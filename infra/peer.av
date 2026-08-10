@@ -1,39 +1,51 @@
 module Peer
     intent =
-        "The live side of a Peer: opening the socket and completing the Handshake."
+        "The live side of a Peer: the socket, the Handshake, and the listen loop."
         "This is the only module that touches the network, so everything it does"
-        "is a thin arrangement of pure parts from the domain. Reading is always"
+        "is a thin arrangement of pure parts from the domain. Reads are always"
         "exact-length — a 24-byte header, then exactly the payload it announces —"
-        "so the stream never has to be guessed at."
-    exposes [handshake, Greeting, greetingVersion, greetingAgent]
-    depends [Bytes, Domain.Message, Domain.Network, Domain.Address, Domain.Version]
-    effects [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
+        "so the stream is never guessed at."
+        "The loop carries nothing but the connection and how many Transactions"
+        "are still wanted: an Announcement is answered immediately, and a"
+        "Transaction that arrives is decoded, so there is nothing to correlate."
+    exposes [run]
+    depends [Bytes, Domain.Message, Domain.Network, Domain.Address, Domain.Version, Domain.Inventory, Domain.Transaction]
+    effects [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int, Console.print, Console.error]
 
 record Greeting
     version: Int
     agent: String
 
-fn greetingVersion(greeting: Greeting) -> Int
-    ? "The protocol version the Peer reported."
-    greeting.version
-
-fn greetingAgent(greeting: Greeting) -> String
-    ? "The user agent the Peer reported."
-    greeting.agent
-
-fn messageBudget() -> Int
+fn handshakeBudget() -> Int
     ? "How many Messages to read while waiting for verack before giving up."
     20
 
-verify messageBudget
-    messageBudget() => 20
+verify handshakeBudget
+    handshakeBudget() => 20
 
-fn handshake(network: Network, address: PeerAddress) -> Result<Greeting, String>
-    ? "Open a connection, introduce ourselves, and wait for the Peer to accept."
-    ! [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
+fn run(network: Network, address: PeerAddress, wanted: Int) -> Result<Unit, String>
+    ? "Connect, complete the Handshake, then listen until enough Transactions arrive."
+    ! [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int, Console.print, Console.error]
     connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    greeting = introduce(connection, network, address)
-    closeAfter(connection, greeting)
+    outcome = session(connection, network, address, wanted)
+    closeAfter(connection, outcome)
+
+fn session(connection: Tcp.Connection, network: Network, address: PeerAddress, wanted: Int) -> Result<Unit, String>
+    ? "Introduce ourselves, report who answered, then start listening."
+    ! [Tcp.writeBytes, Tcp.readBytes, Time.unixMs, Random.int, Console.print, Console.error]
+    greeting = introduce(connection, network, address)?
+    _reported = Console.print(greetingLine(greeting))
+    listen(connection, network, wanted)
+
+fn greetingLine(greeting: Greeting) -> String
+    ? "How a completed Handshake is shown to a reader."
+    "handshake complete: protocol {greeting.version}, agent {greeting.agent}"
+
+fn closeAfter(connection: Tcp.Connection, outcome: Result<Unit, String>) -> Result<Unit, String>
+    ? "Always release the socket, whatever the session did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    outcome
 
 fn introduce(connection: Tcp.Connection, network: Network, address: PeerAddress) -> Result<Greeting, String>
     ? "Send our version, then read until the Peer sends verack."
@@ -41,29 +53,23 @@ fn introduce(connection: Tcp.Connection, network: Network, address: PeerAddress)
     body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
     sent = Domain.Message.frame(network, "version", body)?
     _written = Tcp.writeBytes(connection, sent)?
-    await(connection, network, messageBudget(), Greeting(version = 0, agent = ""))
-
-fn closeAfter(connection: Tcp.Connection, greeting: Result<Greeting, String>) -> Result<Greeting, String>
-    ? "Always release the socket, whatever the Handshake did."
-    ! [Tcp.close]
-    _closed = Tcp.close(connection)
-    greeting
+    await(connection, network, handshakeBudget(), Greeting(version = 0, agent = ""))
 
 fn await(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "Read Messages until verack arrives or the budget runs out."
     ! [Tcp.writeBytes, Tcp.readBytes]
     match budget <= 0
-        true -> Result.Err("no verack after {messageBudget()} messages")
-        false -> readOne(connection, network, budget, seen)
+        true -> Result.Err("no verack after {handshakeBudget()} messages")
+        false -> readGreeting(connection, network, budget, seen)
 
-fn readOne(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "Read one framed Message: a fixed header, then exactly what it announces."
+fn readGreeting(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "Read one framed Message during the Handshake."
     ! [Tcp.writeBytes, Tcp.readBytes]
     header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
     body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
-    dispatch(connection, network, Domain.Message.commandAt(header), body, budget, seen)
+    dispatchGreeting(connection, network, Domain.Message.commandAt(header), body, budget, seen)
 
-fn dispatch(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
+fn dispatchGreeting(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "verack ends the Handshake; version tells us who we are talking to."
     ! [Tcp.writeBytes, Tcp.readBytes]
     match command == "verack"
@@ -87,3 +93,93 @@ fn acknowledge(connection: Tcp.Connection, network: Network, budget: Int, seen: 
 fn describePeer(body: List<Int>) -> Greeting
     ? "What the Peer told us about itself in its version payload."
     Greeting(version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body))
+
+fn listen(connection: Tcp.Connection, network: Network, wanted: Int) -> Result<Unit, String>
+    ? "Read Messages until the wanted number of Transactions have been decoded."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    match wanted <= 0
+        true -> Result.Ok(Unit)
+        false -> readMessage(connection, network, wanted)
+
+fn readMessage(connection: Tcp.Connection, network: Network, wanted: Int) -> Result<Unit, String>
+    ? "One framed Message: a fixed header, then exactly what it announces."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
+    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
+    handle(connection, network, Domain.Message.commandAt(header), body, wanted)
+
+fn handle(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "An Announcement is answered; anything else falls through."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    match command == "inv"
+        true -> onAnnouncement(connection, network, body, wanted)
+        false -> handleTransaction(connection, network, command, body, wanted)
+
+fn handleTransaction(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "A Transaction is decoded and printed."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    match command == "tx"
+        true -> onTransaction(connection, network, body, wanted)
+        false -> handlePing(connection, network, command, body, wanted)
+
+fn handlePing(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "A ping must be answered or the Peer will eventually drop us."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    match command == "ping"
+        true -> onPing(connection, network, body, wanted)
+        false -> listen(connection, network, wanted)
+
+fn onAnnouncement(connection: Tcp.Connection, network: Network, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "Ask for every Transaction the Peer just offered."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    hashes = Domain.Inventory.txHashesOf(body)
+    request(connection, network, hashes, wanted)
+
+fn request(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>, wanted: Int) -> Result<Unit, String>
+    ? "An Announcement carrying no Transactions needs no reply."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    match hashes
+        [] -> listen(connection, network, wanted)
+        [head, ..tail] -> sendGetData(connection, network, hashes, wanted)
+
+fn sendGetData(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>, wanted: Int) -> Result<Unit, String>
+    ? "Send the getdata that turns identifiers into Transactions."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    payload = Domain.Inventory.getDataPayload(hashes)?
+    message = Domain.Message.frame(network, "getdata", payload)?
+    _written = Tcp.writeBytes(connection, message)?
+    listen(connection, network, wanted)
+
+fn onTransaction(connection: Tcp.Connection, network: Network, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "Decode and print the Transaction, then count it against what was wanted."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    _shown = show(Domain.Transaction.decode(body))
+    listen(connection, network, wanted - 1)
+
+fn show(decoded: Result<Transaction, String>) -> Unit
+    ? "Print a decoded Transaction, or say why it could not be read."
+    ! [Console.print, Console.error]
+    match decoded
+        Result.Ok(transaction) -> printLines(Domain.Transaction.summaryLines(transaction))
+        Result.Err(reason) -> Console.error("could not decode transaction: {reason}")
+
+fn onPing(connection: Tcp.Connection, network: Network, body: List<Int>, wanted: Int) -> Result<Unit, String>
+    ? "Reply with the same nonce the Peer sent."
+    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
+    payload = Bytes.fromList(body)?
+    message = Domain.Message.frame(network, "pong", payload)?
+    _written = Tcp.writeBytes(connection, message)?
+    listen(connection, network, wanted)
+
+fn printLines(lines: List<String>) -> Unit
+    ? "Print each line in turn."
+    ! [Console.print]
+    match lines
+        [] -> Unit
+        [head, ..tail] -> printThen(head, tail)
+
+fn printThen(line: String, rest: List<String>) -> Unit
+    ? "Print one line, then continue with the rest."
+    ! [Console.print]
+    _printed = Console.print(line)
+    printLines(rest)

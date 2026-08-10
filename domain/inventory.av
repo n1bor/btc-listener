@@ -1,0 +1,146 @@
+module Inventory
+    intent =
+        "The contents of an Announcement, and the request that answers it."
+        "A Peer offers Transactions by identifier only; the Transaction itself"
+        "arrives after a getdata asks for it. Asking with the witness type is"
+        "what makes the reply SegWit-serialised, which the decoder needs."
+    exposes [txHashesOf, getDataPayload, entrySize, witnessTxType]
+    depends [Bytes, Domain.Message]
+    effects []
+
+fn entrySize() -> Int
+    ? "Each Announcement entry is a four-byte type and a 32-byte identifier."
+    36
+
+verify entrySize
+    entrySize() => 36
+
+fn txType() -> Int
+    ? "The inventory type meaning a plain Transaction."
+    1
+
+verify txType
+    txType() => 1
+
+fn witnessTxType() -> Int
+    ? "The inventory type asking for the SegWit-serialised Transaction."
+    1073741825
+
+verify witnessTxType
+    witnessTxType() => 1073741825
+
+fn txHashesOf(body: List<Int>) -> List<List<Int>>
+    ? "Every Transaction identifier offered in an Announcement."
+    collect(entriesOf(body), [])
+
+verify txHashesOf
+    List.len(txHashesOf(List.concat([1], List.concat([1, 0, 0, 0], thirtyTwo())))) => 1
+    List.len(txHashesOf([0])) => 0
+
+fn thirtyTwo() -> List<Int>
+    ? "A stand-in 32-byte identifier for the verify cases."
+    [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]
+
+verify thirtyTwo
+    List.len(thirtyTwo()) => 32
+
+fn entriesOf(body: List<Int>) -> List<Int>
+    ? "The entry bytes, after the count that precedes them."
+    List.drop(body, countWidth(body))
+
+verify entriesOf
+    entriesOf([1, 9, 9]) => [9, 9]
+
+fn countWidth(body: List<Int>) -> Int
+    ? "How many bytes the entry count occupies."
+    match body
+        [] -> 0
+        [head, ..tail] -> widthFor(head)
+
+verify countWidth
+    countWidth([1]) => 1
+    countWidth([253]) => 3
+    countWidth([]) => 0
+
+fn widthFor(head: Int) -> Int
+    ? "A CompactSize below 253 is one byte; wider forms add their field."
+    match head < 253
+        true -> 1
+        false -> wideWidth(head)
+
+verify widthFor
+    widthFor(5) => 1
+    widthFor(253) => 3
+
+fn wideWidth(head: Int) -> Int
+    ? "The wider CompactSize forms, including their marker byte."
+    match head == 253
+        true -> 3
+        false -> widestWidth(head)
+
+verify wideWidth
+    wideWidth(253) => 3
+    wideWidth(254) => 5
+
+fn widestWidth(head: Int) -> Int
+    ? "The two widest CompactSize forms."
+    match head == 254
+        true -> 5
+        false -> 9
+
+verify widestWidth
+    widestWidth(254) => 5
+    widestWidth(255) => 9
+
+fn collect(entries: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Walk the entries, keeping the identifiers that name Transactions."
+    match List.len(entries) < entrySize()
+        true -> List.reverse(acc)
+        false -> collectOne(entries, acc)
+
+verify collect
+    List.len(collect(List.concat([1, 0, 0, 0], thirtyTwo()), [])) => 1
+    List.len(collect([1, 2], [])) => 0
+
+fn collectOne(entries: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Keep this entry's identifier if it names a Transaction."
+    kind = Domain.Message.readLittleEndian(List.take(entries, 4))
+    collect(List.drop(entries, entrySize()), keepIfTx(kind, List.take(List.drop(entries, 4), 32), acc))
+
+verify collectOne
+    List.len(collectOne(List.concat([1, 0, 0, 0], thirtyTwo()), [])) => 1
+    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), [])) => 0
+
+fn keepIfTx(kind: Int, hash: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Blocks and other kinds are offered too; only Transactions are wanted."
+    match kind == txType()
+        true -> List.prepend(hash, acc)
+        false -> acc
+
+verify keepIfTx
+    List.len(keepIfTx(1, [7], [])) => 1
+    List.len(keepIfTx(2, [7], [])) => 0
+
+fn getDataPayload(hashes: List<List<Int>>) -> Result<Bytes, String>
+    ? "The request that asks for every offered Transaction, with its Witnesses."
+    Bytes.fromList(List.concat(countPrefix(List.len(hashes)), entriesFor(hashes, [])))
+
+fn countPrefix(count: Int) -> List<Int>
+    ? "A CompactSize count; an Announcement never offers more than 50000."
+    match count < 253
+        true -> [count]
+        false -> List.prepend(253, Domain.Message.littleEndian(count, 2))
+
+verify countPrefix
+    countPrefix(1) => [1]
+    countPrefix(300) => [253, 44, 1]
+
+fn entriesFor(hashes: List<List<Int>>, acc: List<Int>) -> List<Int>
+    ? "One request entry per identifier, each asking for the Witness form."
+    match hashes
+        [] -> acc
+        [head, ..tail] -> entriesFor(tail, List.concat(acc, List.concat(Domain.Message.littleEndian(witnessTxType(), 4), head)))
+
+verify entriesFor
+    List.len(entriesFor([thirtyTwo()], [])) => 36
+    entriesFor([], [9]) => [9]

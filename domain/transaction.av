@@ -1,0 +1,434 @@
+module Transaction
+    intent =
+        "Decoding a Transaction from the bytes a Peer sent."
+        "Pure and total-or-explicit: every read either consumes what it expected"
+        "or returns why it could not, so a malformed Transaction is a Result.Err"
+        "rather than a wrong answer."
+        "The Transaction Id is the double-SHA256 of the legacy serialisation, so"
+        "for a SegWit Transaction the marker, flag and Witnesses are excluded —"
+        "which is why decoding tracks where each section began."
+    exposes [decode, summaryLines, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
+    depends [Bytes, Crypto.Digest32, Domain.Message]
+    effects []
+
+record Input
+    previousTxid: String
+    previousIndex: Int
+    script: String
+    sequence: Int
+    witnessItems: Int
+
+record Output
+    value: Int
+    script: String
+
+record Transaction
+    version: Int
+    inputs: List<Input>
+    outputs: List<Output>
+    lockTime: Int
+    txid: String
+    size: Int
+    isSegWit: Bool
+
+record Count
+    value: Int
+    rest: List<Int>
+
+record InputsRead
+    items: List<Input>
+    rest: List<Int>
+
+record OutputsRead
+    items: List<Output>
+    rest: List<Int>
+
+fn versionOf(transaction: Transaction) -> Int
+    ? "The Transaction's version field."
+    transaction.version
+
+fn inputsOf(transaction: Transaction) -> List<Input>
+    ? "Every Output this Transaction spends."
+    transaction.inputs
+
+fn outputsOf(transaction: Transaction) -> List<Output>
+    ? "Every Output this Transaction creates."
+    transaction.outputs
+
+fn lockTimeOf(transaction: Transaction) -> Int
+    ? "The earliest point this Transaction may be included."
+    transaction.lockTime
+
+fn txidOf(transaction: Transaction) -> String
+    ? "The Transaction Id, in the reversed order conventionally displayed."
+    transaction.txid
+
+fn sizeOf(transaction: Transaction) -> Int
+    ? "How many bytes arrived on the wire."
+    transaction.size
+
+fn isSegWitOf(transaction: Transaction) -> Bool
+    ? "Whether this Transaction used the SegWit serialisation."
+    transaction.isSegWit
+
+fn previousTxidOf(input: Input) -> String
+    ? "The Transaction whose Output this Input spends."
+    input.previousTxid
+
+fn previousIndexOf(input: Input) -> Int
+    ? "Which Output of that Transaction is being spent."
+    input.previousIndex
+
+fn scriptOf(input: Input) -> String
+    ? "The Input's unlocking script, as hex."
+    input.script
+
+fn sequenceOf(input: Input) -> Int
+    ? "The Input's sequence number."
+    input.sequence
+
+fn witnessItemsOf(input: Input) -> Int
+    ? "How many Witness stack items this Input carried."
+    input.witnessItems
+
+fn valueOf(output: Output) -> Int
+    ? "The Output's amount, in satoshis."
+    output.value
+
+fn outputScriptOf(output: Output) -> String
+    ? "The Output's locking script, as hex."
+    output.script
+
+fn summaryLines(transaction: Transaction) -> List<String>
+    ? "How a decoded Transaction is shown to a reader."
+    List.concat(List.concat([headline(transaction), shapeLine(transaction)], inputLines(transaction.inputs, [])), outputLines(transaction.outputs, []))
+
+fn headline(transaction: Transaction) -> String
+    ? "The first line: identity, shape and size."
+    "tx {transaction.txid}"
+
+fn serialisation(transaction: Transaction) -> String
+    ? "Which serialisation the Transaction arrived in."
+    match transaction.isSegWit
+        true -> "segwit"
+        false -> "legacy"
+
+verify serialisation
+    serialisation(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = true)) => "segwit"
+    serialisation(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)) => "legacy"
+
+fn shapeLine(transaction: Transaction) -> String
+    ? "The second line: how the Transaction is built."
+    "   {serialisation(transaction)}, version {transaction.version}, {List.len(transaction.inputs)} in / {List.len(transaction.outputs)} out, {transaction.size} bytes, locktime {transaction.lockTime}"
+
+fn inputLines(inputs: List<Input>, acc: List<String>) -> List<String>
+    ? "One line per Input."
+    match inputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> inputLines(tail, List.prepend(inputLine(head), acc))
+
+verify inputLines
+    List.len(inputLines([], [])) => 0
+    List.len(inputLines([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 1, witnessItems = 2)], [])) => 1
+
+fn inputLine(input: Input) -> String
+    ? "An Input: what it spends, and how much Witness data it carried."
+    "   in  {input.previousTxid}:{input.previousIndex} seq {input.sequence} witness {input.witnessItems}"
+
+fn outputLines(outputs: List<Output>, acc: List<String>) -> List<String>
+    ? "One line per Output."
+    match outputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> outputLines(tail, List.prepend(outputLine(head), acc))
+
+verify outputLines
+    List.len(outputLines([], [])) => 0
+    List.len(outputLines([Output(value = 1, script = "51")], [])) => 1
+
+fn outputLine(output: Output) -> String
+    ? "An Output: its amount and the script that locks it."
+    "   out {amount(output.value)} BTC  {output.script}"
+
+fn amount(satoshis: Int) -> String
+    ? "Satoshis rendered as BTC, with all eight decimal places."
+    "{Int.div(satoshis, 100000000)}.{fraction(Int.mod(satoshis, 100000000))}"
+
+verify amount
+    amount(100000000) => "1.00000000"
+    amount(5000) => "0.00005000"
+    amount(0) => "0.00000000"
+
+fn fraction(remainder: Int) -> String
+    ? "The fractional satoshis, padded to eight digits."
+    padLeft("{remainder}", 8)
+
+fn padLeft(text: String, width: Int) -> String
+    ? "Left-pad with zeros until the text is `width` characters."
+    match String.len(text) >= width
+        true -> text
+        false -> padLeft("0" + text, width)
+
+verify padLeft
+    padLeft("5", 3) => "005"
+    padLeft("1234", 3) => "1234"
+
+fn decode(raw: List<Int>) -> Result<Transaction, String>
+    ? "Decode a Transaction, SegWit-serialised or not."
+    afterVersion = List.drop(raw, 4)
+    build(raw, Domain.Message.readLittleEndian(List.take(raw, 4)), afterVersion, isSegWitMarker(afterVersion))
+
+verify decode
+    decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => Result.Ok(Transaction(version = 2, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 0, script = "", sequence = 4294967295, witnessItems = 2)], outputs = [Output(value = 5000, script = "5151")], lockTime = 0, txid = "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c", size = 70, isSegWit = true))
+    decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("byte 300 at index 0 is outside 0..=255")
+    txidOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+    sizeOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => 204
+    isSegWitOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => false
+    txidOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
+    isSegWitOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => true
+    versionOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => 2
+    List.len(inputsOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?)) => 1
+    List.len(outputsOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?)) => 1
+    lockTimeOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => 0
+
+fn isSegWitMarker(afterVersion: List<Int>) -> Bool
+    ? "A zero byte where the Input count belongs marks SegWit serialisation."
+    match afterVersion
+        [] -> false
+        [head, ..tail] -> head == 0
+
+verify isSegWitMarker
+    isSegWitMarker([0, 1, 9]) => true
+    isSegWitMarker([1, 9]) => false
+    isSegWitMarker([]) => false
+
+fn build(raw: List<Int>, version: Int, afterVersion: List<Int>, segwit: Bool) -> Result<Transaction, String>
+    ? "Read the body, then assemble what was found."
+    body = skipMarker(afterVersion, segwit)
+    assemble(raw, version, body, segwit, readInputs(body)?)
+
+verify build
+    txidOf(build(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 4), true)?) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
+
+fn skipMarker(afterVersion: List<Int>, segwit: Bool) -> List<Int>
+    ? "Step over the two marker bytes when they are present."
+    match segwit
+        true -> List.drop(afterVersion, 2)
+        false -> afterVersion
+
+verify skipMarker
+    skipMarker([0, 1, 9], true) => [9]
+    skipMarker([9], false) => [9]
+
+fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsRead: InputsRead) -> Result<Transaction, String>
+    ? "Outputs follow the Inputs; the lock time is the last four bytes."
+    outputsRead = readOutputs(inputsRead.rest)?
+    core = List.concat(List.concat(List.take(raw, 4), coreSection(body, outputsRead.rest)), lastFour(raw))
+    finish(raw, version, inputsRead.items, outputsRead.items, segwit, core, outputsRead.rest)
+
+verify assemble
+    sizeOf(assemble(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?) => 70
+
+fn coreSection(body: List<Int>, afterOutputs: List<Int>) -> List<Int>
+    ? "The Input and Output bytes, which the Transaction Id is taken over."
+    List.take(body, List.len(body) - List.len(afterOutputs))
+
+verify coreSection
+    coreSection([1, 2, 3, 4], [3, 4]) => [1, 2]
+    coreSection([1, 2], [1, 2]) => []
+
+fn lastFour(raw: List<Int>) -> List<Int>
+    ? "The lock time always occupies the final four bytes."
+    List.drop(raw, List.len(raw) - 4)
+
+verify lastFour
+    lastFour([1, 2, 3, 4, 5, 6, 7, 8]) => [5, 6, 7, 8]
+
+fn finish(raw: List<Int>, version: Int, inputs: List<Input>, outputs: List<Output>, segwit: Bool, core: List<Int>, afterOutputs: List<Int>) -> Result<Transaction, String>
+    ? "Seal the decoded parts into a Transaction."
+    identity = Bytes.fromList(core)?
+    witnessed = attachWitnesses(inputs, segwit, afterOutputs)
+    lockTime = Domain.Message.readLittleEndian(lastFour(raw))
+    Result.Ok(Transaction(version = version, inputs = witnessed, outputs = outputs, lockTime = lockTime, txid = reversedHex(identity), size = List.len(raw), isSegWit = segwit))
+
+verify finish
+    sizeOf(finish([1, 2, 3, 4, 0, 0, 0, 0], 1, [], [], false, [1, 2, 3, 4], [])?) => 8
+
+fn reversedHex(identity: Bytes) -> String
+    ? "A Transaction Id is displayed with its bytes reversed, by convention."
+    Result.withDefault(hexOfReversed(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(identity)))), "")
+
+fn hexOfReversed(bytes: List<Int>) -> Result<String, String>
+    ? "Reverse digest bytes and render them as hex."
+    reversed = Bytes.fromList(List.reverse(bytes))?
+    Result.Ok(Bytes.toHex(reversed))
+
+verify hexOfReversed
+    hexOfReversed([1, 2]) => Result.Ok("0201")
+    hexOfReversed([]) => Result.Ok("")
+
+fn doubleSha(payload: Bytes) -> Digest32
+    ? "SHA-256 applied twice."
+    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
+
+fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> List<Input>
+    ? "Record how many Witness items each Input carried."
+    match segwit
+        true -> countWitnesses(inputs, afterOutputs, [])
+        false -> inputs
+
+verify attachWitnesses
+    List.len(attachWitnesses([], true, [])) => 0
+    List.len(attachWitnesses([], false, [])) => 0
+
+fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>) -> List<Input>
+    ? "Walk the Witness stacks in step with the Inputs they belong to."
+    match inputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> countOne(head, tail, rest, acc)
+
+verify countWitnesses
+    List.len(countWitnesses([], [], [])) => 0
+
+fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>) -> List<Input>
+    ? "Read one Input's Witness stack and carry on to the next."
+    stack = readVarIntOrZero(rest)
+    countWitnesses(remaining, skipWitnessItems(stack.rest, stack.value), List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witnessItems = stack.value), acc))
+
+verify countOne
+    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170], [])) => 1
+
+fn skipWitnessItems(rest: List<Int>, count: Int) -> List<Int>
+    ? "Step over `count` length-prefixed Witness items."
+    match count <= 0
+        true -> rest
+        false -> skipOneItem(rest, count)
+
+verify skipWitnessItems
+    skipWitnessItems([9], 0) => [9]
+    skipWitnessItems([1, 170, 9], 1) => [9]
+
+fn skipOneItem(rest: List<Int>, count: Int) -> List<Int>
+    ? "Step over one length-prefixed Witness item."
+    item = readVarIntOrZero(rest)
+    skipWitnessItems(List.drop(item.rest, item.value), count - 1)
+
+verify skipOneItem
+    skipOneItem([1, 170, 9], 1) => [9]
+
+fn readVarIntOrZero(bytes: List<Int>) -> Count
+    ? "A CompactSize, or zero when the bytes have run out."
+    match bytes
+        [] -> Count(value = 0, rest = [])
+        [head, ..tail] -> varIntFrom(head, tail)
+
+verify readVarIntOrZero
+    readVarIntOrZero([5, 9]) => Count(value = 5, rest = [9])
+    readVarIntOrZero([253, 1, 1, 9]) => Count(value = 257, rest = [9])
+    readVarIntOrZero([]) => Count(value = 0, rest = [])
+
+fn varIntFrom(head: Int, tail: List<Int>) -> Count
+    ? "Values below 253 are the byte itself; above it, a wider field follows."
+    match head < 253
+        true -> Count(value = head, rest = tail)
+        false -> wideVarInt(varIntWidth(head), tail)
+
+verify varIntFrom
+    varIntFrom(5, [9]) => Count(value = 5, rest = [9])
+    varIntFrom(253, [1, 1, 9]) => Count(value = 257, rest = [9])
+
+fn wideVarInt(width: Int, tail: List<Int>) -> Count
+    ? "Read the wider CompactSize field that follows the marker byte."
+    Count(value = Domain.Message.readLittleEndian(List.take(tail, width)), rest = List.drop(tail, width))
+
+fn varIntWidth(head: Int) -> Int
+    ? "253 introduces two bytes, 254 four, 255 eight."
+    match head == 253
+        true -> 2
+        false -> widerVarIntWidth(head)
+
+verify varIntWidth
+    varIntWidth(253) => 2
+    varIntWidth(254) => 4
+    varIntWidth(255) => 8
+
+fn widerVarIntWidth(head: Int) -> Int
+    ? "The two widest CompactSize forms."
+    match head == 254
+        true -> 4
+        false -> 8
+
+verify widerVarIntWidth
+    widerVarIntWidth(254) => 4
+    widerVarIntWidth(255) => 8
+
+fn readInputs(body: List<Int>) -> Result<InputsRead, String>
+    ? "Read the Input count, then that many Inputs."
+    count = readVarIntOrZero(body)
+    readInputsInto(count.value, count.rest, [])
+
+verify readInputs
+    List.len(readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?.items) => 1
+
+fn readInputsInto(remaining: Int, rest: List<Int>, acc: List<Input>) -> Result<InputsRead, String>
+    ? "Accumulator form so the recursion stays in tail position."
+    match remaining <= 0
+        true -> Result.Ok(InputsRead(items = List.reverse(acc), rest = rest))
+        false -> readOneInput(remaining, rest, acc)
+
+verify readInputsInto
+    List.len(readInputsInto(0, [9], [])?.items) => 0
+    readInputsInto(0, [9], [])?.rest => [9]
+
+fn readOneInput(remaining: Int, rest: List<Int>, acc: List<Input>) -> Result<InputsRead, String>
+    ? "An Input: the Output it spends, its script, and its sequence."
+    index = Domain.Message.readLittleEndian(List.take(List.drop(rest, 32), 4))
+    script = readVarIntOrZero(List.drop(rest, 36))
+    inputFrom(remaining, List.take(rest, 32), index, script.value, script.rest, acc)
+
+verify readOneInput
+    List.len(readOneInput(1, List.drop(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [])?.items) => 1
+
+fn inputFrom(remaining: Int, previous: List<Int>, index: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Input>) -> Result<InputsRead, String>
+    ? "Assemble one Input and continue with the bytes that follow it."
+    script = Bytes.fromList(List.take(afterLength, scriptLength))?
+    previousBytes = Bytes.fromList(List.reverse(previous))?
+    afterScript = List.drop(afterLength, scriptLength)
+    readInputsInto(remaining - 1, List.drop(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witnessItems = 0), acc))
+
+verify inputFrom
+    List.len(inputFrom(1, [], 0, 0, [0, 0, 0, 0], [])?.items) => 1
+
+fn readOutputs(rest: List<Int>) -> Result<OutputsRead, String>
+    ? "Read the Output count, then that many Outputs."
+    count = readVarIntOrZero(rest)
+    readOutputsInto(count.value, count.rest, [])
+
+verify readOutputs
+    List.len(readOutputs(List.prepend(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81]))?.items) => 1
+
+fn readOutputsInto(remaining: Int, rest: List<Int>, acc: List<Output>) -> Result<OutputsRead, String>
+    ? "Accumulator form so the recursion stays in tail position."
+    match remaining <= 0
+        true -> Result.Ok(OutputsRead(items = List.reverse(acc), rest = rest))
+        false -> readOneOutput(remaining, rest, acc)
+
+verify readOutputsInto
+    List.len(readOutputsInto(0, [9], [])?.items) => 0
+    readOutputsInto(0, [9], [])?.rest => [9]
+
+fn readOneOutput(remaining: Int, rest: List<Int>, acc: List<Output>) -> Result<OutputsRead, String>
+    ? "An Output: an amount, then the script that locks it."
+    value = Domain.Message.readLittleEndian(List.take(rest, 8))
+    script = readVarIntOrZero(List.drop(rest, 8))
+    outputFrom(remaining, value, script.value, script.rest, acc)
+
+verify readOneOutput
+    List.len(readOneOutput(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81], [])?.items) => 1
+
+verify outputFrom
+    List.len(outputFrom(1, 5000, 0, [], [])?.items) => 1
+
+fn outputFrom(remaining: Int, value: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Output>) -> Result<OutputsRead, String>
+    ? "Assemble one Output and continue with the bytes that follow it."
+    script = Bytes.fromList(List.take(afterLength, scriptLength))?
+    readOutputsInto(remaining - 1, List.drop(afterLength, scriptLength), List.prepend(Output(value = value, script = Bytes.toHex(script)), acc))
