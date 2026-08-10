@@ -1,0 +1,76 @@
+module Cli
+    intent =
+        "Argv adapter for the Bitcoin peer listener."
+        "Argument handling lives here so that address parsing in the domain stays"
+        "pure and verifiable, and so the entrypoint has one thing to call."
+    exposes [runCli]
+    depends [Domain.Address]
+    effects [Args.get, Console.print, Console.error]
+
+fn usageLines() -> List<String>
+    ? "User-facing help for the argv CLI."
+    [
+        "Bitcoin peer listener",
+        "Usage: <peer-address> [port]",
+        "",
+        "  peer-address   IPv4 address of the Peer to listen to",
+        "  port           optional, defaults to 8333",
+    ]
+
+verify usageLines
+    List.len(usageLines()) => 5
+    List.contains(usageLines(), "Bitcoin peer listener") => true
+
+fn describe(address: PeerAddress) -> String
+    ? "The line shown once an address has been accepted."
+    "listening to peer {Domain.Address.toString(address)}"
+
+verify describe
+    describe(Domain.Address.fromString("192.168.1.10")?) => "listening to peer 192.168.1.10:8333"
+    describe(Domain.Address.fromParts("10.0.0.1", "18333")?) => "listening to peer 10.0.0.1:18333"
+
+fn runCli() -> Unit
+    ? "Starts the argv CLI."
+    ! [Args.get, Console.print, Console.error]
+    run(Args.get())
+
+fn run(args: List<String>) -> Unit
+    ? "Dispatch on the arguments given after `--`."
+    ! [Console.print, Console.error]
+    match args
+        [] -> printLines(usageLines())
+        [address, ..rest] -> runWithAddress(address, rest)
+
+fn runWithAddress(address: String, rest: List<String>) -> Unit
+    ? "One argument is an address on the default port; more may carry a port."
+    ! [Console.print, Console.error]
+    match rest
+        [] -> report(Domain.Address.fromString(address))
+        [port, ..extra] -> runWithPort(address, port, extra)
+
+fn runWithPort(address: String, port: String, extra: List<String>) -> Unit
+    ? "An address and a port, and nothing after them."
+    ! [Console.print, Console.error]
+    match extra
+        [] -> report(Domain.Address.fromParts(address, port))
+        [_, ..surplus] -> printLines(usageLines())
+
+fn report(parsed: Result<PeerAddress, String>) -> Unit
+    ? "Print the accepted Peer address, or the reason it was rejected."
+    ! [Console.print, Console.error]
+    match parsed
+        Result.Ok(address) -> Console.print(describe(address))
+        Result.Err(message) -> Console.error("error: {message}")
+
+fn printLines(lines: List<String>) -> Unit
+    ? "Print each line in turn."
+    ! [Console.print]
+    match lines
+        [] -> Unit
+        [head, ..tail] -> printThen(head, tail)
+
+fn printThen(line: String, rest: List<String>) -> Unit
+    ? "Print one line, then continue with the rest."
+    ! [Console.print]
+    _printed = Console.print(line)
+    printLines(rest)

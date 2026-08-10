@@ -1,0 +1,174 @@
+module Address
+    intent =
+        "The validated network location of a Peer: four octets and a port."
+        "Parsing is the only way in, so an unvalidated address cannot reach the"
+        "rest of the program. Octets are kept as numbers rather than as the"
+        "original text, so rendering is canonical no matter how it was written."
+    exposes [fromString, fromParts, toString]
+    exposes opaque [PeerAddress]
+    effects []
+
+record PeerAddress
+    octets: List<Int>
+    portNumber: Int
+
+fn defaultPort() -> Int
+    ? "The port a Bitcoin mainnet Peer listens on."
+    8333
+
+verify defaultPort
+    defaultPort() => 8333
+
+fn fromString(text: String) -> Result<PeerAddress, String>
+    ? "Parse a dotted-quad address, using the default Peer port."
+    fromOctetsAndPort(text, defaultPort())
+
+verify fromString
+    fromString("1.2.3.4") => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 8333))
+    hostOf(fromString("192.168.1.10")?) => "192.168.1.10"
+    portOf(fromString("192.168.1.10")?) => 8333
+    fromString("999.1.1.1") => Result.Err("octet 999 is out of range (0-255)")
+    fromString("") => Result.Err("expected four dot-separated octets, got 1")
+
+fn fromParts(text: String, portText: String) -> Result<PeerAddress, String>
+    ? "Parse a dotted-quad address and an explicit port, both given as text."
+    fromOctetsAndPort(text, parsePort(portText)?)
+
+verify fromParts
+    fromParts("1.2.3.4", "18333") => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18333))
+    portOf(fromParts("10.0.0.1", "18333")?) => 18333
+    fromParts("10.0.0.1", "banana") => Result.Err("port 'banana' is not a number")
+    fromParts("10.0.0.1", "0") => Result.Err("port 0 is out of range (1-65535)")
+    fromParts("", "8333") => Result.Err("expected four dot-separated octets, got 1")
+
+fn fromOctetsAndPort(text: String, port: Int) -> Result<PeerAddress, String>
+    ? "Shared constructor: validate the octets, then the port."
+    parts = String.split(text, ".")
+    checkPartCount(parts, port)
+
+verify fromOctetsAndPort
+    fromOctetsAndPort("1.2.3.4", 8333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 8333))
+    fromOctetsAndPort("10.0.0", 8333) => Result.Err("expected four dot-separated octets, got 3")
+    fromOctetsAndPort("", 8333) => Result.Err("expected four dot-separated octets, got 1")
+
+fn checkPartCount(parts: List<String>, port: Int) -> Result<PeerAddress, String>
+    ? "An address must be exactly four dot-separated parts."
+    count = List.len(parts)
+    match count == 4
+        true -> build(parseOctets(parts)?, port)
+        false -> Result.Err("expected four dot-separated octets, got {count}")
+
+verify checkPartCount
+    checkPartCount(["1", "2", "3", "4"], 8333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 8333))
+    checkPartCount(["1", "2"], 8333) => Result.Err("expected four dot-separated octets, got 2")
+
+fn build(octets: List<Int>, port: Int) -> Result<PeerAddress, String>
+    ? "Seal validated octets and a validated port into a PeerAddress."
+    match inPortRange(port)
+        true -> Result.Ok(PeerAddress(octets = octets, portNumber = port))
+        false -> Result.Err("port {port} is out of range (1-65535)")
+
+verify build
+    build([1, 2, 3, 4], 8333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 8333))
+    build([1, 2, 3, 4], 0) => Result.Err("port 0 is out of range (1-65535)")
+    build([1, 2, 3, 4], 65536) => Result.Err("port 65536 is out of range (1-65535)")
+
+fn inPortRange(port: Int) -> Bool
+    ? "Ports are 1-65535; zero is reserved and cannot be dialled."
+    Bool.and(port >= 1, port <= 65535)
+
+verify inPortRange
+    inPortRange(8333) => true
+    inPortRange(1) => true
+    inPortRange(65535) => true
+    inPortRange(0) => false
+    inPortRange(65536) => false
+    inPortRange(0 - 1) => false
+
+fn parsePort(portText: String) -> Result<Int, String>
+    ? "Parse the port argument, naming the text back when it is not a number."
+    match Int.fromString(portText)
+        Result.Ok(n) -> Result.Ok(n)
+        Result.Err(_) -> Result.Err("port '{portText}' is not a number")
+
+verify parsePort
+    parsePort("8333") => Result.Ok(8333)
+    parsePort("banana") => Result.Err("port 'banana' is not a number")
+    parsePort("") => Result.Err("port '' is not a number")
+
+fn parseOctets(parts: List<String>) -> Result<List<Int>, String>
+    ? "Parse every part as an octet, failing on the first bad one."
+    parseOctetsInto(parts, [])
+
+verify parseOctets
+    parseOctets(["1", "2", "3", "4"]) => Result.Ok([1, 2, 3, 4])
+    parseOctets(["1", "256"]) => Result.Err("octet 256 is out of range (0-255)")
+    parseOctets([]) => Result.Ok([])
+
+fn parseOctetsInto(parts: List<String>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Accumulator form so the recursion stays in tail position."
+    match parts
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> parseOctetsInto(tail, List.prepend(parseOctet(head)?, acc))
+
+verify parseOctetsInto
+    parseOctetsInto(["1", "2"], []) => Result.Ok([1, 2])
+    parseOctetsInto([], [9]) => Result.Ok([9])
+    parseOctetsInto(["256"], []) => Result.Err("octet 256 is out of range (0-255)")
+
+fn parseOctet(text: String) -> Result<Int, String>
+    ? "Parse one octet, rejecting anything outside 0-255."
+    match Int.fromString(text)
+        Result.Ok(n) -> checkOctetRange(n)
+        Result.Err(_) -> Result.Err("octet '{text}' is not a number")
+
+verify parseOctet
+    parseOctet("0") => Result.Ok(0)
+    parseOctet("255") => Result.Ok(255)
+    parseOctet("256") => Result.Err("octet 256 is out of range (0-255)")
+    parseOctet("x") => Result.Err("octet 'x' is not a number")
+    parseOctet("") => Result.Err("octet '' is not a number")
+
+fn checkOctetRange(n: Int) -> Result<Int, String>
+    ? "Octets are 0-255."
+    match Bool.and(n >= 0, n <= 255)
+        true -> Result.Ok(n)
+        false -> Result.Err("octet {n} is out of range (0-255)")
+
+verify checkOctetRange
+    checkOctetRange(0) => Result.Ok(0)
+    checkOctetRange(255) => Result.Ok(255)
+    checkOctetRange(256) => Result.Err("octet 256 is out of range (0-255)")
+
+fn hostOf(address: PeerAddress) -> String
+    ? "Canonical dotted-quad form, rebuilt from the validated octets."
+    joinOctets(address.octets)
+
+fn portOf(address: PeerAddress) -> Int
+    ? "The port this Peer is dialled on."
+    address.portNumber
+
+fn toString(address: PeerAddress) -> String
+    ? "Host and port as they are shown to a reader."
+    "{hostOf(address)}:{portOf(address)}"
+
+fn joinOctets(octets: List<Int>) -> String
+    ? "Render octets dot-separated, without a leading dot."
+    match octets
+        [] -> ""
+        [head, ..tail] -> joinTail(tail, "{head}")
+
+verify joinOctets
+    joinOctets([192, 168, 1, 10]) => "192.168.1.10"
+    joinOctets([0, 0, 0, 0]) => "0.0.0.0"
+    joinOctets([]) => ""
+
+fn joinTail(octets: List<Int>, acc: String) -> String
+    ? "Append the remaining octets to what has been rendered so far."
+    match octets
+        [] -> acc
+        [head, ..tail] -> joinTail(tail, acc + ".{head}")
+
+verify joinTail
+    joinTail([1, 2], "0") => "0.1.2"
+    joinTail([], "7") => "7"
