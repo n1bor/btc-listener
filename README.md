@@ -45,10 +45,15 @@ Two things are easy to leave off:
 - **`--`** — everything after it becomes `Args.get()`. Without it, `aver`
   consumes the address itself.
 
-The program connects, completes the handshake, prints five transactions, and
-exits. That count is `wantedTransactions()` in `app/cli.av`. The first
-transaction can take anywhere from a second to a minute depending on how busy
-the peer's mempool is.
+The program connects, completes the handshake, and then prints transactions
+until you stop it with Ctrl-C. The listen loop's recursive call is in tail
+position, so it runs indefinitely without growing the stack. On a busy mainnet
+peer expect a few transactions per second.
+
+It will also stop if a read fails. Aver's TCP read deadline is a hardcoded 30
+seconds ([jasisz/aver#782](https://github.com/jasisz/aver/issues/782)), so a
+peer that says nothing for that long ends the session — unlikely on mainnet,
+where announcements arrive constantly, but worth knowing.
 
 `aver run` prints a warning that verify blocks in dependency modules are not
 sampled. That is expected — `aver verify --deps` is what checks them.
@@ -137,9 +142,8 @@ Deriving an address needs no RIPEMD-160, which Aver does not have: a script
 already contains the hash, so the work is pattern-matching plus an encoding, not
 hashing a public key.
 
-Not covered: fees (which would need the spent outputs, and so a UTXO cache or
-extra round trips), and running until interrupted rather than stopping after a
-fixed count.
+Not covered: fees, which would need the outputs being spent, and so either a
+UTXO cache or an extra round trip per input.
 
 ## Licence
 
