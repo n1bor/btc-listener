@@ -1,0 +1,196 @@
+module Message
+    intent =
+        "Framing for one unit on the wire: magic, command, length, checksum, payload."
+        "Everything here is a pure transformation over bytes, so the whole framing"
+        "layer is covered by verify blocks against known-good vectors rather than"
+        "by a live Peer. A Peer is only needed to prove the socket, not the format."
+    exposes [frame, checksumOf, commandField, littleEndian, bigEndian, readLittleEndian, asciiBytes, asciiText, headerLength, payloadLengthAt, commandAt, checksumAt]
+    depends [Bytes, Crypto.Digest32, Domain.Network]
+    effects []
+
+fn headerLength() -> Int
+    ? "Every Message begins with a fixed 24-byte header."
+    24
+
+verify headerLength
+    headerLength() => 24
+
+fn littleEndian(value: Int, width: Int) -> List<Int>
+    ? "Encode a non-negative integer as `width` little-endian bytes."
+    littleEndianInto(value, width, [])
+
+verify littleEndian
+    littleEndian(0, 4) => [0, 0, 0, 0]
+    littleEndian(1, 4) => [1, 0, 0, 0]
+    littleEndian(70016, 4) => [128, 17, 1, 0]
+    littleEndian(8333, 2) => [141, 32]
+    littleEndian(1, 8) => [1, 0, 0, 0, 0, 0, 0, 0]
+
+fn littleEndianInto(value: Int, width: Int, acc: List<Int>) -> List<Int>
+    ? "Accumulator form: take the low byte, shift down by one byte, repeat."
+    match width <= 0
+        true -> List.reverse(acc)
+        false -> littleEndianInto(Int.div(value, 256), width - 1, List.prepend(Int.mod(value, 256), acc))
+
+verify littleEndianInto
+    littleEndianInto(258, 2, []) => [2, 1]
+    littleEndianInto(0, 0, [7]) => [7]
+
+fn bigEndian(value: Int, width: Int) -> List<Int>
+    ? "Network byte order, used for ports inside address fields."
+    List.reverse(littleEndian(value, width))
+
+verify bigEndian
+    bigEndian(8333, 2) => [32, 141]
+    bigEndian(0, 2) => [0, 0]
+
+fn readLittleEndian(bytes: List<Int>) -> Int
+    ? "Decode little-endian bytes back into a non-negative integer."
+    readLittleEndianFrom(List.reverse(bytes), 0)
+
+verify readLittleEndian
+    readLittleEndian([128, 17, 1, 0]) => 70016
+    readLittleEndian([0, 0, 0, 0]) => 0
+    readLittleEndian([2, 1]) => 258
+
+fn readLittleEndianFrom(reversed: List<Int>, acc: Int) -> Int
+    ? "Fold the most significant byte in first."
+    match reversed
+        [] -> acc
+        [head, ..tail] -> readLittleEndianFrom(tail, acc * 256 + head)
+
+verify readLittleEndianFrom
+    readLittleEndianFrom([0, 1, 17, 128], 0) => 70016
+    readLittleEndianFrom([], 5) => 5
+
+fn asciiBytes(text: String) -> List<Int>
+    ? "The code point of each character; commands are ASCII by definition."
+    asciiInto(String.chars(text), [])
+
+verify asciiBytes
+    asciiBytes("verack") => [118, 101, 114, 97, 99, 107]
+    asciiBytes("") => []
+
+fn asciiInto(chars: List<String>, acc: List<Int>) -> List<Int>
+    ? "Accumulator form so the recursion stays in tail position."
+    match chars
+        [] -> List.reverse(acc)
+        [head, ..tail] -> asciiInto(tail, List.prepend(Char.toCode(head), acc))
+
+verify asciiInto
+    asciiInto(["a", "b"], []) => [97, 98]
+    asciiInto([], [99]) => [99]
+
+fn commandField(name: String) -> List<Int>
+    ? "The command name as twelve ASCII bytes, zero-padded on the right."
+    padRight(asciiBytes(name), 12)
+
+verify commandField
+    commandField("verack") => [118, 101, 114, 97, 99, 107, 0, 0, 0, 0, 0, 0]
+    commandField("version") => [118, 101, 114, 115, 105, 111, 110, 0, 0, 0, 0, 0]
+    commandField("ping") => [112, 105, 110, 103, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn padRight(bytes: List<Int>, width: Int) -> List<Int>
+    ? "Pad with zeros, or truncate, until exactly `width` bytes."
+    count = List.len(bytes)
+    match count >= width
+        true -> List.take(bytes, width)
+        false -> padRight(List.concat(bytes, [0]), width)
+
+verify padRight
+    padRight([1, 2], 4) => [1, 2, 0, 0]
+    padRight([1, 2, 3], 2) => [1, 2]
+    padRight([], 2) => [0, 0]
+
+fn doubleSha(payload: Bytes) -> Digest32
+    ? "SHA-256 applied twice, as Bitcoin does everywhere it hashes."
+    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
+
+verify doubleSha
+    Crypto.Digest32.toHex(doubleSha(Bytes.fromList([97, 98, 99]))) => "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358"
+
+fn checksumOf(payload: Bytes) -> List<Int>
+    ? "The first four bytes of the payload's double-SHA256."
+    List.take(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(payload))), 4)
+
+verify checksumOf
+    checksumOf(Bytes.fromList([])) => [93, 246, 224, 226]
+    checksumOf(Bytes.fromList([1, 0, 0, 0, 0, 0, 0, 0])) => [8, 83, 63, 107]
+
+fn frame(network: Network, command: String, payload: Bytes) -> Result<Bytes, String>
+    ? "Wrap a payload in its header, ready to put on the wire."
+    body = Bytes.toList(payload)
+    header = List.concat(List.concat(Domain.Network.magicOf(network), commandField(command)), List.concat(littleEndian(List.len(body), 4), checksumOf(payload)))
+    Bytes.fromList(List.concat(header, body))
+
+verify frame
+    frame(Network.Mainnet, "verack", Bytes.fromList([])) => Result.Ok(Bytes.fromHex("f9beb4d976657261636b000000000000000000005df6e0e2")?)
+    Bytes.toHex(frame(Network.Mainnet, "verack", Bytes.fromList([]))?) => "f9beb4d976657261636b000000000000000000005df6e0e2"
+    Bytes.toHex(frame(Network.Mainnet, "ping", Bytes.fromList([1, 0, 0, 0, 0, 0, 0, 0]))?) => "f9beb4d970696e6700000000000000000800000008533f6b0100000000000000"
+    frame(Network.Mainnet, "汉", Bytes.fromList([])) => Result.Err("byte 27721 at index 4 is outside 0..=255")
+
+fn commandAt(header: List<Int>) -> String
+    ? "The command name from a header, with its zero padding removed."
+    asciiText(stripZeros(List.take(List.drop(header, 4), 12)))
+
+verify commandAt
+    commandAt([249, 190, 180, 217, 118, 101, 114, 97, 99, 107, 0, 0, 0, 0, 0, 0]) => "verack"
+    commandAt([249, 190, 180, 217, 112, 105, 110, 103, 0, 0, 0, 0, 0, 0, 0, 0]) => "ping"
+
+fn stripZeros(bytes: List<Int>) -> List<Int>
+    ? "Drop the zero padding that follows a command name."
+    stripZerosInto(bytes, [])
+
+verify stripZeros
+    stripZeros([118, 101, 0, 0]) => [118, 101]
+    stripZeros([0, 1]) => []
+    stripZeros([]) => []
+
+fn stripZerosInto(bytes: List<Int>, acc: List<Int>) -> List<Int>
+    ? "Accumulator form so the recursion stays in tail position."
+    match bytes
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keepUnlessZero(head, tail, acc)
+
+verify stripZerosInto
+    stripZerosInto([118, 101, 0], []) => [118, 101]
+    stripZerosInto([], [101, 118]) => [118, 101]
+
+fn keepUnlessZero(head: Int, tail: List<Int>, acc: List<Int>) -> List<Int>
+    ? "A zero byte ends the name; anything else is part of it."
+    match head == 0
+        true -> List.reverse(acc)
+        false -> stripZerosInto(tail, List.prepend(head, acc))
+
+verify keepUnlessZero
+    keepUnlessZero(118, [101, 0], []) => [118, 101]
+    keepUnlessZero(0, [1, 2], [118]) => [118]
+
+fn asciiText(bytes: List<Int>) -> String
+    ? "Render ASCII code points back as text."
+    asciiTextInto(bytes, "")
+
+fn asciiTextInto(bytes: List<Int>, acc: String) -> String
+    ? "Accumulator form so the recursion stays in tail position."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> asciiTextInto(tail, acc + Option.withDefault(Char.fromCode(head), "?"))
+
+verify asciiTextInto
+    asciiTextInto([118, 101], "") => "ve"
+    asciiTextInto([], "x") => "x"
+
+fn payloadLengthAt(header: List<Int>) -> Int
+    ? "How many payload bytes follow this header."
+    readLittleEndian(List.take(List.drop(header, 16), 4))
+
+verify payloadLengthAt
+    payloadLengthAt([249, 190, 180, 217, 118, 101, 114, 97, 99, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 246, 224, 226]) => 0
+    payloadLengthAt([249, 190, 180, 217, 112, 105, 110, 103, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 8, 83, 63, 107]) => 8
+
+fn checksumAt(header: List<Int>) -> List<Int>
+    ? "The four checksum bytes carried in this header."
+    List.take(List.drop(header, 20), 4)
+
+verify checksumAt
+    checksumAt([249, 190, 180, 217, 118, 101, 114, 97, 99, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 246, 224, 226]) => [93, 246, 224, 226]

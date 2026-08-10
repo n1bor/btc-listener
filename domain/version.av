@@ -1,0 +1,91 @@
+module Version
+    intent =
+        "The version Message payload: what each side says about itself before"
+        "anything else may be sent."
+        "Building it is pure — the caller supplies the clock reading and the nonce"
+        "rather than this module reaching for them — so the exact bytes are"
+        "checkable against a known-good vector instead of against a live Peer."
+    exposes [payload, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf]
+    depends [Bytes, Domain.Message, Domain.Address]
+    effects []
+
+fn protocolVersion() -> Int
+    ? "Protocol 70016 is the version that understands SegWit serialisation."
+    70016
+
+verify protocolVersion
+    protocolVersion() => 70016
+
+fn userAgent() -> String
+    ? "How this program names itself to a Peer."
+    "/aver-btc-listener:0.1/"
+
+verify userAgent
+    userAgent() => "/aver-btc-listener:0.1/"
+
+fn payload(peer: PeerAddress, timestamp: Int, nonce: Int) -> Result<Bytes, String>
+    ? "Build a version payload addressed to this Peer."
+    preamble = List.concat(Domain.Message.littleEndian(protocolVersion(), 4), List.concat(Domain.Message.littleEndian(0, 8), Domain.Message.littleEndian(timestamp, 8)))
+    addresses = List.concat(networkAddress(Domain.Address.octetsOf(peer), Domain.Address.portOf(peer)), networkAddress([0, 0, 0, 0], 0))
+    trailer = List.concat(List.concat(Domain.Message.littleEndian(nonce, 8), varString(userAgent())), List.concat(Domain.Message.littleEndian(0, 4), [1]))
+    Bytes.fromList(List.concat(List.concat(preamble, addresses), trailer))
+
+verify payload
+    payload(Domain.Address.fromString("10.0.0.1")?, 0, 0) => Result.Ok(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff0000000000000000000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001")?)
+    Bytes.toHex(payload(Domain.Address.fromString("192.168.1.10")?, 1700000000, 7)?) => "80110100000000000000000000f1536500000000000000000000000000000000000000000000ffffc0a8010a208d000000000000000000000000000000000000ffff0000000000000700000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001"
+    List.len(Bytes.toList(payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)?)) => 109
+
+fn networkAddress(octets: List<Int>, port: Int) -> List<Int>
+    ? "A 26-byte address field: services, IPv4-mapped IPv6, then the port."
+    List.concat(List.concat(Domain.Message.littleEndian(0, 8), ipv4Mapped(octets)), Domain.Message.bigEndian(port, 2))
+
+verify networkAddress
+    List.len(networkAddress([192, 168, 1, 10], 8333)) => 26
+    List.take(List.drop(networkAddress([192, 168, 1, 10], 8333), 24), 2) => [32, 141]
+
+fn ipv4Mapped(octets: List<Int>) -> List<Int>
+    ? "An IPv4 address written in the IPv6-mapped form the wire format uses."
+    List.concat([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255], octets)
+
+verify ipv4Mapped
+    ipv4Mapped([192, 168, 1, 10]) => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 192, 168, 1, 10]
+    List.len(ipv4Mapped([0, 0, 0, 0])) => 16
+
+fn varString(text: String) -> List<Int>
+    ? "A length-prefixed string. Names this short always fit a one-byte prefix."
+    bytes = Domain.Message.asciiBytes(text)
+    List.prepend(List.len(bytes), bytes)
+
+verify varString
+    varString("ab") => [2, 97, 98]
+    varString("") => [0]
+
+fn userAgentOffset() -> Int
+    ? "Where the user agent begins in a version payload: after the fixed fields."
+    80
+
+verify userAgentOffset
+    userAgentOffset() => 80
+
+fn peerVersionOf(body: List<Int>) -> Int
+    ? "The protocol version a Peer reported in its own version payload."
+    Domain.Message.readLittleEndian(List.take(body, 4))
+
+verify peerVersionOf
+    peerVersionOf([128, 17, 1, 0, 9, 9]) => 70016
+    peerVersionOf([]) => 0
+
+fn peerUserAgentOf(body: List<Int>) -> String
+    ? "The user agent a Peer reported, read from its length prefix."
+    readVarString(List.drop(body, userAgentOffset()))
+
+fn readVarString(rest: List<Int>) -> String
+    ? "Read a length-prefixed string, tolerating a payload that ends early."
+    match rest
+        [] -> ""
+        [length, ..tail] -> Domain.Message.asciiText(List.take(tail, length))
+
+verify readVarString
+    readVarString([2, 97, 98, 99]) => "ab"
+    readVarString([0]) => ""
+    readVarString([]) => ""

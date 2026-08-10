@@ -1,0 +1,89 @@
+module Peer
+    intent =
+        "The live side of a Peer: opening the socket and completing the Handshake."
+        "This is the only module that touches the network, so everything it does"
+        "is a thin arrangement of pure parts from the domain. Reading is always"
+        "exact-length — a 24-byte header, then exactly the payload it announces —"
+        "so the stream never has to be guessed at."
+    exposes [handshake, Greeting, greetingVersion, greetingAgent]
+    depends [Bytes, Domain.Message, Domain.Network, Domain.Address, Domain.Version]
+    effects [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
+
+record Greeting
+    version: Int
+    agent: String
+
+fn greetingVersion(greeting: Greeting) -> Int
+    ? "The protocol version the Peer reported."
+    greeting.version
+
+fn greetingAgent(greeting: Greeting) -> String
+    ? "The user agent the Peer reported."
+    greeting.agent
+
+fn messageBudget() -> Int
+    ? "How many Messages to read while waiting for verack before giving up."
+    20
+
+verify messageBudget
+    messageBudget() => 20
+
+fn handshake(network: Network, address: PeerAddress) -> Result<Greeting, String>
+    ? "Open a connection, introduce ourselves, and wait for the Peer to accept."
+    ! [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
+    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
+    greeting = introduce(connection, network, address)
+    closeAfter(connection, greeting)
+
+fn introduce(connection: Tcp.Connection, network: Network, address: PeerAddress) -> Result<Greeting, String>
+    ? "Send our version, then read until the Peer sends verack."
+    ! [Tcp.writeBytes, Tcp.readBytes, Time.unixMs, Random.int]
+    body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
+    sent = Domain.Message.frame(network, "version", body)?
+    _written = Tcp.writeBytes(connection, sent)?
+    await(connection, network, messageBudget(), Greeting(version = 0, agent = ""))
+
+fn closeAfter(connection: Tcp.Connection, greeting: Result<Greeting, String>) -> Result<Greeting, String>
+    ? "Always release the socket, whatever the Handshake did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    greeting
+
+fn await(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "Read Messages until verack arrives or the budget runs out."
+    ! [Tcp.writeBytes, Tcp.readBytes]
+    match budget <= 0
+        true -> Result.Err("no verack after {messageBudget()} messages")
+        false -> readOne(connection, network, budget, seen)
+
+fn readOne(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "Read one framed Message: a fixed header, then exactly what it announces."
+    ! [Tcp.writeBytes, Tcp.readBytes]
+    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
+    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
+    dispatch(connection, network, Domain.Message.commandAt(header), body, budget, seen)
+
+fn dispatch(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "verack ends the Handshake; version tells us who we are talking to."
+    ! [Tcp.writeBytes, Tcp.readBytes]
+    match command == "verack"
+        true -> Result.Ok(seen)
+        false -> afterVersion(connection, network, command, body, budget, seen)
+
+fn afterVersion(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "Answer the Peer's version with our verack, and remember what it said."
+    ! [Tcp.writeBytes, Tcp.readBytes]
+    match command == "version"
+        true -> acknowledge(connection, network, budget, describePeer(body))
+        false -> await(connection, network, budget - 1, seen)
+
+fn acknowledge(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
+    ? "Send verack in reply, then keep waiting for theirs."
+    ! [Tcp.writeBytes, Tcp.readBytes]
+    reply = Domain.Message.frame(network, "verack", Bytes.fromList([]))?
+    _written = Tcp.writeBytes(connection, reply)?
+    await(connection, network, budget - 1, seen)
+
+fn describePeer(body: List<Int>) -> Greeting
+    ? "What the Peer told us about itself in its version payload."
+    Greeting(version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body))
