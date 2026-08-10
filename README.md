@@ -142,8 +142,12 @@ Deriving an address needs no RIPEMD-160, which Aver does not have: a script
 already contains the hash, so the work is pattern-matching plus an encoding, not
 hashing a public key.
 
-Not covered: fees, which would need the outputs being spent, and so either a
-UTXO cache or an extra round trip per input.
+Fees are deliberately not reported. A Transaction states its output amounts but
+not its input amounts, and a peer will not serve the confirmed transactions
+those inputs spend — measured on mainnet, 29 of 29 such requests came back
+`notfound`, and across 441 inputs none had its parent in the same stream.
+Getting fees means asking the node over RPC instead, which is a different
+program; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md).
 
 ## Licence
 
