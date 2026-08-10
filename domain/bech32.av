@@ -1,0 +1,230 @@
+module Bech32
+    intent =
+        "Bech32 and Bech32m encoding, for SegWit addresses."
+        "Witness version zero uses Bech32, version one and above use Bech32m —"
+        "they differ only in the constant the checksum is finalised against,"
+        "which is what keeps a Taproot address from being read as a v0 one."
+        "The checksum is defined in exclusive-or and shifts, so it is built on"
+        "Domain.Bits rather than on operators Aver does not have."
+    exposes [encode, bech32Constant, bech32mConstant]
+    depends [Domain.Bits]
+    effects []
+
+fn charset() -> List<String>
+    ? "The 32 characters Bech32 data is written in."
+    String.chars("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+
+verify charset
+    List.len(charset()) => 32
+
+fn bech32Constant() -> Int
+    ? "The checksum constant for witness version zero."
+    1
+
+verify bech32Constant
+    bech32Constant() => 1
+
+fn bech32mConstant() -> Int
+    ? "The checksum constant for witness version one and above."
+    734539939
+
+verify bech32mConstant
+    bech32mConstant() => 734539939
+
+fn generators() -> List<Int>
+    ? "The five generator constants the checksum folds in."
+    [996825010, 642813549, 513874426, 1027748829, 705979059]
+
+verify generators
+    List.len(generators()) => 5
+
+fn encode(prefix: String, witnessVersion: Int, program: List<Int>) -> String
+    ? "A SegWit address: prefix, separator, witness version, program, checksum."
+    data = List.prepend(witnessVersion, toFiveBits(program))
+    prefix + "1" + render(List.concat(data, checksum(prefix, data, constantFor(witnessVersion))), "")
+
+verify encode
+    encode("bc", 0, twentyBytes()) => "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    encode("bc", 1, taprootProgram()) => "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+
+fn twentyBytes() -> List<Int>
+    ? "The published BIP173 example witness program."
+    [117, 30, 118, 232, 25, 145, 150, 212, 84, 148, 28, 69, 209, 179, 163, 35, 241, 67, 59, 214]
+
+verify twentyBytes
+    List.len(twentyBytes()) => 20
+
+fn taprootProgram() -> List<Int>
+    ? "The published BIP350 example Taproot output key."
+    [121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2, 155, 252, 219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152]
+
+verify taprootProgram
+    List.len(taprootProgram()) => 32
+
+fn constantFor(witnessVersion: Int) -> Int
+    ? "Version zero is Bech32; everything above it is Bech32m."
+    match witnessVersion == 0
+        true -> bech32Constant()
+        false -> bech32mConstant()
+
+verify constantFor
+    constantFor(0) => 1
+    constantFor(1) => 734539939
+
+fn render(values: List<Int>, acc: String) -> String
+    ? "Write each five-bit value as its character."
+    match values
+        [] -> acc
+        [head, ..tail] -> render(tail, acc + characterAt(head))
+
+verify render
+    render([0, 1], "") => "qp"
+    render([], "x") => "x"
+
+fn characterAt(value: Int) -> String
+    ? "The character standing for one five-bit value."
+    Option.withDefault(Vector.get(Vector.fromList(charset()), value), "?")
+
+verify characterAt
+    characterAt(0) => "q"
+    characterAt(31) => "l"
+
+fn toFiveBits(program: List<Int>) -> List<Int>
+    ? "Regroup eight-bit bytes into five-bit values, padding the last one."
+    regroup(program, 0, 0, [])
+
+verify toFiveBits
+    List.len(toFiveBits(twentyBytes())) => 32
+    toFiveBits([255]) => [31, 28]
+
+fn regroup(bytes: List<Int>, acc: Int, bits: Int, out: List<Int>) -> List<Int>
+    ? "Accumulate whole bytes, emitting a value whenever five bits are ready."
+    match bytes
+        [] -> flush(acc, bits, out)
+        [head, ..tail] -> drain(tail, Domain.Bits.shiftLeft(acc, 8) + head, bits + 8, out)
+
+verify regroup
+    regroup([], 0, 0, [7]) => [7]
+    List.len(regroup([255], 0, 0, [])) => 2
+
+fn drain(bytes: List<Int>, acc: Int, bits: Int, out: List<Int>) -> List<Int>
+    ? "Emit every complete five-bit group the accumulator now holds."
+    match bits >= 5
+        true -> drain(bytes, acc, bits - 5, List.concat(out, [Domain.Bits.lowBits(Domain.Bits.shiftRight(acc, bits - 5), 5)]))
+        false -> regroup(bytes, acc, bits, out)
+
+verify drain
+    drain([], 1, 1, []) => [16]
+    List.len(drain([], 255, 8, [])) => 2
+
+fn flush(acc: Int, bits: Int, out: List<Int>) -> List<Int>
+    ? "Whatever is left becomes a final value, padded with zero bits."
+    match bits == 0
+        true -> out
+        false -> List.concat(out, [Domain.Bits.lowBits(Domain.Bits.shiftLeft(acc, 5 - bits), 5)])
+
+verify flush
+    flush(0, 0, [7]) => [7]
+    flush(1, 1, []) => [16]
+
+fn checksum(prefix: String, data: List<Int>, constant: Int) -> List<Int>
+    ? "Six five-bit values proving the rest of the address arrived intact."
+    residue = Domain.Bits.xor(polymod(List.concat(List.concat(expandPrefix(prefix), data), [0, 0, 0, 0, 0, 0]), 1), constant)
+    checksumDigits(residue, 0, [])
+
+verify checksum
+    List.len(checksum("bc", [0], bech32Constant())) => 6
+
+fn checksumDigits(residue: Int, index: Int, acc: List<Int>) -> List<Int>
+    ? "Split the residue into its six five-bit values, most significant first."
+    match index >= 6
+        true -> acc
+        false -> checksumDigits(residue, index + 1, List.concat(acc, [Domain.Bits.lowBits(Domain.Bits.shiftRight(residue, 5 * (5 - index)), 5)]))
+
+verify checksumDigits
+    List.len(checksumDigits(0, 0, [])) => 6
+    checksumDigits(0, 6, [9]) => [9]
+
+fn expandPrefix(prefix: String) -> List<Int>
+    ? "The prefix contributes its high bits, a zero, then its low bits."
+    codes = codesOf(String.chars(prefix), [])
+    List.concat(List.concat(highParts(codes, []), [0]), lowParts(codes, []))
+
+verify expandPrefix
+    expandPrefix("bc") => [3, 3, 0, 2, 3]
+
+fn codesOf(chars: List<String>, acc: List<Int>) -> List<Int>
+    ? "The code point of each character of the prefix."
+    match chars
+        [] -> List.reverse(acc)
+        [head, ..tail] -> codesOf(tail, List.prepend(Char.toCode(head), acc))
+
+verify codesOf
+    codesOf(["b", "c"], []) => [98, 99]
+    codesOf([], []) => []
+
+fn highParts(codes: List<Int>, acc: List<Int>) -> List<Int>
+    ? "The top bits of each prefix character."
+    match codes
+        [] -> List.reverse(acc)
+        [head, ..tail] -> highParts(tail, List.prepend(Domain.Bits.shiftRight(head, 5), acc))
+
+verify highParts
+    highParts([98, 99], []) => [3, 3]
+    highParts([], []) => []
+
+fn lowParts(codes: List<Int>, acc: List<Int>) -> List<Int>
+    ? "The bottom five bits of each prefix character."
+    match codes
+        [] -> List.reverse(acc)
+        [head, ..tail] -> lowParts(tail, List.prepend(Domain.Bits.lowBits(head, 5), acc))
+
+verify lowParts
+    lowParts([98, 99], []) => [2, 3]
+    lowParts([], []) => []
+
+fn polymod(values: List<Int>, acc: Int) -> Int
+    ? "The Bech32 checksum fold, one five-bit value at a time."
+    match values
+        [] -> acc
+        [head, ..tail] -> polymod(tail, foldValue(acc, head))
+
+verify polymod
+    polymod([], 1) => 1
+    polymod([0], 1) => 32
+
+fn foldValue(acc: Int, value: Int) -> Int
+    ? "Shift the accumulator up, mix the value in, then fold the generators."
+    top = Domain.Bits.shiftRight(acc, 25)
+    foldGenerators(Domain.Bits.xor(Domain.Bits.shiftLeft(Domain.Bits.lowBits(acc, 25), 5), value), top, 0)
+
+verify foldValue
+    foldValue(1, 0) => 32
+
+fn foldGenerators(acc: Int, top: Int, index: Int) -> Int
+    ? "Fold in each generator whose corresponding bit is set."
+    match index >= 5
+        true -> acc
+        false -> foldGenerators(applyGenerator(acc, top, index), top, index + 1)
+
+verify foldGenerators
+    foldGenerators(7, 0, 0) => 7
+    foldGenerators(7, 0, 5) => 7
+
+fn applyGenerator(acc: Int, top: Int, index: Int) -> Int
+    ? "One generator, applied only when its bit is set."
+    match Domain.Bits.bitAt(top, index) == 1
+        true -> Domain.Bits.xor(acc, generatorAt(index))
+        false -> acc
+
+verify applyGenerator
+    applyGenerator(0, 0, 0) => 0
+    applyGenerator(0, 1, 0) => 996825010
+
+fn generatorAt(index: Int) -> Int
+    ? "One of the five generator constants."
+    Option.withDefault(Vector.get(Vector.fromList(generators()), index), 0)
+
+verify generatorAt
+    generatorAt(0) => 996825010
+    generatorAt(4) => 705979059

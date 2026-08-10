@@ -8,12 +8,11 @@ Written in [Aver](https://averlang.dev).
 ```
 listening to peer 172.26.224.1:8333
 handshake complete: protocol 70016, agent /Satoshi:27.0.0/
-tx 3a38d7b2bcb0c17f0210979756b2a04aab364532e429152b20ad8ab8b7c05e84
-   segwit, version 2, 2 in / 2 out, 371 bytes, locktime 0
-   in  386aa7568db84f77398a4635e332557b30f18661cbc4302a3a1f5fbc5bec6f68:0 seq 4294967293 witness 2
-   in  3af60d27c78ab9b8edb15372a15a1ebb43e368f1a8a718828046e9a9691dca84:3 seq 4294967293 witness 2
-   out 0.00000606 BTC  0014cdd11abc6b62fb60ae88132c70570820f2ae8949
-   out 0.00841400 BTC  0014e8d3e213ee0e2c02036e069cb6dc59a0300a5c1f
+tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
+   segwit, version 2, 1 in / 2 out, 222 bytes, locktime 961919
+   in  f398e4689b791f5df72d1e3c5b2a7ac4f6f15321afe1265fe817d29646cda6d6:1 seq 4294967293 witness 2
+   out 0.00015448 BTC  P2WPKH bc1qrwwaqv2fvhhu67tp6pqc0uy83sn0aw3gxgmeuz
+   out 7.46148541 BTC  P2WPKH bc1qywkyxsjrcuj06m47dywvlz68evfvagr3tqe0cs
 ```
 
 ## Requirements
@@ -94,6 +93,10 @@ domain/
   version.av        the version payload, built purely
   inventory.av      reading announcements, building getdata
   transaction.av    the SegWit-aware decoder
+  script.av         recognising output scripts, naming who they pay
+  base58.av         Base58Check, for pre-SegWit addresses
+  bech32.av         Bech32 and Bech32m, for SegWit addresses
+  bits.av           xor and shifts, built from arithmetic
 infra/peer.av       the only module that touches the network
 ```
 
@@ -112,6 +115,9 @@ Three details each produce output that looks right but is not:
 - **The transaction id is hashed over the legacy serialisation**, excluding the
   marker, flag and witnesses. Hashing the full bytes yields the wtxid — a
   plausible 64-character hex string that no explorer recognises.
+- **Bech32 and Bech32m differ only in one constant.** Encoding a Taproot output
+  with the v0 constant yields a well-formed-looking `bc1p…` address that no
+  wallet will accept.
 - **`ping` must be answered.** A peer that is not answered drops the connection
   after a couple of minutes, which presents as "it stopped working after a
   while".
@@ -122,9 +128,18 @@ Decoding covers the transaction structure, SegWit included: version, inputs
 with their outpoints and sequences, outputs with amounts and scripts, witness
 item counts, locktime, size, and the transaction id.
 
-Not covered: script classification and addresses (scripts print as hex), fees
-(which would need the spent outputs, and so a UTXO cache or extra round trips),
-and running until interrupted rather than stopping after a fixed count.
+Standard output scripts are recognised and rendered as addresses — P2PKH and
+P2SH through Base58Check, P2WPKH and P2WSH through Bech32, Taproot through
+Bech32m. `OP_RETURN` is named, and anything unrecognised keeps its hex rather
+than being guessed at.
+
+Deriving an address needs no RIPEMD-160, which Aver does not have: a script
+already contains the hash, so the work is pattern-matching plus an encoding, not
+hashing a public key.
+
+Not covered: fees (which would need the spent outputs, and so a UTXO cache or
+extra round trips), and running until interrupted rather than stopping after a
+fixed count.
 
 ## Licence
 

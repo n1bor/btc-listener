@@ -1,0 +1,118 @@
+module Base58
+    intent =
+        "Base58Check encoding, for the addresses that predate SegWit."
+        "The payload is a version byte and a 20-byte hash, followed by four"
+        "checksum bytes taken from its double-SHA256. The result is that whole"
+        "thing read as one large number and written in base 58 — which Aver can"
+        "do directly, because Int is arbitrary-precision."
+    exposes [encodeCheck, pubKeyHashVersion, scriptHashVersion]
+    depends [Bytes, Crypto.Digest32]
+    effects []
+
+fn alphabet() -> List<String>
+    ? "Base58 omits the characters that are easy to confuse when read aloud."
+    String.chars("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+verify alphabet
+    List.len(alphabet()) => 58
+
+fn pubKeyHashVersion() -> Int
+    ? "The version byte prefixing a mainnet pay-to-public-key-hash address."
+    0
+
+verify pubKeyHashVersion
+    pubKeyHashVersion() => 0
+
+fn scriptHashVersion() -> Int
+    ? "The version byte prefixing a mainnet pay-to-script-hash address."
+    5
+
+verify scriptHashVersion
+    scriptHashVersion() => 5
+
+fn encodeCheck(version: Int, payload: List<Int>) -> Result<String, String>
+    ? "Version byte, payload, and the checksum that guards them, in base 58."
+    body = List.prepend(version, payload)
+    full = List.concat(body, checksumOf(body)?)
+    Result.Ok(leadingOnes(full, "") + digitsOf(toNumber(full, 0), ""))
+
+verify encodeCheck
+    encodeCheck(0, exampleHash()) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
+    encodeCheck(5, scriptExampleHash()) => Result.Ok("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ")
+
+fn exampleHash() -> List<Int>
+    ? "A 20-byte hash used by the verify cases."
+    [117, 30, 118, 232, 25, 145, 150, 212, 84, 148, 28, 69, 209, 179, 163, 35, 241, 67, 59, 214]
+
+verify exampleHash
+    List.len(exampleHash()) => 20
+
+fn scriptExampleHash() -> List<Int>
+    ? "A second 20-byte hash, for the script-hash verify case."
+    [7, 102, 179, 232, 106, 33, 161, 27, 82, 200, 116, 209, 142, 45, 207, 34, 216, 31, 195, 128]
+
+verify scriptExampleHash
+    List.len(scriptExampleHash()) => 20
+
+fn checksumOf(body: List<Int>) -> Result<List<Int>, String>
+    ? "The first four bytes of the body's double-SHA256."
+    payload = Bytes.fromList(body)?
+    Result.Ok(List.take(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(payload))), 4))
+
+verify checksumOf
+    checksumOf([0]) => Result.Ok([20, 6, 224, 88])
+
+fn doubleSha(payload: Bytes) -> Digest32
+    ? "SHA-256 applied twice."
+    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
+
+fn toNumber(bytes: List<Int>, acc: Int) -> Int
+    ? "Read the bytes as one big-endian number."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> toNumber(tail, acc * 256 + head)
+
+verify toNumber
+    toNumber([1, 0], 0) => 256
+    toNumber([], 7) => 7
+    toNumber([255], 0) => 255
+
+fn digitsOf(value: Int, acc: String) -> String
+    ? "Write the number in base 58, least significant digit first."
+    match value <= 0
+        true -> acc
+        false -> digitsOf(Int.div(value, 58), characterAt(Int.mod(value, 58)) + acc)
+
+verify digitsOf
+    digitsOf(0, "") => ""
+    digitsOf(57, "") => "z"
+    digitsOf(58, "") => "21"
+
+fn characterAt(index: Int) -> String
+    ? "One base-58 digit."
+    Option.withDefault(Vector.get(Vector.fromList(alphabet()), index), "?")
+
+verify characterAt
+    characterAt(0) => "1"
+    characterAt(57) => "z"
+
+fn leadingOnes(bytes: List<Int>, acc: String) -> String
+    ? "Each leading zero byte is written as a 1, which base 58 alone would lose."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> oneIfZero(head, tail, acc)
+
+verify leadingOnes
+    leadingOnes([0, 0, 5], "") => "11"
+    leadingOnes([5, 0], "") => ""
+    leadingOnes([], "x") => "x"
+
+fn oneIfZero(head: Int, tail: List<Int>, acc: String) -> String
+    ? "Keep counting while the bytes are zero."
+    match head == 0
+        true -> leadingOnes(tail, acc + "1")
+        false -> acc
+
+verify oneIfZero
+    oneIfZero(0, [5], "") => "1"
+    oneIfZero(5, [0], "") => ""
