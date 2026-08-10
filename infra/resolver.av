@@ -1,0 +1,124 @@
+module Resolver
+    intent =
+        "Finding a Peer to talk to, when none was named on the command line."
+        "Bitcoin publishes seed hostnames that answer with the addresses of"
+        "reachable Peers. The question and the answer are built and read in"
+        "Domain.Dns; this module only carries them over a socket."
+        "DNS over TCP puts a two-byte length in front of the message, which"
+        "makes the exchange exactly the shape exact-length reads are for: read"
+        "two bytes to learn the size, then read precisely that many."
+    exposes [discover, seeds, resolverHost]
+    depends [Bytes, Domain.Dns, Domain.Address]
+    effects [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Random.int]
+
+fn resolverHost() -> String
+    ? "The recursive resolver the seed question is put to."
+    "1.1.1.1"
+
+verify resolverHost
+    resolverHost() => "1.1.1.1"
+
+fn resolverPort() -> Int
+    ? "DNS listens on port 53, over TCP as well as UDP."
+    53
+
+verify resolverPort
+    resolverPort() => 53
+
+fn seeds() -> List<String>
+    ? "The seed hostnames Bitcoin Core ships with."
+    [
+        "seed.bitcoin.sipa.be",
+        "dnsseed.bluematt.me",
+        "seed.bitcoinstats.com",
+        "seed.bitcoin.jonasschnelli.ch",
+        "seed.btc.petertodd.net",
+        "seed.bitcoin.sprovoost.nl",
+        "dnsseed.emzy.de",
+        "seed.bitcoin.wiz.biz",
+    ]
+
+verify seeds
+    List.len(seeds()) => 8
+    List.contains(seeds(), "seed.bitcoin.sipa.be") => true
+
+fn discover() -> Result<PeerAddress, String>
+    ? "Ask a randomly chosen seed for Peers, and pick one of its answers."
+    ! [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Random.int]
+    seed = pick(seeds(), "seed.bitcoin.sipa.be")
+    chooseAddress(lookup(seed)?)
+
+fn pick(candidates: List<String>, fallback: String) -> String
+    ? "One of the candidates, chosen at random."
+    ! [Random.int]
+    itemAt(candidates, Random.int(0, List.len(candidates) - 1), fallback)
+
+fn itemAt(candidates: List<String>, index: Int, fallback: String) -> String
+    ? "The candidate at this position, or the fallback if there is none."
+    Option.withDefault(Vector.get(Vector.fromList(candidates), index), fallback)
+
+verify itemAt
+    itemAt(["a", "b"], 1, "z") => "b"
+    itemAt([], 0, "z") => "z"
+
+fn chooseAddress(addresses: List<List<Int>>) -> Result<PeerAddress, String>
+    ? "One of the returned addresses, chosen at random."
+    ! [Random.int]
+    match addresses
+        [] -> Result.Err("the seed returned no addresses")
+        [head, ..tail] -> Domain.Address.fromOctets(octetsAt(addresses, Random.int(0, List.len(addresses) - 1), head))
+
+fn octetsAt(addresses: List<List<Int>>, index: Int, fallback: List<Int>) -> List<Int>
+    ? "The address at this position, or the first if there is none."
+    Option.withDefault(Vector.get(Vector.fromList(addresses), index), fallback)
+
+verify octetsAt
+    octetsAt([[1], [2]], 1, [9]) => [2]
+    octetsAt([], 0, [9]) => [9]
+
+fn lookup(name: String) -> Result<List<List<Int>>, String>
+    ? "Put the question to the resolver and read the addresses back."
+    ! [Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Random.int]
+    connection = Tcp.connect(resolverHost(), resolverPort())?
+    answer = exchange(connection, name)
+    closeAfter(connection, answer)
+
+fn closeAfter(connection: Tcp.Connection, answer: Result<List<List<Int>>, String>) -> Result<List<List<Int>>, String>
+    ? "Always release the socket, whatever the exchange did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    answer
+
+fn exchange(connection: Tcp.Connection, name: String) -> Result<List<List<Int>>, String>
+    ? "Send the question, then read the length-prefixed answer."
+    ! [Tcp.writeBytes, Tcp.readBytes, Random.int]
+    question = Domain.Dns.question(name, Random.int(0, 65535))?
+    framed = Bytes.fromList(List.concat(lengthPrefix(List.len(Bytes.toList(question))), Bytes.toList(question)))?
+    _written = Tcp.writeBytes(connection, framed)?
+    readAnswer(connection)
+
+fn lengthPrefix(size: Int) -> List<Int>
+    ? "DNS over TCP puts the message size in two big-endian bytes."
+    [Int.div(size, 256), Int.mod(size, 256)]
+
+verify lengthPrefix
+    lengthPrefix(38) => [0, 38]
+    lengthPrefix(300) => [1, 44]
+
+fn readAnswer(connection: Tcp.Connection) -> Result<List<List<Int>>, String>
+    ? "Read the two size bytes, then exactly that many more."
+    ! [Tcp.readBytes]
+    size = Bytes.toList(Tcp.readBytes(connection, 2)?)
+    body = Tcp.readBytes(connection, sizeOf(size))?
+    Result.Ok(Domain.Dns.addressesOf(Bytes.toList(body)))
+
+fn sizeOf(prefix: List<Int>) -> Int
+    ? "The announced message size, read from its two big-endian bytes."
+    match prefix
+        [] -> 0
+        [head, ..tail] -> head * 256 + Option.withDefault(Vector.get(Vector.fromList(tail), 0), 0)
+
+verify sizeOf
+    sizeOf([0, 38]) => 38
+    sizeOf([1, 44]) => 300
+    sizeOf([]) => 0

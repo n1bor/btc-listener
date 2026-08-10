@@ -4,7 +4,7 @@ module Address
         "Parsing is the only way in, so an unvalidated address cannot reach the"
         "rest of the program. Octets are kept as numbers rather than as the"
         "original text, so rendering is canonical no matter how it was written."
-    exposes [fromString, fromParts, toString, hostOf, portOf, octetsOf]
+    exposes [fromString, fromParts, fromOctets, toString, hostOf, portOf, octetsOf]
     exposes opaque [PeerAddress]
     effects []
 
@@ -40,6 +40,45 @@ verify fromParts
     fromParts("10.0.0.1", "banana") => Result.Err("port 'banana' is not a number")
     fromParts("10.0.0.1", "0") => Result.Err("port 0 is out of range (1-65535)")
     fromParts("", "8333") => Result.Err("expected four dot-separated octets, got 1")
+
+fn fromOctets(octets: List<Int>) -> Result<PeerAddress, String>
+    ? "Build an address from four already-numeric octets, on the default port."
+    checkOctetCount(octets, defaultPort())
+
+verify fromOctets
+    fromOctets([192, 168, 1, 10]) => Result.Ok(PeerAddress(octets = [192, 168, 1, 10], portNumber = 8333))
+    fromOctets([1, 2, 3]) => Result.Err("expected four octets, got 3")
+    fromOctets([1, 2, 3, 300]) => Result.Err("octet 300 is out of range (0-255)")
+
+fn checkOctetCount(octets: List<Int>, port: Int) -> Result<PeerAddress, String>
+    ? "An address is exactly four octets, each of them in range."
+    count = List.len(octets)
+    match count == 4
+        true -> build(checkedOctets(octets)?, port)
+        false -> Result.Err("expected four octets, got {count}")
+
+verify checkOctetCount
+    checkOctetCount([1, 2, 3, 4], 8333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 8333))
+    checkOctetCount([1], 8333) => Result.Err("expected four octets, got 1")
+
+fn checkedOctets(octets: List<Int>) -> Result<List<Int>, String>
+    ? "Every octet must be in range, whatever produced them."
+    checkedOctetsInto(octets, [])
+
+verify checkedOctets
+    checkedOctets([1, 255]) => Result.Ok([1, 255])
+    checkedOctets([256]) => Result.Err("octet 256 is out of range (0-255)")
+
+fn checkedOctetsInto(octets: List<Int>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Accumulator form so the recursion stays in tail position."
+    match octets
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> checkedOctetsInto(tail, List.prepend(checkOctetRange(head)?, acc))
+
+verify checkedOctetsInto
+    checkedOctetsInto([7], []) => Result.Ok([7])
+    checkedOctetsInto([], [2, 1]) => Result.Ok([1, 2])
+    checkedOctetsInto([300], []) => Result.Err("octet 300 is out of range (0-255)")
 
 fn fromOctetsAndPort(text: String, port: Int) -> Result<PeerAddress, String>
     ? "Shared constructor: validate the octets, then the port."

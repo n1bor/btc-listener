@@ -4,21 +4,22 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [Domain.Address, Domain.Network, Infra.Peer]
+    depends [Domain.Address, Domain.Network, Infra.Peer, Infra.Resolver]
     effects [Args.get, Console.print, Console.error, Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
 
 fn usageLines() -> List<String>
     ? "User-facing help for the argv CLI."
     [
         "Bitcoin peer listener",
-        "Usage: <peer-address> [port]",
+        "Usage: [peer-address] [port]",
         "",
-        "  peer-address   IPv4 address of the Peer to listen to",
+        "  peer-address   IPv4 address of the Peer to listen to.",
+        "                 Omit it to ask a Bitcoin DNS seed for one.",
         "  port           optional, defaults to 8333",
     ]
 
 verify usageLines
-    List.len(usageLines()) => 5
+    List.len(usageLines()) => 6
     List.contains(usageLines(), "Bitcoin peer listener") => true
 
 fn describe(address: PeerAddress) -> String
@@ -38,8 +39,14 @@ fn run(args: List<String>) -> Unit
     ? "Dispatch on the arguments given after `--`."
     ! [Console.print, Console.error, Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
     match args
-        [] -> printLines(usageLines())
+        [] -> discover()
         [address, ..rest] -> runWithAddress(address, rest)
+
+fn discover() -> Unit
+    ? "With no address given, ask a Bitcoin DNS seed for one."
+    ! [Console.print, Console.error, Tcp.connect, Tcp.writeBytes, Tcp.readBytes, Tcp.close, Time.unixMs, Random.int]
+    _searching = Console.print("no peer given; asking a Bitcoin DNS seed")
+    report(Infra.Resolver.discover())
 
 fn runWithAddress(address: String, rest: List<String>) -> Unit
     ? "One argument is an address on the default port; more may carry a port."

@@ -1,0 +1,163 @@
+module Dns
+    intent =
+        "Building a DNS question and reading the addresses out of the answer."
+        "Bitcoin's seed hostnames answer with the addresses of reachable Peers,"
+        "which is how a client finds its first one."
+        "DNS normally travels over UDP, which Aver has no service for, so this"
+        "is the TCP form: the same message behind a two-byte length. Everything"
+        "here is pure, so the wire format is checked against a captured answer"
+        "rather than against a resolver."
+    exposes [question, addressesOf, answerCount]
+    depends [Bytes, Domain.Message]
+    effects []
+
+fn question(name: String, identifier: Int) -> Result<Bytes, String>
+    ? "A question asking for the A records of one name."
+    Bytes.fromList(List.concat(List.concat(header(identifier), encodeName(name)), [0, 1, 0, 1]))
+
+verify question
+    question("a", 1) => Result.Ok(Bytes.fromHex("00010100000100000000000001610000010001")?)
+    question("汉", 1) => Result.Err("byte 27721 at index 13 is outside 0..=255")
+    Bytes.toHex(question("seed.bitcoin.sipa.be", 4660)?) => "123401000001000000000000047365656407626974636f696e04736970610262650000010001"
+    Bytes.toHex(question("a", 1)?) => "00010100000100000000000001610000010001"
+
+fn header(identifier: Int) -> List<Int>
+    ? "Identifier, recursion-desired flags, one question, no answers."
+    List.concat(Domain.Message.bigEndian(identifier, 2), [1, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+
+verify header
+    header(4660) => [18, 52, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    List.len(header(0)) => 12
+
+fn encodeName(name: String) -> List<Int>
+    ? "Each dot-separated label, length-prefixed, ending with the root label."
+    List.concat(encodeLabels(String.split(name, "."), []), [0])
+
+verify encodeName
+    encodeName("a") => [1, 97, 0]
+    encodeName("ab.c") => [2, 97, 98, 1, 99, 0]
+
+fn encodeLabels(labels: List<String>, acc: List<Int>) -> List<Int>
+    ? "One length-prefixed label after another."
+    match labels
+        [] -> acc
+        [head, ..tail] -> encodeLabels(tail, List.concat(acc, encodeLabel(head)))
+
+verify encodeLabels
+    encodeLabels(["a"], []) => [1, 97]
+    encodeLabels([], [9]) => [9]
+
+fn encodeLabel(label: String) -> List<Int>
+    ? "A label's length, then its bytes."
+    bytes = Domain.Message.asciiBytes(label)
+    List.prepend(List.len(bytes), bytes)
+
+verify encodeLabel
+    encodeLabel("ab") => [2, 97, 98]
+    encodeLabel("") => [0]
+
+fn readBigEndian(bytes: List<Int>) -> Int
+    ? "DNS counts and lengths are big-endian."
+    Domain.Message.readLittleEndian(List.reverse(bytes))
+
+verify readBigEndian
+    readBigEndian([1, 0]) => 256
+    readBigEndian([0, 3]) => 3
+
+fn answerCount(response: List<Int>) -> Int
+    ? "How many answer records the resolver returned."
+    readBigEndian(List.take(List.drop(response, 6), 2))
+
+verify answerCount
+    answerCount(capturedAnswer()) => 3
+
+fn capturedAnswer() -> List<Int>
+    ? "A real answer from a Bitcoin seed, trimmed to three records."
+    empty: List<Int> = []
+    Result.withDefault(capturedBytes(), empty)
+
+verify capturedAnswer
+    List.len(capturedAnswer()) => 86
+    List.take(capturedAnswer(), 2) => [18, 52]
+
+fn capturedBytes() -> Result<List<Int>, String>
+    ? "Decode the captured fixture."
+    decoded = Bytes.fromHex("123481800001000300000000047365656407626974636f696e04736970610262650000010001c00c0001000100000e100004883c4274c00c0001000100000e10000449ad744cc00c0001000100000e10000479d2c79d")?
+    Result.Ok(Bytes.toList(decoded))
+
+verify capturedBytes
+    List.len(capturedBytes()?) => 86
+
+fn addressesOf(response: List<Int>) -> List<List<Int>>
+    ? "The four-byte address of every A record in the answer."
+    collect(answerCount(response), skipQuestion(List.drop(response, 12)), [])
+
+verify addressesOf
+    addressesOf(capturedAnswer()) => [[136, 60, 66, 116], [73, 173, 116, 76], [121, 210, 199, 157]]
+    addressesOf([]) => []
+
+fn skipQuestion(rest: List<Int>) -> List<Int>
+    ? "Step over the question's name, type and class."
+    List.drop(skipName(rest), 4)
+
+verify skipQuestion
+    skipQuestion([1, 97, 0, 0, 1, 0, 1, 9]) => [9]
+
+fn skipName(rest: List<Int>) -> List<Int>
+    ? "Step over a name, which may be labels or a pointer to earlier ones."
+    match rest
+        [] -> []
+        [head, ..tail] -> skipNameFrom(head, tail)
+
+verify skipName
+    skipName([1, 97, 0, 9]) => [9]
+    skipName([192, 12, 9]) => [9]
+    skipName([]) => []
+
+fn skipNameFrom(head: Int, tail: List<Int>) -> List<Int>
+    ? "A byte of 192 or more begins a two-byte pointer, not a label."
+    match head >= 192
+        true -> List.drop(tail, 1)
+        false -> skipLabel(head, tail)
+
+verify skipNameFrom
+    skipNameFrom(192, [12, 9]) => [9]
+    skipNameFrom(1, [97, 0, 9]) => [9]
+
+fn skipLabel(length: Int, tail: List<Int>) -> List<Int>
+    ? "The root label ends a name; any other label is stepped over."
+    match length == 0
+        true -> tail
+        false -> skipName(List.drop(tail, length))
+
+verify skipLabel
+    skipLabel(0, [9]) => [9]
+    skipLabel(1, [97, 0, 9]) => [9]
+
+fn collect(remaining: Int, rest: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Walk the answer records, keeping the addresses."
+    match remaining <= 0
+        true -> List.reverse(acc)
+        false -> collectOne(remaining, rest, acc)
+
+verify collect
+    collect(0, [], [[1]]) => [[1]]
+
+fn collectOne(remaining: Int, rest: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "One answer record: a name, then a typed and length-prefixed value."
+    afterName = skipName(rest)
+    length = readBigEndian(List.take(List.drop(afterName, 8), 2))
+    collect(remaining - 1, List.drop(afterName, 10 + length), keepIfAddress(readBigEndian(List.take(afterName, 2)), length, List.take(List.drop(afterName, 10), length), acc))
+
+verify collectOne
+    collectOne(1, [192, 12, 0, 1, 0, 1, 0, 0, 14, 16, 0, 4, 1, 2, 3, 4], []) => [[1, 2, 3, 4]]
+
+fn keepIfAddress(kind: Int, length: Int, data: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "An A record is type one and four bytes long; anything else is skipped."
+    match Bool.and(kind == 1, length == 4)
+        true -> List.prepend(data, acc)
+        false -> acc
+
+verify keepIfAddress
+    keepIfAddress(1, 4, [1, 2, 3, 4], []) => [[1, 2, 3, 4]]
+    keepIfAddress(28, 16, [1], []) => []

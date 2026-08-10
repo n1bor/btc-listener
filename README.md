@@ -27,15 +27,22 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ```bash
 cd btc-listener
-aver run main.av --module-root . -- <peer-address> [port]
+aver run main.av --module-root . -- [peer-address] [port]
 ```
 
-The port defaults to 8333.
+With no address, the listener asks one of Bitcoin's DNS seeds for reachable
+peers and connects to one of them at random. The port defaults to 8333.
 
 ```bash
-aver run main.av --module-root .                        # usage
-aver run main.av --module-root . -- 192.168.1.10        # default port
+aver run main.av --module-root .                        # find a peer via DNS
+aver run main.av --module-root . -- 192.168.1.10        # named peer
 aver run main.av --module-root . -- 192.168.1.10 8333   # explicit port
+```
+
+```
+no peer given; asking a Bitcoin DNS seed
+listening to peer 172.97.131.195:8333
+handshake complete: protocol 70016, agent /Satoshi:29.0.0/
 ```
 
 Two things are easy to leave off:
@@ -98,15 +105,18 @@ domain/
   version.av        the version payload, built purely
   inventory.av      reading announcements, building getdata
   transaction.av    the SegWit-aware decoder
+  dns.av            DNS questions and answers, for seed lookups
   script.av         recognising output scripts, naming who they pay
   base58.av         Base58Check, for pre-SegWit addresses
   bech32.av         Bech32 and Bech32m, for SegWit addresses
   bits.av           xor and shifts, built from arithmetic
-infra/peer.av       the only module that touches the network
+infra/
+  peer.av           the Peer session: handshake and listen loop
+  resolver.av       seed lookups over DNS
 ```
 
-The split is deliberate: `infra/peer.av` is the sole holder of effects, and
-everything it does is an arrangement of pure parts from `domain/`. That is why
+The split is deliberate: only `infra/` touches the network, and everything it
+does is an arrangement of pure parts from `domain/`. That is why
 the wire format can be tested without a peer, and why a failure against a live
 node is a socket problem rather than an ambiguity.
 
@@ -123,6 +133,13 @@ Three details each produce output that looks right but is not:
 - **Bech32 and Bech32m differ only in one constant.** Encoding a Taproot output
   with the v0 constant yields a well-formed-looking `bc1p…` address that no
   wallet will accept.
+- **DNS over TCP is not DNS over UDP.** The message is identical but carries a
+  two-byte length in front of it. Aver has no UDP service, and every recursive
+  resolver is required to accept TCP, so this is the form the seed lookup uses.
+- **Answer records point back at the question name** with a `0xC0` marker
+  instead of repeating it. You do not need to follow the pointer to read an
+  address, but you must recognise it to skip two bytes rather than a label
+  sequence — otherwise every record after the first is misaligned.
 - **`ping` must be answered.** A peer that is not answered drops the connection
   after a couple of minutes, which presents as "it stopped working after a
   while".
