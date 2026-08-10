@@ -125,3 +125,7 @@ item counts, locktime, size, and the transaction id.
 Not covered: script classification and addresses (scripts print as hex), fees
 (which would need the spent outputs, and so a UTXO cache or extra round trips),
 and running until interrupted rather than stopping after a fixed count.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
