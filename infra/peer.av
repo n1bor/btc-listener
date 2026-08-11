@@ -71,17 +71,12 @@ fn readGreeting(connection: Tcp.Connection, network: Network, budget: Int, seen:
 
 fn dispatchGreeting(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "verack ends the Handshake; version tells us who we are talking to."
+      "Anything else is a Peer being chatty before it agrees, and is skipped."
     ! [Tcp.writeBytes, Tcp.readBytes]
-    match command == "verack"
-        true -> Result.Ok(seen)
-        false -> afterVersion(connection, network, command, body, budget, seen)
-
-fn afterVersion(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "Answer the Peer's version with our verack, and remember what it said."
-    ! [Tcp.writeBytes, Tcp.readBytes]
-    match command == "version"
-        true -> acknowledge(connection, network, budget, describePeer(body))
-        false -> await(connection, network, budget - 1, seen)
+    match command
+        "verack" -> Result.Ok(seen)
+        "version" -> acknowledge(connection, network, budget, describePeer(body))
+        _ -> await(connection, network, budget - 1, seen)
 
 fn acknowledge(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "Send verack in reply, then keep waiting for theirs."
@@ -110,25 +105,14 @@ fn readMessage(connection: Tcp.Connection, network: Network) -> Result<Unit, Str
     handle(connection, network, Domain.Message.commandAt(header), body)
 
 fn handle(connection: Tcp.Connection, network: Network, command: String, body: List<Int>) -> Result<Unit, String>
-    ? "An Announcement is answered; anything else falls through."
+    ? "The three Messages this program acts on; every other one is ignored."
+      "A ping must be answered, or the Peer eventually drops the connection."
     ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
-    match command == "inv"
-        true -> onAnnouncement(connection, network, body)
-        false -> handleTransaction(connection, network, command, body)
-
-fn handleTransaction(connection: Tcp.Connection, network: Network, command: String, body: List<Int>) -> Result<Unit, String>
-    ? "A Transaction is decoded and printed."
-    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
-    match command == "tx"
-        true -> onTransaction(connection, network, body)
-        false -> handlePing(connection, network, command, body)
-
-fn handlePing(connection: Tcp.Connection, network: Network, command: String, body: List<Int>) -> Result<Unit, String>
-    ? "A ping must be answered or the Peer will eventually drop us."
-    ! [Tcp.writeBytes, Tcp.readBytes, Console.print, Console.error]
-    match command == "ping"
-        true -> onPing(connection, network, body)
-        false -> listen(connection, network)
+    match command
+        "inv" -> onAnnouncement(connection, network, body)
+        "tx" -> onTransaction(connection, network, body)
+        "ping" -> onPing(connection, network, body)
+        _ -> listen(connection, network)
 
 fn onAnnouncement(connection: Tcp.Connection, network: Network, body: List<Int>) -> Result<Unit, String>
     ? "Ask for every Transaction the Peer just offered."

@@ -32,16 +32,33 @@ verify describe
 fn render(kind: String, scriptHex: String) -> String
     ? "An address when one could be derived, otherwise the kind and the hex."
     match addressOf(kind, bytesOf(scriptHex))
-        Result.Ok(address) -> "{kind} {address}"
-        Result.Err(reason) -> "{kind} {scriptHex}"
+        Result.Ok(address) -> "{padded(kind)} {address}"
+        Result.Err(reason) -> "{padded(kind)} {scriptHex}"
+
+fn padded(kind: String) -> String
+    ? "Pad the kind so the addresses beside it line up."
+    padRight(kind, 6)
+
+verify padded
+    padded("P2SH") => "P2SH  "
+    padded("OP_RETURN") => "OP_RETURN"
+
+fn padRight(text: String, width: Int) -> String
+    ? "Pad with spaces until the text is at least `width` characters."
+    match String.len(text) >= width
+        true -> text
+        false -> padRight(text + " ", width)
+
+verify padRight
+    padRight("ab", 4) => "ab  "
+    padRight("abcdef", 3) => "abcdef"
 
 verify render
     render("nonstandard", "ffff") => "nonstandard ffff"
 
 fn bytesOf(scriptHex: String) -> List<Int>
     ? "The script as bytes; unreadable hex simply matches nothing."
-    empty: List<Int> = []
-    Result.withDefault(listOf(scriptHex), empty)
+    Result.withDefault(listOf(scriptHex), [])
 
 verify bytesOf
     bytesOf("00ff") => [0, 255]
@@ -61,69 +78,53 @@ fn kindOf(scriptHex: String) -> String
     classify(bytesOf(scriptHex))
 
 verify kindOf
-    kindOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => "P2PKH "
+    kindOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => "P2PKH"
     kindOf("0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH"
     kindOf("ffff") => "nonstandard"
 
 fn classify(script: List<Int>) -> String
-    ? "Match the script against each standard shape in turn."
-    match isPayToPubKeyHash(script)
-        true -> "P2PKH "
-        false -> classifyScriptHash(script)
+    ? "Match the script against the standard shapes, by its leading opcode."
+      "The opcode alone is not enough — each shape also has a fixed length and"
+      "a push size — so the byte selects a candidate and the shape confirms it."
+    match byteAt(script, 0)
+        118 -> named(isPayToPubKeyHash(script), "P2PKH")
+        169 -> named(isPayToScriptHash(script), "P2SH")
+        0 -> witnessKind(script)
+        81 -> named(isWitnessProgram(script, 81, 34), "P2TR")
+        106 -> "OP_RETURN"
+        _ -> "nonstandard"
 
 verify classify
-    classify(bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => "P2PKH "
+    classify(bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => "P2PKH"
+    classify(bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => "P2SH"
+    classify(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "P2WPKH"
+    classify(bytesOf("00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262")) => "P2WSH"
+    classify(bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => "P2TR"
+    classify(bytesOf("6a0b68656c6c6f20776f726c64")) => "OP_RETURN"
     classify(bytesOf("ffff")) => "nonstandard"
+    classify(bytesOf("76ff")) => "nonstandard"
 
-fn classifyScriptHash(script: List<Int>) -> String
-    ? "Pay-to-script-hash, or keep looking."
-    match isPayToScriptHash(script)
-        true -> "P2SH  "
-        false -> classifyWitness(script)
+fn witnessKind(script: List<Int>) -> String
+    ? "A leading zero is a version-zero program; its length says which."
+    match List.len(script)
+        22 -> named(isWitnessProgram(script, 0, 22), "P2WPKH")
+        34 -> named(isWitnessProgram(script, 0, 34), "P2WSH")
+        _ -> "nonstandard"
 
-verify classifyScriptHash
-    classifyScriptHash(bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => "P2SH  "
-    classifyScriptHash(bytesOf("ffff")) => "nonstandard"
+verify witnessKind
+    witnessKind(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "P2WPKH"
+    witnessKind(bytesOf("00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262")) => "P2WSH"
+    witnessKind(bytesOf("0000")) => "nonstandard"
 
-fn classifyWitness(script: List<Int>) -> String
-    ? "The witness-version-zero shapes."
-    match isWitnessProgram(script, 0, 22)
-        true -> "P2WPKH"
-        false -> classifyWitnessScript(script)
-
-verify classifyWitness
-    classifyWitness(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "P2WPKH"
-    classifyWitness(bytesOf("ffff")) => "nonstandard"
-
-fn classifyWitnessScript(script: List<Int>) -> String
-    ? "Pay-to-witness-script-hash, or keep looking."
-    match isWitnessProgram(script, 0, 34)
-        true -> "P2WSH "
-        false -> classifyTaproot(script)
-
-verify classifyWitnessScript
-    classifyWitnessScript(bytesOf("00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262")) => "P2WSH "
-    classifyWitnessScript(bytesOf("ffff")) => "nonstandard"
-
-fn classifyTaproot(script: List<Int>) -> String
-    ? "Taproot, or keep looking."
-    match isWitnessProgram(script, 81, 34)
-        true -> "P2TR  "
-        false -> classifyOpReturn(script)
-
-verify classifyTaproot
-    classifyTaproot(bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => "P2TR  "
-    classifyTaproot(bytesOf("ffff")) => "nonstandard"
-
-fn classifyOpReturn(script: List<Int>) -> String
-    ? "A provably unspendable Output, or nothing recognised."
-    match startsWith(script, 106)
-        true -> "OP_RETURN"
+fn named(matches: Bool, kind: String) -> String
+    ? "The kind when the shape confirms it, and nothing when it does not."
+    match matches
+        true -> kind
         false -> "nonstandard"
 
-verify classifyOpReturn
-    classifyOpReturn([106, 1]) => "OP_RETURN"
-    classifyOpReturn([255]) => "nonstandard"
+verify named
+    named(true, "P2SH") => "P2SH"
+    named(false, "P2SH") => "nonstandard"
 
 fn startsWith(script: List<Int>, opcode: Int) -> Bool
     ? "Whether the script opens with this opcode."
@@ -170,40 +171,20 @@ verify isWitnessProgram
 
 fn addressOf(kind: String, script: List<Int>) -> Result<String, String>
     ? "Derive the address a recognised script pays to."
-    match kind == "P2PKH "
-        true -> Domain.Base58.encodeCheck(Domain.Base58.pubKeyHashVersion(), List.take(List.drop(script, 3), 20))
-        false -> addressForScriptHash(kind, script)
+      "The witness shapes differ only in which version the program follows,"
+      "and that version is what selects Bech32 or Bech32m."
+    program = List.drop(script, 2)
+    match kind
+        "P2PKH" -> Domain.Base58.encodeCheck(Domain.Base58.pubKeyHashVersion(), List.take(List.drop(script, 3), 20))
+        "P2SH" -> Domain.Base58.encodeCheck(Domain.Base58.scriptHashVersion(), List.take(program, 20))
+        "P2WPKH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
+        "P2WSH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
+        "P2TR" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 1, program))
+        _ -> Result.Err("no address for {kind}")
 
 verify addressOf
-    addressOf("P2PKH ", bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
-    addressOf("nonstandard", []) => Result.Err("no address for nonstandard")
-
-fn addressForScriptHash(kind: String, script: List<Int>) -> Result<String, String>
-    ? "Pay-to-script-hash, or a witness shape."
-    match kind == "P2SH  "
-        true -> Domain.Base58.encodeCheck(Domain.Base58.scriptHashVersion(), List.take(List.drop(script, 2), 20))
-        false -> addressForWitness(kind, script)
-
-verify addressForScriptHash
-    addressForScriptHash("P2SH  ", bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => Result.Ok("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ")
-    addressForScriptHash("nonstandard", []) => Result.Err("no address for nonstandard")
-
-fn addressForWitness(kind: String, script: List<Int>) -> Result<String, String>
-    ? "The witness-version-zero shapes share an encoding."
-    match Bool.or(kind == "P2WPKH", kind == "P2WSH ")
-        true -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, List.drop(script, 2)))
-        false -> addressForTaproot(kind, script)
-
-verify addressForWitness
-    addressForWitness("P2WPKH", bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
-    addressForWitness("nonstandard", []) => Result.Err("no address for nonstandard")
-
-fn addressForTaproot(kind: String, script: List<Int>) -> Result<String, String>
-    ? "Taproot uses witness version one, and so Bech32m."
-    match kind == "P2TR  "
-        true -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 1, List.drop(script, 2)))
-        false -> Result.Err("no address for {kind}")
-
-verify addressForTaproot
-    addressForTaproot("P2TR  ", bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => Result.Ok("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
-    addressForTaproot("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
+    addressOf("P2PKH", bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
+    addressOf("P2SH", bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => Result.Ok("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ")
+    addressOf("P2WPKH", bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+    addressOf("P2TR", bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => Result.Ok("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
+    addressOf("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
