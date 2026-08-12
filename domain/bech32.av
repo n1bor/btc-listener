@@ -4,10 +4,9 @@ module Bech32
         "Witness version zero uses Bech32, version one and above use Bech32m —"
         "they differ only in the constant the checksum is finalised against,"
         "which is what keeps a Taproot address from being read as a v0 one."
-        "The checksum is defined in exclusive-or and shifts, so it is built on"
-        "Domain.Bits rather than on operators Aver does not have."
+        "The checksum is defined in exclusive-or and shifts, which the Bits"
+        "namespace provides directly."
     exposes [encode, bech32Constant, bech32mConstant]
-    depends [Domain.Bits]
     effects []
 
 fn charset() -> List<String>
@@ -101,7 +100,7 @@ fn regroup(bytes: List<Int>, acc: Int, bits: Int, out: List<Int>) -> List<Int>
     ? "Accumulate whole bytes, emitting a value whenever five bits are ready."
     match bytes
         [] -> flush(acc, bits, out)
-        [head, ..tail] -> drain(tail, Domain.Bits.shiftLeft(acc, 8) + head, bits + 8, out)
+        [head, ..tail] -> drain(tail, Bits.shiftLeft(acc, 8) + head, bits + 8, out)
 
 verify regroup
     regroup([], 0, 0, [7]) => [7]
@@ -110,7 +109,7 @@ verify regroup
 fn drain(bytes: List<Int>, acc: Int, bits: Int, out: List<Int>) -> List<Int>
     ? "Emit every complete five-bit group the accumulator now holds."
     match bits >= 5
-        true -> drain(bytes, acc, bits - 5, List.concat(out, [Domain.Bits.lowBits(Domain.Bits.shiftRight(acc, bits - 5), 5)]))
+        true -> drain(bytes, acc, bits - 5, List.concat(out, [Bits.low(shiftedRight(acc, bits - 5), 5)]))
         false -> regroup(bytes, acc, bits, out)
 
 verify drain
@@ -121,7 +120,7 @@ fn flush(acc: Int, bits: Int, out: List<Int>) -> List<Int>
     ? "Whatever is left becomes a final value, padded with zero bits."
     match bits == 0
         true -> out
-        false -> List.concat(out, [Domain.Bits.lowBits(Domain.Bits.shiftLeft(acc, 5 - bits), 5)])
+        false -> List.concat(out, [Bits.low(shiftedLeft(acc, 5 - bits), 5)])
 
 verify flush
     flush(0, 0, [7]) => [7]
@@ -129,7 +128,7 @@ verify flush
 
 fn checksum(prefix: String, data: List<Int>, constant: Int) -> List<Int>
     ? "Six five-bit values proving the rest of the address arrived intact."
-    residue = Domain.Bits.xor(polymod(List.concat(List.concat(expandPrefix(prefix), data), [0, 0, 0, 0, 0, 0]), 1), constant)
+    residue = Bits.xor(polymod(List.concat(List.concat(expandPrefix(prefix), data), [0, 0, 0, 0, 0, 0]), 1), constant)
     checksumDigits(residue, 0, [])
 
 verify checksum
@@ -139,7 +138,7 @@ fn checksumDigits(residue: Int, index: Int, acc: List<Int>) -> List<Int>
     ? "Split the residue into its six five-bit values, most significant first."
     match index >= 6
         true -> acc
-        false -> checksumDigits(residue, index + 1, List.concat(acc, [Domain.Bits.lowBits(Domain.Bits.shiftRight(residue, 5 * (5 - index)), 5)]))
+        false -> checksumDigits(residue, index + 1, List.concat(acc, [Bits.low(shiftedRight(residue, 5 * (5 - index)), 5)]))
 
 verify checksumDigits
     List.len(checksumDigits(0, 0, [])) => 6
@@ -167,7 +166,7 @@ fn highParts(codes: List<Int>, acc: List<Int>) -> List<Int>
     ? "The top bits of each prefix character."
     match codes
         [] -> List.reverse(acc)
-        [head, ..tail] -> highParts(tail, List.prepend(Domain.Bits.shiftRight(head, 5), acc))
+        [head, ..tail] -> highParts(tail, List.prepend(Bits.shiftRight(head, 5), acc))
 
 verify highParts
     highParts([98, 99], []) => [3, 3]
@@ -177,7 +176,7 @@ fn lowParts(codes: List<Int>, acc: List<Int>) -> List<Int>
     ? "The bottom five bits of each prefix character."
     match codes
         [] -> List.reverse(acc)
-        [head, ..tail] -> lowParts(tail, List.prepend(Domain.Bits.lowBits(head, 5), acc))
+        [head, ..tail] -> lowParts(tail, List.prepend(Bits.low(head, 5), acc))
 
 verify lowParts
     lowParts([98, 99], []) => [2, 3]
@@ -195,8 +194,8 @@ verify polymod
 
 fn foldValue(acc: Int, value: Int) -> Int
     ? "Shift the accumulator up, mix the value in, then fold the generators."
-    top = Domain.Bits.shiftRight(acc, 25)
-    foldGenerators(Domain.Bits.xor(Domain.Bits.shiftLeft(Domain.Bits.lowBits(acc, 25), 5), value), top, 0)
+    top = Bits.shiftRight(acc, 25)
+    foldGenerators(Bits.xor(Bits.shiftLeft(Bits.low(acc, 25), 5), value), top, 0)
 
 verify foldValue
     foldValue(1, 0) => 32
@@ -213,8 +212,8 @@ verify foldGenerators
 
 fn applyGenerator(acc: Int, top: Int, index: Int) -> Int
     ? "One generator, applied only when its bit is set."
-    match Domain.Bits.bitAt(top, index) == 1
-        true -> Domain.Bits.xor(acc, generatorAt(index))
+    match bitAt(top, index) == 1
+        true -> Bits.xor(acc, generatorAt(index))
         false -> acc
 
 verify applyGenerator
@@ -228,3 +227,32 @@ fn generatorAt(index: Int) -> Int
 verify generatorAt
     generatorAt(0) => 996825010
     generatorAt(4) => 705979059
+
+fn shiftedRight(value: Int, places: Int) -> Int
+    ? "Shift right by a count the caller computed."
+      "Bits.shiftRight only fails on a negative count. Every caller here derives"
+      "`places` from a loop index that the surrounding match keeps at or above"
+      "zero, so the error branch is unreachable."
+    Result.withDefault(Bits.shiftRight(value, places), 0)
+
+verify shiftedRight
+    shiftedRight(32, 5) => 1
+    shiftedRight(7, 0) => 7
+
+fn shiftedLeft(value: Int, places: Int) -> Int
+    ? "Shift left by a count the caller computed, under the same reasoning."
+    Result.withDefault(Bits.shiftLeft(value, places), 0)
+
+verify shiftedLeft
+    shiftedLeft(1, 5) => 32
+    shiftedLeft(3, 0) => 3
+
+fn bitAt(value: Int, index: Int) -> Int
+    ? "The bit at `index`, counting from the least significant."
+    Int.mod(shiftedRight(value, index), 2)
+
+verify bitAt
+    bitAt(1, 0) => 1
+    bitAt(2, 1) => 1
+    bitAt(8, 3) => 1
+    bitAt(2, 0) => 0

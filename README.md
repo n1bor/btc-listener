@@ -17,9 +17,10 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Requirements
 
-- **Aver 0.28.0 or later.** Earlier versions cannot do this at all: byte-clean
+- **Aver 0.28.1 or later.** Earlier versions cannot do this at all: byte-clean
   TCP (`Tcp.sendBytes`, `Tcp.readBytes`, `Tcp.writeBytes`) and `Crypto.sha256`
-  all landed in 0.28.0 "Oktet".
+  landed in 0.28.0 "Oktet", and the `Bits` namespace the Bech32 checksum needs
+  landed in 0.28.1.
 - A reachable Bitcoin node. Any peer will do; one you run yourself is easier to
   debug against.
 
@@ -109,7 +110,6 @@ domain/
   script.av         recognising output scripts, naming who they pay
   base58.av         Base58Check, for pre-SegWit addresses
   bech32.av         Bech32 and Bech32m, for SegWit addresses
-  bits.av           xor and shifts, built from arithmetic
 infra/
   peer.av           the Peer session: handshake and listen loop
   resolver.av       seed lookups over DNS
