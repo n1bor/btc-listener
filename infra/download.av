@@ -1,0 +1,327 @@
+module Download
+    intent =
+        "Downloading the chain from one Peer, in two phases."
+        "Headers first, because a getdata names Block Ids and never Heights, so"
+        "the chain has to be known before any body can be asked for. Every Header"
+        "is fetched — all of them fit comfortably — and each one records a Height"
+        "against a Block Id in the Index."
+        "Bodies second, for a range of Heights the caller chooses, written to"
+        "Segments with their Locations recorded against their Block Ids."
+        "Both phases resume. Neither holds anything it has not already written"
+        "down, so stopping is always safe and restarting costs at most the batch"
+        "or the Block that was in flight."
+    exposes [headers, bodies]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Index, Domain.Inventory, Domain.Message, Domain.Network, Infra.Blocks, Infra.Peer, Infra.Store]
+    effects [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+
+record Progress
+    store: Store
+    blocks: BlockStore
+    count: Int
+
+fn frameBudget() -> Int
+    ? "How many unrelated Messages to read before giving up on the one wanted."
+      "A Peer sends ping, inv and addr traffic whenever it likes, so the reply to"
+      "a request is rarely the next thing to arrive."
+    200
+
+verify frameBudget
+    frameBudget() => 200
+
+fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store, String>
+    ? "Fetch every Block Header the Peer has, recording Height against Block Id."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
+    outcome = headerSession(connection, network, address, store)
+    closeAfter(connection, outcome)
+
+fn closeAfter(connection: Tcp.Connection, outcome: Result<Store, String>) -> Result<Store, String>
+    ? "Always release the socket, whatever the session did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    outcome
+
+fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store) -> Result<Store, String>
+    ? "Handshake, then ask for Headers from wherever the Index already reaches."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.readBytes, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _greeting = Infra.Peer.introduce(connection, network, address)?
+    seeded = withGenesis(network, store)?
+    have = heightsHeld(seeded, 0)
+    _said = Console.print("have {have} headers; asking for more")
+    headerBatch(connection, network, seeded, have)
+
+fn withGenesis(network: Network, store: Store) -> Result<Store, String>
+    ? "Put the first Block in the Index, because no Peer will send it."
+      "A getheaders is answered with the Headers that follow the Locator, and the"
+      "Locator has to name something — so genesis is always the question and never"
+      "the answer. Left out, every Height in the Index is one too low and nothing"
+      "says so."
+    ! [Disk.appendText]
+    match Infra.Store.has(store, Domain.Index.heightKey(0))
+        true -> Result.Ok(store)
+        false -> Infra.Store.put(store, Domain.Index.heightKey(0), Domain.Block.genesisBlockId(network))
+
+fn heightsHeld(store: Store, height: Int) -> Int
+    ? "How many Heights the Index already names, counting up from genesis."
+      "Walking beats keeping a tip record: a lookup is cheap, and a count that"
+      "cannot disagree with the entries is worth more than one that can."
+    match Infra.Store.has(store, Domain.Index.heightKey(height))
+        false -> height
+        true -> heightsHeld(store, height + 1)
+
+verify heightsHeld
+    heightsHeld(storeOf([]), 0) => 0
+    heightsHeld(storeOf([("h:00000000", "aa")]), 0) => 1
+    heightsHeld(storeOf([("h:00000000", "aa"), ("h:00000001", "bb")]), 0) => 2
+    heightsHeld(storeOf([("h:00000001", "bb")]), 0) => 0
+
+fn storeOf(pairs: List<Tuple<String, String>>) -> Store
+    ? "A Store standing in for a real one, so the pure lookups can be checked."
+    Store(path = "test", entries = Map.fromList(pairs))
+
+verify storeOf
+    Infra.Store.size(storeOf([])) => 0
+    Infra.Store.size(storeOf([("a", "b")])) => 1
+
+fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
+    ? "Ask for the Headers after the ones held, store them, and go round again."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    payload = Domain.Block.getHeadersPayload(locatorFor(network, store, have))?
+    _sent = Infra.Peer.send(connection, network, "getheaders", payload)?
+    frame = awaitFrame(connection, network, "headers", frameBudget())?
+    decoded = Domain.Block.headersOf(frame.body)?
+    absorb(connection, network, store, have, decoded)
+
+fn absorb(connection: Tcp.Connection, network: Network, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Store, String>
+    ? "An empty batch means the Peer has nothing after what we hold."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    match decoded
+        [] -> done(store, have)
+        [head, ..tail] -> stored(connection, network, store, have, decoded)
+
+fn done(store: Store, have: Int) -> Result<Store, String>
+    ? "Report where the Index now reaches and stop."
+    ! [Console.print]
+    _said = Console.print("headers complete: {have} known")
+    Result.Ok(store)
+
+fn stored(connection: Tcp.Connection, network: Network, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Store, String>
+    ? "Write the batch in one append, then ask for the next."
+      "One putAll rather than a put per Header: a Store hands back a copy of"
+      "itself, so a batch of two thousand costs one copy instead of two thousand."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    grown = Infra.Store.putAll(store, entriesFor(decoded, have, []))?
+    reached = have + List.len(decoded)
+    _said = Console.print("headers to {reached}")
+    headerBatch(connection, network, grown, reached)
+
+fn entriesFor(decoded: List<BlockHeader>, height: Int, acc: List<Entry>) -> List<Entry>
+    ? "One Index entry per Header: this Height names this Block Id."
+    match decoded
+        [] -> List.reverse(acc)
+        [head, ..tail] -> entriesFor(tail, height + 1, List.prepend(Entry(key = Domain.Index.heightKey(height), value = head.blockId), acc))
+
+verify entriesFor
+    entriesFor([], 0, []) => []
+    List.len(entriesFor([headerAt(0)], 5, [])) => 1
+
+fn headerAt(nonce: Int) -> BlockHeader
+    ? "A Header standing in for a real one, so the entry shape can be checked."
+    BlockHeader(blockId = "aa", version = 1, previousBlockId = "bb", merkleRoot = "cc", timestamp = 0, bits = 0, nonce = nonce)
+
+verify headerAt
+    headerAt(7).nonce => 7
+
+fn locatorFor(network: Network, store: Store, have: Int) -> List<List<Int>>
+    ? "The Block Ids a getheaders should carry, newest first."
+      "Never empty. A Peer given a Locator of no Block Ids does not answer at all"
+      "— measured against Bitcoin Core 27.0, which replies to a Locator naming"
+      "genesis and stays silent on an empty one — so an Index with nothing in it"
+      "still has to say where the chain starts."
+    orGenesis(network, idsHeld(store, have))
+
+verify locatorFor
+    locatorFor(Network.Mainnet, storeOf([]), 0) => [wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))]
+    locatorFor(Network.Mainnet, storeOf([("h:00000000", "0102")]), 1) => [[2, 1]]
+    locatorFor(Network.Mainnet, storeOf([]), 1) => [wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))]
+
+fn idsHeld(store: Store, have: Int) -> List<List<Int>>
+    ? "The Block Ids the Index can supply for a Locator."
+    match have == 0
+        true -> []
+        false -> idsAt(store, Domain.Block.locatorHeights(have - 1), [])
+
+verify idsHeld
+    idsHeld(storeOf([]), 0) => []
+    idsHeld(storeOf([("h:00000000", "0102")]), 1) => [[2, 1]]
+
+fn orGenesis(network: Network, ids: List<List<Int>>) -> List<List<Int>>
+    ? "Fall back to genesis rather than send a Locator the Peer will ignore."
+    match ids
+        [] -> [wireOrder(Domain.Block.genesisBlockId(network))]
+        [head, ..tail] -> ids
+
+verify orGenesis
+    orGenesis(Network.Mainnet, [[1, 2]]) => [[1, 2]]
+    List.len(orGenesis(Network.Mainnet, [])) => 1
+
+fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "The Block Id held at each Height, in wire order rather than display order."
+    match heights
+        [] -> List.reverse(acc)
+        [head, ..tail] -> idsAt(store, tail, prependId(store, head, acc))
+
+verify idsAt
+    idsAt(storeOf([]), [], []) => []
+    idsAt(storeOf([("h:00000000", "0102")]), [0], []) => [[2, 1]]
+    idsAt(storeOf([]), [0], []) => []
+
+fn prependId(store: Store, height: Int, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Add the Block Id at a Height, skipping a Height the Index does not name."
+    match Infra.Store.get(store, Domain.Index.heightKey(height))
+        Option.None -> acc
+        Option.Some(id) -> List.prepend(wireOrder(id), acc)
+
+verify prependId
+    prependId(storeOf([]), 0, []) => []
+    prependId(storeOf([("h:00000000", "0102")]), 0, []) => [[2, 1]]
+
+fn wireOrder(blockId: String) -> List<Int>
+    ? "A Block Id goes back to front on the wire, being displayed reversed."
+    List.reverse(Bytes.toList(Result.withDefault(Bytes.fromHex(blockId), Bytes.fromList([]))))
+
+verify wireOrder
+    wireOrder("0102") => [2, 1]
+    wireOrder("") => []
+    wireOrder("zz") => []
+
+fn awaitFrame(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
+    ? "Read until the wanted Message arrives, dealing with whatever else turns up."
+    ! [Tcp.readBytes, Tcp.writeBytes]
+    match budget <= 0
+        true -> Result.Err("no {wanted} after {frameBudget()} messages")
+        false -> matching(connection, network, wanted, budget)
+
+fn matching(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
+    ? "One frame: the one wanted, or another turn of the loop."
+    ! [Tcp.readBytes, Tcp.writeBytes]
+    frame = Infra.Peer.readFrame(connection)?
+    keepOrSkip(connection, network, wanted, budget, frame)
+
+fn keepOrSkip(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
+    ? "Keep the frame if it is the one asked for."
+    ! [Tcp.readBytes, Tcp.writeBytes]
+    match frame.command == wanted
+        true -> Result.Ok(frame)
+        false -> skip(connection, network, wanted, budget, frame)
+
+fn skip(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
+    ? "A ping has to be answered even while waiting for something else."
+      "A Peer drops a connection that stops answering, and fetching every Header"
+      "takes long enough — some hundreds of round trips — that one will arrive."
+    ! [Tcp.readBytes, Tcp.writeBytes]
+    match frame.command
+        "ping" -> pongThen(connection, network, wanted, budget, frame)
+        _ -> awaitFrame(connection, network, wanted, budget - 1)
+
+fn pongThen(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
+    ? "Echo the nonce back, then carry on waiting."
+    ! [Tcp.readBytes, Tcp.writeBytes]
+    payload = Bytes.fromList(frame.body)?
+    _sent = Infra.Peer.send(connection, network, "pong", payload)?
+    awaitFrame(connection, network, wanted, budget - 1)
+
+fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
+    ? "Fetch the Blocks for a range of Heights and write them to Segments."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
+    outcome = bodySession(connection, network, address, store, blocks, from, to)
+    closeBodies(connection, outcome)
+
+fn closeBodies(connection: Tcp.Connection, outcome: Result<Progress, String>) -> Result<Progress, String>
+    ? "Always release the socket, whatever the session did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    outcome
+
+fn bodySession(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
+    ? "Handshake, then walk the range one Block at a time."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.readBytes, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _greeting = Infra.Peer.introduce(connection, network, address)?
+    walk(connection, network, Progress(store = store, blocks = blocks, count = 0), from, to)
+
+fn walk(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
+    ? "Each Height in turn, until the range is exhausted."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    match height > to
+        true -> Result.Ok(progress)
+        false -> atHeight(connection, network, progress, height, to)
+
+fn atHeight(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
+    ? "A Height the Index does not name cannot be fetched, and ends the walk."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    match Infra.Store.get(progress.store, Domain.Index.heightKey(height))
+        Option.None -> Result.Err("no header for height {height}; run the header phase first")
+        Option.Some(blockId) -> maybeFetch(connection, network, progress, height, to, blockId)
+
+fn maybeFetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
+    ? "A Block already held is skipped, which is what makes the phase resumable."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    match Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))
+        true -> walk(connection, network, progress, height + 1, to)
+        false -> fetch(connection, network, progress, height, to, blockId)
+
+fn fetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
+    ? "Ask for one Block and wait for it."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wireOrder(blockId)])?
+    _sent = Infra.Peer.send(connection, network, "getdata", payload)?
+    frame = awaitFrame(connection, network, "block", frameBudget())?
+    keep(connection, network, progress, height, to, blockId, frame)
+
+fn keep(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Progress, String>
+    ? "Write the Block to a Segment, then record where it went."
+      "The bytes are on disk before the Index names them, so a crash between the"
+      "two costs a Block that is fetched again rather than an entry pointing at"
+      "nothing."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    payload = Bytes.fromList(frame.body)?
+    appended = Infra.Blocks.append(progress.blocks, payload)?
+    recorded = Infra.Store.put(progress.store, Domain.Index.blockKey(blockId), Domain.Index.encodeLocation(appended.location))?
+    announce(connection, network, Progress(store = recorded, blocks = appended.store, count = progress.count + 1), height, to, List.len(frame.body))
+
+fn announce(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, size: Int) -> Result<Progress, String>
+    ? "Say what arrived, then move on."
+    ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
+    _said = Console.print("block {height}  {size} bytes  segment {progress.blocks.state.segment}")
+    walk(connection, network, progress, height + 1, to)

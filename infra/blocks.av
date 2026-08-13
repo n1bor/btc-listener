@@ -1,0 +1,192 @@
+module Blocks
+    intent =
+        "Segments on disk: appending a Block, reading one back, and deleting the"
+        "Segments that pruning has finished with."
+        "The only module that knows a Segment is a file. Where a Block goes is"
+        "decided in Domain.Segment, which is pure; this carries the decision to"
+        "Disk and nothing more."
+        "Resume reads the directory rather than counting up from zero, because"
+        "pruning removes the low Segments — after it, Segment 0 is absent while"
+        "Segment 400 is current, and probing upward from zero would report an"
+        "empty store."
+    exposes [BlockStore, Appended, open, append, read, prune, segmentPath]
+    depends [Bytes, Domain.Index, Domain.Segment, Domain.Text]
+    effects [Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+
+record BlockStore
+    dir: String
+    state: SegmentState
+
+record Appended
+    store: BlockStore
+    location: Location
+
+fn open(dir: String) -> Result<BlockStore, String>
+    ? "Pick up where the last run left off, creating the directory if absent."
+      "makeDir is create_dir_all, so calling it on a directory that already"
+      "exists succeeds and needs no guard."
+    ! [Disk.listDir, Disk.makeDir, Disk.readText]
+    _made = Disk.makeDir(dir)?
+    names = Disk.listDir(dir)?
+    resume(dir, highestSegment(names, Option.None))
+
+fn resume(dir: String, highest: Option<Int>) -> Result<BlockStore, String>
+    ? "An empty directory starts at the beginning; otherwise reopen the last Segment."
+    ! [Disk.readText]
+    match highest
+        Option.None -> Result.Ok(BlockStore(dir = dir, state = Domain.Segment.initial()))
+        Option.Some(segment) -> reopen(dir, segment)
+
+fn reopen(dir: String, segment: Int) -> Result<BlockStore, String>
+    ? "Count what the last Segment already holds, so the next Block lands after it."
+    ! [Disk.readText]
+    contents = Disk.readText(segmentPath(dir, segment))?
+    Result.Ok(BlockStore(dir = dir, state = stateFrom(segment, contents)))
+
+fn stateFrom(segment: Int, contents: String) -> SegmentState
+    ? "How full a Segment is, from its text alone."
+      "A torn final line is dropped by completeLines, so a Block whose append was"
+      "cut short is neither counted nor read — it is simply fetched again."
+    lines = Domain.Text.completeLines(contents)
+    SegmentState(segment = segment, lines = List.len(lines), used = usedBy(lines, 0))
+
+verify stateFrom
+    stateFrom(0, "") => SegmentState(segment = 0, lines = 0, used = 0)
+    stateFrom(3, "aabb\n") => SegmentState(segment = 3, lines = 1, used = 2)
+    stateFrom(3, "aabb\nccddee\n") => SegmentState(segment = 3, lines = 2, used = 5)
+    stateFrom(3, "aabb\nccdd") => SegmentState(segment = 3, lines = 1, used = 2)
+
+fn usedBy(lines: List<String>, acc: Int) -> Int
+    ? "How many Block bytes the lines hold, from their lengths rather than by decoding."
+      "Two hex characters to the byte, so the count costs nothing and a Segment"
+      "can be sized without paying Bytes.fromHex to reopen it."
+    match lines
+        [] -> acc
+        [head, ..tail] -> usedBy(tail, acc + Int.div(String.len(head), 2))
+
+verify usedBy
+    usedBy([], 0) => 0
+    usedBy(["aabb"], 0) => 2
+    usedBy(["aabb", "ccddee"], 0) => 5
+
+fn highestSegment(names: List<String>, best: Option<Int>) -> Option<Int>
+    ? "The largest Segment number in the directory, ignoring anything else in it."
+    match names
+        [] -> best
+        [head, ..tail] -> highestSegment(tail, better(best, segmentNumberOf(head)))
+
+verify highestSegment
+    highestSegment([], Option.None) => Option.None
+    highestSegment(["blk000000.hex"], Option.None) => Option.Some(0)
+    highestSegment(["blk000007.hex", "blk000003.hex"], Option.None) => Option.Some(7)
+    highestSegment(["notes.txt"], Option.None) => Option.None
+    highestSegment(["blk000400.hex"], Option.None) => Option.Some(400)
+
+fn better(best: Option<Int>, found: Option<Int>) -> Option<Int>
+    ? "Keep whichever Segment number is larger."
+    match found
+        Option.None -> best
+        Option.Some(n) -> largest(best, n)
+
+verify better
+    better(Option.None, Option.Some(4)) => Option.Some(4)
+    better(Option.Some(9), Option.None) => Option.Some(9)
+    better(Option.Some(9), Option.Some(4)) => Option.Some(9)
+    better(Option.Some(2), Option.Some(4)) => Option.Some(4)
+
+fn largest(best: Option<Int>, n: Int) -> Option<Int>
+    ? "The larger of a number and a number we may not have."
+    match best
+        Option.None -> Option.Some(n)
+        Option.Some(current) -> Option.Some(higher(current, n))
+
+verify largest
+    largest(Option.None, 3) => Option.Some(3)
+    largest(Option.Some(5), 3) => Option.Some(5)
+
+fn higher(a: Int, b: Int) -> Int
+    ? "The larger of two numbers."
+    match a >= b
+        true -> a
+        false -> b
+
+verify higher
+    higher(5, 3) => 5
+    higher(3, 5) => 5
+
+fn segmentNumberOf(name: String) -> Option<Int>
+    ? "The Segment a file name denotes, or nothing when it names something else."
+    match Bool.and(String.startsWith(name, "blk"), String.endsWith(name, ".hex"))
+        false -> Option.None
+        true -> numberIn(String.slice(name, 3, String.len(name) - 4))
+
+verify segmentNumberOf
+    segmentNumberOf("blk000000.hex") => Option.Some(0)
+    segmentNumberOf("blk000042.hex") => Option.Some(42)
+    segmentNumberOf("blk999999.hex") => Option.Some(999999)
+    segmentNumberOf("notes.txt") => Option.None
+    segmentNumberOf("blk.hex") => Option.None
+    segmentNumberOf("blkxxxxxx.hex") => Option.None
+
+fn numberIn(digits: String) -> Option<Int>
+    ? "The digits between the prefix and the suffix, if that is what they are."
+    match Int.fromString(digits)
+        Result.Err(e) -> Option.None
+        Result.Ok(value) -> Option.Some(value)
+
+verify numberIn
+    numberIn("000042") => Option.Some(42)
+    numberIn("") => Option.None
+    numberIn("xx") => Option.None
+
+fn segmentPath(dir: String, segment: Int) -> String
+    ? "Where a Segment lives."
+    "{dir}/{Domain.Segment.nameOf(segment)}"
+
+verify segmentPath
+    segmentPath("blocks", 0) => "blocks/blk000000.hex"
+    segmentPath("/tmp/chain", 42) => "/tmp/chain/blk000042.hex"
+
+fn append(store: BlockStore, payload: Bytes) -> Result<Appended, String>
+    ? "Put a Block at the end of the current Segment, or at the start of the next."
+      "The line is written before the Location is believed, so a crash between the"
+      "two loses the Block rather than inventing one."
+    ! [Disk.appendText]
+    placement = Domain.Segment.place(store.state, List.len(Bytes.toList(payload)))
+    _written = Disk.appendText(segmentPath(store.dir, placement.location.segment), Domain.Segment.lineFor(payload))?
+    Result.Ok(Appended(store = BlockStore(dir = store.dir, state = placement.state), location = placement.location))
+
+fn read(store: BlockStore, location: Location) -> Result<Bytes, String>
+    ? "The Block a Location names."
+      "The whole Segment is read, because Aver cannot read from an offset. That is"
+      "why a Segment is capped at two mebibytes rather than Bitcoin Core's 128."
+    ! [Disk.readText]
+    contents = Disk.readText(segmentPath(store.dir, location.segment))?
+    Domain.Segment.blockAt(contents, location.line)
+
+fn prune(store: BlockStore, belowSegment: Int) -> Result<Int, String>
+    ? "Delete every Segment below the given one, and say how many went."
+      "Pruning is prefix-shaped: the scan walks Heights upward and discards behind"
+      "itself, so there is never a hole to describe — only a floor that rises."
+    ! [Disk.delete, Disk.exists]
+    pruneFrom(store.dir, 0, belowSegment, 0)
+
+fn pruneFrom(dir: String, segment: Int, belowSegment: Int, deleted: Int) -> Result<Int, String>
+    ? "Walk up to the floor, removing the Segments that are still there."
+    ! [Disk.delete, Disk.exists]
+    match segment < belowSegment
+        false -> Result.Ok(deleted)
+        true -> pruneOne(dir, segment, belowSegment, deleted)
+
+fn pruneOne(dir: String, segment: Int, belowSegment: Int, deleted: Int) -> Result<Int, String>
+    ? "Remove one Segment if it survives; a gap is not an error."
+    ! [Disk.delete, Disk.exists]
+    match Disk.exists(segmentPath(dir, segment))
+        false -> pruneFrom(dir, segment + 1, belowSegment, deleted)
+        true -> pruneExisting(dir, segment, belowSegment, deleted)
+
+fn pruneExisting(dir: String, segment: Int, belowSegment: Int, deleted: Int) -> Result<Int, String>
+    ? "Delete the Segment, then carry on."
+    ! [Disk.delete, Disk.exists]
+    _gone = Disk.delete(segmentPath(dir, segment))?
+    pruneFrom(dir, segment + 1, belowSegment, deleted + 1)

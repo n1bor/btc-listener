@@ -8,7 +8,7 @@ module Peer
         "The loop carries nothing but the connection: an Announcement is"
         "answered immediately and any Transaction that arrives is decoded, so"
         "there is nothing to correlate and nothing to remember between reads."
-    exposes [run]
+    exposes [Greeting, Frame, run, introduce, readFrame, send]
     depends [Bytes, Domain.Message, Domain.Network, Domain.Address, Domain.Version, Domain.Inventory, Domain.Transaction]
     effects [
         Console.error, Console.print,
@@ -20,6 +20,25 @@ module Peer
 record Greeting
     version: Int
     agent: String
+
+record Frame
+    command: String
+    body: List<Int>
+
+fn readFrame(connection: Tcp.Connection) -> Result<Frame, String>
+    ? "One framed Message: a fixed header, then exactly the payload it announces."
+      "Every read on this connection goes through here, so the stream is never"
+      "guessed at and no caller has to know the header layout."
+    ! [Tcp.readBytes]
+    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
+    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
+    Result.Ok(Frame(command = Domain.Message.commandAt(header), body = body))
+
+fn send(connection: Tcp.Connection, network: Network, command: String, payload: Bytes) -> Result<Unit, String>
+    ? "Frame a payload for this Network and put it on the wire."
+    ! [Tcp.writeBytes]
+    framed = Domain.Message.frame(network, command, payload)?
+    Tcp.writeBytes(connection, framed)
 
 fn handshakeBudget() -> Int
     ? "How many Messages to read while waiting for verack before giving up."
@@ -61,8 +80,7 @@ fn introduce(connection: Tcp.Connection, network: Network, address: PeerAddress)
     ? "Send our version, then read until the Peer sends verack."
     ! [Random.int, Tcp.readBytes, Tcp.writeBytes, Time.unixMs]
     body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
-    sent = Domain.Message.frame(network, "version", body)?
-    _written = Tcp.writeBytes(connection, sent)?
+    _written = send(connection, network, "version", body)?
     await(connection, network, handshakeBudget(), Greeting(version = 0, agent = ""))
 
 fn await(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
@@ -75,9 +93,8 @@ fn await(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeti
 fn readGreeting(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "Read one framed Message during the Handshake."
     ! [Tcp.readBytes, Tcp.writeBytes]
-    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
-    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
-    dispatchGreeting(connection, network, Domain.Message.commandAt(header), body, budget, seen)
+    frame = readFrame(connection)?
+    dispatchGreeting(connection, network, frame.command, frame.body, budget, seen)
 
 fn dispatchGreeting(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "verack ends the Handshake; version tells us who we are talking to."
@@ -91,8 +108,7 @@ fn dispatchGreeting(connection: Tcp.Connection, network: Network, command: Strin
 fn acknowledge(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
     ? "Send verack in reply, then keep waiting for theirs."
     ! [Tcp.readBytes, Tcp.writeBytes]
-    reply = Domain.Message.frame(network, "verack", Bytes.fromList([]))?
-    _written = Tcp.writeBytes(connection, reply)?
+    _written = send(connection, network, "verack", Bytes.fromList([]))?
     await(connection, network, budget - 1, seen)
 
 fn describePeer(body: List<Int>) -> Greeting
@@ -110,9 +126,8 @@ fn listen(connection: Tcp.Connection, network: Network) -> Result<Unit, String>
 fn readMessage(connection: Tcp.Connection, network: Network) -> Result<Unit, String>
     ? "One framed Message: a fixed header, then exactly what it announces."
     ! [Console.error, Console.print, Tcp.readBytes, Tcp.writeBytes]
-    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
-    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
-    handle(connection, network, Domain.Message.commandAt(header), body)
+    frame = readFrame(connection)?
+    handle(connection, network, frame.command, frame.body)
 
 fn handle(connection: Tcp.Connection, network: Network, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this program acts on; every other one is ignored."
@@ -140,9 +155,8 @@ fn request(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>
 fn sendGetData(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>) -> Result<Unit, String>
     ? "Send the getdata that turns identifiers into Transactions."
     ! [Console.error, Console.print, Tcp.readBytes, Tcp.writeBytes]
-    payload = Domain.Inventory.getDataPayload(hashes)?
-    message = Domain.Message.frame(network, "getdata", payload)?
-    _written = Tcp.writeBytes(connection, message)?
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
+    _written = send(connection, network, "getdata", payload)?
     listen(connection, network)
 
 fn onTransaction(connection: Tcp.Connection, network: Network, body: List<Int>) -> Result<Unit, String>
@@ -162,8 +176,7 @@ fn onPing(connection: Tcp.Connection, network: Network, body: List<Int>) -> Resu
     ? "Reply with the same nonce the Peer sent."
     ! [Console.error, Console.print, Tcp.readBytes, Tcp.writeBytes]
     payload = Bytes.fromList(body)?
-    message = Domain.Message.frame(network, "pong", payload)?
-    _written = Tcp.writeBytes(connection, message)?
+    _written = send(connection, network, "pong", payload)?
     listen(connection, network)
 
 fn printLines(lines: List<String>) -> Unit

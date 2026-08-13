@@ -4,7 +4,7 @@ module Inventory
         "A Peer offers Transactions by identifier only; the Transaction itself"
         "arrives after a getdata asks for it. Asking with the witness type is"
         "what makes the reply SegWit-serialised, which the decoder needs."
-    exposes [txHashesOf, getDataPayload, entrySize, witnessTxType]
+    exposes [txHashesOf, getDataPayload, entrySize, witnessTxType, witnessBlockType]
     depends [Bytes, Domain.CompactSize, Domain.Message]
     effects []
 
@@ -28,6 +28,14 @@ fn witnessTxType() -> Int
 
 verify witnessTxType
     witnessTxType() => 1073741825
+
+fn witnessBlockType() -> Int
+    ? "The inventory type asking for the SegWit-serialised Block."
+      "One above the Transaction type, with the same witness flag set."
+    1073741826
+
+verify witnessBlockType
+    witnessBlockType() => 1073741826
 
 fn txHashesOf(body: List<Int>) -> List<List<Int>>
     ? "Every Transaction identifier offered in an Announcement."
@@ -91,9 +99,10 @@ verify keepIfTx
     List.len(keepIfTx(1, [7], [])) => 1
     List.len(keepIfTx(2, [7], [])) => 0
 
-fn getDataPayload(hashes: List<List<Int>>) -> Result<Bytes, String>
-    ? "The request that asks for every offered Transaction, with its Witnesses."
-    Bytes.fromList(List.concat(countPrefix(List.len(hashes)), entriesFor(hashes, [])))
+fn getDataPayload(kind: Int, hashes: List<List<Int>>) -> Result<Bytes, String>
+    ? "The request that asks for everything named, in the form the kind selects."
+      "The same Message serves Transactions and Blocks; only the type differs."
+    Bytes.fromList(List.concat(countPrefix(List.len(hashes)), entriesFor(kind, hashes, [])))
 
 fn countPrefix(count: Int) -> List<Int>
     ? "A CompactSize count; an Announcement never offers more than 50000."
@@ -105,12 +114,13 @@ verify countPrefix
     countPrefix(1) => [1]
     countPrefix(300) => [253, 44, 1]
 
-fn entriesFor(hashes: List<List<Int>>, acc: List<Int>) -> List<Int>
-    ? "One request entry per identifier, each asking for the Witness form."
+fn entriesFor(kind: Int, hashes: List<List<Int>>, acc: List<Int>) -> List<Int>
+    ? "One request entry per identifier, each carrying the requested type."
     match hashes
         [] -> acc
-        [head, ..tail] -> entriesFor(tail, List.concat(acc, List.concat(Domain.Message.littleEndian(witnessTxType(), 4), head)))
+        [head, ..tail] -> entriesFor(kind, tail, List.concat(acc, List.concat(Domain.Message.littleEndian(kind, 4), head)))
 
 verify entriesFor
-    List.len(entriesFor([thirtyTwo()], [])) => 36
-    entriesFor([], [9]) => [9]
+    List.len(entriesFor(witnessTxType(), [thirtyTwo()], [])) => 36
+    List.len(entriesFor(witnessBlockType(), [thirtyTwo()], [])) => 36
+    entriesFor(witnessTxType(), [], [9]) => [9]
