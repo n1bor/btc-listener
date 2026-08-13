@@ -53,43 +53,6 @@ Two things are easy to leave off:
 - **`--`** — everything after it becomes `Args.get()`. Without it, `aver`
   consumes the address itself.
 
-### Downloading the chain
-
-Two further subcommands fetch the chain rather than listen to it. Both want a
-directory to work in, and both resume: stopping either is always safe, and
-starting again costs at most the batch or the Block that was in flight.
-
-```bash
-aver run main.av --module-root . -- headers 192.168.1.10 ./chain
-aver run main.av --module-root . -- bodies  192.168.1.10 ./chain 1 500
-```
-
-`headers` must run first. A `getdata` names Block Ids and never Heights, so the
-chain has to be known before any Block can be asked for. It fetches every Header
-— around 962,000 of them at the time of writing, roughly 24 minutes — and
-records a Height against a Block Id for each.
-
-`bodies` then fetches the Blocks for a range of Heights, writing them into
-Segments and recording where each one went. A Block already held is skipped, so
-re-running a range costs nothing and widening one only fetches the difference.
-
-```
-block 1  215 bytes  segment 0
-block 2  215 bytes  segment 0
-2 Blocks stored, last Segment 0
-```
-
-**Compile these two rather than interpreting them.** Building a `Map` is
-quadratic under `aver run` ([jasisz/aver#900](https://github.com/jasisz/aver/issues/900)),
-so opening an Index of any size stops making progress. See
-[ADR 0003](docs/adr/0003-compile-rather-than-interpret.md).
-
-```bash
-aver compile main.av --module-root . -o ./out
-cd out && cargo build --release
-./target/release/main headers 192.168.1.10 ./chain
-```
-
 The program connects, completes the handshake, and then prints transactions
 until you stop it with Ctrl-C. The listen loop's recursive call is in tail
 position, so it runs indefinitely without growing the stack. On a busy mainnet
@@ -102,6 +65,54 @@ where announcements arrive constantly, but worth knowing.
 
 `aver run` prints a warning that verify blocks in dependency modules are not
 sampled. That is expected — `aver verify --deps` is what checks them.
+
+### Downloading the chain
+
+Two further subcommands fetch the chain rather than listen to it. **Both must be
+compiled** — building a `Map` is quadratic under `aver run`
+([jasisz/aver#900](https://github.com/jasisz/aver/issues/900)), so an
+interpreted Index stops making progress at any real size. See
+[ADR 0003](docs/adr/0003-compile-rather-than-interpret.md).
+
+```bash
+aver compile main.av --module-root . -o ../btc-listener-build
+cd ../btc-listener-build && cargo build --release
+```
+
+Then, from that directory:
+
+```bash
+./target/release/main headers 192.168.1.10 ~/chain        # every Block Header
+./target/release/main bodies  192.168.1.10 ~/chain 1 500  # Blocks for Heights 1..500
+```
+
+`headers` must run first, and it runs in Height order. A `getdata` names Block
+Ids and never Heights, so the chain has to be known before any Block can be
+asked for. It fetches every Header — around 962,000 at the time of writing,
+roughly 24 minutes — recording a Height against a Block Id for each. Asking for
+bodies above the Height it has reached gives `no header for height N`.
+
+`bodies` then fetches the Blocks for a range, writing them into Segments and
+recording where each went.
+
+```
+block 1  215 bytes  segment 0
+block 2  215 bytes  segment 0
+2 Blocks stored, last Segment 0
+```
+
+Both resume, and both are safe to interrupt. Stopping costs at most the batch or
+the Block in flight. A Block already held is skipped, so re-running a range
+stores nothing and widening one fetches only the difference:
+
+```bash
+./target/release/main bodies 192.168.1.10 ~/chain 1 20   # stores 20
+./target/release/main bodies 192.168.1.10 ~/chain 1 20   # stores 0
+./target/release/main bodies 192.168.1.10 ~/chain 1 30   # stores 10
+```
+
+Heights 1–20 are 215-byte Blocks from 2009. Modern Blocks are 1–2 MB, and
+reaching them means letting `headers` finish first.
 
 ### Running under WSL
 
