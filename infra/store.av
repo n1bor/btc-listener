@@ -124,29 +124,27 @@ fn compact(store: Store) -> Result<Store, String>
       "rather than on every put. A log-structured store calls this compaction and"
       "does it in the background; here the caller chooses the moment."
     ! [Disk.writeText]
-    records = recordsFor(asEntries(Map.keys(store.entries), store.entries, []))?
+    records = recordsFor(asEntries(Map.entries(store.entries), []))?
     _rewritten = Disk.writeText(store.path, records)?
     Result.Ok(store)
 
-fn asEntries(keys: List<String>, from: Map<String, String>, acc: List<Entry>) -> List<Entry>
+fn asEntries(pairs: List<Tuple<String, String>>, acc: List<Entry>) -> List<Entry>
     ? "The Store's contents as Entries, ready to be written back."
-      "Walks Map.keys rather than Map.entries because the formatter cannot parse"
-      "a Tuple type as of 0.28.1, though the checker accepts one."
-    match keys
+    match pairs
         [] -> List.reverse(acc)
-        [head, ..tail] -> asEntries(tail, from, List.prepend(Entry(key = head, value = valueAt(from, head)), acc))
+        [head, ..tail] -> asEntries(tail, List.prepend(entryOf(head), acc))
 
 verify asEntries
-    asEntries([], empty(), []) => []
-    asEntries(["a"], Map.set(empty(), "a", "b"), []) => [Entry(key = "a", value = "b")]
+    asEntries([], []) => []
+    asEntries([("a", "b")], []) => [Entry(key = "a", value = "b")]
 
-fn valueAt(from: Map<String, String>, key: String) -> String
-    ? "The value under a key that Map.keys just produced, so it is always there."
-    Option.withDefault(Map.get(from, key), "")
+fn entryOf(pair: Tuple<String, String>) -> Entry
+    ? "One key and value from the map."
+    match pair
+        (key, value) -> Entry(key = key, value = value)
 
-verify valueAt
-    valueAt(Map.set(empty(), "a", "b"), "a") => "b"
-    valueAt(empty(), "a") => ""
+verify entryOf
+    entryOf(("a", "b")) => Entry(key = "a", value = "b")
 
 fn appended(path: String, records: String) -> Result<Unit, String>
     ? "Put the records on the end of the log."
