@@ -1,0 +1,215 @@
+module Segment
+    intent =
+        "Segments: what they are called, how much they hold, and where the next"
+        "Block goes."
+        "A Block is one line of hexadecimal, so a Segment is self-framing and"
+        "needs no length prefixes. A Block never straddles two Segments, which is"
+        "what lets pruning delete whole files, and an oversized Block is given a"
+        "Segment of its own rather than split."
+        "Everything here is pure arithmetic and text, so a Segment's layout is"
+        "settled without touching Disk."
+    exposes [Placement, SegmentState, capBytes, nameOf, initial, place, lineFor, encodeLine, decodeLine, completeLines, blockAt]
+    depends [Bytes, Domain.Index]
+    effects []
+
+record SegmentState
+    segment: Int
+    lines: Int
+    used: Int
+
+record Placement
+    location: Location
+    state: SegmentState
+
+fn capBytes() -> Int
+    ? "How many bytes of Block a Segment holds before the next one starts."
+      "Two mebibytes, set by the hex read path rather than by anything about"
+      "Blocks: a Segment is read whole because Aver has no positional reads, and"
+      "Bytes.fromHex peaks near 927 MB for four mebibytes. See ADR 0004."
+    2097152
+
+verify capBytes
+    capBytes() => 2097152
+
+fn nameWidth() -> Int
+    ? "Segment numbers are padded to this width so a directory listing sorts in order."
+    6
+
+verify nameWidth
+    nameWidth() => 6
+
+fn nameOf(segment: Int) -> String
+    ? "The file a Segment lives in. Six digits allows a million of them, some two"
+      "terabytes of Blocks, which is well past anything this program will hold."
+    "blk{padLeft(String.fromInt(segment), nameWidth())}.hex"
+
+verify nameOf
+    nameOf(0) => "blk000000.hex"
+    nameOf(1) => "blk000001.hex"
+    nameOf(42) => "blk000042.hex"
+    nameOf(999999) => "blk999999.hex"
+    nameOf(1000000) => "blk1000000.hex"
+
+fn padLeft(text: String, width: Int) -> String
+    ? "Grow the text to the given width with leading zeroes, never shrinking it."
+    match String.len(text) >= width
+        true -> text
+        false -> padLeft("0" + text, width)
+
+verify padLeft
+    padLeft("7", 3) => "007"
+    padLeft("123", 3) => "123"
+    padLeft("1234", 3) => "1234"
+
+fn initial() -> SegmentState
+    ? "Where a Store with no Segments starts."
+    SegmentState(segment = 0, lines = 0, used = 0)
+
+verify initial
+    initial() => SegmentState(segment = 0, lines = 0, used = 0)
+
+fn place(state: SegmentState, blockBytes: Int) -> Placement
+    ? "Where the next Block goes, and the state that follows it."
+      "A Block that would take the current Segment past the cap starts a new one."
+      "An empty Segment always accepts the Block, however large, because a Block"
+      "cannot be split — so a Block above the cap simply gets a Segment to itself."
+    match rolls(state, blockBytes)
+        true -> rolled(state, blockBytes)
+        false -> appended(state, blockBytes)
+
+verify place
+    place(initial(), 100) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 100))
+    place(SegmentState(segment = 0, lines = 1, used = 100), 200) => Placement(location = Location(segment = 0, line = 1), state = SegmentState(segment = 0, lines = 2, used = 300))
+    place(SegmentState(segment = 3, lines = 2, used = 2097100), 100) => Placement(location = Location(segment = 4, line = 0), state = SegmentState(segment = 4, lines = 1, used = 100))
+    place(initial(), 5000000) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 5000000))
+    place(SegmentState(segment = 1, lines = 1, used = 10), 5000000) => Placement(location = Location(segment = 2, line = 0), state = SegmentState(segment = 2, lines = 1, used = 5000000))
+    place(SegmentState(segment = 0, lines = 1, used = 2097052), 100) => Placement(location = Location(segment = 0, line = 1), state = SegmentState(segment = 0, lines = 2, used = 2097152))
+
+fn rolls(state: SegmentState, blockBytes: Int) -> Bool
+    ? "A non-empty Segment rolls when the Block would take it past the cap."
+    match state.lines > 0
+        true -> state.used + blockBytes > capBytes()
+        false -> false
+
+verify rolls
+    rolls(initial(), 100) => false
+    rolls(initial(), 5000000) => false
+    rolls(SegmentState(segment = 0, lines = 1, used = 2097100), 100) => true
+    rolls(SegmentState(segment = 0, lines = 1, used = 2097052), 100) => false
+    rolls(SegmentState(segment = 0, lines = 1, used = 100), 100) => false
+
+fn rolled(state: SegmentState, blockBytes: Int) -> Placement
+    ? "Start the next Segment, with this Block as its first line."
+    next = state.segment + 1
+    Placement(location = Location(segment = next, line = 0), state = SegmentState(segment = next, lines = 1, used = blockBytes))
+
+verify rolled
+    rolled(initial(), 100) => Placement(location = Location(segment = 1, line = 0), state = SegmentState(segment = 1, lines = 1, used = 100))
+
+fn appended(state: SegmentState, blockBytes: Int) -> Placement
+    ? "Add the Block to the Segment already open."
+    Placement(location = Location(segment = state.segment, line = state.lines), state = SegmentState(segment = state.segment, lines = state.lines + 1, used = state.used + blockBytes))
+
+verify appended
+    appended(initial(), 100) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 100))
+    appended(SegmentState(segment = 2, lines = 5, used = 60), 40) => Placement(location = Location(segment = 2, line = 5), state = SegmentState(segment = 2, lines = 6, used = 100))
+
+fn encodeLine(payload: Bytes) -> String
+    ? "A Block as one line of hexadecimal, without its terminator."
+    Bytes.toHex(payload)
+
+verify encodeLine
+    encodeLine(Bytes.fromList([1, 2, 255])) => "0102ff"
+    encodeLine(Bytes.fromList([])) => ""
+
+fn lineFor(payload: Bytes) -> String
+    ? "What a writer appends: the Block's line and the newline that completes it."
+      "The terminator is what makes a torn append detectable — see completeLines."
+    encodeLine(payload) + "\n"
+
+verify lineFor
+    lineFor(Bytes.fromList([1, 2, 255])) => "0102ff\n"
+    lineFor(Bytes.fromList([])) => "\n"
+
+fn decodeLine(line: String) -> Result<Bytes, String>
+    ? "Read one line back into the Block's bytes."
+    Bytes.fromHex(line)
+
+verify decodeLine
+    decodeLine("0102ff") => Result.Ok(Bytes.fromHex("0102ff")?)
+    decodeLine("") => Result.Ok(Bytes.fromHex("")?)
+    decodeLine("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    decodeLine("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
+
+fn completeLines(contents: String) -> List<String>
+    ? "The lines a writer finished."
+      "Splitting on the terminator always leaves a final element that is not a"
+      "complete line: empty when the Segment ends in a newline as it should, and"
+      "the partial Block when an append was cut short. Dropping it is what makes"
+      "a resumed download tolerate a crash mid-write, at the cost of at most one"
+      "Block that has to be fetched again."
+    dropLast(String.split(contents, "\n"), [])
+
+verify completeLines
+    completeLines("") => []
+    completeLines("aa\n") => ["aa"]
+    completeLines("aa\nbb\n") => ["aa", "bb"]
+    completeLines("aa\nbb") => ["aa"]
+    completeLines("aa\nbb\ncc") => ["aa", "bb"]
+    completeLines("\n") => [""]
+
+fn dropLast(parts: List<String>, acc: List<String>) -> List<String>
+    ? "Everything but the final element."
+    match parts
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keepUnlessLast(head, tail, acc)
+
+verify dropLast
+    dropLast([], []) => []
+    dropLast(["a"], []) => []
+    dropLast(["a", "b"], []) => ["a"]
+    dropLast(["a", "b", "c"], []) => ["a", "b"]
+
+fn keepUnlessLast(head: String, tail: List<String>, acc: List<String>) -> List<String>
+    ? "Keep this element only if something follows it."
+    match tail
+        [] -> List.reverse(acc)
+        [next, ..rest] -> dropLast(tail, List.prepend(head, acc))
+
+verify keepUnlessLast
+    keepUnlessLast("a", [], []) => []
+    keepUnlessLast("a", ["b"], []) => ["a"]
+
+fn blockAt(contents: String, line: Int) -> Result<Bytes, String>
+    ? "The Block a Location names, from the Segment it names."
+    at(completeLines(contents), line, line)
+
+verify blockAt
+    blockAt("0102ff\n", 0) => Result.Ok(Bytes.fromHex("0102ff")?)
+    blockAt("0102ff\naabb\n", 1) => Result.Ok(Bytes.fromHex("aabb")?)
+    blockAt("0102ff\n", 1) => Result.Err("Segment has no line 1")
+    blockAt("0102ff\naabb", 1) => Result.Err("Segment has no line 1")
+    blockAt("", 0) => Result.Err("Segment has no line 0")
+    blockAt("zz\n", 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn at(lines: List<String>, remaining: Int, line: Int) -> Result<Bytes, String>
+    ? "Walk to the requested line, or report that the Segment is shorter than that."
+    match lines
+        [] -> Result.Err("Segment has no line {line}")
+        [head, ..tail] -> here(head, tail, remaining, line)
+
+verify at
+    at([], 0, 0) => Result.Err("Segment has no line 0")
+    at(["0102ff"], 0, 0) => Result.Ok(Bytes.fromHex("0102ff")?)
+    at(["0102ff"], 1, 1) => Result.Err("Segment has no line 1")
+
+fn here(head: String, tail: List<String>, remaining: Int, line: Int) -> Result<Bytes, String>
+    ? "Decode this line if it is the one wanted, or keep walking."
+    match remaining == 0
+        true -> decodeLine(head)
+        false -> at(tail, remaining - 1, line)
+
+verify here
+    here("0102ff", [], 0, 0) => Result.Ok(Bytes.fromHex("0102ff")?)
+    here("0102ff", ["aabb"], 1, 1) => Result.Ok(Bytes.fromHex("aabb")?)
+    here("0102ff", [], 1, 1) => Result.Err("Segment has no line 1")
