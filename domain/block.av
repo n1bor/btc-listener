@@ -1,0 +1,298 @@
+module Block
+    intent =
+        "Block Headers: how to read one, how to name it, and how to ask for more."
+        "A Header is eighty fixed bytes with no length prefixes and no optional"
+        "fields, so decoding is total once the length is right — which is why the"
+        "only Result here guards that length and the octet range beneath it."
+        "Every vector below was taken from mainnet or computed from the published"
+        "genesis parameters, never written from memory."
+    exposes [BlockHeader, headerLength, decodeHeader, headersOf, blockIdOf, genesisBlockId, locatorHeights, getHeadersPayload]
+    depends [Bytes, Crypto.Digest32, Domain.Message, Domain.Network]
+    effects []
+
+record BlockHeader
+    blockId: String
+    version: Int
+    previousBlockId: String
+    merkleRoot: String
+    timestamp: Int
+    bits: Int
+    nonce: Int
+
+record CompactSize
+    value: Int
+    rest: List<Int>
+
+fn headerLength() -> Int
+    ? "A Block Header is always eighty bytes."
+    80
+
+verify headerLength
+    headerLength() => 80
+
+fn recordLength() -> Int
+    ? "In a headers Message each Header carries a trailing Transaction count, always zero."
+    81
+
+verify recordLength
+    recordLength() => 81
+
+fn protocolVersion() -> Int
+    ? "The version announced in a getheaders request, matching the handshake."
+    70016
+
+verify protocolVersion
+    protocolVersion() => 70016
+
+fn decodeHeader(bytes: List<Int>) -> Result<BlockHeader, String>
+    ? "Read one Block Header, rejecting anything that is not exactly eighty bytes."
+    length = List.len(bytes)
+    match length == headerLength()
+        true -> headerFrom(bytes)
+        false -> Result.Err("Block Header must be {headerLength()} bytes, got {length}")
+
+verify decodeHeader
+    decodeHeader([])                            => Result.Err("Block Header must be 80 bytes, got 0")
+    decodeHeader([1, 2, 3])                     => Result.Err("Block Header must be 80 bytes, got 3")
+    decodeHeader(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?))?.blockId => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    decodeHeader(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?))?.blockId => "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
+    decodeHeader(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?))?.previousBlockId => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    decodeHeader(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?))?.merkleRoot => "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098"
+    decodeHeader(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?))?.timestamp => 1231469665
+    decodeHeader(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?))?.nonce => 2573394689
+    decodeHeader(Bytes.toList(Bytes.fromHex("000034204b0880c72ee3d4edb29eeab4adeeb072438a536d6a2c02000000000000000000f195202d3381409301229154d64520d35c8ea8a739bbd73121ec4b552b8423cdc524566a9d360217c6dbbe4e")?))?.blockId => "0000000000000000000083ba9f4419cba02143ae252bd3633a28d0fbdfac8dda"
+    decodeHeader(Bytes.toList(Bytes.fromHex("000034204b0880c72ee3d4edb29eeab4adeeb072438a536d6a2c02000000000000000000f195202d3381409301229154d64520d35c8ea8a739bbd73121ec4b552b8423cdc524566a9d360217c6dbbe4e")?))?.version => 540278784
+    decodeHeader(Bytes.toList(Bytes.fromHex("000034204b0880c72ee3d4edb29eeab4adeeb072438a536d6a2c02000000000000000000f195202d3381409301229154d64520d35c8ea8a739bbd73121ec4b552b8423cdc524566a9d360217c6dbbe4e")?))?.bits => 386021021
+
+fn headerFrom(bytes: List<Int>) -> Result<BlockHeader, String>
+    ? "Split eighty known-good bytes into the six fields and the Block Id."
+    raw = Bytes.fromList(bytes)?
+    Result.Ok(BlockHeader(blockId = blockIdOf(raw), version = Domain.Message.readLittleEndian(List.take(bytes, 4)), previousBlockId = reversedHex(slice(bytes, 4, 32)), merkleRoot = reversedHex(slice(bytes, 36, 32)), timestamp = Domain.Message.readLittleEndian(slice(bytes, 68, 4)), bits = Domain.Message.readLittleEndian(slice(bytes, 72, 4)), nonce = Domain.Message.readLittleEndian(slice(bytes, 76, 4))))
+
+verify headerFrom
+    headerFrom(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?))?.timestamp => 1231006505
+    headerFrom(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?))?.nonce => 2083236893
+    headerFrom(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?))?.previousBlockId => "0000000000000000000000000000000000000000000000000000000000000000"
+    headerFrom([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn slice(bytes: List<Int>, from: Int, width: Int) -> List<Int>
+    ? "The `width` bytes starting at `from`."
+    List.take(List.drop(bytes, from), width)
+
+verify slice
+    slice([1, 2, 3, 4, 5], 1, 3) => [2, 3, 4]
+    slice([1, 2, 3], 0, 2) => [1, 2]
+    slice([1, 2, 3], 5, 2) => []
+
+fn blockIdOf(header: Bytes) -> String
+    ? "A Block Id is the Header's double-SHA256, displayed with its bytes reversed."
+    reversedHex(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(header))))
+
+verify blockIdOf
+    blockIdOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    blockIdOf(Bytes.fromHex("010000004860eb18bf1b1620e37e9490fc8a427514416fd75159ab86688e9a8300000000d5fdcc541e25de1c7a5addedf24858b8bb665c9f36ef744ee42c316022c90f9bb0bc6649ffff001d08d2bd61")?) => "000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"
+
+fn doubleSha(payload: Bytes) -> Digest32
+    ? "SHA-256 applied twice, as Bitcoin does everywhere it hashes."
+    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
+
+verify doubleSha
+    Crypto.Digest32.toHex(doubleSha(Bytes.fromList([97, 98, 99]))) => "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358"
+
+fn reversedHex(bytes: List<Int>) -> String
+    ? "Block Ids, previous Block Ids and merkle roots are all displayed reversed."
+    Result.withDefault(hexOfReversed(bytes), "")
+
+verify reversedHex
+    reversedHex([1, 2]) => "0201"
+    reversedHex([]) => ""
+    reversedHex([256]) => ""
+
+fn hexOfReversed(bytes: List<Int>) -> Result<String, String>
+    ? "Reverse the bytes and render them as hex."
+    reversed = Bytes.fromList(List.reverse(bytes))?
+    Result.Ok(Bytes.toHex(reversed))
+
+verify hexOfReversed
+    hexOfReversed([1, 2]) => Result.Ok("0201")
+    hexOfReversed([]) => Result.Ok("")
+    hexOfReversed([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn genesisBlockId(network: Network) -> String
+    ? "The first Block of each Network, where every Locator ultimately ends."
+    match network
+        Network.Mainnet -> "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        Network.Testnet -> "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
+        Network.Regtest -> "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+
+verify genesisBlockId
+    genesisBlockId(Network.Mainnet) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    genesisBlockId(Network.Testnet) => "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
+    genesisBlockId(Network.Regtest) => "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+
+fn headersOf(payload: List<Int>) -> Result<List<BlockHeader>, String>
+    ? "Read a headers Message: a count, then that many Headers each followed by a zero."
+    count = readCompactSize(payload)
+    headersInto(count.value, count.rest, [])
+
+verify headersOf
+    List.len(headersOf([0])?) => 0
+    List.len(headersOf(List.concat([1], List.concat(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?), [0])))?) => 1
+    List.len(headersOf(List.concat([2], List.concat(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?), List.concat([0], List.concat(Bytes.toList(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?), [0])))))?) => 2
+    headersOf([1, 2, 3]) => Result.Err("Block Header must be 80 bytes, got 2")
+
+fn headersInto(remaining: Int, bytes: List<Int>, acc: List<BlockHeader>) -> Result<List<BlockHeader>, String>
+    ? "Take one Header at a time until the announced count is exhausted."
+    match remaining > 0
+        true -> oneHeader(remaining, bytes, acc)
+        false -> Result.Ok(List.reverse(acc))
+
+verify headersInto
+    List.len(headersInto(0, [], [])?) => 0
+    headersInto(1, [], []) => Result.Err("Block Header must be 80 bytes, got 0")
+
+fn oneHeader(remaining: Int, bytes: List<Int>, acc: List<BlockHeader>) -> Result<List<BlockHeader>, String>
+    ? "Decode the Header at the front and skip its trailing Transaction count."
+    header = decodeHeader(List.take(bytes, headerLength()))?
+    headersInto(remaining - 1, List.drop(bytes, recordLength()), List.prepend(header, acc))
+
+verify oneHeader
+    oneHeader(1, [], []) => Result.Err("Block Header must be 80 bytes, got 0")
+    List.len(oneHeader(1, List.concat(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?), [0]), [])?) => 1
+
+fn readCompactSize(bytes: List<Int>) -> CompactSize
+    ? "Bitcoin's variable-width count, and whatever follows it."
+    match bytes
+        [] -> CompactSize(value = 0, rest = [])
+        [head, ..tail] -> sizeFrom(head, tail)
+
+verify readCompactSize
+    readCompactSize([]).value => 0
+    readCompactSize([5, 9]).value => 5
+    readCompactSize([5, 9]).rest => [9]
+    readCompactSize([253, 208, 7, 9]).value => 2000
+    readCompactSize([253, 208, 7, 9]).rest => [9]
+    readCompactSize([254, 0, 0, 1, 0, 9]).value => 65536
+
+fn sizeFrom(head: Int, tail: List<Int>) -> CompactSize
+    ? "Values below 253 are the byte itself; the three markers name a wider field."
+    match head
+        253 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 2)), rest = List.drop(tail, 2))
+        254 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 4)), rest = List.drop(tail, 4))
+        255 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 8)), rest = List.drop(tail, 8))
+        _ -> CompactSize(value = head, rest = tail)
+
+verify sizeFrom
+    sizeFrom(5, [9]).value => 5
+    sizeFrom(252, []).value => 252
+    sizeFrom(253, [208, 7]).value => 2000
+    sizeFrom(254, [0, 0, 1, 0]).value => 65536
+    sizeFrom(255, [1, 0, 0, 0, 0, 0, 0, 0]).value => 1
+
+fn locatorHeights(top: Int) -> List<Int>
+    ? "The Heights a Locator names: ten in a row from the top, then doubling gaps, then genesis."
+    locatorInto(top, [])
+
+verify locatorHeights
+    locatorHeights(0) => [0]
+    locatorHeights(1) => [1, 0]
+    locatorHeights(5) => [5, 4, 3, 2, 1, 0]
+    locatorHeights(10) => [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    locatorHeights(11) => [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 0]
+    locatorHeights(20) => [20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 9, 5, 0]
+    locatorHeights(100) => [100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 89, 85, 77, 61, 29, 0]
+    locatorHeights(1000) => [1000, 999, 998, 997, 996, 995, 994, 993, 992, 991, 989, 985, 977, 961, 929, 865, 737, 481, 0]
+
+fn locatorInto(height: Int, acc: List<Int>) -> List<Int>
+    ? "Walk down from the top, widening the step, until genesis closes the list."
+    match height > 0
+        true -> advance(height, List.prepend(height, acc))
+        false -> List.reverse(List.prepend(0, acc))
+
+verify locatorInto
+    locatorInto(0, []) => [0]
+    locatorInto(2, []) => [2, 1, 0]
+
+fn advance(height: Int, acc: List<Int>) -> List<Int>
+    ? "Step back by the current gap, which doubles once ten Heights are named."
+    next = stepFor(List.len(acc))
+    locatorInto(height - next, acc)
+
+verify advance
+    advance(3, [3]) => [3, 2, 1, 0]
+    advance(1, [1]) => [1, 0]
+
+fn stepFor(taken: Int) -> Int
+    ? "One while fewer than ten Heights are named, then doubling with each further one."
+    match taken >= 10
+        true -> doubled(taken - 9)
+        false -> 1
+
+verify stepFor
+    stepFor(1) => 1
+    stepFor(9) => 1
+    stepFor(10) => 2
+    stepFor(11) => 4
+    stepFor(12) => 8
+
+fn doubled(times: Int) -> Int
+    ? "Two raised to `times`, built by repeated addition since there is no power."
+    doubledInto(times, 1)
+
+verify doubled
+    doubled(0) => 1
+    doubled(1) => 2
+    doubled(4) => 16
+
+fn doubledInto(times: Int, acc: Int) -> Int
+    ? "Double the accumulator `times` over."
+    match times > 0
+        true -> doubledInto(times - 1, acc * 2)
+        false -> acc
+
+verify doubledInto
+    doubledInto(0, 1) => 1
+    doubledInto(3, 1) => 8
+
+fn getHeadersPayload(locator: List<List<Int>>) -> Result<Bytes, String>
+    ? "Ask a Peer for the Headers following the newest Block Id we hold."
+    prefix = List.concat(Domain.Message.littleEndian(protocolVersion(), 4), countPrefix(List.len(locator)))
+    Bytes.fromList(List.concat(prefix, List.concat(flatten(locator, []), zeros(32, []))))
+
+verify getHeadersPayload
+    Bytes.toHex(getHeadersPayload([])?) => "8011010000" + "0000000000000000000000000000000000000000000000000000000000000000"
+    Bytes.toHex(getHeadersPayload([zeros(32, [])])?) => "8011010001" + "0000000000000000000000000000000000000000000000000000000000000000" + "0000000000000000000000000000000000000000000000000000000000000000"
+    getHeadersPayload([[256]]) => Result.Err("byte 256 at index 5 is outside 0..=255")
+
+fn countPrefix(count: Int) -> List<Int>
+    ? "A Locator names at most a few dozen Block Ids, so one byte always suffices."
+    match count >= 253
+        true -> List.prepend(253, Domain.Message.littleEndian(count, 2))
+        false -> [count]
+
+verify countPrefix
+    countPrefix(0) => [0]
+    countPrefix(1) => [1]
+    countPrefix(252) => [252]
+    countPrefix(253) => [253, 253, 0]
+
+fn flatten(entries: List<List<Int>>, acc: List<Int>) -> List<Int>
+    ? "Lay the Locator's Block Ids end to end."
+    match entries
+        [] -> acc
+        [head, ..tail] -> flatten(tail, List.concat(acc, head))
+
+verify flatten
+    flatten([], []) => []
+    flatten([[1, 2], [3]], []) => [1, 2, 3]
+
+fn zeros(count: Int, acc: List<Int>) -> List<Int>
+    ? "The stop hash is thirty-two zero bytes, meaning as many Headers as you have."
+    match count > 0
+        true -> zeros(count - 1, List.prepend(0, acc))
+        false -> acc
+
+verify zeros
+    List.len(zeros(32, [])) => 32
+    zeros(2, []) => [0, 0]
+    zeros(0, []) => []

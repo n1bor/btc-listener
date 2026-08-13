@@ -1,7 +1,9 @@
 # Bitcoin Peer Listener
 
 Connects to a single Bitcoin node over the peer-to-peer protocol, listens for
-transaction announcements, and prints each transaction's decoded structure.
+transaction announcements, and prints each transaction's decoded structure. It
+also downloads the chain — every Block Header, then Block bodies for a chosen
+range — keeping the bytes in Segments on disk and their whereabouts in an Index.
 
 ## Language
 
@@ -75,3 +77,57 @@ Signature data carried outside the Inputs, present only in SegWit-serialised
 Transactions. Its presence changes how a Transaction is framed, so it must be
 detected before the Inputs can be read at all.
 _Avoid_: segwit data, signature, script witness
+
+### The chain
+
+**Block**:
+A Block Header and the Transactions it commits to, as it arrives on the wire.
+_Avoid_: blk, chunk, batch
+
+**Block Header**:
+The eighty bytes that identify a Block and name its predecessor. Small enough to
+hold the whole chain's worth, which is why they are fetched before any body.
+_Avoid_: head, metadata, preamble
+
+**Block Id**:
+The double-SHA256 of a Block Header, displayed in reverse byte order, exactly as
+a Transaction Id is. A Block's only stable name.
+_Avoid_: block hash, hash, digest
+
+**Height**:
+A Block's distance from the first Block. A position rather than an identity: the
+chain may reassign one, so a Height names a slot and never a Block.
+_Avoid_: index, number, sequence, depth
+
+**Locator**:
+The descending list of Block Ids sent with `getheaders` to tell a Peer how far we
+have got. Sparse by design — recent Ids in full, then exponentially thinning.
+_Avoid_: checkpoint, cursor, bookmark
+
+### What we store
+
+**Store**:
+A keyed byte store offering get, put, delete and batch. The seam a real
+key-value database will eventually fill; today one module backed by files.
+_Avoid_: database, cache, map, persistence
+
+**Index**:
+What we keep in a Store: Block Ids to Locations, Heights to Block Ids. Content,
+where a Store is mechanism.
+_Avoid_: db, catalogue, lookup, registry
+
+**Segment**:
+One size-capped file of Block bytes, and the unit pruning deletes. A Block never
+straddles two of them.
+_Avoid_: blk file, shard, partition, volume
+
+**Location**:
+Where a Block's bytes are: a Segment, and the line within it. Meaningless without
+the Segment, so the two travel together.
+_Avoid_: offset, pointer, position, address
+
+**Prune Watermark**:
+The Height below which Blocks were deliberately deleted. What separates a Block
+we never fetched from one we chose to discard — the two look identical in the
+Index and demand opposite responses.
+_Avoid_: cutoff, floor, horizon, threshold
