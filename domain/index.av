@@ -1,0 +1,265 @@
+module Index
+    intent =
+        "How the Index is spelled inside a Store: its keys, its values, and what"
+        "an absent entry means."
+        "Two keyspaces share one Store. The `b:` space maps a Block Id to a"
+        "Location and is append-only, because a Block Id always names the same"
+        "bytes. The `h:` space maps a Height to a Block Id and is the mutable"
+        "record of which chain we currently believe, since a reorganisation can"
+        "reassign a Height."
+        "Everything here is a pure transformation over text, so the whole"
+        "encoding is covered by verify blocks rather than by a Store."
+    exposes [BodyState, Location, blockKey, heightKey, prunedBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    effects []
+
+record Location
+    segment: Int
+    line: Int
+
+type BodyState
+    Stored(Location)
+    Missing
+    Pruned
+
+fn heightWidth() -> Int
+    ? "Heights are padded to this many digits so the keyspace sorts by Height."
+    8
+
+verify heightWidth
+    heightWidth() => 8
+
+fn blockKey(blockId: String) -> String
+    ? "Where a Block's Location lives. Immutable: a Block Id always names the same bytes."
+    "b:{blockId}"
+
+verify blockKey
+    blockKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "b:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    blockKey("") => "b:"
+
+fn heightKey(height: Int) -> String
+    ? "Where a Height's Block Id lives. Rewritten if a reorganisation reassigns the Height."
+    "h:{padHeight(height)}"
+
+verify heightKey
+    heightKey(0) => "h:00000000"
+    heightKey(1) => "h:00000001"
+    heightKey(962268) => "h:00962268"
+    heightKey(99999999) => "h:99999999"
+
+fn padHeight(height: Int) -> String
+    ? "Zero-padded so a Store that keeps its keys in order keeps them in Height order."
+      "Nothing today needs that ordering — resume and the scan both walk Heights"
+      "one at a time — but rekeying a populated Store later would be far more"
+      "expensive than the seven spare digits cost now."
+    padLeft(String.fromInt(height), heightWidth())
+
+verify padHeight
+    padHeight(0) => "00000000"
+    padHeight(7) => "00000007"
+    padHeight(962268) => "00962268"
+    padHeight(99999999) => "99999999"
+    padHeight(100000000) => "100000000"
+
+fn padLeft(text: String, width: Int) -> String
+    ? "Grow the text to the given width with leading zeroes, never shrinking it."
+      "Beyond the width the padding simply stops, so a Height above 99999999 —"
+      "some nineteen centuries away at ten minutes a Block — sorts out of order"
+      "rather than being rejected."
+    match String.len(text) >= width
+        true -> text
+        false -> padLeft("0" + text, width)
+
+verify padLeft
+    padLeft("7", 3) => "007"
+    padLeft("123", 3) => "123"
+    padLeft("1234", 3) => "1234"
+    padLeft("", 2) => "00"
+
+fn prunedBelowKey() -> String
+    ? "The single record naming the Prune Watermark."
+    "meta:prunedBelow"
+
+verify prunedBelowKey
+    prunedBelowKey() => "meta:prunedBelow"
+
+fn encodeLocation(location: Location) -> String
+    ? "A Location is its Segment and the line within it."
+    "{location.segment}:{location.line}"
+
+verify encodeLocation
+    encodeLocation(Location(segment = 0, line = 0)) => "0:0"
+    encodeLocation(Location(segment = 7, line = 1234)) => "7:1234"
+
+fn decodeLocation(text: String) -> Result<Location, String>
+    ? "Read a Location back, rejecting anything that is not two whole numbers."
+    parts(text, String.split(text, ":"))
+
+verify decodeLocation
+    decodeLocation("0:0") => Result.Ok(Location(segment = 0, line = 0))
+    decodeLocation("7:1234") => Result.Ok(Location(segment = 7, line = 1234))
+    decodeLocation("") => Result.Err("Location must be segment:line, got ''")
+    decodeLocation("7") => Result.Err("Location must be segment:line, got '7'")
+    decodeLocation("7:12:3") => Result.Err("Location must be segment:line, got '7:12:3'")
+    decodeLocation("a:1") => Result.Err("Location must be two whole numbers, got 'a:1'")
+    decodeLocation("7:b") => Result.Err("Location must be two whole numbers, got '7:b'")
+    decodeLocation("-1:0") => Result.Err("Location must be two whole numbers, got '-1:0'")
+    decodeLocation("0:-1") => Result.Err("Location must be two whole numbers, got '0:-1'")
+
+fn parts(text: String, split: List<String>) -> Result<Location, String>
+    ? "Exactly two colon-separated fields, and no more."
+    match split
+        [] -> Result.Err("Location must be segment:line, got '{text}'")
+        [segment, ..rest] -> afterSegment(text, segment, rest)
+
+verify parts
+    parts("7:1", ["7", "1"]) => Result.Ok(Location(segment = 7, line = 1))
+    parts("x", []) => Result.Err("Location must be segment:line, got 'x'")
+
+fn afterSegment(text: String, segment: String, rest: List<String>) -> Result<Location, String>
+    ? "The second field is the line; a third means the text was not a Location."
+    match rest
+        [] -> Result.Err("Location must be segment:line, got '{text}'")
+        [line, ..extra] -> afterLine(text, segment, line, extra)
+
+verify afterSegment
+    afterSegment("7:1", "7", ["1"]) => Result.Ok(Location(segment = 7, line = 1))
+    afterSegment("7", "7", []) => Result.Err("Location must be segment:line, got '7'")
+
+fn afterLine(text: String, segment: String, line: String, extra: List<String>) -> Result<Location, String>
+    ? "Reject a third field before reading the numbers."
+    match extra
+        [] -> located(text, whole(segment), whole(line))
+        [head, ..tail] -> Result.Err("Location must be segment:line, got '{text}'")
+
+verify afterLine
+    afterLine("7:1", "7", "1", []) => Result.Ok(Location(segment = 7, line = 1))
+    afterLine("7:1:2", "7", "1", ["2"]) => Result.Err("Location must be segment:line, got '7:1:2'")
+
+fn located(text: String, segment: Option<Int>, line: Option<Int>) -> Result<Location, String>
+    ? "Both fields must have parsed as non-negative whole numbers."
+    match segment
+        Option.None -> Result.Err("Location must be two whole numbers, got '{text}'")
+        Option.Some(s) -> withSegment(text, s, line)
+
+verify located
+    located("7:1", Option.Some(7), Option.Some(1)) => Result.Ok(Location(segment = 7, line = 1))
+    located("a:1", Option.None, Option.Some(1)) => Result.Err("Location must be two whole numbers, got 'a:1'")
+
+fn withSegment(text: String, segment: Int, line: Option<Int>) -> Result<Location, String>
+    ? "The Segment parsed; the line still has to."
+    match line
+        Option.None -> Result.Err("Location must be two whole numbers, got '{text}'")
+        Option.Some(l) -> Result.Ok(Location(segment = segment, line = l))
+
+verify withSegment
+    withSegment("7:1", 7, Option.Some(1)) => Result.Ok(Location(segment = 7, line = 1))
+    withSegment("7:b", 7, Option.None) => Result.Err("Location must be two whole numbers, got '7:b'")
+
+fn whole(text: String) -> Option<Int>
+    ? "A non-negative whole number, or nothing. Negative Segments and lines are not Locations."
+    match Int.fromString(text)
+        Result.Err(e) -> Option.None
+        Result.Ok(value) -> nonNegative(value)
+
+verify whole
+    whole("0") => Option.Some(0)
+    whole("1234") => Option.Some(1234)
+    whole("a") => Option.None
+    whole("") => Option.None
+    whole("-1") => Option.None
+
+fn nonNegative(value: Int) -> Option<Int>
+    ? "Keep the value only if it is zero or above."
+    match value >= 0
+        true -> Option.Some(value)
+        false -> Option.None
+
+verify nonNegative
+    nonNegative(0) => Option.Some(0)
+    nonNegative(5) => Option.Some(5)
+    nonNegative(0 - 1) => Option.None
+
+fn encodeHeight(height: Int) -> String
+    ? "A Height stored as a value rather than a key needs no padding."
+    String.fromInt(height)
+
+verify encodeHeight
+    encodeHeight(0) => "0"
+    encodeHeight(962268) => "962268"
+
+fn decodeHeight(text: String) -> Result<Int, String>
+    ? "Read a Height back, rejecting anything that is not a whole number."
+    match whole(text)
+        Option.None -> Result.Err("Height must be a whole number, got '{text}'")
+        Option.Some(value) -> Result.Ok(value)
+
+verify decodeHeight
+    decodeHeight("0") => Result.Ok(0)
+    decodeHeight("962268") => Result.Ok(962268)
+    decodeHeight("") => Result.Err("Height must be a whole number, got ''")
+    decodeHeight("x") => Result.Err("Height must be a whole number, got 'x'")
+    decodeHeight("-1") => Result.Err("Height must be a whole number, got '-1'")
+
+fn prunedBelowOf(stored: Option<String>) -> Result<Int, String>
+    ? "The Prune Watermark a Store holds, or zero when it holds none."
+      "A Store with no such record has never pruned, which is the same thing as"
+      "a Watermark of zero — so a fresh Index needs no initialisation."
+    match stored
+        Option.None -> Result.Ok(0)
+        Option.Some(text) -> decodeHeight(text)
+
+verify prunedBelowOf
+    prunedBelowOf(Option.None) => Result.Ok(0)
+    prunedBelowOf(Option.Some("0")) => Result.Ok(0)
+    prunedBelowOf(Option.Some("962268")) => Result.Ok(962268)
+    prunedBelowOf(Option.Some("x")) => Result.Err("Height must be a whole number, got 'x'")
+
+fn bodyStateOf(stored: Option<String>, height: Int, prunedBelow: Int) -> Result<BodyState, String>
+    ? "Why a Block's body is absent, which decides what to do about it."
+      "An entry means we hold the bytes. No entry below the Prune Watermark means"
+      "we deleted them deliberately and must not fetch them again; no entry at or"
+      "above it means we never fetched them."
+    match stored
+        Option.Some(text) -> asStored(text)
+        Option.None -> Result.Ok(absent(height, prunedBelow))
+
+verify bodyStateOf
+    bodyStateOf(Option.Some("7:1234"), 100, 0) => Result.Ok(BodyState.Stored(Location(segment = 7, line = 1234)))
+    bodyStateOf(Option.None, 100, 0) => Result.Ok(BodyState.Missing)
+    bodyStateOf(Option.None, 100, 500) => Result.Ok(BodyState.Pruned)
+    bodyStateOf(Option.None, 500, 500) => Result.Ok(BodyState.Missing)
+    bodyStateOf(Option.Some("nonsense"), 100, 0) => Result.Err("Location must be segment:line, got 'nonsense'")
+
+fn asStored(text: String) -> Result<BodyState, String>
+    ? "An entry is a Location, and a Location that will not decode is corruption."
+    location = decodeLocation(text)?
+    Result.Ok(BodyState.Stored(location))
+
+verify asStored
+    asStored("7:1234") => Result.Ok(BodyState.Stored(Location(segment = 7, line = 1234)))
+    asStored("bad") => Result.Err("Location must be segment:line, got 'bad'")
+
+fn absent(height: Int, prunedBelow: Int) -> BodyState
+    ? "Below the Prune Watermark the bytes were discarded; at or above it they never arrived."
+    match height < prunedBelow
+        true -> BodyState.Pruned
+        false -> BodyState.Missing
+
+verify absent
+    absent(0, 0) => BodyState.Missing
+    absent(100, 0) => BodyState.Missing
+    absent(100, 500) => BodyState.Pruned
+    absent(500, 500) => BodyState.Missing
+
+fn scanUsable(startHeight: Int, prunedBelow: Int) -> Bool
+    ? "Whether a scan from this Height can see every Block it needs."
+      "Pruning is prefix-shaped, so one comparison before starting replaces"
+      "discovering a gap partway through and having to unwind."
+    startHeight >= prunedBelow
+
+verify scanUsable
+    scanUsable(0, 0) => true
+    scanUsable(500, 0) => true
+    scanUsable(500, 500) => true
+    scanUsable(499, 500) => false
+    scanUsable(0, 1) => false
