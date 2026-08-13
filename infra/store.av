@@ -23,6 +23,7 @@ module Store
         "change. One putAll of 40000 entries takes 64 milliseconds; the same"
         "40000 entries one put at a time take 35 seconds."
     exposes [Store, Entry, open, get, has, size, put, putAll, delete, compact]
+    depends [Domain.Text]
     effects [Disk.appendText, Disk.exists, Disk.readText, Disk.writeText]
 
 record Entry
@@ -47,7 +48,7 @@ fn open(path: String) -> Result<Store, String>
 fn reopen(path: String, contents: Result<String, String>) -> Result<Store, String>
     ? "Replay a log that was read, or report why it could not be."
     log = contents?
-    changes = parseAll(completeRecords(log), [])?
+    changes = parseAll(Domain.Text.completeLines(log), [])?
     Result.Ok(Store(path = path, entries = applyChanges(changes, empty())))
 
 verify reopen
@@ -253,41 +254,6 @@ verify usableValue
     usableValue("") => true
     usableValue("a\tb") => false
     usableValue("a\nb") => false
-
-fn completeRecords(contents: String) -> List<String>
-    ? "The records a writer finished."
-      "Splitting on the terminator always leaves a final element that is not a"
-      "complete record: empty when the log ends as it should, and a partial record"
-      "when an append was cut short. Dropping it is what lets a Store survive a"
-      "crash mid-write, losing at most the last batch."
-    dropLast(String.split(contents, "\n"), [])
-
-verify completeRecords
-    completeRecords("") => []
-    completeRecords("+a\tb\n") => ["+a\tb"]
-    completeRecords("+a\tb\n+c\td\n") => ["+a\tb", "+c\td"]
-    completeRecords("+a\tb\n+c\td") => ["+a\tb"]
-
-fn dropLast(parts: List<String>, acc: List<String>) -> List<String>
-    ? "Everything but the final element."
-    match parts
-        [] -> List.reverse(acc)
-        [head, ..tail] -> keepUnlessLast(head, tail, acc)
-
-verify dropLast
-    dropLast([], []) => []
-    dropLast(["a"], []) => []
-    dropLast(["a", "b"], []) => ["a"]
-
-fn keepUnlessLast(head: String, tail: List<String>, acc: List<String>) -> List<String>
-    ? "Keep this element only if something follows it."
-    match tail
-        [] -> List.reverse(acc)
-        [next, ..rest] -> dropLast(tail, List.prepend(head, acc))
-
-verify keepUnlessLast
-    keepUnlessLast("a", [], []) => []
-    keepUnlessLast("a", ["b"], []) => ["a"]
 
 fn parseAll(records: List<String>, acc: List<Change>) -> Result<List<Change>, String>
     ? "Read every log record into a Change, in the order they were written."

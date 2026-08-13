@@ -8,7 +8,7 @@ module Transaction
         "for a SegWit Transaction the marker, flag and Witnesses are excluded —"
         "which is why decoding tracks where each section began."
     exposes [decode, summaryLines, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
-    depends [Bytes, Crypto.Digest32, Domain.Message, Domain.Script]
+    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Script, Domain.Text]
     effects []
 
 record Input
@@ -30,10 +30,6 @@ record Transaction
     txid: String
     size: Int
     isSegWit: Bool
-
-record Count
-    value: Int
-    rest: List<Int>
 
 record InputsRead
     items: List<Input>
@@ -160,17 +156,7 @@ verify amount
 
 fn fraction(remainder: Int) -> String
     ? "The fractional satoshis, padded to eight digits."
-    padLeft("{remainder}", 8)
-
-fn padLeft(text: String, width: Int) -> String
-    ? "Left-pad with zeros until the text is `width` characters."
-    match String.len(text) >= width
-        true -> text
-        false -> padLeft("0" + text, width)
-
-verify padLeft
-    padLeft("5", 3) => "005"
-    padLeft("1234", 3) => "1234"
+    Domain.Text.padLeft("{remainder}", 8)
 
 fn decode(raw: List<Int>) -> Result<Transaction, String>
     ? "Decode a Transaction, SegWit-serialised or not."
@@ -248,27 +234,10 @@ fn finish(raw: List<Int>, version: Int, inputs: List<Input>, outputs: List<Outpu
     identity = Bytes.fromList(core)?
     witnessed = attachWitnesses(inputs, segwit, afterOutputs)
     lockTime = Domain.Message.readLittleEndian(lastFour(raw))
-    Result.Ok(Transaction(version = version, inputs = witnessed, outputs = outputs, lockTime = lockTime, txid = reversedHex(identity), size = List.len(raw), isSegWit = segwit))
+    Result.Ok(Transaction(version = version, inputs = witnessed, outputs = outputs, lockTime = lockTime, txid = Domain.Hash.identifierOf(identity), size = List.len(raw), isSegWit = segwit))
 
 verify finish
     sizeOf(finish([1, 2, 3, 4, 0, 0, 0, 0], 1, [], [], false, [1, 2, 3, 4], [])?) => 8
-
-fn reversedHex(identity: Bytes) -> String
-    ? "A Transaction Id is displayed with its bytes reversed, by convention."
-    Result.withDefault(hexOfReversed(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(identity)))), "")
-
-fn hexOfReversed(bytes: List<Int>) -> Result<String, String>
-    ? "Reverse digest bytes and render them as hex."
-    reversed = Bytes.fromList(List.reverse(bytes))?
-    Result.Ok(Bytes.toHex(reversed))
-
-verify hexOfReversed
-    hexOfReversed([1, 2]) => Result.Ok("0201")
-    hexOfReversed([]) => Result.Ok("")
-
-fn doubleSha(payload: Bytes) -> Digest32
-    ? "SHA-256 applied twice."
-    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
 
 fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> List<Input>
     ? "Record how many Witness items each Input carried."
@@ -302,7 +271,7 @@ verify headOf
 
 fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>) -> List<Input>
     ? "Read one Input's Witness stack and carry on to the next."
-    stack = readVarIntOrZero(rest)
+    stack = Domain.CompactSize.read(rest)
     countWitnesses(remaining, skipWitnessItems(stack.rest, stack.value), List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witnessItems = stack.value), acc))
 
 verify countOne
@@ -320,52 +289,15 @@ verify skipWitnessItems
 
 fn skipOneItem(rest: List<Int>, count: Int) -> List<Int>
     ? "Step over one length-prefixed Witness item."
-    item = readVarIntOrZero(rest)
+    item = Domain.CompactSize.read(rest)
     skipWitnessItems(List.drop(item.rest, item.value), count - 1)
 
 verify skipOneItem
     skipOneItem([1, 170, 9], 1) => [9]
 
-fn readVarIntOrZero(bytes: List<Int>) -> Count
-    ? "A CompactSize, or zero when the bytes have run out."
-    match bytes
-        [] -> Count(value = 0, rest = [])
-        [head, ..tail] -> varIntFrom(head, tail)
-
-verify readVarIntOrZero
-    readVarIntOrZero([5, 9]) => Count(value = 5, rest = [9])
-    readVarIntOrZero([253, 1, 1, 9]) => Count(value = 257, rest = [9])
-    readVarIntOrZero([]) => Count(value = 0, rest = [])
-
-fn varIntFrom(head: Int, tail: List<Int>) -> Count
-    ? "Values below 253 are the byte itself; above it, a wider field follows."
-    match head < 253
-        true -> Count(value = head, rest = tail)
-        false -> wideVarInt(varIntWidth(head), tail)
-
-verify varIntFrom
-    varIntFrom(5, [9]) => Count(value = 5, rest = [9])
-    varIntFrom(253, [1, 1, 9]) => Count(value = 257, rest = [9])
-
-fn wideVarInt(width: Int, tail: List<Int>) -> Count
-    ? "Read the wider CompactSize field that follows the marker byte."
-    Count(value = Domain.Message.readLittleEndian(List.take(tail, width)), rest = List.drop(tail, width))
-
-fn varIntWidth(head: Int) -> Int
-    ? "253 introduces two more bytes, 254 four, 255 eight."
-    match head
-        253 -> 2
-        254 -> 4
-        _ -> 8
-
-verify varIntWidth
-    varIntWidth(253) => 2
-    varIntWidth(254) => 4
-    varIntWidth(255) => 8
-
 fn readInputs(body: List<Int>) -> Result<InputsRead, String>
     ? "Read the Input count, then that many Inputs."
-    count = readVarIntOrZero(body)
+    count = Domain.CompactSize.read(body)
     readInputsInto(count.value, count.rest, [])
 
 verify readInputs
@@ -384,7 +316,7 @@ verify readInputsInto
 fn readOneInput(remaining: Int, rest: List<Int>, acc: List<Input>) -> Result<InputsRead, String>
     ? "An Input: the Output it spends, its script, and its sequence."
     index = Domain.Message.readLittleEndian(List.take(List.drop(rest, 32), 4))
-    script = readVarIntOrZero(List.drop(rest, 36))
+    script = Domain.CompactSize.read(List.drop(rest, 36))
     inputFrom(remaining, List.take(rest, 32), index, script.value, script.rest, acc)
 
 verify readOneInput
@@ -402,7 +334,7 @@ verify inputFrom
 
 fn readOutputs(rest: List<Int>) -> Result<OutputsRead, String>
     ? "Read the Output count, then that many Outputs."
-    count = readVarIntOrZero(rest)
+    count = Domain.CompactSize.read(rest)
     readOutputsInto(count.value, count.rest, [])
 
 verify readOutputs
@@ -421,7 +353,7 @@ verify readOutputsInto
 fn readOneOutput(remaining: Int, rest: List<Int>, acc: List<Output>) -> Result<OutputsRead, String>
     ? "An Output: an amount, then the script that locks it."
     value = Domain.Message.readLittleEndian(List.take(rest, 8))
-    script = readVarIntOrZero(List.drop(rest, 8))
+    script = Domain.CompactSize.read(List.drop(rest, 8))
     outputFrom(remaining, value, script.value, script.rest, acc)
 
 verify readOneOutput

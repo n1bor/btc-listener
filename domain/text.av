@@ -1,0 +1,65 @@
+module Text
+    intent =
+        "Two pieces of text shaping that several modules need and none owns."
+        "Neither is a Bitcoin idea, which is why they live together rather than"
+        "in the module that happened to want one first. They are here to be"
+        "written once, not to name a concept."
+        "padLeft makes a number sort in numeric order as text. completeLines"
+        "reads an append-only file and answers which lines a writer finished,"
+        "which is what lets both the Store and a Segment survive a crash."
+    exposes [padLeft, completeLines]
+    effects []
+
+fn padLeft(text: String, width: Int) -> String
+    ? "Grow the text to the given width with leading zeroes, never shrinking it."
+      "Beyond the width the padding simply stops, so an oversized value sorts out"
+      "of order rather than being rejected."
+    match String.len(text) >= width
+        true -> text
+        false -> padLeft("0" + text, width)
+
+verify padLeft
+    padLeft("7", 3) => "007"
+    padLeft("123", 3) => "123"
+    padLeft("1234", 3) => "1234"
+    padLeft("", 2) => "00"
+    padLeft("7", 0) => "7"
+
+fn completeLines(contents: String) -> List<String>
+    ? "The lines a writer finished."
+      "Splitting on the terminator always leaves a final element that is not a"
+      "complete line: empty when the file ends in a newline as it should, and the"
+      "partial line when a write was cut short. Dropping it is one rule covering"
+      "both, and is what makes an append-only file tolerate a crash mid-write at"
+      "the cost of at most its last record."
+    dropLast(String.split(contents, "\n"), [])
+
+verify completeLines
+    completeLines("") => []
+    completeLines("aa\n") => ["aa"]
+    completeLines("aa\nbb\n") => ["aa", "bb"]
+    completeLines("aa\nbb") => ["aa"]
+    completeLines("aa\nbb\ncc") => ["aa", "bb"]
+    completeLines("\n") => [""]
+
+fn dropLast(parts: List<String>, acc: List<String>) -> List<String>
+    ? "Everything but the final element."
+    match parts
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keepUnlessLast(head, tail, acc)
+
+verify dropLast
+    dropLast([], []) => []
+    dropLast(["a"], []) => []
+    dropLast(["a", "b"], []) => ["a"]
+    dropLast(["a", "b", "c"], []) => ["a", "b"]
+
+fn keepUnlessLast(head: String, tail: List<String>, acc: List<String>) -> List<String>
+    ? "Keep this element only if something follows it."
+    match tail
+        [] -> List.reverse(acc)
+        [next, ..rest] -> dropLast(tail, List.prepend(head, acc))
+
+verify keepUnlessLast
+    keepUnlessLast("a", [], []) => []
+    keepUnlessLast("a", ["b"], []) => ["a"]

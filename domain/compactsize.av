@@ -1,0 +1,71 @@
+module CompactSize
+    intent =
+        "Bitcoin's variable-width count, which prefixes almost every list on the"
+        "wire: Inputs, Outputs, Witness items, inventory entries, Headers."
+        "One byte below 253; otherwise a marker naming a wider little-endian"
+        "field that follows it. Three modules had each written their own reader,"
+        "one of which only ever needed the width."
+        "Running out of bytes reads as zero rather than as an error. A count is"
+        "always followed by the items it counts, so a truncated Message fails when"
+        "those items are read, with something to say about what was missing."
+    exposes [Count, read, widthOf]
+    depends [Domain.Message]
+    effects []
+
+record Count
+    value: Int
+    rest: List<Int>
+
+fn read(bytes: List<Int>) -> Count
+    ? "The count at the front, and whatever follows it."
+    match bytes
+        [] -> Count(value = 0, rest = [])
+        [head, ..tail] -> from(head, tail)
+
+verify read
+    read([]) => Count(value = 0, rest = [])
+    read([5, 9]) => Count(value = 5, rest = [9])
+    read([252, 9]) => Count(value = 252, rest = [9])
+    read([253, 1, 1, 9]) => Count(value = 257, rest = [9])
+    read([253, 208, 7, 9]) => Count(value = 2000, rest = [9])
+    read([254, 0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9])
+    read([255, 1, 0, 0, 0, 0, 0, 0, 0, 9]) => Count(value = 1, rest = [9])
+
+fn from(head: Int, tail: List<Int>) -> Count
+    ? "Values below 253 are the byte itself; the three markers name a wider field."
+    match head
+        253 -> wide(2, tail)
+        254 -> wide(4, tail)
+        255 -> wide(8, tail)
+        _ -> Count(value = head, rest = tail)
+
+verify from
+    from(5, [9]) => Count(value = 5, rest = [9])
+    from(252, []) => Count(value = 252, rest = [])
+    from(253, [1, 1, 9]) => Count(value = 257, rest = [9])
+    from(254, [0, 0, 1, 0]) => Count(value = 65536, rest = [])
+    from(255, [1, 0, 0, 0, 0, 0, 0, 0]) => Count(value = 1, rest = [])
+
+fn wide(width: Int, tail: List<Int>) -> Count
+    ? "Read the wider field the marker promised, and step past it."
+    Count(value = Domain.Message.readLittleEndian(List.take(tail, width)), rest = List.drop(tail, width))
+
+verify wide
+    wide(2, [1, 1, 9]) => Count(value = 257, rest = [9])
+    wide(4, [0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9])
+
+fn widthOf(head: Int) -> Int
+    ? "How many bytes the count occupies, its marker included."
+      "For a caller that only needs to step over the count rather than read it."
+    match head
+        253 -> 3
+        254 -> 5
+        255 -> 9
+        _ -> 1
+
+verify widthOf
+    widthOf(5) => 1
+    widthOf(252) => 1
+    widthOf(253) => 3
+    widthOf(254) => 5
+    widthOf(255) => 9

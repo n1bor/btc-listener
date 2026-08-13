@@ -8,8 +8,8 @@ module Segment
         "Segment of its own rather than split."
         "Everything here is pure arithmetic and text, so a Segment's layout is"
         "settled without touching Disk."
-    exposes [Placement, SegmentState, capBytes, nameOf, initial, place, lineFor, encodeLine, decodeLine, completeLines, blockAt]
-    depends [Bytes, Domain.Index]
+    exposes [Placement, SegmentState, capBytes, nameOf, initial, place, lineFor, encodeLine, decodeLine, blockAt]
+    depends [Bytes, Domain.Index, Domain.Text]
     effects []
 
 record SegmentState
@@ -41,7 +41,7 @@ verify nameWidth
 fn nameOf(segment: Int) -> String
     ? "The file a Segment lives in. Six digits allows a million of them, some two"
       "terabytes of Blocks, which is well past anything this program will hold."
-    "blk{padLeft(String.fromInt(segment), nameWidth())}.hex"
+    "blk{Domain.Text.padLeft(String.fromInt(segment), nameWidth())}.hex"
 
 verify nameOf
     nameOf(0) => "blk000000.hex"
@@ -49,17 +49,6 @@ verify nameOf
     nameOf(42) => "blk000042.hex"
     nameOf(999999) => "blk999999.hex"
     nameOf(1000000) => "blk1000000.hex"
-
-fn padLeft(text: String, width: Int) -> String
-    ? "Grow the text to the given width with leading zeroes, never shrinking it."
-    match String.len(text) >= width
-        true -> text
-        false -> padLeft("0" + text, width)
-
-verify padLeft
-    padLeft("7", 3) => "007"
-    padLeft("123", 3) => "123"
-    padLeft("1234", 3) => "1234"
 
 fn initial() -> SegmentState
     ? "Where a Store with no Segments starts."
@@ -141,48 +130,9 @@ verify decodeLine
     decodeLine("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
     decodeLine("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
 
-fn completeLines(contents: String) -> List<String>
-    ? "The lines a writer finished."
-      "Splitting on the terminator always leaves a final element that is not a"
-      "complete line: empty when the Segment ends in a newline as it should, and"
-      "the partial Block when an append was cut short. Dropping it is what makes"
-      "a resumed download tolerate a crash mid-write, at the cost of at most one"
-      "Block that has to be fetched again."
-    dropLast(String.split(contents, "\n"), [])
-
-verify completeLines
-    completeLines("") => []
-    completeLines("aa\n") => ["aa"]
-    completeLines("aa\nbb\n") => ["aa", "bb"]
-    completeLines("aa\nbb") => ["aa"]
-    completeLines("aa\nbb\ncc") => ["aa", "bb"]
-    completeLines("\n") => [""]
-
-fn dropLast(parts: List<String>, acc: List<String>) -> List<String>
-    ? "Everything but the final element."
-    match parts
-        [] -> List.reverse(acc)
-        [head, ..tail] -> keepUnlessLast(head, tail, acc)
-
-verify dropLast
-    dropLast([], []) => []
-    dropLast(["a"], []) => []
-    dropLast(["a", "b"], []) => ["a"]
-    dropLast(["a", "b", "c"], []) => ["a", "b"]
-
-fn keepUnlessLast(head: String, tail: List<String>, acc: List<String>) -> List<String>
-    ? "Keep this element only if something follows it."
-    match tail
-        [] -> List.reverse(acc)
-        [next, ..rest] -> dropLast(tail, List.prepend(head, acc))
-
-verify keepUnlessLast
-    keepUnlessLast("a", [], []) => []
-    keepUnlessLast("a", ["b"], []) => ["a"]
-
 fn blockAt(contents: String, line: Int) -> Result<Bytes, String>
     ? "The Block a Location names, from the Segment it names."
-    at(completeLines(contents), line, line)
+    at(Domain.Text.completeLines(contents), line, line)
 
 verify blockAt
     blockAt("0102ff\n", 0) => Result.Ok(Bytes.fromHex("0102ff")?)

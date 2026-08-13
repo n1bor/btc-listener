@@ -7,7 +7,7 @@ module Block
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
     exposes [BlockHeader, headerLength, decodeHeader, headersOf, blockIdOf, genesisBlockId, locatorHeights, getHeadersPayload]
-    depends [Bytes, Crypto.Digest32, Domain.Message, Domain.Network]
+    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network]
     effects []
 
 record BlockHeader
@@ -18,10 +18,6 @@ record BlockHeader
     timestamp: Int
     bits: Int
     nonce: Int
-
-record CompactSize
-    value: Int
-    rest: List<Int>
 
 fn headerLength() -> Int
     ? "A Block Header is always eighty bytes."
@@ -67,7 +63,7 @@ verify decodeHeader
 fn headerFrom(bytes: List<Int>) -> Result<BlockHeader, String>
     ? "Split eighty known-good bytes into the six fields and the Block Id."
     raw = Bytes.fromList(bytes)?
-    Result.Ok(BlockHeader(blockId = blockIdOf(raw), version = Domain.Message.readLittleEndian(List.take(bytes, 4)), previousBlockId = reversedHex(slice(bytes, 4, 32)), merkleRoot = reversedHex(slice(bytes, 36, 32)), timestamp = Domain.Message.readLittleEndian(slice(bytes, 68, 4)), bits = Domain.Message.readLittleEndian(slice(bytes, 72, 4)), nonce = Domain.Message.readLittleEndian(slice(bytes, 76, 4))))
+    Result.Ok(BlockHeader(blockId = blockIdOf(raw), version = Domain.Message.readLittleEndian(List.take(bytes, 4)), previousBlockId = Domain.Hash.reversedHex(slice(bytes, 4, 32)), merkleRoot = Domain.Hash.reversedHex(slice(bytes, 36, 32)), timestamp = Domain.Message.readLittleEndian(slice(bytes, 68, 4)), bits = Domain.Message.readLittleEndian(slice(bytes, 72, 4)), nonce = Domain.Message.readLittleEndian(slice(bytes, 76, 4))))
 
 verify headerFrom
     headerFrom(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?))?.timestamp => 1231006505
@@ -86,37 +82,11 @@ verify slice
 
 fn blockIdOf(header: Bytes) -> String
     ? "A Block Id is the Header's double-SHA256, displayed with its bytes reversed."
-    reversedHex(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(header))))
+    Domain.Hash.identifierOf(header)
 
 verify blockIdOf
     blockIdOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
     blockIdOf(Bytes.fromHex("010000004860eb18bf1b1620e37e9490fc8a427514416fd75159ab86688e9a8300000000d5fdcc541e25de1c7a5addedf24858b8bb665c9f36ef744ee42c316022c90f9bb0bc6649ffff001d08d2bd61")?) => "000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"
-
-fn doubleSha(payload: Bytes) -> Digest32
-    ? "SHA-256 applied twice, as Bitcoin does everywhere it hashes."
-    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
-
-verify doubleSha
-    Crypto.Digest32.toHex(doubleSha(Bytes.fromList([97, 98, 99]))) => "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358"
-
-fn reversedHex(bytes: List<Int>) -> String
-    ? "Block Ids, previous Block Ids and merkle roots are all displayed reversed."
-    Result.withDefault(hexOfReversed(bytes), "")
-
-verify reversedHex
-    reversedHex([1, 2]) => "0201"
-    reversedHex([]) => ""
-    reversedHex([256]) => ""
-
-fn hexOfReversed(bytes: List<Int>) -> Result<String, String>
-    ? "Reverse the bytes and render them as hex."
-    reversed = Bytes.fromList(List.reverse(bytes))?
-    Result.Ok(Bytes.toHex(reversed))
-
-verify hexOfReversed
-    hexOfReversed([1, 2]) => Result.Ok("0201")
-    hexOfReversed([]) => Result.Ok("")
-    hexOfReversed([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
 
 fn genesisBlockId(network: Network) -> String
     ? "The first Block of each Network, where every Locator ultimately ends."
@@ -132,7 +102,7 @@ verify genesisBlockId
 
 fn headersOf(payload: List<Int>) -> Result<List<BlockHeader>, String>
     ? "Read a headers Message: a count, then that many Headers each followed by a zero."
-    count = readCompactSize(payload)
+    count = Domain.CompactSize.read(payload)
     headersInto(count.value, count.rest, [])
 
 verify headersOf
@@ -159,35 +129,6 @@ fn oneHeader(remaining: Int, bytes: List<Int>, acc: List<BlockHeader>) -> Result
 verify oneHeader
     oneHeader(1, [], []) => Result.Err("Block Header must be 80 bytes, got 0")
     List.len(oneHeader(1, List.concat(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?), [0]), [])?) => 1
-
-fn readCompactSize(bytes: List<Int>) -> CompactSize
-    ? "Bitcoin's variable-width count, and whatever follows it."
-    match bytes
-        [] -> CompactSize(value = 0, rest = [])
-        [head, ..tail] -> sizeFrom(head, tail)
-
-verify readCompactSize
-    readCompactSize([]).value => 0
-    readCompactSize([5, 9]).value => 5
-    readCompactSize([5, 9]).rest => [9]
-    readCompactSize([253, 208, 7, 9]).value => 2000
-    readCompactSize([253, 208, 7, 9]).rest => [9]
-    readCompactSize([254, 0, 0, 1, 0, 9]).value => 65536
-
-fn sizeFrom(head: Int, tail: List<Int>) -> CompactSize
-    ? "Values below 253 are the byte itself; the three markers name a wider field."
-    match head
-        253 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 2)), rest = List.drop(tail, 2))
-        254 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 4)), rest = List.drop(tail, 4))
-        255 -> CompactSize(value = Domain.Message.readLittleEndian(List.take(tail, 8)), rest = List.drop(tail, 8))
-        _ -> CompactSize(value = head, rest = tail)
-
-verify sizeFrom
-    sizeFrom(5, [9]).value => 5
-    sizeFrom(252, []).value => 252
-    sizeFrom(253, [208, 7]).value => 2000
-    sizeFrom(254, [0, 0, 1, 0]).value => 65536
-    sizeFrom(255, [1, 0, 0, 0, 0, 0, 0, 0]).value => 1
 
 fn locatorHeights(top: Int) -> List<Int>
     ? "The Heights a Locator names: ten in a row from the top, then doubling gaps, then genesis."

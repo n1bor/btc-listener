@@ -1,0 +1,51 @@
+module Hash
+    intent =
+        "How Bitcoin hashes, and how it displays what it hashed."
+        "Two conventions the protocol applies everywhere, and which four modules"
+        "had each rebuilt for themselves: every hash is SHA-256 applied twice, and"
+        "every identifier derived from one is shown with its bytes reversed."
+        "The reversal is a display concern only. Bytes on the wire are never"
+        "reversed, so a value that has been through identifierOf is for reading"
+        "and never for hashing again."
+    exposes [doubleSha, identifierOf, reversedHex]
+    depends [Bytes, Crypto.Digest32]
+    effects []
+
+fn doubleSha(payload: Bytes) -> Digest32
+    ? "SHA-256 applied twice, as Bitcoin does everywhere it hashes."
+    Crypto.sha256(Crypto.Digest32.toBytes(Crypto.sha256(payload)))
+
+verify doubleSha
+    Crypto.Digest32.toHex(doubleSha(Bytes.fromList([97, 98, 99]))) => "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358"
+    Crypto.Digest32.toHex(doubleSha(Bytes.fromList([]))) => "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456"
+
+fn identifierOf(payload: Bytes) -> String
+    ? "The name Bitcoin gives a serialised thing: its double-SHA256, reversed."
+      "A Transaction Id and a Block Id are the same construction over different"
+      "bytes, which is why they are one function here."
+    reversedHex(Bytes.toList(Crypto.Digest32.toBytes(doubleSha(payload))))
+
+verify identifierOf
+    identifierOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    identifierOf(Bytes.fromHex("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299")?) => "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
+
+fn reversedHex(bytes: List<Int>) -> String
+    ? "Hash-shaped bytes rendered for a reader, which means back to front."
+      "Total: the caller has always come from a digest or a slice of validated"
+      "Bytes, so an octet out of range cannot arise and renders as empty."
+    Result.withDefault(hexOfReversed(bytes), "")
+
+verify reversedHex
+    reversedHex([1, 2]) => "0201"
+    reversedHex([]) => ""
+    reversedHex([256]) => ""
+
+fn hexOfReversed(bytes: List<Int>) -> Result<String, String>
+    ? "Reverse the bytes and render them as hex."
+    reversed = Bytes.fromList(List.reverse(bytes))?
+    Result.Ok(Bytes.toHex(reversed))
+
+verify hexOfReversed
+    hexOfReversed([1, 2]) => Result.Ok("0201")
+    hexOfReversed([]) => Result.Ok("")
+    hexOfReversed([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
