@@ -1,0 +1,99 @@
+module Show
+    intent =
+        "How one Block is put in front of a reader."
+        "Presentation only. Infra.Chain decides what is known about a Height and"
+        "this decides how to say it, which is why nothing here reads a disk and"
+        "every function is covered by cases rather than by running the program."
+        "A body that will not decode is described rather than raised. show is"
+        "what you reach for when something looks wrong, and an error that hid"
+        "the rest of the report would be the wrong trade."
+    exposes [describeFound]
+    depends [Bytes, Domain.Block, Domain.Index, Domain.Transaction, Infra.Chain]
+    effects []
+
+fn describeFound(found: Found, below: Int) -> List<String>
+    ? "The Height and its Block Id, then whatever is known about the body."
+    List.concat(["height {found.height}", "block  {found.blockId}"], describeBody(found, below))
+
+verify describeFound
+    describeFound(Found(height = 7, blockId = "aa", body = Body.NotFetched), 0) => ["height 7", "block  aa", "body   not fetched"]
+    describeFound(Found(height = 7, blockId = "aa", body = Body.Discarded), 500) => ["height 7", "block  aa", "body   discarded by pruning, Prune Watermark 500"]
+
+fn describeBody(found: Found, below: Int) -> List<String>
+    ? "Held Blocks are checked against the Block Id the Index recorded."
+    match found.body
+        Body.NotFetched -> ["body   not fetched"]
+        Body.Discarded -> ["body   discarded by pruning, Prune Watermark {below}"]
+        Body.Held(location, payload) -> describeHeld(found, location, payload)
+
+verify describeBody
+    describeBody(Found(height = 1, blockId = "aa", body = Body.NotFetched), 0) => ["body   not fetched"]
+    describeBody(Found(height = 1, blockId = "aa", body = Body.Discarded), 5) => ["body   discarded by pruning, Prune Watermark 5"]
+    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0)) => 3
+
+fn describeHeld(found: Found, location: Location, payload: Bytes) -> List<String>
+    ? "Re-derive the Block Id from the bytes on disk and say whether it agrees."
+      "This is the only thing that checks the whole round trip inside Aver: the"
+      "Header was decoded from the wire, the bytes were written to a Segment, the"
+      "Location was recorded against the Block Id, and hashing what comes back"
+      "has to produce the Block Id the Index was asked for."
+    List.concat(
+        [
+            "body   segment {location.segment} line {location.line}, {List.len(Bytes.toList(payload))} bytes",
+            agreement(Domain.Block.idOfWholeBlock(payload), found.blockId),
+        ],
+        transactionLines(payload),
+    )
+
+verify describeHeld
+    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 3 line 9, 80 bytes", "check  header hashes to the recorded Block Id", "txs    0"]
+    describeHeld(Found(height = 0, blockId = "wrong", body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 0 line 0, 80 bytes", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "txs    0"]
+
+fn transactionLines(payload: Bytes) -> List<String>
+    ? "Every Transaction in the body, shown the way the listener shows one."
+      "A body that will not decode is reported rather than fatal. show is what"
+      "you reach for when something looks wrong, and the check above it is worth"
+      "more than an error that would stop you seeing it."
+      "A Block near the tip holds a few thousand Transactions and each takes"
+      "several lines, so this is worth piping somewhere."
+    match Domain.Block.transactionsOf(payload)
+        Result.Err(message) -> ["txs    cannot decode: {message}"]
+        Result.Ok(transactions) -> List.concat(["txs    {List.len(transactions)}"], summariesOf(transactions, []))
+
+verify transactionLines
+    transactionLines(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?) => ["txs    cannot decode: Transaction ends before its lock time"]
+    List.take(transactionLines(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 2) => ["txs    1", "tx 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"]
+    List.len(transactionLines(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)) => 5
+
+fn summariesOf(transactions: List<Transaction>, acc: List<String>) -> List<String>
+    ? "Each Transaction's summary, in the order the Block carries them."
+      "Accumulated in reverse and turned round once at the end, so the cost is"
+      "the number of lines rather than its square."
+    match transactions
+        [] -> List.reverse(acc)
+        [head, ..tail] -> summariesOf(tail, prependAll(Domain.Transaction.summaryLines(head), acc))
+
+verify summariesOf
+    summariesOf([], []) => []
+    summariesOf([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "aa", size = 9, isSegWit = false)], []) => ["tx aa", "   legacy, version 1, 0 in / 0 out, 9 bytes, locktime 0"]
+
+fn prependAll(lines: List<String>, acc: List<String>) -> List<String>
+    ? "Push each line onto the accumulator, keeping them in step."
+    match lines
+        [] -> acc
+        [head, ..tail] -> prependAll(tail, List.prepend(head, acc))
+
+verify prependAll
+    prependAll([], ["z"]) => ["z"]
+    prependAll(["a", "b"], []) => ["b", "a"]
+    prependAll(["a", "b"], ["z"]) => ["b", "a", "z"]
+
+fn agreement(derived: String, recorded: String) -> String
+    ? "Whether the bytes on disk hash to the Block Id the Index recorded."
+    match derived == recorded
+        true -> "check  header hashes to the recorded Block Id"
+        false -> "check  MISMATCH: bytes on disk hash to {derived}"
+
+verify agreement
+    agreement("aa", "aa") => "check  header hashes to the recorded Block Id"
+    agreement("aa", "bb") => "check  MISMATCH: bytes on disk hash to aa"

@@ -116,15 +116,37 @@ reaching them means letting `headers` finish first.
 
 ### Looking at one Block
 
-`show` reads a Block back off disk and checks it. It needs no Peer.
+`show` reads a Block back off disk, checks it, and prints its Transactions the
+same way the listener prints loose ones. It needs no Peer.
 
 ```bash
-./target/release/main show ~/chain 1
-height 1
-block  00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048
-body   segment 0 line 0, 215 bytes
-txs    1
+./target/release/main show ~/chain 170
+height 170
+block  00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee
+body   segment 0 line 5, 490 bytes
 check  header hashes to the recorded Block Id
+txs    2
+tx b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082
+   legacy, version 1, 1 in / 1 out, 134 bytes, locktime 0
+   in  0000000000000000000000000000000000000000000000000000000000000000:4294967295 seq 4294967295 witness 0
+   out 50.00000000 BTC  nonstandard 4104d46c4968bde02899d2aa0963367c7a6…
+tx f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+   legacy, version 1, 1 in / 2 out, 275 bytes, locktime 0
+   in  0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9:0 seq 4294967295 witness 0
+   out 10.00000000 BTC  nonstandard 4104ae1a62fe09c5f51b13905f07f06b99a…
+   out 40.00000000 BTC  nonstandard 410411db93e1dcdb8a016b49840f8c53bc1…
+```
+
+That is Block 170: the first payment anyone made in Bitcoin, ten coins from
+Satoshi to Hal Finney with forty back as change. Those outputs pay a public key
+directly rather than a hash of one, which no longer has a standard address form,
+so they are shown as their raw script.
+
+A Block near the tip carries a few thousand Transactions and each takes several
+lines, so pipe it somewhere:
+
+```bash
+./target/release/main show ~/chain 800000 | head -40
 ```
 
 That last line is the only thing that tests the whole round trip inside Aver:
