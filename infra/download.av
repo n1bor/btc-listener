@@ -84,16 +84,36 @@ fn heightsHeld(store: Store, height: Int) -> Result<Int, String>
     ? "How many Heights the Index already names, counting up from genesis."
       "Walking beats keeping a tip record: a lookup is cheap, and a count that"
       "cannot disagree with the entries is worth more than one that can."
-    held = Infra.Store.has(store, Domain.Index.heightKey(height))?
-    match held
-        false -> Result.Ok(height)
-        true -> heightsHeld(store, height + 1)
+      "What is counted is checked, but only for presence. A Height that names"
+      "nothing is not a Height the Index names."
+    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(height)
+        Option.Some(blockId) -> heightAfter(store, height, blockId)
 
 verify heightsHeld
     heightsHeld(Infra.Store.fixture([]), 0) => Result.Ok(0)
     heightsHeld(Infra.Store.fixture([("h:00000000", "aa")]), 0) => Result.Ok(1)
     heightsHeld(Infra.Store.fixture([("h:00000000", "aa"), ("h:00000001", "bb")]), 0) => Result.Ok(2)
     heightsHeld(Infra.Store.fixture([("h:00000001", "bb")]), 0) => Result.Ok(0)
+    heightsHeld(Infra.Store.fixture([("h:00000000", "")]), 0) => Result.Err("index has no Block Id at height 0")
+
+fn heightAfter(store: Store, height: Int, blockId: String) -> Result<Int, String>
+    ? "A Height has to name something, then the walk carries on."
+      "Presence rather than a decode, and the difference is measured rather than"
+      "assumed. Reading the value instead of only asking whether the key is there"
+      "costs 0.2 seconds per sixty thousand Heights; decoding each one as well"
+      "costs 3.2, which is near a minute on a finished Index and is paid on every"
+      "run, including a resume that then fetches nothing. The Locator decodes the"
+      "Block Ids it actually uses, so a malformed one is still caught -- there,"
+      "where it is about to be sent, rather than here where it is being counted."
+    match String.len(blockId) > 0
+        false -> Result.Err("index has no Block Id at height {height}")
+        true -> heightsHeld(store, height + 1)
+
+verify heightAfter
+    heightAfter(Infra.Store.fixture([]), 0, "aa") => Result.Ok(1)
+    heightAfter(Infra.Store.fixture([]), 0, "") => Result.Err("index has no Block Id at height 0")
 
 fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
@@ -160,12 +180,15 @@ fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int
       "genesis and stays silent on an empty one — so an Index with nothing in it"
       "still has to say where the chain starts."
     ids = idsHeld(store, have)?
-    Result.Ok(orGenesis(network, ids))
+    match ids
+        [] -> Result.Ok([wireOrder(Domain.Block.genesisBlockId(network))?])
+        [head, ..tail] -> Result.Ok(ids)
 
 verify locatorFor
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
     locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
     ? "The Block Ids the Index can supply for a Locator."
@@ -176,16 +199,7 @@ fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
 verify idsHeld
     idsHeld(Infra.Store.fixture([]), 0) => Result.Ok([])
     idsHeld(Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
-
-fn orGenesis(network: Network, ids: List<List<Int>>) -> List<List<Int>>
-    ? "Fall back to genesis rather than send a Locator the Peer will ignore."
-    match ids
-        [] -> [wireOrder(Domain.Block.genesisBlockId(network))]
-        [head, ..tail] -> ids
-
-verify orGenesis
-    orGenesis(Network.Mainnet, [[1, 2]]) => [[1, 2]]
-    List.len(orGenesis(Network.Mainnet, [])) => 1
+    idsHeld(Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Block Id held at each Height, in wire order rather than display order."
@@ -197,6 +211,7 @@ verify idsAt
     idsAt(Infra.Store.fixture([]), [], []) => Result.Ok([])
     idsAt(Infra.Store.fixture([("h:00000000", "0102")]), [0], []) => Result.Ok([[2, 1]])
     idsAt(Infra.Store.fixture([]), [0], []) => Result.Ok([])
+    idsAt(Infra.Store.fixture([("h:00000000", "zz")]), [0], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn nextId(store: Store, height: Int, tail: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Take the Block Id at one Height, then carry on with the rest."
@@ -206,38 +221,50 @@ fn nextId(store: Store, height: Int, tail: List<Int>, acc: List<List<Int>>) -> R
 verify nextId
     nextId(Infra.Store.fixture([("h:00000000", "0102")]), 0, [], []) => Result.Ok([[2, 1]])
     nextId(Infra.Store.fixture([]), 0, [], []) => Result.Ok([])
+    nextId(Infra.Store.fixture([("h:00000000", "zz")]), 0, [], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn prependId(store: Store, height: Int, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Add the Block Id at a Height, skipping a Height the Index does not name."
     found = Infra.Store.get(store, Domain.Index.heightKey(height))?
     match found
         Option.None -> Result.Ok(acc)
-        Option.Some(id) -> Result.Ok(List.prepend(wireOrder(id), acc))
+        Option.Some(id) -> prependDecoded(id, acc)
 
 verify prependId
     prependId(Infra.Store.fixture([]), 0, []) => Result.Ok([])
     prependId(Infra.Store.fixture([("h:00000000", "0102")]), 0, []) => Result.Ok([[2, 1]])
+    prependId(Infra.Store.fixture([("h:00000000", "zz")]), 0, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn wireOrder(blockId: String) -> List<Int>
+fn prependDecoded(id: String, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "The Index named a Block Id, which still has to be one."
+    wire = wireOrder(id)?
+    Result.Ok(List.prepend(wire, acc))
+
+verify prependDecoded
+    prependDecoded("0102", []) => Result.Ok([[2, 1]])
+    prependDecoded("zz", []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn wireOrder(blockId: String) -> Result<List<Int>, String>
     ? "A Block Id goes back to front on the wire, being displayed reversed."
-      "Total: hex that will not decode becomes an empty entry rather than an"
-      "error, which is only safe because of where these Block Ids come from."
-      "Every one is either a genesisBlockId literal or a value the header phase"
-      "wrote, and those are built by Domain.Hash.identifierOf over a digest, so"
-      "they are always sixty-four hexadecimal characters."
-      "Were that to stop holding, the cost would land somewhere unhelpful."
-      "Neither getHeadersPayload nor getDataPayload checks that an entry is"
-      "thirty-two bytes, so a short one is concatenated as it stands and the"
-      "count prefix then disagrees with the bytes that follow it. The Peer sees"
-      "a malformed Message and this end sees no reply, reported as 'no headers"
-      "after 200 messages' -- which names neither the Block Id nor the hex that"
-      "caused it."
-    List.reverse(Bytes.toList(Result.withDefault(Bytes.fromHex(blockId), Bytes.fromList([]))))
+      "Hex that will not decode is an error rather than an empty entry. It used"
+      "to be swallowed, on the grounds that every Block Id here comes from a"
+      "genesisBlockId literal or from Domain.Hash.identifierOf over a digest and"
+      "so cannot be malformed -- true, but it made the one thing that could go"
+      "wrong go wrong invisibly. Neither getHeadersPayload nor getDataPayload"
+      "checks that an entry is thirty-two bytes, so a short one would be sent as"
+      "it stands, the count prefix would disagree with the bytes after it, and"
+      "the Peer would answer a malformed Message with silence. That surfaced as"
+      "'no headers after 200 messages', naming neither the Block Id nor the hex."
+      "Reading it back out of the Store is what makes this reachable: the Index"
+      "is a file, and a file can be truncated, edited or corrupted between runs."
+    bytes = Bytes.fromHex(blockId)?
+    Result.Ok(List.reverse(Bytes.toList(bytes)))
 
 verify wireOrder
-    wireOrder("0102") => [2, 1]
-    wireOrder("") => []
-    wireOrder("zz") => []
+    wireOrder("0102") => Result.Ok([2, 1])
+    wireOrder("") => Result.Ok([])
+    wireOrder("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    wireOrder("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
 
 fn awaitFrame(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
     ? "Read until the wanted Message arrives, dealing with whatever else turns up."
@@ -332,7 +359,8 @@ fn maybeFetch(connection: Tcp.Connection, network: Network, progress: Progress, 
 fn fetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
     ? "Ask for one Block and wait for it."
     ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
-    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wireOrder(blockId)])?
+    wanted = wireOrder(blockId)?
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wanted])?
     _sent = Infra.Peer.send(connection, network, "getdata", payload)?
     frame = awaitFrame(connection, network, "block", frameBudget())?
     keep(connection, network, progress, height, to, blockId, frame)
