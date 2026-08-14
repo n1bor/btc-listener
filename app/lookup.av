@@ -1,0 +1,67 @@
+module Lookup
+    intent =
+        "The two commands that start from a Transaction Id rather than a Height."
+        "tx shows the Transaction and spend follows its Inputs back to what they"
+        "spend. They take the same two arguments and do the same three lookups"
+        "to get there, so they are one path with a choice at the end rather than"
+        "two paths that happen to agree."
+    exposes [byTxid]
+    depends [App.Show, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    effects [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+
+fn byTxid(rest: List<String>, spending: Bool) -> Unit
+    ? "Both commands want a directory and a Transaction Id."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match rest
+        [] -> Console.error("usage: <dir> <txid>")
+        [dir, ..more] -> withTxid(dir, more, spending)
+
+fn withTxid(dir: String, more: List<String>, spending: Bool) -> Unit
+    ? "The Transaction Id follows the directory."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match more
+        [] -> Console.error("usage: <dir> <txid>")
+        [txid, ..extra] -> said(txidRun(dir, txid, spending))
+
+fn txidRun(dir: String, txid: String, spending: Bool) -> Result<List<String>, String>
+    ? "Find the Transaction, then either show it or check what it spends."
+    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open("{dir}/blocks")?
+    sited = Infra.Store.get(store, Domain.Index.txKey(txid))?
+    found = Infra.Chain.transactionAt(store, blocks, txid)?
+    transaction = App.Show.transactionSited(found, txid, sited)?
+    reported(store, blocks, transaction, txid, sited, found, spending)
+
+fn reported(store: Store, blocks: BlockStore, transaction: Transaction, txid: String, sited: Option<String>, found: Found, spending: Bool) -> Result<List<String>, String>
+    ? "Which of the two reports was asked for."
+    ! [Disk.readText]
+    match spending
+        false -> App.Show.describeSited(found, txid, sited)
+        true -> spendReport(store, blocks, transaction)
+
+fn spendReport(store: Store, blocks: BlockStore, transaction: Transaction) -> Result<List<String>, String>
+    ? "Follow every Input back and report whether the Transaction adds up."
+    ! [Disk.readText]
+    tally = Infra.Spends.checked(store, blocks, transaction)?
+    Result.Ok(App.Show.describeSpend(transaction, tally))
+
+fn said(outcome: Result<List<String>, String>) -> Unit
+    ? "Print the lines, or the reason there are none."
+    ! [Console.error, Console.print]
+    match outcome
+        Result.Ok(lines) -> printLines(lines)
+        Result.Err(message) -> Console.error("error: {message}")
+
+fn printLines(lines: List<String>) -> Unit
+    ? "Print each line in turn."
+    ! [Console.print]
+    match lines
+        [] -> Unit
+        [head, ..tail] -> printThen(head, tail)
+
+fn printThen(line: String, rest: List<String>) -> Unit
+    ? "Print one line, then continue with the rest."
+    ! [Console.print]
+    _printed = Console.print(line)
+    printLines(rest)

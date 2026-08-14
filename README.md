@@ -226,6 +226,38 @@ Transaction index is exactly what `infra/store.av` says it cannot back. Over a
 range it works today, and the keyspace is the one a real database would be
 given.
 
+### Checking a spend
+
+`spend` follows each Input back to the Output it spends and reports whether the
+Transaction adds up. No Peer, and `txindex` must cover the Blocks the parents
+are in.
+
+```bash
+./target/release/main spend ~/chain f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+txid   f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+in     50.00000000 BTC over 1 inputs
+out    50.00000000 BTC over 2 outputs
+spend  inputs cover outputs, fee 0.00000000 BTC
+```
+
+There are **three** answers, not two, and the difference matters more than the
+check does:
+
+```
+spend  inputs cover outputs, fee 0.00000000 BTC       # it adds up
+spend  INVALID: outputs exceed inputs by 0.5 BTC      # value was created
+spend  cannot tell: transaction 0437cd7f… is not indexed
+```
+
+Over a chain held in part most lookups fail for want of coverage. Reporting
+that as invalid would make the whole check worthless, so a gap in what we hold
+and a fault in the Transaction are never the same answer. A coinbase is
+answered separately again, because its Input spends nothing.
+
+**This is not full validation.** It checks that the Outputs being spent exist
+and that value is not created. Whether the spender was *entitled* to spend them
+is a signature question, and Aver has no secp256k1 — see the note at the end.
+
 ### Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.

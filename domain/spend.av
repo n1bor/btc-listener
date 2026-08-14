@@ -1,0 +1,145 @@
+module Spend
+    intent =
+        "What an Input spends, and whether a Transaction adds up."
+        "Three answers, not two. An Input whose parent is not indexed is not an"
+        "Input that is wrong: over a chain held in part, most lookups fail for"
+        "want of coverage, and reporting that as invalid would make the whole"
+        "check worthless. Unknown and Invalid are kept apart everywhere."
+        "Nothing here is about signatures. Whether the spender was entitled to"
+        "spend needs secp256k1, which Aver has not got. What is checked is that"
+        "the Outputs being spent exist and that value is not created."
+    exposes [Spend, Verdict, Tally, coinbaseTxid, isCoinbaseInput, started, absorb, markCoinbase, verdictOf, feeOf]
+    depends []
+    effects []
+
+type Spend
+    Resolved(Int)
+    Unknown(String)
+    Invalid(String)
+
+type Verdict
+    Conserved
+    Created(Int)
+    Incomplete(String)
+    Broken(String)
+    Coinbase
+
+record Tally
+    spent: Int
+    unknown: Option<String>
+    invalid: Option<String>
+    coinbase: Bool
+
+fn coinbaseTxid() -> String
+    ? "The Transaction Id a coinbase Input names, which is no Transaction at all."
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+verify coinbaseTxid
+    String.len(coinbaseTxid()) => 64
+
+fn isCoinbaseInput(previousTxid: String) -> Bool
+    ? "A coinbase Input spends nothing and names the empty Transaction Id."
+    previousTxid == coinbaseTxid()
+
+verify isCoinbaseInput
+    isCoinbaseInput(coinbaseTxid()) => true
+    isCoinbaseInput("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16") => false
+    isCoinbaseInput("") => false
+
+fn started() -> Tally
+    ? "Nothing resolved yet."
+    Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false)
+
+verify started
+    started() => Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false)
+
+fn absorb(tally: Tally, spend: Spend) -> Tally
+    ? "Fold one Input's answer into the running total."
+      "The first Unknown and the first Invalid are kept and later ones dropped:"
+      "one reason is enough to explain the verdict, and the first is the one a"
+      "reader can act on."
+    match spend
+        Spend.Resolved(value) -> Tally(spent = tally.spent + value, unknown = tally.unknown, invalid = tally.invalid, coinbase = tally.coinbase)
+        Spend.Unknown(why) -> Tally(spent = tally.spent, unknown = Option.Some(firstReason(tally.unknown, why)), invalid = tally.invalid, coinbase = tally.coinbase)
+        Spend.Invalid(why) -> Tally(spent = tally.spent, unknown = tally.unknown, invalid = Option.Some(firstReason(tally.invalid, why)), coinbase = tally.coinbase)
+
+verify absorb
+    absorb(started(), Spend.Resolved(500)) => Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false)
+    absorb(absorb(started(), Spend.Resolved(500)), Spend.Resolved(200)).spent => 700
+    absorb(started(), Spend.Unknown("no record")).unknown => Option.Some("no record")
+    absorb(started(), Spend.Invalid("no such output")).invalid => Option.Some("no such output")
+    absorb(absorb(started(), Spend.Unknown("first")), Spend.Unknown("second")).unknown => Option.Some("first")
+
+fn firstReason(held: Option<String>, found: String) -> String
+    ? "The reason already recorded, or this one if there was none."
+    match held
+        Option.None -> found
+        Option.Some(already) -> already
+
+verify firstReason
+    firstReason(Option.None, "a") => "a"
+    firstReason(Option.Some("a"), "b") => "a"
+
+fn markCoinbase(tally: Tally) -> Tally
+    ? "This Transaction mints rather than spends."
+    Tally(spent = tally.spent, unknown = tally.unknown, invalid = tally.invalid, coinbase = true)
+
+verify markCoinbase
+    markCoinbase(started()).coinbase => true
+
+fn verdictOf(tally: Tally, paid: Int) -> Verdict
+    ? "What the tally says, once every Input has been looked at."
+      "Order matters. Something known to be wrong outranks something unknown,"
+      "and both outrank arithmetic that cannot be trusted until they are"
+      "settled. A coinbase is answered first because its Inputs never resolve."
+    match tally.coinbase
+        true -> Verdict.Coinbase
+        false -> settledVerdict(tally, paid)
+
+verify verdictOf
+    verdictOf(markCoinbase(started()), 5000000000) => Verdict.Coinbase
+    verdictOf(Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => Verdict.Conserved
+    verdictOf(Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), 700) => Verdict.Created(200)
+    verdictOf(Tally(spent = 0, unknown = Option.Some("why"), invalid = Option.None, coinbase = false), 1) => Verdict.Incomplete("why")
+    verdictOf(Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), 1) => Verdict.Broken("i")
+
+fn settledVerdict(tally: Tally, paid: Int) -> Verdict
+    ? "A Transaction that is not a coinbase."
+    match tally.invalid
+        Option.Some(why) -> Verdict.Broken(why)
+        Option.None -> unknownOrSum(tally, paid)
+
+verify settledVerdict
+    settledVerdict(Tally(spent = 0, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), 1) => Verdict.Broken("i")
+    settledVerdict(Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => Verdict.Conserved
+
+fn unknownOrSum(tally: Tally, paid: Int) -> Verdict
+    ? "Nothing known to be wrong, so either something is unknown or it adds up."
+    match tally.unknown
+        Option.Some(why) -> Verdict.Incomplete(why)
+        Option.None -> sumVerdict(tally.spent, paid)
+
+verify unknownOrSum
+    unknownOrSum(Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), 1) => Verdict.Incomplete("u")
+    unknownOrSum(Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => Verdict.Conserved
+
+fn sumVerdict(spent: Int, paid: Int) -> Verdict
+    ? "Value may be destroyed as a fee, but never created."
+    match spent >= paid
+        true -> Verdict.Conserved
+        false -> Verdict.Created(paid - spent)
+
+verify sumVerdict
+    sumVerdict(700, 500) => Verdict.Conserved
+    sumVerdict(500, 500) => Verdict.Conserved
+    sumVerdict(500, 700) => Verdict.Created(200)
+
+fn feeOf(tally: Tally, paid: Int) -> Int
+    ? "What was spent and not paid out, which the miner takes."
+      "Only meaningful once the verdict is Conserved; anything else has an"
+      "Input this could not account for and the number would be a guess."
+    tally.spent - paid
+
+verify feeOf
+    feeOf(Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => 200
+    feeOf(Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => 0

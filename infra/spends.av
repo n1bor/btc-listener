@@ -1,0 +1,140 @@
+module Spends
+    intent =
+        "Following an Input back to the Output it spends."
+        "An Input names its parent by Transaction Id, so this is the t: keyspace"
+        "used for the thing it was built for: find the Transaction, take the"
+        "Output at the named position, and that is what is being spent."
+        "Every step can come up empty for a different reason, and only one of"
+        "them means the Input is wrong. Not indexed and not held are gaps in"
+        "what we have; a position past the end of a Transaction that we do hold"
+        "is a fault in the Input itself. Domain.Spend keeps the two apart and"
+        "this decides which is which."
+        "Each parent read costs a whole Block, and the parents of one"
+        "Transaction are scattered across the chain, so there is nothing to"
+        "share between them the way a scan in Height order shares a Segment."
+    exposes [checked, resolve]
+    depends [Domain.Block, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Store]
+    effects [Disk.readText]
+
+fn checked(store: Store, blocks: BlockStore, transaction: Transaction) -> Result<Tally, String>
+    ? "Look up every Input of a Transaction and total what it spends."
+    ! [Disk.readText]
+    over(store, blocks, Domain.Transaction.inputsOf(transaction), Domain.Spend.started())
+
+fn over(store: Store, blocks: BlockStore, inputs: List<Input>, tally: Tally) -> Result<Tally, String>
+    ? "Each Input in turn."
+    ! [Disk.readText]
+    match inputs
+        [] -> Result.Ok(tally)
+        [head, ..tail] -> nextInput(store, blocks, head, tail, tally)
+
+fn nextInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, tally: Tally) -> Result<Tally, String>
+    ? "A coinbase Input spends nothing, and marks the whole Transaction."
+    ! [Disk.readText]
+    match Domain.Spend.isCoinbaseInput(Domain.Transaction.previousTxidOf(input))
+        true -> over(store, blocks, tail, Domain.Spend.markCoinbase(tally))
+        false -> resolvedInput(store, blocks, input, tail, tally)
+
+fn resolvedInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, tally: Tally) -> Result<Tally, String>
+    ? "Follow one Input back and fold the answer in."
+    ! [Disk.readText]
+    spend = resolve(store, blocks, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
+    over(store, blocks, tail, Domain.Spend.absorb(tally, spend))
+
+fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
+    ? "What the Output at this position of this Transaction is worth."
+      "Not indexed is Unknown rather than Invalid: the t: keyspace covers the"
+      "Heights someone chose to index, and everything else in the chain is"
+      "simply absent from it."
+    ! [Disk.readText]
+    sited = Infra.Store.get(store, Domain.Index.txKey(previousTxid))?
+    match sited
+        Option.None -> Result.Ok(Spend.Unknown("transaction {previousTxid} is not indexed"))
+        Option.Some(text) -> atSite(store, blocks, text, position)
+
+fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Result<Spend, String>
+    ? "The site names a Block; the Index says whether its bytes are held."
+    ! [Disk.readText]
+    site = Domain.Index.decodeTxSite(text)?
+    located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
+    match located
+        Option.None -> Result.Ok(Spend.Unknown("block {site.blockId} is not held"))
+        Option.Some(where) -> inBlock(blocks, where, site, position)
+
+fn inBlock(blocks: BlockStore, where: String, site: TxSite, position: Int) -> Result<Spend, String>
+    ? "Read the Block and take the Transaction the site points at."
+    ! [Disk.readText]
+    location = Domain.Index.decodeLocation(where)?
+    payload = Infra.Blocks.read(blocks, location)?
+    transactions = Domain.Block.transactionsOf(payload)?
+    Result.Ok(outputAt(nth(transactions, site.position), site, position))
+
+fn nth(transactions: List<Transaction>, remaining: Int) -> Option<Transaction>
+    ? "The Transaction at a position, or nothing when the Block is shorter."
+    match transactions
+        [] -> Option.None
+        [head, ..tail] -> takeOrWalk(head, tail, remaining)
+
+verify nth
+    nth([], 0) => Option.None
+    nth([sampleTx()], 0) => Option.Some(sampleTx())
+    nth([sampleTx()], 1) => Option.None
+
+fn takeOrWalk(head: Transaction, tail: List<Transaction>, remaining: Int) -> Option<Transaction>
+    ? "This is the one when the count runs out."
+    match remaining <= 0
+        true -> Option.Some(head)
+        false -> nth(tail, remaining - 1)
+
+verify takeOrWalk
+    takeOrWalk(sampleTx(), [], 0) => Option.Some(sampleTx())
+    takeOrWalk(sampleTx(), [], 1) => Option.None
+
+fn outputAt(found: Option<Transaction>, site: TxSite, position: Int) -> Spend
+    ? "A Block we hold that is shorter than its own Index entry is broken."
+    match found
+        Option.None -> Spend.Invalid("block {site.blockId} has no transaction at position {site.position}")
+        Option.Some(transaction) -> valueAt(Domain.Transaction.outputsOf(transaction), position, position)
+
+verify outputAt
+    outputAt(Option.None, Domain.Index.TxSite(blockId = "aa", position = 3), 0) => Spend.Invalid("block aa has no transaction at position 3")
+    outputAt(Option.Some(sampleTx()), Domain.Index.TxSite(blockId = "aa", position = 0), 0) => Spend.Resolved(5000)
+    outputAt(Option.Some(sampleTx()), Domain.Index.TxSite(blockId = "aa", position = 0), 4) => Spend.Invalid("output 4 is past the end of the transaction")
+
+fn valueAt(outputs: List<Output>, remaining: Int, position: Int) -> Spend
+    ? "What the Output at a position holds."
+      "An Input naming an Output past the end of a Transaction we hold is wrong,"
+      "not unknown. That is the one thing here that condemns an Input outright."
+    match outputs
+        [] -> Spend.Invalid("output {position} is past the end of the transaction")
+        [head, ..tail] -> valueOrWalk(head, tail, remaining, position)
+
+verify valueAt
+    valueAt([], 0, 0) => Spend.Invalid("output 0 is past the end of the transaction")
+    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 0, 0) => Spend.Resolved(5000)
+    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 1, 1) => Spend.Resolved(7000)
+    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 2, 2) => Spend.Invalid("output 2 is past the end of the transaction")
+
+fn valueOrWalk(head: Output, tail: List<Output>, remaining: Int, position: Int) -> Spend
+    ? "This is the Output when the count runs out."
+    match remaining <= 0
+        true -> Spend.Resolved(Domain.Transaction.valueOf(head))
+        false -> valueAt(tail, remaining - 1, position)
+
+verify valueOrWalk
+    valueOrWalk(Output(value = 5000, script = ""), [], 0, 0) => Spend.Resolved(5000)
+    valueOrWalk(Output(value = 5000, script = ""), [], 1, 1) => Spend.Invalid("output 1 is past the end of the transaction")
+
+fn sampleOutputs() -> List<Output>
+    ? "Two Outputs, for the cases above."
+    [Output(value = 5000, script = ""), Output(value = 7000, script = "")]
+
+verify sampleOutputs
+    List.len(sampleOutputs()) => 2
+
+fn sampleTx() -> Transaction
+    ? "A Transaction carrying those Outputs, for the cases above."
+    Transaction(version = 1, inputs = [], outputs = sampleOutputs(), lockTime = 0, txid = "cc", size = 9, isSegWit = false)
+
+verify sampleTx
+    Domain.Transaction.txidOf(sampleTx()) => "cc"

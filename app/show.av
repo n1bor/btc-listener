@@ -7,8 +7,8 @@ module Show
         "A body that will not decode is described rather than raised. show is"
         "what you reach for when something looks wrong, and an error that hid"
         "the rest of the report would be the wrong trade."
-    exposes [describeFound, describeSited]
-    depends [Bytes, Domain.Block, Domain.Index, Domain.Network, Domain.Transaction, Infra.Chain]
+    exposes [describeFound, describeSited, describeSpend, transactionSited]
+    depends [Bytes, Domain.Block, Domain.Index, Domain.Network, Domain.Spend, Domain.Transaction, Infra.Chain]
     effects []
 
 fn describeFound(found: Found, below: Int, withTransactions: Bool) -> List<String>
@@ -230,13 +230,23 @@ verify describeTransaction
 
 fn describeSited(found: Found, txid: String, sited: Option<String>) -> Result<List<String>, String>
     ? "The Transaction a t: entry points at, taken out of the Block holding it."
+    transaction = transactionSited(found, txid, sited)?
     site = siteOrFail(txid, sited)?
-    pickedFrom(found, site)
+    Result.Ok(describeTransaction(site, transaction))
 
 verify describeSited
     describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), "cc", Option.None) => Result.Err("no record of transaction cc; index the Heights that hold it first")
     describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), "cc", Option.Some("aa:0")) => Result.Err("the Block holding it is not held")
     List.len(describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), "cc", Option.Some("aa:0"))?) => 6
+
+fn transactionSited(found: Found, txid: String, sited: Option<String>) -> Result<Transaction, String>
+    ? "The Transaction itself, for a caller that wants it rather than its lines."
+    site = siteOrFail(txid, sited)?
+    pickedFrom(found, site)
+
+verify transactionSited
+    Domain.Transaction.txidOf(transactionSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), "cc", Option.Some("aa:0"))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+    transactionSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), "cc", Option.None) => Result.Err("no record of transaction cc; index the Heights that hold it first")
 
 fn siteOrFail(txid: String, sited: Option<String>) -> Result<TxSite, String>
     ? "The t: entry has to be there and has to parse."
@@ -249,7 +259,7 @@ verify siteOrFail
     siteOrFail("cc", Option.None) => Result.Err("no record of transaction cc; index the Heights that hold it first")
     siteOrFail("cc", Option.Some("nonsense")) => Result.Err("Transaction site must be blockId:position, got 'nonsense'")
 
-fn pickedFrom(found: Found, site: TxSite) -> Result<List<String>, String>
+fn pickedFrom(found: Found, site: TxSite) -> Result<Transaction, String>
     ? "Take the Transaction the site points at out of the Block."
     match found.body
         Body.NotFetched -> Result.Err("the Block holding it is not held")
@@ -259,18 +269,18 @@ fn pickedFrom(found: Found, site: TxSite) -> Result<List<String>, String>
 verify pickedFrom
     pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("the Block holding it is not held")
     pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Discarded), Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("the Block holding it was pruned")
-    List.len(pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), Domain.Index.TxSite(blockId = "aa", position = 0))?) => 6
+    Domain.Transaction.txidOf(pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), Domain.Index.TxSite(blockId = "aa", position = 0))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
 
-fn atPosition(payload: Bytes, site: TxSite) -> Result<List<String>, String>
+fn atPosition(payload: Bytes, site: TxSite) -> Result<Transaction, String>
     ? "The Transaction at the recorded position."
     transactions = Domain.Block.transactionsOf(payload)?
     nth(transactions, site.position, site)
 
 verify atPosition
-    List.len(atPosition(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 6
+    Domain.Transaction.txidOf(atPosition(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?, Domain.Index.TxSite(blockId = "aa", position = 0))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
     atPosition(Bytes.fromHex("00")?, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")
 
-fn nth(transactions: List<Transaction>, remaining: Int, site: TxSite) -> Result<List<String>, String>
+fn nth(transactions: List<Transaction>, remaining: Int, site: TxSite) -> Result<Transaction, String>
     ? "Walk to the recorded position, or report that the Block is shorter."
     match transactions
         [] -> Result.Err("block {site.blockId} has no transaction at position {site.position}")
@@ -278,14 +288,78 @@ fn nth(transactions: List<Transaction>, remaining: Int, site: TxSite) -> Result<
 
 verify nth
     nth([], 0, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")
-    List.len(nth([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false)], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 4
+    Domain.Transaction.txidOf(nth([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false)], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => "cc"
 
-fn takeOrWalk(head: Transaction, tail: List<Transaction>, remaining: Int, site: TxSite) -> Result<List<String>, String>
+fn takeOrWalk(head: Transaction, tail: List<Transaction>, remaining: Int, site: TxSite) -> Result<Transaction, String>
     ? "This is the one when the count runs out."
     match remaining <= 0
-        true -> Result.Ok(describeTransaction(site, head))
+        true -> Result.Ok(head)
         false -> nth(tail, remaining - 1, site)
 
 verify takeOrWalk
-    List.len(takeOrWalk(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false), [], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 4
+    Domain.Transaction.txidOf(takeOrWalk(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false), [], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => "cc"
     takeOrWalk(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false), [], 1, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")
+
+fn describeSpend(transaction: Transaction, tally: Tally) -> List<String>
+    ? "What a Transaction spends, what it pays out, and whether that adds up."
+    List.concat(
+        [
+            "txid   {Domain.Transaction.txidOf(transaction)}",
+            "in     {amountLine(tally.spent)} over {List.len(Domain.Transaction.inputsOf(transaction))} inputs",
+            "out    {amountLine(paidBy(transaction))} over {List.len(Domain.Transaction.outputsOf(transaction))} outputs",
+        ],
+        verdictLines(tally, paidBy(transaction)),
+    )
+
+verify describeSpend
+    List.take(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000))), 1) => ["txid   cc"]
+    List.len(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000)))) => 4
+
+fn spendSample() -> Transaction
+    ? "A Transaction paying out 5000, for the cases above."
+    Transaction(version = 1, inputs = [], outputs = [Output(value = 5000, script = "")], lockTime = 0, txid = "cc", size = 9, isSegWit = false)
+
+verify spendSample
+    Domain.Transaction.txidOf(spendSample()) => "cc"
+
+fn paidBy(transaction: Transaction) -> Int
+    ? "What a Transaction pays out, over all its Outputs."
+    paidFrom(Domain.Transaction.outputsOf(transaction), 0)
+
+verify paidBy
+    paidBy(spendSample()) => 5000
+
+fn paidFrom(outputs: List<Output>, acc: Int) -> Int
+    ? "Total the Output values."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> paidFrom(tail, acc + Domain.Transaction.valueOf(head))
+
+verify paidFrom
+    paidFrom([], 0) => 0
+    paidFrom([Output(value = 5000, script = "")], 0) => 5000
+    paidFrom([Output(value = 5000, script = ""), Output(value = 200, script = "")], 0) => 5200
+
+fn verdictLines(tally: Tally, paid: Int) -> List<String>
+    ? "The verdict, and the fee when there is one worth quoting."
+    match Domain.Spend.verdictOf(tally, paid)
+        Verdict.Coinbase -> ["spend  coinbase: it creates value rather than moving it"]
+        Verdict.Conserved -> ["spend  inputs cover outputs, fee {amountLine(Domain.Spend.feeOf(tally, paid))}"]
+        Verdict.Created(excess) -> ["spend  INVALID: outputs exceed inputs by {amountLine(excess)}"]
+        Verdict.Broken(why) -> ["spend  INVALID: {why}"]
+        Verdict.Incomplete(why) -> ["spend  cannot tell: {why}"]
+
+verify verdictLines
+    verdictLines(Domain.Spend.markCoinbase(Domain.Spend.started()), 0) => ["spend  coinbase: it creates value rather than moving it"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000)), 5000) => ["spend  inputs cover outputs, fee 0.00002000 BTC"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(1000)), 5000) => ["spend  INVALID: outputs exceed inputs by 0.00004000 BTC"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Invalid("bad")), 5000) => ["spend  INVALID: bad"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Unknown("no idea")), 5000) => ["spend  cannot tell: no idea"]
+
+fn amountLine(satoshis: Int) -> String
+    ? "An amount in whole coins, the way the listener shows one."
+    "{Domain.Transaction.amount(satoshis)} BTC"
+
+verify amountLine
+    amountLine(0) => "0.00000000 BTC"
+    amountLine(5000) => "0.00005000 BTC"
