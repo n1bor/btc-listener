@@ -5,6 +5,10 @@ module Audit
         "lower Height, so holding 1..N means holding every parent. Over a prefix"
         "an unresolved Input is a defect rather than a gap in coverage, which is"
         "what makes this worth running."
+        "Blocks are read through Infra.Blocks.fetch rather than Infra.Chain.at,"
+        "which reads one Block at a time and re-reads its whole Segment to do it."
+        "Nine thousand seven hundred early Blocks share a Segment, so that walk"
+        "is quadratic; holding the Segment between Heights is not."
     exposes [main]
     depends [Bytes, Domain.Block, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
@@ -62,38 +66,51 @@ fn audited(dir: String, from: Result<Int, String>, to: Result<Int, String>) -> R
     b = to?
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, a, b, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0))
+    walk(store, blocks, Option.None, a, b, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0))
 
-fn walk(store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
-    ? "Each Height in turn."
+fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
+    ? "Each Height in turn, keeping the Segment in hand between them."
     ! [Console.print, Disk.readText]
     match height > to
         true -> Result.Ok(counts)
-        false -> atHeight(store, blocks, height, to, counts)
+        false -> atHeight(store, blocks, loaded, height, to, counts)
 
-fn atHeight(store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
-    ? "Check one Block, then its Transactions."
+fn atHeight(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
+    ? "A Height the Index does not name ends the range."
     ! [Console.print, Disk.readText]
-    found = Infra.Chain.at(store, blocks, height)?
-    next = height + 1
-    match found.body
-        Body.NotFetched -> walk(store, blocks, next, to, counts)
-        Body.Discarded -> walk(store, blocks, next, to, counts)
-        Body.Held(location, payload) -> checkedBlock(store, blocks, height, to, counts, found, payload)
+    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(counts)
+        Option.Some(blockId) -> atBlock(store, blocks, loaded, height, to, counts, blockId)
 
-fn checkedBlock(store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts, found: Found, payload: Bytes) -> Result<Counts, String>
+fn atBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String) -> Result<Counts, String>
+    ? "A Block whose body is not held is stepped over."
+    ! [Console.print, Disk.readText]
+    located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> walk(store, blocks, loaded, height + 1, to, counts)
+        Option.Some(text) -> readBlock(store, blocks, loaded, height, to, counts, blockId, text)
+
+fn readBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, text: String) -> Result<Counts, String>
+    ? "Read it through fetch, so a Segment is read once and not once per Block."
+    ! [Console.print, Disk.readText]
+    location = Domain.Index.decodeLocation(text)?
+    got = Infra.Blocks.fetch(blocks, loaded, location)?
+    checkedBlock(store, blocks, Option.Some(got.loaded), height, to, counts, blockId, got.payload)
+
+fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, payload: Bytes) -> Result<Counts, String>
     ? "The Block's own checks, then every Transaction it holds."
     ! [Console.print, Disk.readText]
     transactions = Domain.Block.transactionsOf(payload)?
     root = Domain.Block.merkleRootOf(Domain.Block.txidsOf(transactions))?
     header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
-    faults = blockFaults(height, found, header, root)
+    faults = blockFaults(height, blockId, header, root)
     _said = reportBlock(height, faults)
-    overTransactions(store, blocks, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, faults = counts.faults + List.len(faults)), transactions)
+    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, faults = counts.faults + List.len(faults)), transactions)
 
-fn blockFaults(height: Int, found: Found, header: BlockHeader, root: String) -> List<String>
+fn blockFaults(height: Int, blockId: String, header: BlockHeader, root: String) -> List<String>
     ? "Whatever is wrong with the Block itself."
-    List.concat(merkleFault(height, header, root), List.concat(idFault(height, found, header), workFault(height, found, header)))
+    List.concat(merkleFault(height, header, root), List.concat(idFault(height, blockId, header), workFault(height, blockId, header)))
 
 fn merkleFault(height: Int, header: BlockHeader, root: String) -> List<String>
     ? "The Transactions must build the Root the Header committed to."
@@ -105,26 +122,26 @@ verify merkleFault
     merkleFault(1, sampleHeader("aa"), "aa") => []
     List.len(merkleFault(1, sampleHeader("aa"), "bb")) => 1
 
-fn idFault(height: Int, found: Found, header: BlockHeader) -> List<String>
+fn idFault(height: Int, blockId: String, header: BlockHeader) -> List<String>
     ? "The Header must hash to the Block Id the Index recorded."
-    match header.blockId == found.blockId
+    match header.blockId == blockId
         true -> []
-        false -> ["height {height}: header hashes to {header.blockId} but index says {found.blockId}"]
+        false -> ["height {height}: header hashes to {header.blockId} but index says {blockId}"]
 
 verify idFault
-    idFault(1, sampleFound("cc"), sampleHeaderWithId("cc")) => []
-    List.len(idFault(1, sampleFound("cc"), sampleHeaderWithId("dd"))) => 1
+    idFault(1, "cc", sampleHeaderWithId("cc")) => []
+    List.len(idFault(1, "cc", sampleHeaderWithId("dd"))) => 1
 
-fn workFault(height: Int, found: Found, header: BlockHeader) -> List<String>
+fn workFault(height: Int, blockId: String, header: BlockHeader) -> List<String>
     ? "The Block Id must fall under the target."
-    match Domain.Block.meetsTarget(found.blockId, header.bits)
+    match Domain.Block.meetsTarget(blockId, header.bits)
         Result.Err(message) -> ["height {height}: cannot check work: {message}"]
         Result.Ok(met) -> workOrNot(height, met)
 
 verify workFault
-    workFault(1, sampleFound("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"), sampleHeader("aa")) => []
-    List.len(workFault(1, sampleFound("zz"), sampleHeader("aa"))) => 1
-    List.len(workFault(1, sampleFound("ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"), sampleHeader("aa"))) => 1
+    workFault(1, "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", sampleHeader("aa")) => []
+    List.len(workFault(1, "zz", sampleHeader("aa"))) => 1
+    List.len(workFault(1, "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", sampleHeader("aa"))) => 1
 
 fn workOrNot(height: Int, met: Bool) -> List<String>
     ? "Report only a failure."
@@ -150,13 +167,6 @@ fn sampleHeaderWithId(blockId: String) -> BlockHeader
 verify sampleHeaderWithId
     sampleHeaderWithId("cc").blockId => "cc"
 
-fn sampleFound(blockId: String) -> Found
-    ? "A Found with a chosen Block Id, for the cases above."
-    Found(height = 1, blockId = blockId, parentBlockId = Option.None, body = Body.NotFetched)
-
-verify sampleFound
-    sampleFound("cc").blockId => "cc"
-
 fn reportBlock(height: Int, faults: List<String>) -> Unit
     ? "Print any Block-level fault as it is found."
     ! [Console.print]
@@ -177,20 +187,22 @@ fn printThen(line: String, rest: List<String>) -> Unit
     _printed = Console.print(line)
     printAll(rest)
 
-fn overTransactions(store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
+fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
     ? "Check what each Transaction spends."
     ! [Console.print, Disk.readText]
     match transactions
-        [] -> walk(store, blocks, height + 1, to, counts)
-        [head, ..tail] -> oneTransaction(store, blocks, height, to, counts, head, tail)
+        [] -> walk(store, blocks, loaded, height + 1, to, counts)
+        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail)
 
-fn oneTransaction(store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>) -> Result<Counts, String>
+fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>) -> Result<Counts, String>
     ? "Resolve its Inputs and judge the sums."
+      "Resolving reads parent Blocks and does not share the Segment held here,"
+      "since a parent may sit anywhere below."
     ! [Console.print, Disk.readText]
     tally = Infra.Spends.checked(store, blocks, transaction)?
     paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
     grown = judged(height, counts, transaction, Domain.Spend.verdictOf(tally, paid))
-    overTransactions(store, blocks, height, to, grown, tail)
+    overTransactions(store, blocks, loaded, height, to, grown, tail)
 
 fn paidBy(outputs: List<Output>, acc: Int) -> Int
     ? "Total the Output values."
