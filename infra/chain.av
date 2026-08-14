@@ -21,6 +21,7 @@ type Body
 record Found
     height: Int
     blockId: String
+    parentBlockId: Option<String>
     body: Body
 
 fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
@@ -37,7 +38,22 @@ fn withBlockId(store: Store, blocks: BlockStore, height: Int, blockId: String) -
     stored = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
     below = watermark(store)?
     state = Domain.Index.bodyStateOf(stored, height, below)?
-    bodyFor(blocks, height, blockId, state)
+    parent = parentOf(store, height)?
+    bodyFor(blocks, height, blockId, parent, state)
+
+fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
+    ? "The Block Id the Index holds one Height down, if there is one."
+      "Genesis has no parent and neither has a Height below the Prune Watermark"
+      "whose Header has gone, so this is an Option rather than an error."
+    match height <= 0
+        true -> Result.Ok(Option.None)
+        false -> Infra.Store.get(store, Domain.Index.heightKey(height - 1))
+
+verify parentOf
+    parentOf(Infra.Store.fixture([]), 0) => Result.Ok(Option.None)
+    parentOf(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
+    parentOf(Infra.Store.fixture([("h:00000004", "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    parentOf(Infra.Store.fixture([]), 0 - 4) => Result.Ok(Option.None)
 
 fn watermark(store: Store) -> Result<Int, String>
     ? "The Prune Watermark, or zero when nothing has ever been pruned."
@@ -50,18 +66,18 @@ verify watermark
     watermark(Infra.Store.fixture([("meta:prunedBelow", "500")])) => Result.Ok(500)
     watermark(Infra.Store.fixture([("meta:prunedBelow", "x")])) => Result.Err("Height must be a whole number, got 'x'")
 
-fn bodyFor(blocks: BlockStore, height: Int, blockId: String, state: BodyState) -> Result<Found, String>
+fn bodyFor(blocks: BlockStore, height: Int, blockId: String, parent: Option<String>, state: BodyState) -> Result<Found, String>
     ? "Read the bytes when there are bytes, and say why when there are not."
     ! [Disk.readText]
     match state
-        BodyState.Missing -> Result.Ok(Found(height = height, blockId = blockId, body = Body.NotFetched))
-        BodyState.Pruned -> Result.Ok(Found(height = height, blockId = blockId, body = Body.Discarded))
-        BodyState.Stored(location) -> readHeld(blocks, height, blockId, location)
+        BodyState.Missing -> Result.Ok(Found(height = height, blockId = blockId, parentBlockId = parent, body = Body.NotFetched))
+        BodyState.Pruned -> Result.Ok(Found(height = height, blockId = blockId, parentBlockId = parent, body = Body.Discarded))
+        BodyState.Stored(location) -> readHeld(blocks, height, blockId, parent, location)
 
-fn readHeld(blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Found, String>
+fn readHeld(blocks: BlockStore, height: Int, blockId: String, parent: Option<String>, location: Location) -> Result<Found, String>
     ? "One Block on its own, so read rather than fetch."
       "A scan over many Heights should hold the Segment between calls; this asks"
       "for one Block and is done, and read is the cheaper of the two for that."
     ! [Disk.readText]
     payload = Infra.Blocks.read(blocks, location)?
-    Result.Ok(Found(height = height, blockId = blockId, body = Body.Held(location, payload)))
+    Result.Ok(Found(height = height, blockId = blockId, parentBlockId = parent, body = Body.Held(location, payload)))

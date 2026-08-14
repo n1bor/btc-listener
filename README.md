@@ -125,6 +125,9 @@ height 170
 block  00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee
 body   segment 0 line 5, 490 bytes
 check  header hashes to the recorded Block Id
+merkle Transactions build the Root in the Header
+parent follows the Block below it in the Index
+work   Block Id is under the target in the Header
 txs    2
 tx b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082
    legacy, version 1, 1 in / 1 out, 134 bytes, locktime 0
@@ -151,6 +154,9 @@ height 800000
 block  00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054
 body   segment 0 line 7, 1634536 bytes
 check  header hashes to the recorded Block Id
+merkle Transactions build the Root in the Header
+parent follows the Block below it in the Index
+work   Block Id is under the target in the Header
 txs    3721
 ```
 
@@ -161,15 +167,28 @@ has already been decoded. That Block takes about five and a half seconds, nearly
 all of it turning two megabytes of hexadecimal back into bytes
 ([jasisz/aver#911](https://github.com/jasisz/aver/issues/911)).
 
-That last line is the only thing that tests the whole round trip inside Aver:
-the Header was decoded from the wire, the bytes written to a Segment, the
-Location recorded against the Block Id, and hashing what comes back has to
-produce the Block Id the Index was asked for. Flip one hexadecimal digit in a
-Segment file and it says so:
+Four things are checked, and each says which one failed:
+
+| line | what it proves |
+|---|---|
+| `check` | the bytes on disk hash to the Block Id the Index recorded |
+| `merkle` | those bytes hold the Transactions the Header committed to |
+| `parent` | this Header names the Block the Index holds one Height below |
+| `work` | the Block Id falls under the target the Header claims |
+
+`check` is the round trip: Header decoded from the wire, bytes written to a
+Segment, Location recorded against the Block Id, and hashing what comes back has
+to give the Block Id that was asked for. `merkle` is the one that catches a
+damaged Transaction, which `check` cannot see because it only hashes the Header:
 
 ```
-check  MISMATCH: bytes on disk hash to 487a8a8c80feb555efbe5b6fc63884c4…
+check  header hashes to the recorded Block Id
+merkle MISMATCH: Transactions build 4d1b53876296a682305dcfedee667b567b2bffb…
 ```
+
+These need no Peer and no signatures. What they cannot check is whether the
+Transactions were allowed to spend what they spent — that needs the outputs they
+are spending, which means a UTXO set.
 
 A body that is absent is reported as one of two different things, because they
 are two different situations:

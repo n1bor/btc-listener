@@ -8,7 +8,7 @@ module Show
         "what you reach for when something looks wrong, and an error that hid"
         "the rest of the report would be the wrong trade."
     exposes [describeFound]
-    depends [Bytes, Domain.Block, Domain.Index, Domain.Transaction, Infra.Chain]
+    depends [Bytes, Domain.Block, Domain.Index, Domain.Network, Domain.Transaction, Infra.Chain]
     effects []
 
 fn describeFound(found: Found, below: Int, withTransactions: Bool) -> List<String>
@@ -16,9 +16,9 @@ fn describeFound(found: Found, below: Int, withTransactions: Bool) -> List<Strin
     List.concat(["height {found.height}", "block  {found.blockId}"], describeBody(found, below, withTransactions))
 
 verify describeFound
-    describeFound(Found(height = 7, blockId = "aa", body = Body.NotFetched), 0, true) => ["height 7", "block  aa", "body   not fetched"]
-    describeFound(Found(height = 7, blockId = "aa", body = Body.NotFetched), 0, false) => ["height 7", "block  aa", "body   not fetched"]
-    describeFound(Found(height = 7, blockId = "aa", body = Body.Discarded), 500, true) => ["height 7", "block  aa", "body   discarded by pruning, Prune Watermark 500"]
+    describeFound(Found(height = 7, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), 0, true) => ["height 7", "block  aa", "body   not fetched"]
+    describeFound(Found(height = 7, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), 0, false) => ["height 7", "block  aa", "body   not fetched"]
+    describeFound(Found(height = 7, blockId = "aa", parentBlockId = Option.None, body = Body.Discarded), 500, true) => ["height 7", "block  aa", "body   discarded by pruning, Prune Watermark 500"]
 
 fn describeBody(found: Found, below: Int, withTransactions: Bool) -> List<String>
     ? "Held Blocks are checked against the Block Id the Index recorded."
@@ -28,10 +28,10 @@ fn describeBody(found: Found, below: Int, withTransactions: Bool) -> List<String
         Body.Held(location, payload) -> describeHeld(found, location, payload, withTransactions)
 
 verify describeBody
-    describeBody(Found(height = 1, blockId = "aa", body = Body.NotFetched), 0, true) => ["body   not fetched"]
-    describeBody(Found(height = 1, blockId = "aa", body = Body.NotFetched), 0, false) => ["body   not fetched"]
-    describeBody(Found(height = 1, blockId = "aa", body = Body.Discarded), 5, true) => ["body   discarded by pruning, Prune Watermark 5"]
-    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0, true)) => 3
+    describeBody(Found(height = 1, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), 0, true) => ["body   not fetched"]
+    describeBody(Found(height = 1, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), 0, false) => ["body   not fetched"]
+    describeBody(Found(height = 1, blockId = "aa", parentBlockId = Option.None, body = Body.Discarded), 5, true) => ["body   discarded by pruning, Prune Watermark 5"]
+    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0, true)) => 6
 
 fn describeHeld(found: Found, location: Location, payload: Bytes, withTransactions: Bool) -> List<String>
     ? "Re-derive the Block Id from the bytes on disk and say whether it agrees."
@@ -40,16 +40,111 @@ fn describeHeld(found: Found, location: Location, payload: Bytes, withTransactio
       "Location was recorded against the Block Id, and hashing what comes back"
       "has to produce the Block Id the Index was asked for."
     List.concat(
-        [
-            "body   segment {location.segment} line {location.line}, {List.len(Bytes.toList(payload))} bytes",
-            agreement(Domain.Block.idOfWholeBlock(payload), found.blockId),
-        ],
+        List.concat(
+            [
+                "body   segment {location.segment} line {location.line}, {List.len(Bytes.toList(payload))} bytes",
+                agreement(Domain.Block.idOfWholeBlock(payload), found.blockId),
+            ],
+            validationLines(found, payload),
+        ),
         transactionLines(payload, withTransactions),
     )
 
 verify describeHeld
-    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, true) => ["body   segment 3 line 9, 80 bytes", "check  header hashes to the recorded Block Id", "txs    0"]
-    describeHeld(Found(height = 0, blockId = "wrong", body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, true) => ["body   segment 0 line 0, 80 bytes", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "txs    0"]
+    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, true) => ["body   segment 3 line 9, 80 bytes", "check  header hashes to the recorded Block Id", "merkle cannot compute: a Block with no Transactions has no Merkle Root", "parent none recorded at this Height", "work   Block Id is under the target in the Header", "txs    0"]
+    describeHeld(Found(height = 0, blockId = "wrong", parentBlockId = Option.None, body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, true) => ["body   segment 0 line 0, 80 bytes", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "merkle cannot compute: a Block with no Transactions has no Merkle Root", "parent none recorded at this Height", "work   cannot check: Bytes.fromHex: invalid hexadecimal character 'w'", "txs    0"]
+
+fn validationLines(found: Found, payload: Bytes) -> List<String>
+    ? "The three things a Block can be checked against without a UTXO set."
+      "The Merkle Root says the body holds the Transactions the Header committed"
+      "to; the parent says this Block follows the one the Index has beneath it;"
+      "the target says the Header was worked for. None of them needs a Peer, a"
+      "signature, or anything the Index does not already hold."
+    match Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))
+        Result.Err(message) -> ["header cannot decode: {message}"]
+        Result.Ok(header) -> checksAgainst(found, payload, header)
+
+verify validationLines
+    List.len(validationLines(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)) => 3
+    validationLines(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Bytes.fromHex("00")?) => ["header cannot decode: Block Header must be 80 bytes, got 1"]
+
+fn checksAgainst(found: Found, payload: Bytes, header: BlockHeader) -> List<String>
+    ? "Each check on its own line, so a failure names which one."
+    [merkleLine(payload, header), parentLine(found, header), workLine(found, header)]
+
+verify checksAgainst
+    List.len(checksAgainst(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?, Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?)) => 3
+
+fn merkleLine(payload: Bytes, header: BlockHeader) -> String
+    ? "Whether the body's Transactions build the Root the Header committed to."
+      "This is the check that says the bytes on disk are this Block and not some"
+      "other Block with the same Header, which nothing else here would notice."
+    match rootOfBody(payload)
+        Result.Err(message) -> "merkle cannot compute: {message}"
+        Result.Ok(root) -> merkleVerdict(root, header.merkleRoot)
+
+verify merkleLine
+    merkleLine(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?, Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "merkle Transactions build the Root in the Header"
+    merkleLine(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?, Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "merkle cannot compute: Transaction ends before its lock time"
+
+fn rootOfBody(payload: Bytes) -> Result<String, String>
+    ? "The Merkle Root the Transactions in this body produce."
+    transactions = Domain.Block.transactionsOf(payload)?
+    Domain.Block.merkleRootOf(Domain.Block.txidsOf(transactions))
+
+verify rootOfBody
+    rootOfBody(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?) => Result.Ok("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    rootOfBody(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?) => Result.Err("Transaction ends before its lock time")
+
+fn merkleVerdict(computed: String, claimed: String) -> String
+    ? "Whether the two Roots agree."
+    match computed == claimed
+        true -> "merkle Transactions build the Root in the Header"
+        false -> "merkle MISMATCH: Transactions build {computed}"
+
+verify merkleVerdict
+    merkleVerdict("aa", "aa") => "merkle Transactions build the Root in the Header"
+    merkleVerdict("aa", "bb") => "merkle MISMATCH: Transactions build aa"
+
+fn parentLine(found: Found, header: BlockHeader) -> String
+    ? "Whether this Header names the Block the Index holds one Height down."
+    match found.parentBlockId
+        Option.None -> "parent none recorded at this Height"
+        Option.Some(recorded) -> parentVerdict(header.previousBlockId, recorded)
+
+verify parentLine
+    parentLine(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "parent none recorded at this Height"
+    parentLine(Found(height = 1, blockId = "aa", parentBlockId = Option.Some("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"), body = Body.NotFetched), Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "parent MISMATCH: Header names 0000000000000000000000000000000000000000000000000000000000000000"
+
+fn parentVerdict(named: String, recorded: String) -> String
+    ? "Whether the Header's parent is the one the Index has beneath it."
+    match named == recorded
+        true -> "parent follows the Block below it in the Index"
+        false -> "parent MISMATCH: Header names {named}"
+
+verify parentVerdict
+    parentVerdict("aa", "aa") => "parent follows the Block below it in the Index"
+    parentVerdict("aa", "bb") => "parent MISMATCH: Header names aa"
+
+fn workLine(found: Found, header: BlockHeader) -> String
+    ? "Whether the Block Id falls under the target the Header claims."
+    match Domain.Block.meetsTarget(found.blockId, header.bits)
+        Result.Err(message) -> "work   cannot check: {message}"
+        Result.Ok(met) -> workVerdict(met)
+
+verify workLine
+    workLine(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, body = Body.NotFetched), Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "work   Block Id is under the target in the Header"
+    workLine(Found(height = 0, blockId = "zz", parentBlockId = Option.None, body = Body.NotFetched), Domain.Block.decodeHeader(List.take(Bytes.toList(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), 80))?) => "work   cannot check: Bytes.fromHex: invalid hexadecimal character 'z'"
+
+fn workVerdict(met: Bool) -> String
+    ? "Whether the Header was worked for."
+    match met
+        true -> "work   Block Id is under the target in the Header"
+        false -> "work   MISMATCH: Block Id is above the target"
+
+verify workVerdict
+    workVerdict(true) => "work   Block Id is under the target in the Header"
+    workVerdict(false) => "work   MISMATCH: Block Id is above the target"
 
 fn transactionLines(payload: Bytes, withTransactions: Bool) -> List<String>
     ? "Every Transaction in the body, shown the way the listener shows one."

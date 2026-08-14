@@ -6,7 +6,7 @@ module Block
         "only Result here guards that length and the octet range beneath it."
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
-    exposes [BlockHeader, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, locatorHeights, getHeadersPayload]
+    exposes [BlockHeader, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, locatorHeights, getHeadersPayload]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network, Domain.Transaction]
     effects []
 
@@ -162,6 +162,167 @@ verify idsFrom
     idsFrom([], []) => []
     idsFrom([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "aa", size = 0, isSegWit = false)], []) => ["aa"]
     idsFrom([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "aa", size = 0, isSegWit = false), Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "bb", size = 0, isSegWit = false)], []) => ["aa", "bb"]
+
+fn merkleRootOf(txids: List<String>) -> Result<String, String>
+    ? "The Merkle Root a list of Transaction Ids commits to."
+      "Pairs are hashed together until one is left. An odd level duplicates its"
+      "last entry rather than carrying it up, which is Bitcoin's rule and not the"
+      "obvious one."
+      "Transaction Ids are displayed back to front, so each is reversed into the"
+      "order it was hashed in and the answer is reversed back at the end. Getting"
+      "that wrong gives a Root that is wrong in a way no vector would catch"
+      "unless it came from a real Block."
+    leaves = leavesFrom(txids, [])?
+    rootFrom(leaves)
+
+verify merkleRootOf
+    merkleRootOf(["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"]) => Result.Ok("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    merkleRootOf(["b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082", "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"]) => Result.Ok("7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff")
+    merkleRootOf([]) => Result.Err("a Block with no Transactions has no Merkle Root")
+    merkleRootOf(["zz"]) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn leavesFrom(txids: List<String>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Each Transaction Id as the bytes it was hashed as, which is reversed."
+    match txids
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> nextLeaf(head, tail, acc)
+
+verify leavesFrom
+    leavesFrom([], []) => Result.Ok([])
+    leavesFrom(["0102"], []) => Result.Ok([[2, 1]])
+    leavesFrom(["zz"], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn nextLeaf(head: String, tail: List<String>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "One Transaction Id turned round, then the rest."
+    bytes = Bytes.fromHex(head)?
+    leavesFrom(tail, List.prepend(List.reverse(Bytes.toList(bytes)), acc))
+
+verify nextLeaf
+    nextLeaf("0102", [], []) => Result.Ok([[2, 1]])
+    nextLeaf("z", [], []) => Result.Err("Bytes.fromHex: expected an even number of hex characters")
+
+fn rootFrom(level: List<List<Int>>) -> Result<String, String>
+    ? "Hash the level down until one entry is left, which is the Root."
+    match level
+        [] -> Result.Err("a Block with no Transactions has no Merkle Root")
+        [only, ..rest] -> settleOrClimb(only, rest, level)
+
+verify rootFrom
+    rootFrom([]) => Result.Err("a Block with no Transactions has no Merkle Root")
+    rootFrom([[2, 1]]) => Result.Ok("0102")
+
+fn settleOrClimb(only: List<Int>, rest: List<List<Int>>, level: List<List<Int>>) -> Result<String, String>
+    ? "One entry is the Root; more than one means another level."
+    match rest
+        [] -> Result.Ok(Domain.Hash.reversedHex(only))
+        [head, ..tail] -> climb(level)
+
+verify settleOrClimb
+    settleOrClimb([2, 1], [], [[2, 1]]) => Result.Ok("0102")
+    settleOrClimb([2, 1], [[3]], [[2, 1], [3]]) => Result.Ok("df0b8b15079307a53eaab12e9ac260c13e4173b60d6a02fa1c92ada4284ce382")
+    settleOrClimb([256], [[256]], [[256], [256]]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn climb(level: List<List<Int>>) -> Result<String, String>
+    ? "One level of pairing, then look again."
+    next = pairsOf(level, [])?
+    rootFrom(next)
+
+verify climb
+    climb([[2, 1]]) => Result.Ok("fb61cdce51a6652aeebe41c152e8738047b1e9b19b850d6e09e02ca5aa611973")
+    climb([[256]]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+    climb([]) => Result.Err("a Block with no Transactions has no Merkle Root")
+
+fn pairsOf(level: List<List<Int>>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Hash the level two at a time, duplicating a lone last entry."
+    match level
+        [] -> Result.Ok(List.reverse(acc))
+        [left, ..rest] -> pairWith(left, rest, acc)
+
+verify pairsOf
+    pairsOf([], []) => Result.Ok([])
+    List.len(pairsOf([[1], [2]], [])?) => 1
+    List.len(pairsOf([[1], [2], [3]], [])?) => 2
+    pairsOf([[256]], []) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn pairWith(left: List<Int>, rest: List<List<Int>>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "An entry with nothing beside it is paired with itself."
+    match rest
+        [] -> onePair(left, left, [], acc)
+        [right, ..tail] -> onePair(left, right, tail, acc)
+
+verify pairWith
+    List.len(pairWith([1], [], [])?) => 1
+    List.len(pairWith([1], [[2]], [])?) => 1
+    List.len(pairWith([1], [[2], [3]], [])?) => 2
+    pairWith([256], [], []) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn onePair(left: List<Int>, right: List<Int>, tail: List<List<Int>>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Hash one pair and carry on along the level."
+    hashed = combined(left, right)?
+    pairsOf(tail, List.prepend(hashed, acc))
+
+verify onePair
+    List.len(onePair([1], [2], [], [])?) => 1
+    onePair([256], [1], [], []) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn combined(left: List<Int>, right: List<Int>) -> Result<List<Int>, String>
+    ? "The double-SHA256 of two entries laid end to end."
+    joined = Bytes.fromList(List.concat(left, right))?
+    Result.Ok(Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(joined))))
+
+verify combined
+    List.len(combined([1], [2])?) => 32
+    combined([256], [1]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn targetOf(bits: Int) -> Int
+    ? "The threshold a Block Id has to fall under, unpacked from the compact form."
+      "The top byte is a power of 256 and the low three bytes are the value, so"
+      "the target is that value shifted up by however many bytes the exponent"
+      "names beyond the three it already occupies."
+    scaled(Int.div(bits, 16777216), Int.mod(bits, 16777216))
+
+verify targetOf
+    targetOf(486604799) => 26959535291011309493156476344723991336010898738574164086137773096960
+    targetOf(386021021) => 211995196999759460994199096039995000850151983156297728
+
+fn scaled(exponent: Int, mantissa: Int) -> Int
+    ? "The mantissa shifted up by the exponent, or down when it is very small."
+      "Total: the divisor is a power of 256 with a positive exponent and so is at"
+      "least 256, but the checker cannot see that and asks for a Result. The"
+      "default is unreachable. An exponent below three has never occurred on"
+      "mainnet -- it would mean a target small enough to fit in under three"
+      "bytes -- and is handled because the encoding allows it."
+    match exponent >= 3
+        true -> mantissa * powerOf(256, exponent - 3, 1)
+        false -> Result.withDefault(Int.div(mantissa, powerOf(256, 3 - exponent, 1)), 0)
+
+verify scaled
+    scaled(3, 5) => 5
+    scaled(4, 5) => 1280
+    scaled(2, 512) => 2
+
+fn powerOf(base: Int, exponent: Int, acc: Int) -> Int
+    ? "base to the exponent, by repeated multiplication."
+    match exponent <= 0
+        true -> acc
+        false -> powerOf(base, exponent - 1, acc * base)
+
+verify powerOf
+    powerOf(256, 0, 1) => 1
+    powerOf(256, 2, 1) => 65536
+
+fn meetsTarget(blockId: String, bits: Int) -> Result<Bool, String>
+    ? "Whether a Block Id falls under the target its Header claims."
+      "A Block Id is displayed back to front, so read as a number it is the"
+      "big-endian value of the hex as written -- which is why a valid one starts"
+      "with zeros."
+    bytes = Bytes.fromHex(blockId)?
+    Result.Ok(Domain.Message.readLittleEndian(List.reverse(Bytes.toList(bytes))) <= targetOf(bits))
+
+verify meetsTarget
+    meetsTarget("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 486604799) => Result.Ok(true)
+    meetsTarget("ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 486604799) => Result.Ok(false)
+    meetsTarget("zz", 486604799) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn genesisBlockId(network: Network) -> String
     ? "The first Block of each Network, where every Locator ultimately ends."
