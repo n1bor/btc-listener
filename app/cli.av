@@ -4,7 +4,7 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [App.Show, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [App.Show, Domain.Block, Domain.Index, Infra.TxIndex, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
@@ -28,24 +28,25 @@ fn usageLines() -> List<String>
         "  bodies  <peer-address> <dir> <a> <b>  fetch Blocks for Heights a..b",
         "  prune   <dir> <height>                delete Blocks below a Height",
         "  show    <dir> <height> [summary]      read one Block back and check it",
+        "  txindex <dir> <a> <b>                 record where Transactions in a..b sit",
+        "  tx      <dir> <txid>                  find one Transaction by its Id",
         "",
         "  peer-address   IPv4 address of the Peer. Omit it, when listening,",
         "                 to ask a Bitcoin DNS seed for one.",
         "  port           optional, defaults to 8333",
         "  dir            where the Index and the Segments live",
-        "  height         the Prune Watermark: Blocks below it are discarded",
         "  summary        show, without listing the Block's Transactions",
         "",
-        "  headers must run before bodies: a getdata names Block Ids, never",
-        "  Heights, so the chain has to be known before a Block can be asked for.",
+        "  headers must run before bodies, and bodies before txindex: each needs",
+        "  what the one before it wrote. Only headers and bodies need a Peer.",
         "",
-        "  prune needs no Peer. It deletes whole Segments only, so it frees",
-        "  nothing until a Segment holds no Block you are still keeping, and",
-        "  never deletes the Segment the next Block goes into.",
+        "  prune deletes whole Segments only, so it frees nothing until a Segment",
+        "  holds no Block you are still keeping, and never deletes the one the",
+        "  next Block goes into.",
     ]
 
 verify usageLines
-    List.len(usageLines()) => 21
+    List.len(usageLines()) => 22
     List.contains(usageLines(), "Bitcoin peer listener and chain downloader") => true
 
 fn describe(address: PeerAddress) -> String
@@ -94,6 +95,8 @@ fn dispatch(command: String, rest: List<String>) -> Unit
         "headers" -> needTwo(rest)
         "bodies" -> needFour(rest)
         "prune" -> needPrune(rest)
+        "txindex" -> needTxIndex(rest)
+        "tx" -> needTx(rest)
         "show" -> needShow(rest)
         "help" -> printLines(usageLines())
         _ -> runWithAddress(command, rest)
@@ -350,6 +353,57 @@ fn shown(outcome: Result<List<String>, String>) -> Unit
     match outcome
         Result.Ok(lines) -> printLines(lines)
         Result.Err(message) -> Console.error("error: {message}")
+
+fn needTxIndex(rest: List<String>) -> Unit
+    ? "Indexing is local: a directory and a range of Heights."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+    ]
+    match rest
+        [] -> printLines(usageLines())
+        [dir, ..more] -> txIndexRange(dir, more)
+
+fn txIndexRange(dir: String, more: List<String>) -> Unit
+    ? "Both Heights must be given."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+    ]
+    match heights(more)
+        Option.None -> printLines(usageLines())
+        Option.Some(span) -> said(txIndexRun(dir, span))
+
+fn txIndexRun(dir: String, span: Span) -> Result<String, String>
+    ? "Record where every Transaction in the range sits."
+    ! [Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open(blocksPath(dir))?
+    built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
+    Result.Ok("{built.transactions} Transactions recorded from {built.blocks} Blocks")
+
+fn needTx(rest: List<String>) -> Unit
+    ? "Looking one up is local: a directory and a Transaction Id."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match rest
+        [] -> printLines(usageLines())
+        [dir, ..more] -> txNamed(dir, more)
+
+fn txNamed(dir: String, more: List<String>) -> Unit
+    ? "The Transaction Id follows the directory."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match more
+        [] -> printLines(usageLines())
+        [txid, ..extra] -> shown(txRun(dir, txid))
+
+fn txRun(dir: String, txid: String) -> Result<List<String>, String>
+    ? "Find the Transaction and show it."
+    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open(blocksPath(dir))?
+    sited = Infra.Store.get(store, Domain.Index.txKey(txid))?
+    found = Infra.Chain.transactionAt(store, blocks, txid)?
+    App.Show.describeSited(found, txid, sited)
 
 fn blocksPath(dir: String) -> String
     ? "Where the Segments live."

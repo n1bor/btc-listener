@@ -10,12 +10,16 @@ module Index
         "Everything here is a pure transformation over text, so the whole"
         "encoding is covered by verify blocks rather than by a Store."
     depends [Domain.Text]
-    exposes [BodyState, Location, blockKey, heightKey, prunedBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    exposes [BodyState, Location, TxSite, txKey, encodeTxSite, decodeTxSite, blockKey, heightKey, prunedBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
     effects []
 
 record Location
     segment: Int
     line: Int
+
+record TxSite
+    blockId: String
+    position: Int
 
 type BodyState
     Stored(Location)
@@ -36,6 +40,80 @@ fn blockKey(blockId: String) -> String
 verify blockKey
     blockKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "b:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
     blockKey("") => "b:"
+
+fn txKey(txid: String) -> String
+    ? "Where a Transaction's whereabouts live."
+      "A third keyspace beside b: and h:, and immutable like b: rather than"
+      "mutable like h:, because a Transaction Id names the same bytes in the same"
+      "Block whatever else the chain does afterwards."
+    "t:{txid}"
+
+verify txKey
+    txKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16") => "t:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
+    txKey("") => "t:"
+
+fn encodeTxSite(site: TxSite) -> String
+    ? "A Transaction is named by its Block and its position in it."
+      "The Block rather than the Height, so a reorganisation that moves a Height"
+      "leaves this entry still true."
+    "{site.blockId}:{site.position}"
+
+verify encodeTxSite
+    encodeTxSite(TxSite(blockId = "aa", position = 0)) => "aa:0"
+    encodeTxSite(TxSite(blockId = "00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee", position = 1)) => "00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee:1"
+
+fn decodeTxSite(text: String) -> Result<TxSite, String>
+    ? "Read a Transaction's whereabouts back."
+    siteParts(text, String.split(text, ":"))
+
+verify decodeTxSite
+    decodeTxSite("aa:0") => Result.Ok(TxSite(blockId = "aa", position = 0))
+    decodeTxSite("aa:12") => Result.Ok(TxSite(blockId = "aa", position = 12))
+    decodeTxSite("aa") => Result.Err("Transaction site must be blockId:position, got 'aa'")
+    decodeTxSite("") => Result.Err("Transaction site must be blockId:position, got ''")
+    decodeTxSite("aa:0:1") => Result.Err("Transaction site must be blockId:position, got 'aa:0:1'")
+    decodeTxSite("aa:x") => Result.Err("Transaction position must be a whole number, got 'aa:x'")
+    decodeTxSite("aa:-1") => Result.Err("Transaction position must be a whole number, got 'aa:-1'")
+
+fn siteParts(text: String, split: List<String>) -> Result<TxSite, String>
+    ? "Exactly two colon-separated fields, and no more."
+    match split
+        [] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
+        [blockId, ..rest] -> afterBlockId(text, blockId, rest)
+
+verify siteParts
+    siteParts("aa:0", ["aa", "0"]) => Result.Ok(TxSite(blockId = "aa", position = 0))
+    siteParts("", []) => Result.Err("Transaction site must be blockId:position, got ''")
+
+fn afterBlockId(text: String, blockId: String, rest: List<String>) -> Result<TxSite, String>
+    ? "The position follows, and nothing follows that."
+    match rest
+        [] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
+        [position, ..extra] -> lastPart(text, blockId, position, extra)
+
+verify afterBlockId
+    afterBlockId("aa:0", "aa", ["0"]) => Result.Ok(TxSite(blockId = "aa", position = 0))
+    afterBlockId("aa", "aa", []) => Result.Err("Transaction site must be blockId:position, got 'aa'")
+
+fn lastPart(text: String, blockId: String, position: String, extra: List<String>) -> Result<TxSite, String>
+    ? "A third field means this is not a Transaction site."
+    match extra
+        [] -> siteFrom(text, blockId, position)
+        [head, ..tail] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
+
+verify lastPart
+    lastPart("aa:0", "aa", "0", []) => Result.Ok(TxSite(blockId = "aa", position = 0))
+    lastPart("aa:0:1", "aa", "0", ["1"]) => Result.Err("Transaction site must be blockId:position, got 'aa:0:1'")
+
+fn siteFrom(text: String, blockId: String, position: String) -> Result<TxSite, String>
+    ? "The position has to be a whole number."
+    match whole(position)
+        Option.None -> Result.Err("Transaction position must be a whole number, got '{text}'")
+        Option.Some(value) -> Result.Ok(TxSite(blockId = blockId, position = value))
+
+verify siteFrom
+    siteFrom("aa:0", "aa", "0") => Result.Ok(TxSite(blockId = "aa", position = 0))
+    siteFrom("aa:x", "aa", "x") => Result.Err("Transaction position must be a whole number, got 'aa:x'")
 
 fn heightKey(height: Int) -> String
     ? "Where a Height's Block Id lives. Rewritten if a reorganisation reassigns the Height."

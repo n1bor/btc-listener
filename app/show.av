@@ -7,7 +7,7 @@ module Show
         "A body that will not decode is described rather than raised. show is"
         "what you reach for when something looks wrong, and an error that hid"
         "the rest of the report would be the wrong trade."
-    exposes [describeFound]
+    exposes [describeFound, describeSited]
     depends [Bytes, Domain.Block, Domain.Index, Domain.Network, Domain.Transaction, Infra.Chain]
     effects []
 
@@ -210,3 +210,82 @@ fn agreement(derived: String, recorded: String) -> String
 verify agreement
     agreement("aa", "aa") => "check  header hashes to the recorded Block Id"
     agreement("aa", "bb") => "check  MISMATCH: bytes on disk hash to aa"
+
+fn describeTransaction(site: TxSite, transaction: Transaction) -> List<String>
+    ? "Which Block a Transaction sits in and where, then the Transaction itself."
+      "No Height. The t: keyspace names a Block rather than a Height, on purpose,"
+      "so that a reorganisation moving a Height leaves the entry true — and this"
+      "walk never touches h: to find out what the Height currently is."
+    List.concat(
+        [
+            "txid   {transaction.txid}",
+            "block  {site.blockId} position {site.position}",
+        ],
+        Domain.Transaction.summaryLines(transaction),
+    )
+
+verify describeTransaction
+    List.take(describeTransaction(Domain.Index.TxSite(blockId = "aa", position = 3), Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false)), 2) => ["txid   cc", "block  aa position 3"]
+    List.len(describeTransaction(Domain.Index.TxSite(blockId = "aa", position = 3), Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false))) => 4
+
+fn describeSited(found: Found, txid: String, sited: Option<String>) -> Result<List<String>, String>
+    ? "The Transaction a t: entry points at, taken out of the Block holding it."
+    site = siteOrFail(txid, sited)?
+    pickedFrom(found, site)
+
+verify describeSited
+    describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), "cc", Option.None) => Result.Err("no record of transaction cc; index the Heights that hold it first")
+    describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), "cc", Option.Some("aa:0")) => Result.Err("the Block holding it is not held")
+    List.len(describeSited(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), "cc", Option.Some("aa:0"))?) => 6
+
+fn siteOrFail(txid: String, sited: Option<String>) -> Result<TxSite, String>
+    ? "The t: entry has to be there and has to parse."
+    match sited
+        Option.None -> Result.Err("no record of transaction {txid}; index the Heights that hold it first")
+        Option.Some(text) -> Domain.Index.decodeTxSite(text)
+
+verify siteOrFail
+    siteOrFail("cc", Option.Some("aa:0")) => Result.Ok(Domain.Index.TxSite(blockId = "aa", position = 0))
+    siteOrFail("cc", Option.None) => Result.Err("no record of transaction cc; index the Heights that hold it first")
+    siteOrFail("cc", Option.Some("nonsense")) => Result.Err("Transaction site must be blockId:position, got 'nonsense'")
+
+fn pickedFrom(found: Found, site: TxSite) -> Result<List<String>, String>
+    ? "Take the Transaction the site points at out of the Block."
+    match found.body
+        Body.NotFetched -> Result.Err("the Block holding it is not held")
+        Body.Discarded -> Result.Err("the Block holding it was pruned")
+        Body.Held(location, payload) -> atPosition(payload, site)
+
+verify pickedFrom
+    pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.NotFetched), Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("the Block holding it is not held")
+    pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Discarded), Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("the Block holding it was pruned")
+    List.len(pickedFrom(Found(height = 0, blockId = "aa", parentBlockId = Option.None, body = Body.Held(Domain.Index.Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?)), Domain.Index.TxSite(blockId = "aa", position = 0))?) => 6
+
+fn atPosition(payload: Bytes, site: TxSite) -> Result<List<String>, String>
+    ? "The Transaction at the recorded position."
+    transactions = Domain.Block.transactionsOf(payload)?
+    nth(transactions, site.position, site)
+
+verify atPosition
+    List.len(atPosition(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 6
+    atPosition(Bytes.fromHex("00")?, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")
+
+fn nth(transactions: List<Transaction>, remaining: Int, site: TxSite) -> Result<List<String>, String>
+    ? "Walk to the recorded position, or report that the Block is shorter."
+    match transactions
+        [] -> Result.Err("block {site.blockId} has no transaction at position {site.position}")
+        [head, ..tail] -> takeOrWalk(head, tail, remaining, site)
+
+verify nth
+    nth([], 0, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")
+    List.len(nth([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false)], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 4
+
+fn takeOrWalk(head: Transaction, tail: List<Transaction>, remaining: Int, site: TxSite) -> Result<List<String>, String>
+    ? "This is the one when the count runs out."
+    match remaining <= 0
+        true -> Result.Ok(describeTransaction(site, head))
+        false -> nth(tail, remaining - 1, site)
+
+verify takeOrWalk
+    List.len(takeOrWalk(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false), [], 0, Domain.Index.TxSite(blockId = "aa", position = 0))?) => 4
+    takeOrWalk(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cc", size = 9, isSegWit = false), [], 1, Domain.Index.TxSite(blockId = "aa", position = 0)) => Result.Err("block aa has no transaction at position 0")

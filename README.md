@@ -198,6 +198,34 @@ body   not fetched                                    # never asked for
 body   discarded by pruning, Prune Watermark 100      # deliberately deleted
 ```
 
+### Finding a Transaction
+
+`txindex` records where each Transaction sits, and `tx` looks one up. Neither
+needs a Peer, and `bodies` must have run over the range first.
+
+```bash
+./target/release/main txindex ~/chain 1 200
+7 Transactions recorded from 6 Blocks
+
+./target/release/main tx ~/chain f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+txid   f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+block  00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee position 1
+tx f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
+   legacy, version 1, 1 in / 2 out, 275 bytes, locktime 0
+   in  0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9:0 seq 4294967295 witness 0
+   out 10.00000000 BTC  nonstandard 4104ae1a62fe09c5f51b13905f07f06b99a…
+   out 40.00000000 BTC  nonstandard 410411db93e1dcdb8a016b49840f8c53bc1…
+```
+
+The entry names a **Block**, not a Height, so a reorganisation that moves a
+Height leaves it true.
+
+**Index a range, not the chain.** Bitcoin holds well over a billion
+Transactions and the Store keeps every entry in memory — a whole-chain
+Transaction index is exactly what `infra/store.av` says it cannot back. Over a
+range it works today, and the keyspace is the one a real database would be
+given.
+
 ### Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.

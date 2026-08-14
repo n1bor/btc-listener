@@ -1,0 +1,81 @@
+module TxIndex
+    intent =
+        "Recording where each Transaction lives, so one can be found by its Id."
+        "The Index knows Heights and Blocks. Nothing in it can answer 'where is"
+        "this Transaction', which is the question every spend asks: an Input"
+        "names the Output it spends by Transaction Id, and without this that"
+        "means reading the whole chain to find one Transaction."
+        "Built over a range of Heights rather than all of them, deliberately. The"
+        "chain holds well over a billion Transactions and Infra.Store keeps every"
+        "entry in memory, so a whole-chain Transaction index is exactly the case"
+        "its own intent says it cannot back. Over a range it is useful now, and"
+        "the keyspace is the one a real database would be given."
+        "Blocks are read through Infra.Blocks.fetch, which holds a Segment between"
+        "calls, because consecutive Heights usually sit in the same one."
+    exposes [Built, build]
+    depends [Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store]
+    effects [Disk.appendText, Disk.readText]
+
+record Built
+    blocks: Int
+    transactions: Int
+
+record Walk
+    store: Store
+    blocks: BlockStore
+    loaded: Option<Loaded>
+    counted: Built
+
+fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, String>
+    ? "Record every Transaction in a range of Heights against where it sits."
+      "A Height whose body is absent is stepped over rather than refused: the"
+      "range is what the caller asked for, and what is held inside it is what"
+      "there is to index."
+    ! [Disk.appendText, Disk.readText]
+    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, counted = Built(blocks = 0, transactions = 0)), from, to)?
+    Result.Ok(walked.counted)
+
+fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "Each Height in turn."
+    ! [Disk.appendText, Disk.readText]
+    match height > to
+        true -> Result.Ok(state)
+        false -> atHeight(state, height, to)
+
+fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "A Height the Index does not name ends the range early."
+    ! [Disk.appendText, Disk.readText]
+    named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(state)
+        Option.Some(blockId) -> atBlock(state, height, to, blockId)
+
+fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
+    ? "A Block whose body is not held has no Transactions to record."
+    ! [Disk.appendText, Disk.readText]
+    located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> walk(state, height + 1, to)
+        Option.Some(text) -> indexBody(state, height, to, blockId, text)
+
+fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+    ? "Read the Block and write one entry per Transaction it holds."
+    ! [Disk.appendText, Disk.readText]
+    location = Domain.Index.decodeLocation(text)?
+    got = Infra.Blocks.fetch(state.blocks, state.loaded, location)?
+    transactions = Domain.Block.transactionsOf(got.payload)?
+    entries = sitesFor(Domain.Block.txidsOf(transactions), blockId, 0, [])
+    grown = Infra.Store.putAll(state.store, entries)?
+    walk(Walk(store = grown, blocks = state.blocks, loaded = Option.Some(got.loaded), counted = Built(blocks = state.counted.blocks + 1, transactions = state.counted.transactions + List.len(entries))), height + 1, to)
+
+fn sitesFor(txids: List<String>, blockId: String, position: Int, acc: List<Entry>) -> List<Entry>
+    ? "One entry per Transaction: this Id sits at this place in this Block."
+    match txids
+        [] -> List.reverse(acc)
+        [head, ..tail] -> sitesFor(tail, blockId, position + 1, List.prepend(Entry(key = Domain.Index.txKey(head), value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = blockId, position = position))), acc))
+
+verify sitesFor
+    sitesFor([], "aa", 0, []) => []
+    sitesFor(["cc"], "aa", 0, []) => [Entry(key = "t:cc", value = "aa:0")]
+    sitesFor(["cc", "dd"], "aa", 0, []) => [Entry(key = "t:cc", value = "aa:0"), Entry(key = "t:dd", value = "aa:1")]
+    sitesFor(["cc"], "aa", 7, []) => [Entry(key = "t:cc", value = "aa:7")]
