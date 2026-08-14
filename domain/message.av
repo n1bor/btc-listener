@@ -4,7 +4,7 @@ module Message
         "Everything here is a pure transformation over bytes, so the whole framing"
         "layer is covered by verify blocks against known-good vectors rather than"
         "by a live Peer. A Peer is only needed to prove the socket, not the format."
-    exposes [frame, littleEndian, bigEndian, readLittleEndian, asciiBytes, asciiText, headerLength, payloadLengthAt, commandAt]
+    exposes [frame, skip, littleEndian, bigEndian, readLittleEndian, asciiBytes, asciiText, headerLength, payloadLengthAt, commandAt]
     depends [Bytes, Crypto.Digest32, Domain.Hash, Domain.Network]
     effects []
 
@@ -14,6 +14,33 @@ fn headerLength() -> Int
 
 verify headerLength
     headerLength() => 24
+
+fn skip(bytes: List<Int>, n: Int) -> List<Int>
+    ? "Step over n bytes without copying what is left."
+      "List.drop copies the remainder rather than sharing an offset, so it costs"
+      "the length of what follows and not the length of what is stepped over."
+      "Walking a Block that way is quadratic: measured at 57 ms over a hundred"
+      "thousand elements, 250 over two hundred thousand and 1,038 over four"
+      "hundred thousand, against 19, 34 and 67 for this. See jasisz/aver#913."
+    match n <= 0
+        true -> bytes
+        false -> skipOne(bytes, n)
+
+verify skip
+    skip([1, 2, 3], 0) => [1, 2, 3]
+    skip([1, 2, 3], 2) => [3]
+    skip([1, 2, 3], 9) => []
+    skip([], 2) => []
+
+fn skipOne(bytes: List<Int>, n: Int) -> List<Int>
+    ? "One byte at a time, which is what makes it share rather than copy."
+    match bytes
+        [] -> []
+        [head, ..tail] -> skip(tail, n - 1)
+
+verify skipOne
+    skipOne([1, 2, 3], 1) => [2, 3]
+    skipOne([], 1) => []
 
 fn littleEndian(value: Int, width: Int) -> List<Int>
     ? "Encode a non-negative integer as `width` little-endian bytes."

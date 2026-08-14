@@ -15,21 +15,25 @@ module CompactSize
 record Count
     value: Int
     rest: List<Int>
+    width: Int
 
 fn read(bytes: List<Int>) -> Count
-    ? "The count at the front, and whatever follows it."
+    ? "The count at the front, whatever follows it, and how many bytes it took."
+      "The width is reported rather than worked out from the value, so a caller"
+      "measuring how much it consumed stays right even on an encoding that used"
+      "more bytes than the value needed."
     match bytes
-        [] -> Count(value = 0, rest = [])
+        [] -> Count(value = 0, rest = [], width = 0)
         [head, ..tail] -> from(head, tail)
 
 verify read
-    read([]) => Count(value = 0, rest = [])
-    read([5, 9]) => Count(value = 5, rest = [9])
-    read([252, 9]) => Count(value = 252, rest = [9])
-    read([253, 1, 1, 9]) => Count(value = 257, rest = [9])
-    read([253, 208, 7, 9]) => Count(value = 2000, rest = [9])
-    read([254, 0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9])
-    read([255, 1, 0, 0, 0, 0, 0, 0, 0, 9]) => Count(value = 1, rest = [9])
+    read([]) => Count(value = 0, rest = [], width = 0)
+    read([5, 9]) => Count(value = 5, rest = [9], width = 1)
+    read([252, 9]) => Count(value = 252, rest = [9], width = 1)
+    read([253, 1, 1, 9]) => Count(value = 257, rest = [9], width = 3)
+    read([253, 208, 7, 9]) => Count(value = 2000, rest = [9], width = 3)
+    read([254, 0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9], width = 5)
+    read([255, 1, 0, 0, 0, 0, 0, 0, 0, 9]) => Count(value = 1, rest = [9], width = 9)
 
 fn from(head: Int, tail: List<Int>) -> Count
     ? "Values below 253 are the byte itself; the three markers name a wider field."
@@ -37,22 +41,22 @@ fn from(head: Int, tail: List<Int>) -> Count
         253 -> wide(2, tail)
         254 -> wide(4, tail)
         255 -> wide(8, tail)
-        _ -> Count(value = head, rest = tail)
+        _ -> Count(value = head, rest = tail, width = 1)
 
 verify from
-    from(5, [9]) => Count(value = 5, rest = [9])
-    from(252, []) => Count(value = 252, rest = [])
-    from(253, [1, 1, 9]) => Count(value = 257, rest = [9])
-    from(254, [0, 0, 1, 0]) => Count(value = 65536, rest = [])
-    from(255, [1, 0, 0, 0, 0, 0, 0, 0]) => Count(value = 1, rest = [])
+    from(5, [9]) => Count(value = 5, rest = [9], width = 1)
+    from(252, []) => Count(value = 252, rest = [], width = 1)
+    from(253, [1, 1, 9]) => Count(value = 257, rest = [9], width = 3)
+    from(254, [0, 0, 1, 0]) => Count(value = 65536, rest = [], width = 5)
+    from(255, [1, 0, 0, 0, 0, 0, 0, 0]) => Count(value = 1, rest = [], width = 9)
 
 fn wide(width: Int, tail: List<Int>) -> Count
     ? "Read the wider field the marker promised, and step past it."
-    Count(value = Domain.Message.readLittleEndian(List.take(tail, width)), rest = List.drop(tail, width))
+    Count(value = Domain.Message.readLittleEndian(List.take(tail, width)), rest = Domain.Message.skip(tail, width), width = width + 1)
 
 verify wide
-    wide(2, [1, 1, 9]) => Count(value = 257, rest = [9])
-    wide(4, [0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9])
+    wide(2, [1, 1, 9]) => Count(value = 257, rest = [9], width = 3)
+    wide(4, [0, 0, 1, 0, 9]) => Count(value = 65536, rest = [9], width = 5)
 
 fn widthOf(head: Int) -> Int
     ? "How many bytes the count occupies, its marker included."

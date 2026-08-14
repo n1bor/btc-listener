@@ -156,12 +156,10 @@ txs    3721
 
 `full` is the default and says so explicitly; anything else prints the usage.
 
-**That took six and a half minutes.** `summary` saves the printing, not the work:
-the count means every Transaction has already been decoded. Fetching that same
-Block over the network took three and a half seconds, so reading it back is a
-hundredfold slower than downloading it. Early Blocks are small enough that this
-does not show — Block 170 returns instantly — and it is worth knowing before
-reaching for `show` on anything modern.
+`summary` saves the printing, not the work: the count means every Transaction
+has already been decoded. That Block takes about five and a half seconds, nearly
+all of it turning two megabytes of hexadecimal back into bytes
+([jasisz/aver#911](https://github.com/jasisz/aver/issues/911)).
 
 That last line is the only thing that tests the whole round trip inside Aver:
 the Header was decoded from the wire, the bytes written to a Segment, the
