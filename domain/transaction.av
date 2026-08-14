@@ -198,7 +198,7 @@ fn decodeNext(raw: List<Int>) -> Result<Decoded, String>
       "A Transaction carries no length prefix, so the only way to find the next"
       "one is to decode this one and see where it ended. Everything a Block scan"
       "does rests on that."
-    afterVersion = Domain.Message.skip(raw, 4)
+    afterVersion = List.drop(raw, 4)
     build(raw, Domain.Message.readLittleEndian(List.take(raw, 4)), afterVersion, isSegWitMarker(afterVersion))
 
 verify decodeNext
@@ -228,12 +228,12 @@ fn build(raw: List<Int>, version: Int, afterVersion: List<Int>, segwit: Bool) ->
     assemble(raw, version, body, segwit, readInputs(body)?)
 
 verify build
-    txidOf(build(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 4), true)?.transaction) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
+    txidOf(build(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 4), true)?.transaction) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
 
 fn skipMarker(afterVersion: List<Int>, segwit: Bool) -> List<Int>
     ? "Step over the two marker bytes when they are present."
     match segwit
-        true -> Domain.Message.skip(afterVersion, 2)
+        true -> List.drop(afterVersion, 2)
         false -> afterVersion
 
 verify skipMarker
@@ -251,7 +251,7 @@ fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsR
     finish(version, witnessRead, outputsRead.items, segwit, core, 8 + markerWidth(segwit) + inputsRead.consumed + outputsRead.consumed + witnessRead.consumed)
 
 verify assemble
-    sizeOf(assemble(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?.transaction) => 70
+    sizeOf(assemble(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?.transaction) => 70
 
 fn markerWidth(segwit: Bool) -> Int
     ? "The two marker bytes a SegWit serialisation carries after the version."
@@ -282,7 +282,7 @@ fn sealed(version: Int, witnessRead: WitnessRead, outputs: List<Output>, segwit:
     ? "The lock time is present, so the Transaction is whole."
     identity = Bytes.fromList(core)?
     lockTime = Domain.Message.readLittleEndian(List.take(witnessRead.rest, 4))
-    Result.Ok(Decoded(transaction = Transaction(version = version, inputs = witnessRead.items, outputs = outputs, lockTime = lockTime, txid = Domain.Hash.identifierOf(identity), size = size, isSegWit = segwit), rest = Domain.Message.skip(witnessRead.rest, 4)))
+    Result.Ok(Decoded(transaction = Transaction(version = version, inputs = witnessRead.items, outputs = outputs, lockTime = lockTime, txid = Domain.Hash.identifierOf(identity), size = size, isSegWit = segwit), rest = List.drop(witnessRead.rest, 4)))
 
 verify sealed
     sizeOf(sealed(1, WitnessRead(items = [], rest = [0, 0, 0, 0], consumed = 0), [], false, [1, 2, 3, 4], 8)?.transaction) => 8
@@ -347,7 +347,7 @@ verify skipWitnessItems
 fn skipOneItem(rest: List<Int>, count: Int, consumed: Int) -> Skipped
     ? "Step over one length-prefixed Witness item."
     item = Domain.CompactSize.read(rest)
-    skipWitnessItems(Domain.Message.skip(item.rest, item.value), count - 1, consumed + item.width + item.value)
+    skipWitnessItems(List.drop(item.rest, item.value), count - 1, consumed + item.width + item.value)
 
 verify skipOneItem
     skipOneItem([1, 170, 9], 1, 0) => Skipped(rest = [9], consumed = 2)
@@ -358,7 +358,7 @@ fn readInputs(body: List<Int>) -> Result<InputsRead, String>
     readInputsInto(count.value, count.rest, [], count.width)
 
 verify readInputs
-    List.len(readInputs(Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?.items) => 1
+    List.len(readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?.items) => 1
 
 fn readInputsInto(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: Int) -> Result<InputsRead, String>
     ? "Accumulator form so the recursion stays in tail position."
@@ -378,20 +378,20 @@ fn readOneInput(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: Int
     ? "An Input: the Output it spends, its script, and its sequence."
       "Thirty-two bytes of Transaction Id, four of index, the script behind its"
       "length, then four of sequence."
-    index = Domain.Message.readLittleEndian(List.take(Domain.Message.skip(rest, 32), 4))
-    script = Domain.CompactSize.read(Domain.Message.skip(rest, 36))
+    index = Domain.Message.readLittleEndian(List.take(List.drop(rest, 32), 4))
+    script = Domain.CompactSize.read(List.drop(rest, 36))
     inputFrom(remaining, List.take(rest, 32), index, script.value, script.rest, acc, consumed + 40 + script.width + script.value)
 
 verify readOneInput
-    List.len(readOneInput(1, Domain.Message.skip(Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.items) => 1
-    readOneInput(1, Domain.Message.skip(Domain.Message.skip(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.consumed => 41
+    List.len(readOneInput(1, List.drop(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.items) => 1
+    readOneInput(1, List.drop(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.consumed => 41
 
 fn inputFrom(remaining: Int, previous: List<Int>, index: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Input>, consumed: Int) -> Result<InputsRead, String>
     ? "Assemble one Input and continue with the bytes that follow it."
     script = Bytes.fromList(List.take(afterLength, scriptLength))?
     previousBytes = Bytes.fromList(List.reverse(previous))?
-    afterScript = Domain.Message.skip(afterLength, scriptLength)
-    readInputsInto(remaining - 1, Domain.Message.skip(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witnessItems = 0), acc), consumed)
+    afterScript = List.drop(afterLength, scriptLength)
+    readInputsInto(remaining - 1, List.drop(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witnessItems = 0), acc), consumed)
 
 verify inputFrom
     List.len(inputFrom(1, [], 0, 0, [0, 0, 0, 0], [], 41)?.items) => 1
@@ -419,7 +419,7 @@ verify readOutputsInto
 fn readOneOutput(remaining: Int, rest: List<Int>, acc: List<Output>, consumed: Int) -> Result<OutputsRead, String>
     ? "An Output: eight bytes of amount, then the script behind its length."
     value = Domain.Message.readLittleEndian(List.take(rest, 8))
-    script = Domain.CompactSize.read(Domain.Message.skip(rest, 8))
+    script = Domain.CompactSize.read(List.drop(rest, 8))
     outputFrom(remaining, value, script.value, script.rest, acc, consumed + 8 + script.width + script.value)
 
 verify readOneOutput
@@ -429,7 +429,7 @@ verify readOneOutput
 fn outputFrom(remaining: Int, value: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Output>, consumed: Int) -> Result<OutputsRead, String>
     ? "Assemble one Output and continue with the bytes that follow it."
     script = Bytes.fromList(List.take(afterLength, scriptLength))?
-    readOutputsInto(remaining - 1, Domain.Message.skip(afterLength, scriptLength), List.prepend(Output(value = value, script = Bytes.toHex(script)), acc), consumed)
+    readOutputsInto(remaining - 1, List.drop(afterLength, scriptLength), List.prepend(Output(value = value, script = Bytes.toHex(script)), acc), consumed)
 
 verify outputFrom
     List.len(outputFrom(1, 5000, 0, [], [], 9)?.items) => 1
