@@ -4,7 +4,7 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [Domain.Address, Domain.Network, Infra.Blocks, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Index, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
@@ -27,6 +27,7 @@ fn usageLines() -> List<String>
         "  headers <peer-address> <dir>          fetch every Block Header",
         "  bodies  <peer-address> <dir> <a> <b>  fetch Blocks for Heights a..b",
         "  prune   <dir> <height>                delete Blocks below a Height",
+        "  show    <dir> <height>                read one Block back and check it",
         "",
         "  peer-address   IPv4 address of the Peer. Omit it, when listening,",
         "                 to ask a Bitcoin DNS seed for one.",
@@ -43,7 +44,7 @@ fn usageLines() -> List<String>
     ]
 
 verify usageLines
-    List.len(usageLines()) => 19
+    List.len(usageLines()) => 20
     List.contains(usageLines(), "Bitcoin peer listener and chain downloader") => true
 
 fn describe(address: PeerAddress) -> String
@@ -92,6 +93,7 @@ fn dispatch(command: String, rest: List<String>) -> Unit
         "headers" -> needTwo(rest)
         "bodies" -> needFour(rest)
         "prune" -> needPrune(rest)
+        "show" -> needShow(rest)
         "help" -> printLines(usageLines())
         _ -> runWithAddress(command, rest)
 
@@ -295,6 +297,88 @@ fn pruneRun(dir: String, below: Int) -> Result<String, String>
     blocks = Infra.Blocks.open(blocksPath(dir))?
     pruned = Infra.Prune.run(store, blocks, below)?
     Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
+
+fn needShow(rest: List<String>) -> Unit
+    ? "Showing a Block is local: a directory and a Height, no Peer."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match rest
+        [] -> printLines(usageLines())
+        [dir, ..more] -> showHeight(dir, more)
+
+fn showHeight(dir: String, more: List<String>) -> Unit
+    ? "Take the Height that follows the directory."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match more
+        [] -> printLines(usageLines())
+        [height, ..extra] -> startShow(dir, Int.fromString(height))
+
+fn startShow(dir: String, parsed: Result<Int, String>) -> Unit
+    ? "Show, or the usage if the Height was not a whole number."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match parsed
+        Result.Err(message) -> printLines(usageLines())
+        Result.Ok(height) -> shown(showRun(dir, height))
+
+fn showRun(dir: String, height: Int) -> Result<List<String>, String>
+    ? "What the Index and the Segments hold for one Height."
+    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open(blocksPath(dir))?
+    found = Infra.Chain.at(store, blocks, height)?
+    below = Infra.Chain.watermark(store)?
+    Result.Ok(describeFound(found, below))
+
+fn describeFound(found: Found, below: Int) -> List<String>
+    ? "The Height and its Block Id, then whatever is known about the body."
+    List.concat(["height {found.height}", "block  {found.blockId}"], describeBody(found, below))
+
+verify describeFound
+    describeFound(Found(height = 7, blockId = "aa", body = Body.NotFetched), 0) => ["height 7", "block  aa", "body   not fetched"]
+    describeFound(Found(height = 7, blockId = "aa", body = Body.Discarded), 500) => ["height 7", "block  aa", "body   discarded by pruning, Prune Watermark 500"]
+
+fn describeBody(found: Found, below: Int) -> List<String>
+    ? "Held Blocks are checked against the Block Id the Index recorded."
+    match found.body
+        Body.NotFetched -> ["body   not fetched"]
+        Body.Discarded -> ["body   discarded by pruning, Prune Watermark {below}"]
+        Body.Held(location, payload) -> describeHeld(found, location, payload)
+
+verify describeBody
+    describeBody(Found(height = 1, blockId = "aa", body = Body.NotFetched), 0) => ["body   not fetched"]
+    describeBody(Found(height = 1, blockId = "aa", body = Body.Discarded), 5) => ["body   discarded by pruning, Prune Watermark 5"]
+    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0)) => 2
+
+fn describeHeld(found: Found, location: Location, payload: Bytes) -> List<String>
+    ? "Re-derive the Block Id from the bytes on disk and say whether it agrees."
+      "This is the only thing that checks the whole round trip inside Aver: the"
+      "Header was decoded from the wire, the bytes were written to a Segment, the"
+      "Location was recorded against the Block Id, and hashing what comes back"
+      "has to produce the Block Id the Index was asked for."
+    [
+        "body   segment {location.segment} line {location.line}, {List.len(Bytes.toList(payload))} bytes",
+        agreement(Domain.Block.idOfWholeBlock(payload), found.blockId),
+    ]
+
+verify describeHeld
+    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 3 line 9, 80 bytes", "check  header hashes to the recorded Block Id"]
+    describeHeld(Found(height = 0, blockId = "wrong", body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 0 line 0, 80 bytes", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"]
+
+fn agreement(derived: String, recorded: String) -> String
+    ? "Whether the bytes on disk hash to the Block Id the Index recorded."
+    match derived == recorded
+        true -> "check  header hashes to the recorded Block Id"
+        false -> "check  MISMATCH: bytes on disk hash to {derived}"
+
+verify agreement
+    agreement("aa", "aa") => "check  header hashes to the recorded Block Id"
+    agreement("aa", "bb") => "check  MISMATCH: bytes on disk hash to aa"
+
+fn shown(outcome: Result<List<String>, String>) -> Unit
+    ? "Print the lines, or the reason there are none."
+    ! [Console.error, Console.print]
+    match outcome
+        Result.Ok(lines) -> printLines(lines)
+        Result.Err(message) -> Console.error("error: {message}")
 
 fn blocksPath(dir: String) -> String
     ? "Where the Segments live."

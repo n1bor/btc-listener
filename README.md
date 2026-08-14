@@ -114,6 +114,36 @@ stores nothing and widening one fetches only the difference:
 Heights 1–20 are 215-byte Blocks from 2009. Modern Blocks are 1–2 MB, and
 reaching them means letting `headers` finish first.
 
+### Looking at one Block
+
+`show` reads a Block back off disk and checks it. It needs no Peer.
+
+```bash
+./target/release/main show ~/chain 1
+height 1
+block  00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048
+body   segment 0 line 0, 215 bytes
+check  header hashes to the recorded Block Id
+```
+
+That last line is the only thing that tests the whole round trip inside Aver:
+the Header was decoded from the wire, the bytes written to a Segment, the
+Location recorded against the Block Id, and hashing what comes back has to
+produce the Block Id the Index was asked for. Flip one hexadecimal digit in a
+Segment file and it says so:
+
+```
+check  MISMATCH: bytes on disk hash to 487a8a8c80feb555efbe5b6fc63884c4…
+```
+
+A body that is absent is reported as one of two different things, because they
+are two different situations:
+
+```
+body   not fetched                                    # never asked for
+body   discarded by pruning, Prune Watermark 100      # deliberately deleted
+```
+
 ### Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.

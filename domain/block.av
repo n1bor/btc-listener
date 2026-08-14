@@ -6,7 +6,7 @@ module Block
         "only Result here guards that length and the octet range beneath it."
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
-    exposes [BlockHeader, headerLength, decodeHeader, headersOf, blockIdOf, genesisBlockId, locatorHeights, getHeadersPayload]
+    exposes [BlockHeader, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, genesisBlockId, locatorHeights, getHeadersPayload]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network]
     effects []
 
@@ -87,6 +87,22 @@ fn blockIdOf(header: Bytes) -> String
 verify blockIdOf
     blockIdOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
     blockIdOf(Bytes.fromHex("010000004860eb18bf1b1620e37e9490fc8a427514416fd75159ab86688e9a8300000000d5fdcc541e25de1c7a5addedf24858b8bb665c9f36ef744ee42c316022c90f9bb0bc6649ffff001d08d2bd61")?) => "000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"
+
+fn idOfWholeBlock(payload: Bytes) -> String
+    ? "The Block Id of a serialised Block, which is its Header's and nothing else's."
+      "A Block is its eighty-byte Header followed by its Transactions, and only"
+      "the Header is hashed — so a Block read back off disk can be checked"
+      "against the Block Id the Index recorded for it without decoding any of"
+      "the body."
+      "Total: the first eighty elements of a Bytes are octets by construction, so"
+      "Bytes.fromList cannot refuse them and the default is unreachable. It is"
+      "the payload itself, which would only ever be seen if that stopped holding."
+    header = List.take(Bytes.toList(payload), headerLength())
+    blockIdOf(Result.withDefault(Bytes.fromList(header), payload))
+
+verify idOfWholeBlock
+    idOfWholeBlock(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01ff")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    idOfWholeBlock(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 
 fn genesisBlockId(network: Network) -> String
     ? "The first Block of each Network, where every Locator ultimately ends."

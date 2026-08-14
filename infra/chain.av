@@ -1,0 +1,67 @@
+module Chain
+    intent =
+        "What the Index and the Segments together hold for a Height."
+        "The read side of everything the download wrote. A Height names a Block"
+        "Id, a Block Id may name a Location, and a Location names bytes on disk —"
+        "and each of those steps can come up empty for a different reason, which"
+        "is the whole point of asking through one place rather than three."
+        "Absent is not one answer. A body we never fetched and a body we deleted"
+        "on purpose look identical in the Index, and the Prune Watermark is what"
+        "tells them apart. A caller that treats them alike either re-downloads"
+        "what it discarded or reports a hole where there was a decision."
+    exposes [Body, Found, at, watermark]
+    depends [Bytes, Domain.Index, Infra.Blocks, Infra.Store]
+    effects [Disk.readText]
+
+type Body
+    Held(Location, Bytes)
+    NotFetched
+    Discarded
+
+record Found
+    height: Int
+    blockId: String
+    body: Body
+
+fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
+    ? "Everything known about one Height, including why its body is absent."
+    ! [Disk.readText]
+    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Err("no header for height {height}; run the header phase first")
+        Option.Some(blockId) -> withBlockId(store, blocks, height, blockId)
+
+fn withBlockId(store: Store, blocks: BlockStore, height: Int, blockId: String) -> Result<Found, String>
+    ? "The Height names a Block; whether the bytes are here is a second question."
+    ! [Disk.readText]
+    stored = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
+    below = watermark(store)?
+    state = Domain.Index.bodyStateOf(stored, height, below)?
+    bodyFor(blocks, height, blockId, state)
+
+fn watermark(store: Store) -> Result<Int, String>
+    ? "The Prune Watermark, or zero when nothing has ever been pruned."
+      "One place reads it, so one place decides what an absent record means."
+    held = Infra.Store.get(store, Domain.Index.prunedBelowKey())?
+    Domain.Index.prunedBelowOf(held)
+
+verify watermark
+    watermark(Infra.Store.fixture([])) => Result.Ok(0)
+    watermark(Infra.Store.fixture([("meta:prunedBelow", "500")])) => Result.Ok(500)
+    watermark(Infra.Store.fixture([("meta:prunedBelow", "x")])) => Result.Err("Height must be a whole number, got 'x'")
+
+fn bodyFor(blocks: BlockStore, height: Int, blockId: String, state: BodyState) -> Result<Found, String>
+    ? "Read the bytes when there are bytes, and say why when there are not."
+    ! [Disk.readText]
+    match state
+        BodyState.Missing -> Result.Ok(Found(height = height, blockId = blockId, body = Body.NotFetched))
+        BodyState.Pruned -> Result.Ok(Found(height = height, blockId = blockId, body = Body.Discarded))
+        BodyState.Stored(location) -> readHeld(blocks, height, blockId, location)
+
+fn readHeld(blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Found, String>
+    ? "One Block on its own, so read rather than fetch."
+      "A scan over many Heights should hold the Segment between calls; this asks"
+      "for one Block and is done, and read is the cheaper of the two for that."
+    ! [Disk.readText]
+    payload = Infra.Blocks.read(blocks, location)?
+    Result.Ok(Found(height = height, blockId = blockId, body = Body.Held(location, payload)))
