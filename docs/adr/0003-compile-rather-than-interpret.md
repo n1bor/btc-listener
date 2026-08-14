@@ -86,7 +86,66 @@ removes it. Compiling is now a considered preference rather than a necessity,
 and the original consequence — that `aver run` is useless for trying something
 out — no longer holds. Small experiments interpret perfectly well.
 
+> **Superseded by the 14 August update below.** "A considered preference rather
+> than a necessity" was written from the decoding measurements alone, before the
+> Index existed and before anyone opened a Store under `aver run`. It is wrong,
+> and the README was right to say the downloader must be compiled.
+
 Note that [#890](https://github.com/jasisz/aver/issues/890) — a `Map` returned
 from a function is copied — is a separate defect and is still open. It is the
 reason `infra/store.av` folds the way it does, and it is unaffected by any of
 the above.
+
+## Update, 14 August 2026 — a necessity again, for a different reason
+
+The decision stands, and not as a preference. What restores it is not the list
+defect that prompted it but two `Map` defects that arrived with the Index:
+[#890](https://github.com/jasisz/aver/issues/890), a `Map` handed back from a
+function is copied, and [#900](https://github.com/jasisz/aver/issues/900),
+building a `Map` is quadratic under `aver run`. Both are open on `d6b72152`.
+
+[#905](https://github.com/jasisz/aver/pull/905) reworked `Map.fromList` and says
+plainly why this is not over: *"filling a map is still quadratic in time,
+because a map has no equivalent of a list body's all-immediate flag."*
+
+### Opening a Store, on real Index data
+
+`Infra.Store.open` replays its log into a `Map`. Truncated prefixes of a real
+mainnet Index, timed end to end:
+
+| entries | compiled | `aver run` |
+|---|---|---|
+| 10,000 | 30 ms / 6 MB | 3,480 ms / 2,059 MB |
+| 20,000 | 60 ms / 10 MB | 17,710 ms / 8,189 MB |
+| 40,000 | 140 ms / 19 MB | 107,950 ms / 30,425 MB |
+
+Compiled is linear in both. Interpreted is quadratic in both, and at 40,000
+entries it wants 30 GB on a 32 GB machine. The whole 60,001-entry Index opens
+compiled in 0.26 s and 33 MB. A finished Index is 962,268 entries.
+
+So this is the 1 MiB `Bytes.fromHex` situation again: not slower, but unable to
+finish. Unlike the decoding numbers above, no amount of patience substitutes for
+the build step.
+
+### Why the fold in `infra/store.av` is shaped as it is
+
+#890 is the compiled half, and it is untouched. Building a 80,000-entry `Map`
+three ways, all compiled:
+
+| fold | time |
+|---|---|
+| `Map.set` inline in the recursive call | 58 ms |
+| branch, then tail-call — what `store.av` does | 55 ms |
+| via a helper that returns a `Map` | 101,496 ms |
+
+Roughly 1,800× for writing the obvious helper. `applyChanges` and `applyNext`
+are split the way they are for this reason alone, and `putAll`/`deleteAll` exist
+so a batch costs one copy of the Store rather than one per entry.
+
+### What would retire this
+
+#900 closing would make `aver run` viable for the downloader. #890 closing would
+let `infra/store.av` be written the natural way. They are independent: either can
+land without the other, and only the first bears on this decision. The compiled
+path stays valid either way, so nothing depends on this beyond the build
+instructions and the note in the README.
