@@ -27,13 +27,14 @@ fn usageLines() -> List<String>
         "  headers <peer-address> <dir>          fetch every Block Header",
         "  bodies  <peer-address> <dir> <a> <b>  fetch Blocks for Heights a..b",
         "  prune   <dir> <height>                delete Blocks below a Height",
-        "  show    <dir> <height>                read one Block back and check it",
+        "  show    <dir> <height> [summary]      read one Block back and check it",
         "",
         "  peer-address   IPv4 address of the Peer. Omit it, when listening,",
         "                 to ask a Bitcoin DNS seed for one.",
         "  port           optional, defaults to 8333",
         "  dir            where the Index and the Segments live",
         "  height         the Prune Watermark: Blocks below it are discarded",
+        "  summary        show, without listing the Block's Transactions",
         "",
         "  headers must run before bodies: a getdata names Block Ids, never",
         "  Heights, so the chain has to be known before a Block can be asked for.",
@@ -44,7 +45,7 @@ fn usageLines() -> List<String>
     ]
 
 verify usageLines
-    List.len(usageLines()) => 20
+    List.len(usageLines()) => 21
     List.contains(usageLines(), "Bitcoin peer listener and chain downloader") => true
 
 fn describe(address: PeerAddress) -> String
@@ -310,23 +311,38 @@ fn showHeight(dir: String, more: List<String>) -> Unit
     ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
     match more
         [] -> printLines(usageLines())
-        [height, ..extra] -> startShow(dir, Int.fromString(height))
+        [height, ..extra] -> showMode(dir, Int.fromString(height), extra)
 
-fn startShow(dir: String, parsed: Result<Int, String>) -> Unit
+fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Unit
+    ? "An optional third word chooses how much of the Block to print."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match extra
+        [] -> startShow(dir, parsed, true)
+        [mode, ..rest] -> namedMode(dir, parsed, mode)
+
+fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
+    ? "Only two words mean anything here; anything else is a typo worth showing."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match mode
+        "full" -> startShow(dir, parsed, true)
+        "summary" -> startShow(dir, parsed, false)
+        _ -> printLines(usageLines())
+
+fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -> Unit
     ? "Show, or the usage if the Height was not a whole number."
     ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
     match parsed
         Result.Err(message) -> printLines(usageLines())
-        Result.Ok(height) -> shown(showRun(dir, height))
+        Result.Ok(height) -> shown(showRun(dir, height, withTransactions))
 
-fn showRun(dir: String, height: Int) -> Result<List<String>, String>
+fn showRun(dir: String, height: Int, withTransactions: Bool) -> Result<List<String>, String>
     ? "What the Index and the Segments hold for one Height."
     ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
     found = Infra.Chain.at(store, blocks, height)?
     below = Infra.Chain.watermark(store)?
-    Result.Ok(App.Show.describeFound(found, below))
+    Result.Ok(App.Show.describeFound(found, below, withTransactions))
 
 fn shown(outcome: Result<List<String>, String>) -> Unit
     ? "Print the lines, or the reason there are none."

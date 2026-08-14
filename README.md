@@ -143,11 +143,18 @@ directly rather than a hash of one, which no longer has a standard address form,
 so they are shown as their raw script.
 
 A Block near the tip carries a few thousand Transactions and each takes several
-lines, so pipe it somewhere:
+lines. `summary` stops before them:
 
 ```bash
-./target/release/main show ~/chain 800000 | head -40
+./target/release/main show ~/chain 800000 summary
+height 800000
+block  00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054
+body   segment 412 line 0, 1657267 bytes
+check  header hashes to the recorded Block Id
+txs    3006
 ```
+
+`full` is the default and says so explicitly; anything else prints the usage.
 
 That last line is the only thing that tests the whole round trip inside Aver:
 the Header was decoded from the wire, the bytes written to a Segment, the
