@@ -7,7 +7,7 @@ module Transaction
         "The Transaction Id is the double-SHA256 of the legacy serialisation, so"
         "for a SegWit Transaction the marker, flag and Witnesses are excluded —"
         "which is why decoding tracks where each section began."
-    exposes [decode, summaryLines, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
+    exposes [decode, decodeNext, Decoded, summaryLines, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Script, Domain.Text]
     effects []
 
@@ -33,6 +33,14 @@ record Transaction
 
 record InputsRead
     items: List<Input>
+    rest: List<Int>
+
+record WitnessRead
+    items: List<Input>
+    rest: List<Int>
+
+record Decoded
+    transaction: Transaction
     rest: List<Int>
 
 record OutputsRead
@@ -159,13 +167,15 @@ fn fraction(remainder: Int) -> String
     Domain.Text.padLeft("{remainder}", 8)
 
 fn decode(raw: List<Int>) -> Result<Transaction, String>
-    ? "Decode a Transaction, SegWit-serialised or not."
-    afterVersion = List.drop(raw, 4)
-    build(raw, Domain.Message.readLittleEndian(List.take(raw, 4)), afterVersion, isSegWitMarker(afterVersion))
+    ? "Decode a Transaction that is the whole of what it was given."
+      "For a tx Message off the wire, where nothing follows. A Block holds its"
+      "Transactions end to end with no lengths in front of them, so walking one"
+      "needs decodeNext, which says where the Transaction stopped."
+    Result.Ok(decodeNext(raw)?.transaction)
 
 verify decode
     decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => Result.Ok(Transaction(version = 2, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 0, script = "", sequence = 4294967295, witnessItems = 2)], outputs = [Output(value = 5000, script = "5151")], lockTime = 0, txid = "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c", size = 70, isSegWit = true))
-    decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("byte 300 at index 0 is outside 0..=255")
+    decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("Transaction ends before its lock time")
     txidOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
     sizeOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => 204
     isSegWitOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => false
@@ -175,6 +185,24 @@ verify decode
     List.len(inputsOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?)) => 1
     List.len(outputsOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?)) => 1
     lockTimeOf(decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => 0
+
+fn decodeNext(raw: List<Int>) -> Result<Decoded, String>
+    ? "Decode the Transaction at the front, and hand back what follows it."
+      "A Transaction carries no length prefix, so the only way to find the next"
+      "one is to decode this one and see where it ended. Everything a Block scan"
+      "does rests on that."
+    afterVersion = List.drop(raw, 4)
+    build(raw, Domain.Message.readLittleEndian(List.take(raw, 4)), afterVersion, isSegWitMarker(afterVersion))
+
+verify decodeNext
+    decodeNext(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?.transaction.txid => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
+    decodeNext(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?.transaction.size => 70
+    decodeNext(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?.rest => []
+    decodeNext(List.concat(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), [7, 8, 9]))?.transaction.size => 70
+    decodeNext(List.concat(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), [7, 8, 9]))?.rest => [7, 8, 9]
+    decodeNext(List.concat(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), [7, 8, 9]))?.transaction.lockTime => 0
+    decodeNext([]) => Result.Err("Transaction ends before its lock time")
+    decodeNext([1, 2, 3]) => Result.Err("Transaction ends before its lock time")
 
 fn isSegWitMarker(afterVersion: List<Int>) -> Bool
     ? "A zero byte where the Input count belongs marks SegWit serialisation."
@@ -187,13 +215,13 @@ verify isSegWitMarker
     isSegWitMarker([1, 9]) => false
     isSegWitMarker([]) => false
 
-fn build(raw: List<Int>, version: Int, afterVersion: List<Int>, segwit: Bool) -> Result<Transaction, String>
+fn build(raw: List<Int>, version: Int, afterVersion: List<Int>, segwit: Bool) -> Result<Decoded, String>
     ? "Read the body, then assemble what was found."
     body = skipMarker(afterVersion, segwit)
     assemble(raw, version, body, segwit, readInputs(body)?)
 
 verify build
-    txidOf(build(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 4), true)?) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
+    txidOf(build(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 4), true)?.transaction) => "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c"
 
 fn skipMarker(afterVersion: List<Int>, segwit: Bool) -> List<Int>
     ? "Step over the two marker bytes when they are present."
@@ -205,14 +233,18 @@ verify skipMarker
     skipMarker([0, 1, 9], true) => [9]
     skipMarker([9], false) => [9]
 
-fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsRead: InputsRead) -> Result<Transaction, String>
-    ? "Outputs follow the Inputs; the lock time is the last four bytes."
+fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsRead: InputsRead) -> Result<Decoded, String>
+    ? "Outputs follow the Inputs, then any Witnesses, then the lock time."
+      "The lock time used to be taken as the last four bytes of the input, which"
+      "is only right when the input is exactly one Transaction. Read in place it"
+      "is right either way, and where it ends is where the next one starts."
     outputsRead = readOutputs(inputsRead.rest)?
-    core = List.concat(List.concat(List.take(raw, 4), coreSection(body, outputsRead.rest)), lastFour(raw))
-    finish(raw, version, inputsRead.items, outputsRead.items, segwit, core, outputsRead.rest)
+    witnessRead = attachWitnesses(inputsRead.items, segwit, outputsRead.rest)
+    core = List.concat(List.concat(List.take(raw, 4), coreSection(body, outputsRead.rest)), List.take(witnessRead.rest, 4))
+    finish(raw, version, witnessRead, outputsRead.items, segwit, core)
 
 verify assemble
-    sizeOf(assemble(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?) => 70
+    sizeOf(assemble(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(List.drop(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?.transaction) => 70
 
 fn coreSection(body: List<Int>, afterOutputs: List<Int>) -> List<Int>
     ? "The Input and Output bytes, which the Transaction Id is taken over."
@@ -222,45 +254,56 @@ verify coreSection
     coreSection([1, 2, 3, 4], [3, 4]) => [1, 2]
     coreSection([1, 2], [1, 2]) => []
 
-fn lastFour(raw: List<Int>) -> List<Int>
-    ? "The lock time always occupies the final four bytes."
-    List.drop(raw, List.len(raw) - 4)
-
-verify lastFour
-    lastFour([1, 2, 3, 4, 5, 6, 7, 8]) => [5, 6, 7, 8]
-
-fn finish(raw: List<Int>, version: Int, inputs: List<Input>, outputs: List<Output>, segwit: Bool, core: List<Int>, afterOutputs: List<Int>) -> Result<Transaction, String>
-    ? "Seal the decoded parts into a Transaction."
-    identity = Bytes.fromList(core)?
-    witnessed = attachWitnesses(inputs, segwit, afterOutputs)
-    lockTime = Domain.Message.readLittleEndian(lastFour(raw))
-    Result.Ok(Transaction(version = version, inputs = witnessed, outputs = outputs, lockTime = lockTime, txid = Domain.Hash.identifierOf(identity), size = List.len(raw), isSegWit = segwit))
+fn finish(raw: List<Int>, version: Int, witnessRead: WitnessRead, outputs: List<Output>, segwit: Bool, core: List<Int>) -> Result<Decoded, String>
+    ? "Seal the decoded parts, and measure how much of the input was used."
+      "The four bytes of lock time have to actually be there. Without that check"
+      "a truncated Transaction decodes to an empty one of size zero rather than"
+      "failing, which is worse than useless when walking a Block: the count says"
+      "how many Transactions to expect, and phantoms would be handed back for"
+      "bytes that were never there."
+    match List.len(witnessRead.rest) >= 4
+        false -> Result.Err("Transaction ends before its lock time")
+        true -> sealed(raw, version, witnessRead, outputs, segwit, core)
 
 verify finish
-    sizeOf(finish([1, 2, 3, 4, 0, 0, 0, 0], 1, [], [], false, [1, 2, 3, 4], [])?) => 8
+    sizeOf(finish([1, 2, 3, 4, 0, 0, 0, 0], 1, WitnessRead(items = [], rest = [0, 0, 0, 0]), [], false, [1, 2, 3, 4])?.transaction) => 8
+    finish([1, 2, 3, 4], 1, WitnessRead(items = [], rest = []), [], false, [1, 2, 3, 4]) => Result.Err("Transaction ends before its lock time")
 
-fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> List<Input>
-    ? "Record how many Witness items each Input carried."
+fn sealed(raw: List<Int>, version: Int, witnessRead: WitnessRead, outputs: List<Output>, segwit: Bool, core: List<Int>) -> Result<Decoded, String>
+    ? "The lock time is present, so the Transaction is whole."
+    identity = Bytes.fromList(core)?
+    lockTime = Domain.Message.readLittleEndian(List.take(witnessRead.rest, 4))
+    after = List.drop(witnessRead.rest, 4)
+    Result.Ok(Decoded(transaction = Transaction(version = version, inputs = witnessRead.items, outputs = outputs, lockTime = lockTime, txid = Domain.Hash.identifierOf(identity), size = List.len(raw) - List.len(after), isSegWit = segwit), rest = after))
+
+verify sealed
+    sizeOf(sealed([1, 2, 3, 4, 0, 0, 0, 0], 1, WitnessRead(items = [], rest = [0, 0, 0, 0]), [], false, [1, 2, 3, 4])?.transaction) => 8
+    sealed([1, 2, 3, 4, 0, 0, 0, 0], 1, WitnessRead(items = [], rest = [0, 0, 0, 0]), [], false, [256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> WitnessRead
+    ? "Record how many Witness items each Input carried, and where they ended."
+      "A Transaction with no Witnesses has nothing between its Outputs and its"
+      "lock time, so the Outputs' remainder is already the answer."
     match segwit
         true -> countWitnesses(inputs, afterOutputs, [])
-        false -> inputs
+        false -> WitnessRead(items = inputs, rest = afterOutputs)
 
 verify attachWitnesses
-    List.len(attachWitnesses([], true, [])) => 0
-    List.len(attachWitnesses([], false, [])) => 0
+    List.len(attachWitnesses([], true, []).items) => 0
+    List.len(attachWitnesses([], false, []).items) => 0
+    attachWitnesses([], false, [9, 9]).rest => [9, 9]
 
-fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>) -> List<Input>
+fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>) -> WitnessRead
     ? "Walk the Witness stacks in step with the Inputs they belong to."
     match inputs
-        [] -> List.reverse(acc)
+        [] -> WitnessRead(items = List.reverse(acc), rest = rest)
         [head, ..tail] -> countOne(head, tail, rest, acc)
 
 verify countWitnesses
-    List.len(countWitnesses([], [], [])) => 0
-
-verify countWitnesses
-    List.len(countWitnesses([], [], [])) => 0
-    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187], []))) => 2
+    List.len(countWitnesses([], [], []).items) => 0
+    countWitnesses([], [9], []).rest => [9]
+    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187], []).items)) => 2
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187, 9], []).rest => [9]
 
 fn headOf(inputs: List<Input>) -> Input
     ? "The first Input, for the verify cases above."
@@ -269,13 +312,14 @@ fn headOf(inputs: List<Input>) -> Input
 verify headOf
     witnessItemsOf(headOf([])) => 0 - 1
 
-fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>) -> List<Input>
+fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>) -> WitnessRead
     ? "Read one Input's Witness stack and carry on to the next."
     stack = Domain.CompactSize.read(rest)
     countWitnesses(remaining, skipWitnessItems(stack.rest, stack.value), List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witnessItems = stack.value), acc))
 
 verify countOne
-    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170], [])) => 1
+    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170], []).items) => 1
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170, 9], []).rest => [9]
 
 fn skipWitnessItems(rest: List<Int>, count: Int) -> List<Int>
     ? "Step over `count` length-prefixed Witness items."

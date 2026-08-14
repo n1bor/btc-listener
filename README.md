@@ -123,6 +123,7 @@ reaching them means letting `headers` finish first.
 height 1
 block  00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048
 body   segment 0 line 0, 215 bytes
+txs    1
 check  header hashes to the recorded Block Id
 ```
 

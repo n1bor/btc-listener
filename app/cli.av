@@ -346,7 +346,7 @@ fn describeBody(found: Found, below: Int) -> List<String>
 verify describeBody
     describeBody(Found(height = 1, blockId = "aa", body = Body.NotFetched), 0) => ["body   not fetched"]
     describeBody(Found(height = 1, blockId = "aa", body = Body.Discarded), 5) => ["body   discarded by pruning, Prune Watermark 5"]
-    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0)) => 2
+    List.len(describeBody(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.Held(Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?)), 0)) => 3
 
 fn describeHeld(found: Found, location: Location, payload: Bytes) -> List<String>
     ? "Re-derive the Block Id from the bytes on disk and say whether it agrees."
@@ -356,12 +356,26 @@ fn describeHeld(found: Found, location: Location, payload: Bytes) -> List<String
       "has to produce the Block Id the Index was asked for."
     [
         "body   segment {location.segment} line {location.line}, {List.len(Bytes.toList(payload))} bytes",
+        transactionLine(payload),
         agreement(Domain.Block.idOfWholeBlock(payload), found.blockId),
     ]
 
 verify describeHeld
-    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 3 line 9, 80 bytes", "check  header hashes to the recorded Block Id"]
-    describeHeld(Found(height = 0, blockId = "wrong", body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 0 line 0, 80 bytes", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"]
+    describeHeld(Found(height = 0, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", body = Body.NotFetched), Location(segment = 3, line = 9), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 3 line 9, 80 bytes", "txs    0", "check  header hashes to the recorded Block Id"]
+    describeHeld(Found(height = 0, blockId = "wrong", body = Body.NotFetched), Location(segment = 0, line = 0), Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => ["body   segment 0 line 0, 80 bytes", "txs    0", "check  MISMATCH: bytes on disk hash to 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"]
+
+fn transactionLine(payload: Bytes) -> String
+    ? "How many Transactions the body holds, or why it could not be read."
+      "A body that will not decode is reported rather than fatal. show is what"
+      "you reach for when something looks wrong, and the hash check below it is"
+      "worth more than an error that would stop you seeing it."
+    match Domain.Block.transactionsOf(payload)
+        Result.Err(message) -> "txs    cannot decode: {message}"
+        Result.Ok(transactions) -> "txs    {List.len(transactions)}"
+
+verify transactionLine
+    transactionLine(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?) => "txs    1"
+    transactionLine(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?) => "txs    cannot decode: Transaction ends before its lock time"
 
 fn agreement(derived: String, recorded: String) -> String
     ? "Whether the bytes on disk hash to the Block Id the Index recorded."
