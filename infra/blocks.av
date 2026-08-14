@@ -9,7 +9,7 @@ module Blocks
         "pruning removes the low Segments — after it, Segment 0 is absent while"
         "Segment 400 is current, and probing upward from zero would report an"
         "empty store."
-    exposes [BlockStore, Appended, open, append, read, prune, currentSegment, segmentPath]
+    exposes [BlockStore, Appended, Loaded, Fetched, open, append, read, readSegment, fetch, prune, currentSegment, segmentPath]
     depends [Bytes, Domain.Index, Domain.Segment, Domain.Text]
     effects [Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
 
@@ -20,6 +20,15 @@ record BlockStore
 record Appended
     store: BlockStore
     location: Location
+
+record Loaded
+    segment: Int
+    nextLine: Int
+    blocks: List<Bytes>
+
+record Fetched
+    payload: Bytes
+    loaded: Loaded
 
 fn open(dir: String) -> Result<BlockStore, String>
     ? "Pick up where the last run left off, creating the directory if absent."
@@ -170,9 +179,68 @@ fn read(store: BlockStore, location: Location) -> Result<Bytes, String>
     ? "The Block a Location names."
       "The whole Segment is read, because Aver cannot read from an offset. That is"
       "why a Segment is capped at two mebibytes rather than Bitcoin Core's 128."
+      "One Block at a time. Reading a run of them this way re-reads the Segment"
+      "once per Block; fetch does not, and a scan should use that instead."
     ! [Disk.readText]
     contents = Disk.readText(segmentPath(store.dir, location.segment))?
     Domain.Segment.blockAt(contents, location.line)
+
+fn readSegment(store: BlockStore, segment: Int) -> Result<List<Bytes>, String>
+    ? "Every Block in one Segment, decoded together."
+      "The path is bound rather than written inline. `aver compile` emits the"
+      "Disk policy check and the read as two evaluations of the same argument"
+      "expression, so passing a parameter straight through moves it on the first"
+      "and fails to build on the second. See jasisz/aver#912."
+    ! [Disk.readText]
+    path = segmentPath(store.dir, segment)
+    contents = Disk.readText(path)?
+    Domain.Segment.blocksIn(contents)
+
+fn fetch(store: BlockStore, loaded: Option<Loaded>, location: Location) -> Result<Fetched, String>
+    ? "The Block a Location names, keeping the Segment it came from for the next call."
+      "A scan walks Heights in order and consecutive Heights usually sit in one"
+      "Segment, so the Segment already in hand answers most calls without going"
+      "near the disk. Hand the Loaded back in each time to get that; pass"
+      "Option.None to start, and read for a single Block on its own."
+      "Only one Segment is held. Locations that alternate between two Segments"
+      "reload on every call, which is no worse than read and no better."
+    ! [Disk.readText]
+    match loaded
+        Option.None -> loadFor(store, location)
+        Option.Some(held) -> reuseOrLoad(store, held, location)
+
+fn reuseOrLoad(store: BlockStore, held: Loaded, location: Location) -> Result<Fetched, String>
+    ? "Use the Segment in hand when it is the one wanted, and not already passed."
+      "A Loaded holds the Blocks from nextLine onward rather than all of them, so"
+      "going forward costs the distance moved and going forward one costs one."
+      "A Location behind nextLine cannot be reached that way and reloads."
+    ! [Disk.readText]
+    match Bool.and(held.segment == location.segment, location.line >= held.nextLine)
+        true -> takeFrom(held, location)
+        false -> loadFor(store, location)
+
+fn loadFor(store: BlockStore, location: Location) -> Result<Fetched, String>
+    ? "Read the Segment the Location names, then take the Block out of it."
+    ! [Disk.readText]
+    blocks = readSegment(store, location.segment)?
+    takeFrom(Loaded(segment = location.segment, nextLine = 0, blocks = blocks), location)
+
+fn takeFrom(held: Loaded, location: Location) -> Result<Fetched, String>
+    ? "The line the Location names, out of the Segment already decoded."
+      "The Loaded handed back starts at that line, so the next one along is the"
+      "head of what remains and costs nothing to reach."
+    ahead = List.drop(held.blocks, location.line - held.nextLine)
+    match ahead
+        [] -> Result.Err("Segment has no line {location.line}")
+        [head, ..tail] -> Result.Ok(Fetched(payload = head, loaded = Loaded(segment = held.segment, nextLine = location.line, blocks = ahead)))
+
+verify takeFrom
+    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 0))?.payload => Bytes.fromHex("aabb")?
+    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 1))?.payload => Bytes.fromHex("ccdd")?
+    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 1))?.loaded.nextLine => 1
+    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 2)) => Result.Err("Segment has no line 2")
+    takeFrom(Loaded(segment = 1, nextLine = 4, blocks = [Bytes.fromHex("aabb")?]), Location(segment = 1, line = 4))?.payload => Bytes.fromHex("aabb")?
+    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = []), Location(segment = 0, line = 0)) => Result.Err("Segment has no line 0")
 
 fn prune(store: BlockStore, belowSegment: Int) -> Result<Int, String>
     ? "Delete every Segment below the given one, and say how many went."
