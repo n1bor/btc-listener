@@ -114,6 +114,35 @@ stores nothing and widening one fetches only the difference:
 Heights 1–20 are 215-byte Blocks from 2009. Modern Blocks are 1–2 MB, and
 reaching them means letting `headers` finish first.
 
+### Reclaiming space
+
+`prune` deletes the Blocks below a Height. It needs no Peer.
+
+```bash
+./target/release/main prune ~/chain 500000
+2 Segments deleted, 4 Locations dropped, Prune Watermark now 500000
+```
+
+The Height becomes the **Prune Watermark**: below it, a Block that is absent was
+discarded on purpose rather than never fetched. The Index keeps that distinction
+because the two demand opposite responses — one is a gap to fill, the other is a
+decision to respect.
+
+A Segment is the unit of deletion and holds many Blocks, so pruning frees
+nothing until a Segment holds none you are still keeping. Two rules follow, and
+both are why the numbers above are often smaller than expected:
+
+- The Segment currently being appended to is never deleted. It is where the next
+  Block goes.
+- Blocks are stored in the order they were fetched, not in Height order, so a
+  range fetched out of order can leave a low Height sitting in a high Segment.
+  Such a Block survives, and keeps its Location.
+
+Pruning is safe to repeat and the Watermark only ever rises: pruning below a
+Height already passed leaves it where it is. There is no command to lower it,
+and `bodies` will re-fetch a pruned range if you ask for it — the Watermark
+records what was discarded, it does not refuse to fetch it again.
+
 ### Running under WSL
 
 If the node is on the Windows host, `127.0.0.1` inside WSL will not reach it —

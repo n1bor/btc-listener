@@ -1,0 +1,194 @@
+module Prune
+    intent =
+        "Deleting the Blocks below a Height, and recording that it was deliberate."
+        "Three things have to happen together or the Index starts lying. The"
+        "Segments go, the Locations naming Blocks inside them go, and the Prune"
+        "Watermark rises to say that what is now absent below it was discarded"
+        "rather than never fetched. Doing the first without the second leaves the"
+        "Index pointing into files that are gone; doing either without the third"
+        "leaves nothing able to tell a pruned Block from a missing one."
+        "Which Segments may go is found by looking rather than by assuming. A"
+        "Segment is a unit of deletion and holds many Blocks, and Blocks are"
+        "appended in the order they were fetched rather than in Height order, so"
+        "a range fetched out of order can put a low Height in a high Segment. The"
+        "floor is therefore the lowest Segment any surviving Height sits in, not"
+        "the Segment the Height happens to land in."
+        "The Segment currently being appended to is never deleted. It is where"
+        "the next Block goes, and Blocks.open resumes from the highest Segment"
+        "present, so removing it would move the append point backwards."
+    exposes [Pruned, run]
+    depends [Domain.Index, Infra.Blocks, Infra.Store]
+    effects [Disk.appendText, Disk.delete, Disk.exists]
+
+record Pruned
+    segments: Int
+    locations: Int
+    watermark: Int
+
+record Sweep
+    store: Store
+    below: Int
+    floor: Int
+
+fn run(store: Store, blocks: BlockStore, below: Int) -> Result<Pruned, String>
+    ? "Delete what only holds Blocks below a Height, and record the Watermark."
+      "The Segments go first. A crash after that leaves Locations naming files"
+      "that are gone, which reads as a corrupt Index; the other order leaves"
+      "Blocks on disk that nothing names, which merely wastes the space pruning"
+      "was trying to reclaim. Neither is good and the second is recoverable, so"
+      "the Watermark is written last and the whole thing is safe to run again."
+    ! [Disk.appendText, Disk.delete, Disk.exists]
+    watermark = watermarkFor(store, below)?
+    floor = floorSegment(store, watermark, Infra.Blocks.currentSegment(blocks))?
+    segments = Infra.Blocks.prune(blocks, floor)?
+    keys = locationsBelow(Sweep(store = store, below = watermark, floor = floor), 0, [])?
+    dropped = Infra.Store.deleteAll(store, keys)?
+    _marked = Infra.Store.put(dropped, Domain.Index.prunedBelowKey(), Domain.Index.encodeHeight(watermark))?
+    Result.Ok(Pruned(segments = segments, locations = List.len(keys), watermark = watermark))
+
+fn watermarkFor(store: Store, below: Int) -> Result<Int, String>
+    ? "The Prune Watermark only ever rises."
+      "Pruning below a Height already pruned past would otherwise lower it, and"
+      "a lowered Watermark reports Blocks that were discarded on purpose as ones"
+      "that simply never arrived. Nothing can put them back, so nothing should"
+      "be able to forget that they went."
+    held = Infra.Store.get(store, Domain.Index.prunedBelowKey())?
+    existing = Domain.Index.prunedBelowOf(held)?
+    Result.Ok(higher(existing, below))
+
+verify watermarkFor
+    watermarkFor(Infra.Store.fixture([]), 100) => Result.Ok(100)
+    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "500")]), 100) => Result.Ok(500)
+    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "100")]), 500) => Result.Ok(500)
+    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "x")]), 100) => Result.Err("Height must be a whole number, got 'x'")
+
+fn higher(a: Int, b: Int) -> Int
+    ? "The larger of two Heights."
+    match a >= b
+        true -> a
+        false -> b
+
+verify higher
+    higher(5, 3) => 5
+    higher(3, 5) => 5
+
+fn floorSegment(store: Store, below: Int, current: Int) -> Result<Int, String>
+    ? "The lowest Segment that has to survive."
+      "Everything beneath it holds only Blocks below the Height, so deleting it"
+      "loses nothing that is being kept. Bounded by the Segment in hand, so that"
+      "an Index naming no Height at or above the Watermark still does not delete"
+      "the file the next Block is going into."
+    lowestAtOrAbove(store, below, current)
+
+verify floorSegment
+    floorSegment(Infra.Store.fixture([]), 5, 9) => Result.Ok(9)
+    floorSegment(Infra.Store.fixture([("h:00000005", "aa"), ("b:aa", "3:0")]), 5, 9) => Result.Ok(3)
+    floorSegment(Infra.Store.fixture([("h:00000005", "aa"), ("b:aa", "bad")]), 5, 9) => Result.Err("Location must be segment:line, got 'bad'")
+
+fn lowestAtOrAbove(store: Store, height: Int, best: Int) -> Result<Int, String>
+    ? "Walk the Heights the Index still names, keeping the lowest Segment used."
+      "Stops at the first Height with no Block Id, because the Index names a"
+      "prefix of the chain and there is nothing above the end of it."
+    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(best)
+        Option.Some(blockId) -> lowestWith(store, height, blockId, best)
+
+verify lowestAtOrAbove
+    lowestAtOrAbove(Infra.Store.fixture([]), 0, 4) => Result.Ok(4)
+    lowestAtOrAbove(Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "1:0")]), 0, 4) => Result.Ok(1)
+    lowestAtOrAbove(Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "no")]), 0, 4) => Result.Err("Location must be segment:line, got 'no'")
+
+fn lowestWith(store: Store, height: Int, blockId: String, best: Int) -> Result<Int, String>
+    ? "A Height the Index names: lower the answer only if its Block is held."
+    located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> lowestAtOrAbove(store, height + 1, best)
+        Option.Some(text) -> lowerBy(store, height, text, best)
+
+verify lowestWith
+    lowestWith(Infra.Store.fixture([]), 0, "aa", 4) => Result.Ok(4)
+    lowestWith(Infra.Store.fixture([("b:aa", "1:0")]), 0, "aa", 4) => Result.Ok(1)
+    lowestWith(Infra.Store.fixture([("b:aa", "x")]), 0, "aa", 4) => Result.Err("Location must be segment:line, got 'x'")
+
+fn lowerBy(store: Store, height: Int, text: String, best: Int) -> Result<Int, String>
+    ? "The Block is held, so the Segment holding it cannot be deleted."
+    location = Domain.Index.decodeLocation(text)?
+    lowestAtOrAbove(store, height + 1, lower(best, location.segment))
+
+verify lowerBy
+    lowerBy(Infra.Store.fixture([]), 0, "1:0", 4) => Result.Ok(1)
+    lowerBy(Infra.Store.fixture([]), 0, "7:0", 4) => Result.Ok(4)
+    lowerBy(Infra.Store.fixture([]), 0, "nope", 4) => Result.Err("Location must be segment:line, got 'nope'")
+
+fn lower(a: Int, b: Int) -> Int
+    ? "The smaller of two Segment numbers."
+    match a <= b
+        true -> a
+        false -> b
+
+verify lower
+    lower(3, 5) => 3
+    lower(5, 3) => 3
+
+fn locationsBelow(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<String>, String>
+    ? "The b: keys naming Blocks that the deleted Segments were holding."
+      "Only Heights below the Watermark are examined: a Height at or above it"
+      "sits at or above the floor by the way the floor was chosen, so its"
+      "Location was never in a deleted Segment."
+    match height >= sweep.below
+        true -> Result.Ok(List.reverse(acc))
+        false -> locationAt(sweep, height, acc)
+
+verify locationsBelow
+    locationsBelow(Sweep(store = Infra.Store.fixture([]), below = 0, floor = 1), 0, []) => Result.Ok([])
+    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "0:0")]), below = 1, floor = 1), 0, []) => Result.Ok(["b:aa"])
+    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "5:0")]), below = 1, floor = 1), 0, []) => Result.Ok([])
+    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "??")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:line, got '??'")
+
+fn locationAt(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<String>, String>
+    ? "A Height with no Block Id names nothing to forget."
+      "Unlike the walk that finds the floor, this one does not stop at a gap: a"
+      "Height the Index has lost still leaves the Heights above it to sweep."
+    named = Infra.Store.get(sweep.store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> locationsBelow(sweep, height + 1, acc)
+        Option.Some(blockId) -> locationOf(sweep, height, blockId, acc)
+
+verify locationAt
+    locationAt(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, []) => Result.Ok([])
+    locationAt(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "0:0")]), below = 1, floor = 1), 0, []) => Result.Ok(["b:aa"])
+    locationAt(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "!")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:line, got '!'")
+
+fn locationOf(sweep: Sweep, height: Int, blockId: String, acc: List<String>) -> Result<List<String>, String>
+    ? "A Block Id with no Location has nothing on disk to have lost."
+    located = Infra.Store.get(sweep.store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> locationsBelow(sweep, height + 1, acc)
+        Option.Some(text) -> keepIfGone(sweep, height, blockId, text, acc)
+
+verify locationOf
+    locationOf(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", []) => Result.Ok([])
+    locationOf(Sweep(store = Infra.Store.fixture([("b:aa", "0:0")]), below = 1, floor = 1), 0, "aa", []) => Result.Ok(["b:aa"])
+    locationOf(Sweep(store = Infra.Store.fixture([("b:aa", "z")]), below = 1, floor = 1), 0, "aa", []) => Result.Err("Location must be segment:line, got 'z'")
+
+fn keepIfGone(sweep: Sweep, height: Int, blockId: String, text: String, acc: List<String>) -> Result<List<String>, String>
+    ? "Forget the Location only if its Segment was one of the deleted ones."
+    location = Domain.Index.decodeLocation(text)?
+    locationsBelow(sweep, height + 1, dropped(location.segment, sweep.floor, blockId, acc))
+
+verify keepIfGone
+    keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "0:0", []) => Result.Ok(["b:aa"])
+    keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "1:0", []) => Result.Ok([])
+    keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "q", []) => Result.Err("Location must be segment:line, got 'q'")
+
+fn dropped(segment: Int, floor: Int, blockId: String, acc: List<String>) -> List<String>
+    ? "A Location in a Segment that is gone is a Location to forget."
+    match segment < floor
+        true -> List.prepend(Domain.Index.blockKey(blockId), acc)
+        false -> acc
+
+verify dropped
+    dropped(0, 1, "aa", []) => ["b:aa"]
+    dropped(1, 1, "aa", []) => []
+    dropped(5, 1, "aa", []) => []
