@@ -23,7 +23,21 @@ module Download
 record Progress
     store: Store
     blocks: BlockStore
+    pending: List<Entry>
+    waiting: Int
     count: Int
+
+fn locationBatch() -> Int
+    ? "How many Locations to hold before writing them."
+      "A Store hands back a copy of itself, so one put per Block costs the size"
+      "of the whole Index per Block, and the Index holds a Height for every Block"
+      "in the chain. Writing in batches trades a wider crash window for that: a"
+      "crash loses up to this many Locations, and the Blocks they name are"
+      "fetched again on the next run, which is the direction that is safe."
+    2000
+
+verify locationBatch
+    locationBatch() => 2000
 
 fn frameBudget() -> Int
     ? "How many unrelated Messages to read before giving up on the one wanted."
@@ -331,7 +345,14 @@ fn bodySession(connection: Tcp.Connection, network: Network, address: PeerAddres
         Time.unixMs,
     ]
     _greeting = Infra.Peer.introduce(connection, network, address)?
-    walk(connection, network, Progress(store = store, blocks = blocks, count = 0), from, to)
+    walked = walk(connection, network, Progress(store = store, blocks = blocks, pending = [], waiting = 0, count = 0), from, to)?
+    settled(walked)
+
+fn settled(progress: Progress) -> Result<Progress, String>
+    ? "Write whatever Locations are still held back."
+    ! [Disk.appendText]
+    grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
+    Result.Ok(Progress(store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count))
 
 fn walk(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
     ? "Each Height in turn, until the range is exhausted."
@@ -373,8 +394,16 @@ fn keep(connection: Tcp.Connection, network: Network, progress: Progress, height
     ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
     payload = Bytes.fromList(frame.body)?
     appended = Infra.Blocks.append(progress.blocks, payload)?
-    recorded = Infra.Store.put(progress.store, Domain.Index.blockKey(blockId), Domain.Index.encodeLocation(appended.location))?
-    announce(connection, network, Progress(store = recorded, blocks = appended.store, count = progress.count + 1), height, to, List.len(frame.body))
+    held = Progress(store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.Index.blockKey(blockId), value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
+    written = maybeWrite(held)?
+    announce(connection, network, written, height, to, List.len(frame.body))
+
+fn maybeWrite(progress: Progress) -> Result<Progress, String>
+    ? "Write the batch once it is big enough, and start a new one."
+    ! [Disk.appendText]
+    match progress.waiting >= locationBatch()
+        false -> Result.Ok(progress)
+        true -> settled(progress)
 
 fn announce(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, size: Int) -> Result<Progress, String>
     ? "Say what arrived, then move on."
