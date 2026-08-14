@@ -3,10 +3,18 @@ module Store
         "A keyed byte store: get, put, delete and batch, backed by an append-only"
         "log that is replayed into memory when it is opened."
         "This module is a seam. When a real key-value database is reachable from"
-        "Aver, its body is replaced and its signatures are not. Aver has no"
-        "interfaces and no closures, so nothing here is checked by the compiler —"
-        "the contract is the exposed signatures, and keeping to it is a reviewer's"
-        "job rather than a type checker's."
+        "Aver, its body is replaced and its signatures are not. The Store is"
+        "opaque, so the representation is enforced rather than merely agreed: a"
+        "caller cannot build one, read a field from it, or match on it, and every"
+        "attempt is a compile error rather than something a reviewer has to catch."
+        "The reads return a Result although this implementation cannot fail, and"
+        "open is given a directory rather than a file name. Both are shaped for"
+        "the database rather than for the log. A caller written against a total"
+        "lookup or a known file name would have to be restructured when the"
+        "database arrives; written this way it only has to be recompiled."
+        "What is left to do at that point is declare the effects a read performs."
+        "Adding an effect is mechanical and the checker names every site; changing"
+        "a return type is not, which is why the Result is here already."
         "Appending one record per put and rebuilding on open is not a shortcut"
         "around writing a real index. It is the shape a log-structured store"
         "already has, which is why it can be swapped for one. Rewriting the whole"
@@ -22,9 +30,10 @@ module Store
         "cost of a call is the size of the Store rather than the size of the"
         "change. One putAll of 40000 entries takes 64 milliseconds; the same"
         "40000 entries one put at a time take 35 seconds."
-    exposes [Store, Entry, open, get, has, size, put, putAll, delete, compact]
+    exposes [Entry, open, get, has, size, put, putAll, delete, compact, fixture]
+    exposes opaque [Store]
     depends [Domain.Text]
-    effects [Disk.appendText, Disk.exists, Disk.readText, Disk.writeText]
+    effects [Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText]
 
 record Entry
     key: String
@@ -38,8 +47,27 @@ record Store
     path: String
     entries: Map<String, String>
 
-fn open(path: String) -> Result<Store, String>
-    ? "Rebuild a Store by replaying its log, or start an empty one."
+fn open(dir: String) -> Result<Store, String>
+    ? "Rebuild a Store from what is in a directory, or start an empty one."
+      "A directory rather than a file, because what a Store keeps inside it is the"
+      "Store's business. This one keeps a single log; a database would keep a"
+      "directory of its own, and no caller would have to be told."
+      "The directory is created if absent, so a caller never has to know that this"
+      "implementation appends to a file and will not make the folder holding it."
+    ! [Disk.exists, Disk.makeDir, Disk.readText]
+    _made = Disk.makeDir(dir)?
+    openLog(logPath(dir))
+
+fn logPath(dir: String) -> String
+    ? "Where this implementation keeps its records inside the directory it is given."
+    "{dir}/index.log"
+
+verify logPath
+    logPath("chain") => "chain/index.log"
+    logPath("/tmp/chain") => "/tmp/chain/index.log"
+
+fn openLog(path: String) -> Result<Store, String>
+    ? "Replay the log if it is there, otherwise start empty."
     ! [Disk.exists, Disk.readText]
     match Disk.exists(path)
         false -> Result.Ok(Store(path = path, entries = empty()))
@@ -64,32 +92,64 @@ fn empty() -> Map<String, String>
 verify empty
     Map.len(empty()) => 0
 
-fn get(store: Store, key: String) -> Option<String>
+fn get(store: Store, key: String) -> Result<Option<String>, String>
     ? "What is stored under a key, if anything."
-      "Pure, because the whole log has already been replayed into memory. A"
-      "database behind this seam would make it effectful, which is why callers"
-      "should not lean on its purity."
-    Map.get(store.entries, key)
+      "A key the log format could not have written is refused rather than answered"
+      "with None. The two are not the same thing: absent is a fact about the data,"
+      "a malformed key is a fault in the question, and reporting the second as the"
+      "first hides a caller's bug behind ordinary-looking data. put has always"
+      "enforced this; reads enforcing it too is what makes it a contract."
+      "That is also what the seam needs. A read from a real database can fail for"
+      "reasons this one has not got, and a caller written against a total lookup"
+      "would have to be restructured rather than recompiled when one arrives."
+    match usableKey(key)
+        false -> Result.Err(keyRefused(key))
+        true -> Result.Ok(Map.get(store.entries, key))
 
 verify get
-    get(Store(path = "s", entries = Map.set(empty(), "a", "b")), "a") => Option.Some("b")
-    get(Store(path = "s", entries = empty()), "a") => Option.None
+    get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
+    get(fixture([]), "a") => Result.Ok(Option.None)
+    get(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    get(fixture([]), "a\tb") => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
 
-fn has(store: Store, key: String) -> Bool
-    ? "Whether a key is present."
-    Map.has(store.entries, key)
+fn has(store: Store, key: String) -> Result<Bool, String>
+    ? "Whether a key is present, refusing one that could never have been stored."
+    match usableKey(key)
+        false -> Result.Err(keyRefused(key))
+        true -> Result.Ok(Map.has(store.entries, key))
 
 verify has
-    has(Store(path = "s", entries = Map.set(empty(), "a", "b")), "a") => true
-    has(Store(path = "s", entries = empty()), "a") => false
+    has(fixture([("a", "b")]), "a") => Result.Ok(true)
+    has(fixture([]), "a") => Result.Ok(false)
+    has(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
 fn size(store: Store) -> Int
     ? "How many keys the Store holds."
+      "The one read that names no key, and so the one with nothing to refuse and"
+      "no Result to carry. Left total deliberately rather than for symmetry: a"
+      "database would make this fallible, but it has a single caller and that"
+      "caller already sits inside a Result, so the change costs one line there"
+      "rather than the restructuring a total get or has would have cost."
     Map.len(store.entries)
 
 verify size
-    size(Store(path = "s", entries = empty())) => 0
-    size(Store(path = "s", entries = Map.set(empty(), "a", "b"))) => 1
+    size(fixture([])) => 0
+    size(fixture([("a", "b")])) => 1
+
+fn fixture(pairs: List<Tuple<String, String>>) -> Store
+    ? "A Store holding exactly these pairs, for verify blocks in other modules."
+      "An opaque Store cannot be built from outside, and functions elsewhere that"
+      "take one still have to be checked, so the seam supplies the fixture rather"
+      "than leaving each caller to invent a representation it should not know."
+      "It touches no disk. The path is empty because nothing here writes; a Store"
+      "made this way is for reading in a verify block and nothing else, and an"
+      "implementation backed by a database would open a scratch handle instead."
+    Store(path = "", entries = Map.fromList(pairs))
+
+verify fixture
+    size(fixture([])) => 0
+    size(fixture([("a", "b"), ("c", "d")])) => 2
+    get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
 
 fn put(store: Store, key: String, value: String) -> Result<Store, String>
     ? "Record one key, appending to the log before believing it in memory."
@@ -197,10 +257,20 @@ verify nextRecord
     nextRecord(Entry(key = "a", value = "b"), [], []) => Result.Ok(["+a\tb\n"])
     nextRecord(Entry(key = "", value = "b"), [], []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
+fn keyRefused(key: String) -> String
+    ? "Why a key cannot be used, in the one wording every entry point gives."
+      "Reads and writes reject the same keys, so they say so the same way; a"
+      "caller that learns the rule from a put should recognise it from a get."
+    "Store key must not be empty or contain a tab or newline, got '{key}'"
+
+verify keyRefused
+    keyRefused("") => "Store key must not be empty or contain a tab or newline, got ''"
+    keyRefused("a\tb") => "Store key must not be empty or contain a tab or newline, got 'a\tb'"
+
 fn putRecordFor(key: String, value: String) -> Result<String, String>
     ? "A put record, once the key and value are known to survive the log format."
     match usableKey(key)
-        false -> Result.Err("Store key must not be empty or contain a tab or newline, got '{key}'")
+        false -> Result.Err(keyRefused(key))
         true -> withKey(key, value)
 
 verify putRecordFor
@@ -222,7 +292,7 @@ verify withKey
 fn deleteRecordFor(key: String) -> Result<String, String>
     ? "A tombstone record for a key."
     match usableKey(key)
-        false -> Result.Err("Store key must not be empty or contain a tab or newline, got '{key}'")
+        false -> Result.Err(keyRefused(key))
         true -> Result.Ok("-{key}\n")
 
 verify deleteRecordFor

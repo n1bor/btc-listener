@@ -69,7 +69,7 @@ fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddr
     ]
     _greeting = Infra.Peer.introduce(connection, network, address)?
     seeded = withGenesis(network, store)?
-    have = heightsHeld(seeded, 0)
+    have = heightsHeld(seeded, 0)?
     _said = Console.print("have {have} headers; asking for more")
     headerBatch(connection, network, seeded, have)
 
@@ -80,36 +80,31 @@ fn withGenesis(network: Network, store: Store) -> Result<Store, String>
       "the answer. Left out, every Height in the Index is one too low and nothing"
       "says so."
     ! [Disk.appendText]
-    match Infra.Store.has(store, Domain.Index.heightKey(0))
+    seeded = Infra.Store.has(store, Domain.Index.heightKey(0))?
+    match seeded
         true -> Result.Ok(store)
         false -> Infra.Store.put(store, Domain.Index.heightKey(0), Domain.Block.genesisBlockId(network))
 
-fn heightsHeld(store: Store, height: Int) -> Int
+fn heightsHeld(store: Store, height: Int) -> Result<Int, String>
     ? "How many Heights the Index already names, counting up from genesis."
       "Walking beats keeping a tip record: a lookup is cheap, and a count that"
       "cannot disagree with the entries is worth more than one that can."
-    match Infra.Store.has(store, Domain.Index.heightKey(height))
-        false -> height
+    held = Infra.Store.has(store, Domain.Index.heightKey(height))?
+    match held
+        false -> Result.Ok(height)
         true -> heightsHeld(store, height + 1)
 
 verify heightsHeld
-    heightsHeld(storeOf([]), 0) => 0
-    heightsHeld(storeOf([("h:00000000", "aa")]), 0) => 1
-    heightsHeld(storeOf([("h:00000000", "aa"), ("h:00000001", "bb")]), 0) => 2
-    heightsHeld(storeOf([("h:00000001", "bb")]), 0) => 0
-
-fn storeOf(pairs: List<Tuple<String, String>>) -> Store
-    ? "A Store standing in for a real one, so the pure lookups can be checked."
-    Store(path = "test", entries = Map.fromList(pairs))
-
-verify storeOf
-    Infra.Store.size(storeOf([])) => 0
-    Infra.Store.size(storeOf([("a", "b")])) => 1
+    heightsHeld(Infra.Store.fixture([]), 0) => Result.Ok(0)
+    heightsHeld(Infra.Store.fixture([("h:00000000", "aa")]), 0) => Result.Ok(1)
+    heightsHeld(Infra.Store.fixture([("h:00000000", "aa"), ("h:00000001", "bb")]), 0) => Result.Ok(2)
+    heightsHeld(Infra.Store.fixture([("h:00000001", "bb")]), 0) => Result.Ok(0)
 
 fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
     ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
-    payload = Domain.Block.getHeadersPayload(locatorFor(network, store, have))?
+    locator = locatorFor(network, store, have)?
+    payload = Domain.Block.getHeadersPayload(locator)?
     _sent = Infra.Peer.send(connection, network, "getheaders", payload)?
     frame = awaitFrame(connection, network, "headers", frameBudget())?
     decoded = Domain.Block.headersOf(frame.body)?
@@ -155,28 +150,29 @@ fn headerAt(nonce: Int) -> BlockHeader
 verify headerAt
     headerAt(7).nonce => 7
 
-fn locatorFor(network: Network, store: Store, have: Int) -> List<List<Int>>
+fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int>>, String>
     ? "The Block Ids a getheaders should carry, newest first."
       "Never empty. A Peer given a Locator of no Block Ids does not answer at all"
       "— measured against Bitcoin Core 27.0, which replies to a Locator naming"
       "genesis and stays silent on an empty one — so an Index with nothing in it"
       "still has to say where the chain starts."
-    orGenesis(network, idsHeld(store, have))
+    ids = idsHeld(store, have)?
+    Result.Ok(orGenesis(network, ids))
 
 verify locatorFor
-    locatorFor(Network.Mainnet, storeOf([]), 0) => [wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))]
-    locatorFor(Network.Mainnet, storeOf([("h:00000000", "0102")]), 1) => [[2, 1]]
-    locatorFor(Network.Mainnet, storeOf([]), 1) => [wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))]
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))])
 
-fn idsHeld(store: Store, have: Int) -> List<List<Int>>
+fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
     ? "The Block Ids the Index can supply for a Locator."
     match have == 0
-        true -> []
+        true -> Result.Ok([])
         false -> idsAt(store, Domain.Block.locatorHeights(have - 1), [])
 
 verify idsHeld
-    idsHeld(storeOf([]), 0) => []
-    idsHeld(storeOf([("h:00000000", "0102")]), 1) => [[2, 1]]
+    idsHeld(Infra.Store.fixture([]), 0) => Result.Ok([])
+    idsHeld(Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
 
 fn orGenesis(network: Network, ids: List<List<Int>>) -> List<List<Int>>
     ? "Fall back to genesis rather than send a Locator the Peer will ignore."
@@ -188,26 +184,36 @@ verify orGenesis
     orGenesis(Network.Mainnet, [[1, 2]]) => [[1, 2]]
     List.len(orGenesis(Network.Mainnet, [])) => 1
 
-fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Block Id held at each Height, in wire order rather than display order."
     match heights
-        [] -> List.reverse(acc)
-        [head, ..tail] -> idsAt(store, tail, prependId(store, head, acc))
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> nextId(store, head, tail, acc)
 
 verify idsAt
-    idsAt(storeOf([]), [], []) => []
-    idsAt(storeOf([("h:00000000", "0102")]), [0], []) => [[2, 1]]
-    idsAt(storeOf([]), [0], []) => []
+    idsAt(Infra.Store.fixture([]), [], []) => Result.Ok([])
+    idsAt(Infra.Store.fixture([("h:00000000", "0102")]), [0], []) => Result.Ok([[2, 1]])
+    idsAt(Infra.Store.fixture([]), [0], []) => Result.Ok([])
 
-fn prependId(store: Store, height: Int, acc: List<List<Int>>) -> List<List<Int>>
+fn nextId(store: Store, height: Int, tail: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Take the Block Id at one Height, then carry on with the rest."
+    grown = prependId(store, height, acc)?
+    idsAt(store, tail, grown)
+
+verify nextId
+    nextId(Infra.Store.fixture([("h:00000000", "0102")]), 0, [], []) => Result.Ok([[2, 1]])
+    nextId(Infra.Store.fixture([]), 0, [], []) => Result.Ok([])
+
+fn prependId(store: Store, height: Int, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Add the Block Id at a Height, skipping a Height the Index does not name."
-    match Infra.Store.get(store, Domain.Index.heightKey(height))
-        Option.None -> acc
-        Option.Some(id) -> List.prepend(wireOrder(id), acc)
+    found = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    match found
+        Option.None -> Result.Ok(acc)
+        Option.Some(id) -> Result.Ok(List.prepend(wireOrder(id), acc))
 
 verify prependId
-    prependId(storeOf([]), 0, []) => []
-    prependId(storeOf([("h:00000000", "0102")]), 0, []) => [[2, 1]]
+    prependId(Infra.Store.fixture([]), 0, []) => Result.Ok([])
+    prependId(Infra.Store.fixture([("h:00000000", "0102")]), 0, []) => Result.Ok([[2, 1]])
 
 fn wireOrder(blockId: String) -> List<Int>
     ? "A Block Id goes back to front on the wire, being displayed reversed."
@@ -300,14 +306,16 @@ fn walk(connection: Tcp.Connection, network: Network, progress: Progress, height
 fn atHeight(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
     ? "A Height the Index does not name cannot be fetched, and ends the walk."
     ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
-    match Infra.Store.get(progress.store, Domain.Index.heightKey(height))
+    named = Infra.Store.get(progress.store, Domain.Index.heightKey(height))?
+    match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
         Option.Some(blockId) -> maybeFetch(connection, network, progress, height, to, blockId)
 
 fn maybeFetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
     ? "A Block already held is skipped, which is what makes the phase resumable."
     ! [Console.error, Console.print, Disk.appendText, Tcp.readBytes, Tcp.writeBytes]
-    match Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))
+    held = Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))?
+    match held
         true -> walk(connection, network, progress, height + 1, to)
         false -> fetch(connection, network, progress, height, to, blockId)
 
