@@ -1,0 +1,58 @@
+module Lock
+    intent =
+        "One writer at a time in a chain directory."
+        "Two runs appending to the same Segment interleave their Blocks, and each"
+        "computes Locations from its own count of the lines, so both sets point at"
+        "the wrong ones. Every Block is valid and every Location is wrong, which"
+        "no check at write time notices and only a full audit finds. That happened"
+        "here: 62,000 Blocks were written twice over before an audit caught it."
+        "Reading is not guarded. A reader that sees a half-written Segment reads a"
+        "torn final line, which completeLines drops, and a Location written after"
+        "it reads as missing rather than wrong. Writers are the danger."
+        "The claim is a file, tested and then written, so two runs starting in the"
+        "same instant could both pass. Aver has no exclusive create to build on."
+        "It stops the case that actually happens -- a second run started while the"
+        "first is going -- and does not pretend to be a mutex."
+    exposes [claim, release, releasingAfter]
+    depends []
+    effects [Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText]
+
+fn claimPath(dir: String) -> String
+    ? "Where the claim lives."
+    "{dir}/.writing"
+
+verify claimPath
+    claimPath("chain") => "chain/.writing"
+    claimPath("/tmp/c") => "/tmp/c/.writing"
+
+fn claim(dir: String, what: String) -> Result<Unit, String>
+    ? "Take the directory for writing, or say who has it."
+      "A run that dies leaves the claim behind. The message says how to clear it"
+      "rather than leaving someone to guess, because the alternative is a"
+      "directory nothing will write to again."
+      "The directory is made first. The claim is taken before anything opens the"
+      "Store or the Segments, and those are what would otherwise create it, so"
+      "on a directory that does not exist yet there would be nowhere to write."
+    ! [Disk.exists, Disk.makeDir, Disk.writeText]
+    _made = Disk.makeDir(dir)?
+    match Disk.exists(claimPath(dir))
+        true -> Result.Err("{dir} is being written by another run; if none is, delete {claimPath(dir)}")
+        false -> written(dir, what)
+
+fn written(dir: String, what: String) -> Result<Unit, String>
+    ? "Record what took it, so the file says something to whoever finds it."
+    ! [Disk.writeText]
+    Disk.writeText(claimPath(dir), "{what}\n")
+
+fn release(dir: String) -> Result<Unit, String>
+    ? "Give the directory back."
+    ! [Disk.delete]
+    Disk.delete(claimPath(dir))
+
+fn releasingAfter(dir: String, outcome: Result<String, String>) -> Result<String, String>
+    ? "Release the claim whatever the run did, then hand its outcome on."
+      "The same shape as closing a socket after a session: the cleanup has to"
+      "happen on the failing path too, and Aver has no finally."
+    ! [Disk.delete]
+    _released = release(dir)
+    outcome

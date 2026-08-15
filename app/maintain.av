@@ -1,0 +1,146 @@
+module Maintain
+    intent =
+        "The commands that change a chain directory without a Peer."
+        "prune discards Blocks below a Height and txindex records where"
+        "Transactions sit. Both write, so both claim the directory first."
+    exposes [prune, txIndex]
+    depends [Domain.Index, Infra.Blocks, Infra.Lock, Infra.Prune, Infra.Store, Infra.TxIndex]
+    effects [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+
+record Span
+    from: Int
+    to: Int
+
+fn prune(rest: List<String>) -> Unit
+    ? "Pruning is local: a directory and the Height to prune below, no Peer."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir> <height>")
+        [dir, ..more] -> pruneHeight(dir, more)
+
+fn pruneHeight(dir: String, more: List<String>) -> Unit
+    ? "Take the Height that follows the directory."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+    match more
+        [] -> Console.error("usage: <dir> <height>")
+        [height, ..extra] -> startPrune(dir, Int.fromString(height))
+
+fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
+    ? "Prune, or show the usage if the Height was not a whole number."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+    match parsed
+        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Ok(below) -> said(pruneRun(dir, below))
+
+fn pruneRun(dir: String, below: Int) -> Result<String, String>
+    ? "Open the Index and the Segments, then discard what is below the Height."
+    ! [
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText Disk.writeText,
+    ]
+    _claimed = Infra.Lock.claim(dir, "prune")?
+    Infra.Lock.releasingAfter(dir, pruneDone(dir, below))
+
+fn pruneDone(dir: String, below: Int) -> Result<String, String>
+    ? "Discard the Blocks, with the claim already taken."
+    ! [Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open("{dir}/blocks")?
+    pruned = Infra.Prune.run(store, blocks, below)?
+    Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
+
+fn txIndex(rest: List<String>) -> Unit
+    ? "Indexing is local: a directory and a range of Heights."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir> <a> <b>")
+        [dir, ..more] -> txIndexRange(dir, more)
+
+fn txIndexRange(dir: String, more: List<String>) -> Unit
+    ? "Both Heights must be given."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+    ]
+    match heights(more)
+        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.Some(span) -> said(txIndexRun(dir, span))
+
+fn txIndexRun(dir: String, span: Span) -> Result<String, String>
+    ? "Record where every Transaction in the range sits."
+    ! [
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText Disk.writeText,
+    ]
+    _claimed = Infra.Lock.claim(dir, "txindex")?
+    Infra.Lock.releasingAfter(dir, txIndexDone(dir, span))
+
+fn txIndexDone(dir: String, span: Span) -> Result<String, String>
+    ? "Record the Transactions, with the claim already taken."
+    ! [Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open("{dir}/blocks")?
+    built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
+    Result.Ok("{built.transactions} Transactions recorded from {built.blocks} Blocks")
+
+fn heights(range: List<String>) -> Option<Span>
+    ? "Two whole numbers, or nothing."
+    match range
+        [] -> Option.None
+        [from, ..rest] -> secondHeight(from, rest)
+
+verify heights
+    heights([]) => Option.None
+    heights(["1"]) => Option.None
+    heights(["1", "5"]) => Option.Some(Span(from = 1, to = 5))
+    heights(["x", "5"]) => Option.None
+
+fn secondHeight(from: String, rest: List<String>) -> Option<Span>
+    ? "The Height after the first."
+    match rest
+        [] -> Option.None
+        [to, ..extra] -> spanOf(Int.fromString(from), Int.fromString(to))
+
+verify secondHeight
+    secondHeight("1", []) => Option.None
+    secondHeight("1", ["5"]) => Option.Some(Span(from = 1, to = 5))
+
+fn spanOf(from: Result<Int, String>, to: Result<Int, String>) -> Option<Span>
+    ? "Both had to parse."
+    match from
+        Result.Err(e) -> Option.None
+        Result.Ok(a) -> withFrom(a, to)
+
+verify spanOf
+    spanOf(Result.Ok(1), Result.Ok(5)) => Option.Some(Span(from = 1, to = 5))
+    spanOf(Result.Err("no"), Result.Ok(5)) => Option.None
+
+fn withFrom(from: Int, to: Result<Int, String>) -> Option<Span>
+    ? "The first parsed; the second still has to."
+    match to
+        Result.Err(e) -> Option.None
+        Result.Ok(b) -> Option.Some(Span(from = from, to = b))
+
+verify withFrom
+    withFrom(1, Result.Ok(5)) => Option.Some(Span(from = 1, to = 5))
+    withFrom(1, Result.Err("no")) => Option.None
+
+fn said(outcome: Result<String, String>) -> Unit
+    ? "Report what the command finished with."
+    ! [Console.error, Console.print]
+    match outcome
+        Result.Ok(line) -> Console.print(line)
+        Result.Err(message) -> Console.error("error: {message}")
