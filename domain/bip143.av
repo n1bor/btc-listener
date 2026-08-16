@@ -1,0 +1,278 @@
+module Bip143
+    intent =
+        "The message a segwit v0 signature is over, which is a different"
+        "algorithm rather than a variation on the legacy one."
+        "The legacy message re-serialises the whole Transaction once for every"
+        "Input, so signing a Transaction with n Inputs costs n times its size"
+        "and validating one costs the same again. BIP143 replaces the parts"
+        "that do not change between Inputs with three hashes computed once --"
+        "the outpoints, the sequences, the Outputs -- and quadratic becomes"
+        "linear. That is the whole of the difference, and it is why this is not"
+        "an option on Domain.Sighash."
+        "It also fixes something the legacy message got wrong: the amount being"
+        "spent is committed to. Without that a wallet cannot know from the"
+        "Transaction alone how much it is signing away, which mattered enough"
+        "that hardware wallets had to be told the parent Transactions."
+        "The three hashes go to zero rather than being omitted when a hash type"
+        "says not to commit to that part, so the preimage is a fixed shape and"
+        "the difference is in the bytes rather than in the layout."
+        "OP_CODESEPARATOR is not removed here, unlike the legacy message. The"
+        "script code is whatever survives after the last executed separator,"
+        "which is the interpreter's cut to make, and separators before it are"
+        "already gone by construction."
+        "The script code arrives without its length, and gets one on the way"
+        "into the preimage. The BIP writes it with the length attached, which"
+        "is worth knowing when comparing against the published examples by eye."
+    exposes [message, messageOfRaw, preimage, hashPrevouts, hashSequence, hashOutputs]
+    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Sighash, Domain.Transaction]
+    effects []
+
+fn message(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, amount: Int, hashType: Int) -> Result<String, String>
+    ? "The thirty-two byte message, as hexadecimal in the order it is hashed."
+      "Unlike the legacy one this has no case that refuses to hash: SIGHASH_"
+      "SINGLE with no matching Output commits to no Outputs rather than"
+      "signing the number one. That was the point of the redesign."
+    match Bool.or(inputIndex < 0, inputIndex >= List.len(transaction.inputs))
+        true -> Result.Err("no input at index {inputIndex} to sign")
+        false -> withHashType(transaction, inputIndex, scriptCodeHex, amount, hashType)
+
+verify message
+    message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1) => Result.Ok("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 1, "51", 1000, 1) => Result.Err("no input at index 1 to sign")
+    message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "51", 1000, 4294967296) => Result.Err("hash type 4294967296 does not fit in four bytes")
+
+fn withHashType(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, amount: Int, hashType: Int) -> Result<String, String>
+    ? "The hash type is serialised as four bytes, so it has to fit in four."
+    match Bool.or(hashType < 0, hashType > 4294967295)
+        true -> Result.Err("hash type {hashType} does not fit in four bytes")
+        false -> hashed(transaction, inputIndex, scriptCodeHex, amount, hashType)
+
+verify withHashType
+    withHashType(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1) => Result.Ok("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    withHashType(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "51", 1000, 0 - 1) => Result.Err("hash type -1 does not fit in four bytes")
+
+fn hashed(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, amount: Int, hashType: Int) -> Result<String, String>
+    ? "Serialise the preimage and hash it twice."
+    raw = Bytes.fromList(preimage(transaction, inputIndex, scriptCodeHex, amount, hashType)?)?
+    Result.Ok(Crypto.Digest32.toHex(Domain.Hash.doubleSha(raw)))
+
+verify hashed
+    hashed(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1) => Result.Ok("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    hashed(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "zz", 1000, 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn messageOfRaw(rawHex: String, inputIndex: Int, scriptCodeHex: String, amount: Int, hashType: Int) -> Result<String, String>
+    ? "The same, from a serialised Transaction rather than a decoded one."
+      "The BIP's own examples give the Transaction unsigned and without the"
+      "witness marker, which is what this takes: the witness plays no part in"
+      "the message, which is the whole reason segwit works."
+    decoded = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex(rawHex)?))?
+    message(decoded, inputIndex, scriptCodeHex, amount, hashType)
+
+verify messageOfRaw
+    messageOfRaw("0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac11000000", 1, "76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac", 600000000, 1) => Result.Ok("c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670")
+    messageOfRaw("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000", 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1) => Result.Ok("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 1) => Result.Ok("185c0be5263dce5b4bb50a047973c1b6272bfbd0103a89444597dc40b248ee7c")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 2) => Result.Ok("e9733bc60ea13c95c6527066bb975a2ff29a925e80aa14c213f686cbae5d2f36")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 3) => Result.Ok("1e1f1c303dc025bd664acb72e583e933fae4cff9148bf78c157d1e8f78530aea")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 129) => Result.Ok("2a67f03e63a6a422125878b40b82da593be8d4efaafe88ee528af6e5a9955c6e")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 130) => Result.Ok("781ba15f3779d5542ce8ecb5c18716733a5ee42a6f51488ec96154934e2c890a")
+    messageOfRaw("010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a9147480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000", 0, "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43eea8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f50376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de74683123987e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c19617681024306b56ae", 987654321, 131) => Result.Ok("511e8e52ed574121fc1b654970395502128263f62662e076dc6baf05c2e6a99b")
+    messageOfRaw("010000000169c12106097dc2e0526493ef67f21269fe888ef05c7a3a5dacab38e1ac8387f14c1d000000ffffffff0101000000000000000000000000", 0, "ad4830450220487fb382c4974de3f7d834c1b617fe15860828c7f96454490edd6d891556dcc9022100baf95feb48f845d5bfc9882eb6aeefa1bc3790e39f59eaa46ff7f15ae626c53e01", 200000, 1) => Result.Ok("71c9cd9b2869b9c70b01b1f0360c148f42dee72297db312638df136f43311f23")
+    messageOfRaw("zz", 0, "51", 1000, 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn preimage(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, amount: Int, hashType: Int) -> Result<List<Int>, String>
+    ? "The bytes that get hashed, in the order the BIP lists them."
+      "Exposed for the same reason the legacy one is: when a signature will not"
+      "verify, the preimage says which field is wrong and the hash says nothing."
+    base = Domain.Sighash.baseOf(hashType)
+    anyoneCanPay = Domain.Sighash.isAnyoneCanPay(hashType)
+    code = Bytes.toList(Bytes.fromHex(scriptCodeHex)?)
+    spent = inputAt(transaction.inputs, inputIndex)?
+    outpoint = outpointOf(spent)?
+    Result.Ok(List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(hashPrevouts(transaction.inputs, anyoneCanPay)?, List.concat(hashSequence(transaction.inputs, base, anyoneCanPay), List.concat(outpoint, List.concat(Domain.CompactSize.encode(List.len(code)), List.concat(code, List.concat(Domain.Message.littleEndian(amount, 8), List.concat(Domain.Message.littleEndian(spent.sequence, 4), List.concat(hashOutputs(transaction.outputs, inputIndex, base)?, List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), Domain.Message.littleEndian(hashType, 4))))))))))))
+
+verify preimage
+    List.len(preimage(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1)?) => 182
+    List.take(preimage(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", 1000000000, 1)?, 4) => [1, 0, 0, 0]
+    preimage(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, 0, "zz", 1000, 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn inputAt(inputs: List<Input>, inputIndex: Int) -> Result<Input, String>
+    ? "The Input being signed."
+      "The index asked for is carried alongside the one being counted down, so"
+      "that running off the end says which Input was wanted rather than how"
+      "many were left to walk."
+    walked(inputs, inputIndex, inputIndex)
+
+verify inputAt
+    inputAt([], 0) => Result.Err("no input at index 0 to sign")
+    inputAt([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0)?.sequence => 7
+    inputAt([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 1) => Result.Err("no input at index 1 to sign")
+    inputAt([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 5) => Result.Err("no input at index 5 to sign")
+
+fn walked(inputs: List<Input>, remaining: Int, wanted: Int) -> Result<Input, String>
+    ? "Step along the Inputs, counting down."
+    match inputs
+        [] -> Result.Err("no input at index {wanted} to sign")
+        [head, ..tail] -> hereOrDeeper(head, tail, remaining, wanted)
+
+verify walked
+    walked([], 3, 3) => Result.Err("no input at index 3 to sign")
+    walked([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0, 0)?.sequence => 7
+
+fn hereOrDeeper(head: Input, tail: List<Input>, remaining: Int, wanted: Int) -> Result<Input, String>
+    ? "Here, or one further along."
+    match remaining <= 0
+        true -> Result.Ok(head)
+        false -> walked(tail, remaining - 1, wanted)
+
+verify hereOrDeeper
+    hereOrDeeper(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 0, 0)?.sequence => 7
+    hereOrDeeper(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 1, 1) => Result.Err("no input at index 1 to sign")
+
+fn outpointOf(input: Input) -> Result<List<Int>, String>
+    ? "The thirty-six bytes naming what an Input spends."
+      "The Transaction Id is held reversed for display and goes back the way it"
+      "came off the wire before it is hashed."
+    previous = Bytes.fromHex(input.previousTxid)?
+    Result.Ok(List.concat(List.reverse(Bytes.toList(previous)), Domain.Message.littleEndian(input.previousIndex, 4)))
+
+verify outpointOf
+    outpointOf(Input(previousTxid = "aabb", previousIndex = 1, script = "", sequence = 0, witness = [])) => Result.Ok([187, 170, 1, 0, 0, 0])
+    outpointOf(Input(previousTxid = "zz", previousIndex = 1, script = "", sequence = 0, witness = [])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn hashPrevouts(inputs: List<Input>, anyoneCanPay: Bool) -> Result<List<Int>, String>
+    ? "One hash over every outpoint, or zeroes when ANYONECANPAY says not to"
+      "commit to which other Inputs are present."
+    match anyoneCanPay
+        true -> Result.Ok(zeroes())
+        false -> Result.Ok(digestOf(everyOutpoint(inputs, [])?))
+
+verify hashPrevouts
+    hashPrevouts([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], true) => Result.Ok(zeroes())
+    List.len(hashPrevouts([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], false)?) => 32
+    hashPrevouts([Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 0, witness = [])], false) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn everyOutpoint(inputs: List<Input>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Every outpoint, end to end."
+    match inputs
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> everyOutpoint(tail, List.concat(acc, outpointOf(head)?))
+
+verify everyOutpoint
+    everyOutpoint([], [9]) => Result.Ok([9])
+    everyOutpoint([Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 0, witness = [])], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn hashSequence(inputs: List<Input>, base: Base, anyoneCanPay: Bool) -> List<Int>
+    ? "One hash over every sequence, or zeroes."
+      "Zeroed under ANYONECANPAY and under both of the narrowing hash types,"
+      "which is what leaves the other Inputs free to be replaced."
+      "Total where the other two are not: a sequence is a number rather than"
+      "hexadecimal, so there is nothing here that can be malformed."
+    match Bool.or(anyoneCanPay, notSignAll(base))
+        true -> zeroes()
+        false -> digestOf(everySequence(inputs, []))
+
+verify hashSequence
+    hashSequence([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], Base.SignAll, true) => zeroes()
+    hashSequence([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], Base.SignNone, false) => zeroes()
+    List.len(hashSequence([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], Base.SignAll, false)) => 32
+
+fn notSignAll(base: Base) -> Bool
+    ? "Whether this hash type narrows what is committed to."
+    match base
+        Base.SignAll -> false
+        Base.SignNone -> true
+        Base.SignSingle -> true
+
+verify notSignAll
+    notSignAll(Base.SignAll) => false
+    notSignAll(Base.SignNone) => true
+    notSignAll(Base.SignSingle) => true
+
+fn everySequence(inputs: List<Input>, acc: List<Int>) -> List<Int>
+    ? "Every sequence, end to end."
+    match inputs
+        [] -> acc
+        [head, ..tail] -> everySequence(tail, List.concat(acc, Domain.Message.littleEndian(head.sequence, 4)))
+
+verify everySequence
+    everySequence([], [9]) => [9]
+    everySequence([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 1, witness = [])], []) => [1, 0, 0, 0]
+
+fn hashOutputs(outputs: List<Output>, inputIndex: Int, base: Base) -> Result<List<Int>, String>
+    ? "Every Output under SIGHASH_ALL, the matching one under SIGHASH_SINGLE,"
+      "and nothing at all under SIGHASH_NONE."
+      "Where the legacy message signs the number one for a SIGHASH_SINGLE Input"
+      "with no matching Output, this commits to no Outputs. Same situation,"
+      "different answer, and this one is not a bug."
+    match base
+        Base.SignAll -> Result.Ok(digestOf(everyOutput(outputs, [])?))
+        Base.SignNone -> Result.Ok(zeroes())
+        Base.SignSingle -> matchingOutput(outputs, inputIndex)
+
+verify hashOutputs
+    List.len(hashOutputs([Output(value = 1000, script = "53")], 0, Base.SignAll)?) => 32
+    hashOutputs([Output(value = 1000, script = "53")], 0, Base.SignNone) => Result.Ok(zeroes())
+    hashOutputs([Output(value = 1000, script = "53")], 1, Base.SignSingle) => Result.Ok(zeroes())
+    hashOutputs([Output(value = 1000, script = "zz")], 0, Base.SignAll) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn matchingOutput(outputs: List<Output>, inputIndex: Int) -> Result<List<Int>, String>
+    ? "The one Output at the same position, or zeroes when there is not one."
+    match inputIndex >= List.len(outputs)
+        true -> Result.Ok(zeroes())
+        false -> Result.Ok(digestOf(everyOutput(List.take(List.drop(outputs, inputIndex), 1), [])?))
+
+verify matchingOutput
+    matchingOutput([Output(value = 1000, script = "53")], 1) => Result.Ok(zeroes())
+    List.len(matchingOutput([Output(value = 1000, script = "53")], 0)?) => 32
+    matchingOutput([Output(value = 1000, script = "zz")], 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn everyOutput(outputs: List<Output>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Every Output, value then script behind its length."
+    match outputs
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> everyOutput(tail, List.concat(acc, oneOutput(head)?))
+
+verify everyOutput
+    everyOutput([], [9]) => Result.Ok([9])
+    everyOutput([Output(value = 1000, script = "zz")], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn oneOutput(output: Output) -> Result<List<Int>, String>
+    ? "Eight bytes of value, then the script behind its length."
+    script = Bytes.toList(Bytes.fromHex(output.script)?)
+    Result.Ok(List.concat(Domain.Message.littleEndian(output.value, 8), List.concat(Domain.CompactSize.encode(List.len(script)), script)))
+
+verify oneOutput
+    oneOutput(Output(value = 1000, script = "53")) => Result.Ok([232, 3, 0, 0, 0, 0, 0, 0, 1, 83])
+    oneOutput(Output(value = 0, script = "zz")) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn digestOf(bytes: List<Int>) -> List<Int>
+    ? "Double SHA-256 of a run of bytes, as bytes rather than as a Digest."
+      "The result goes back into another preimage, so it wants to be bytes."
+      "Total, on the same grounds as Domain.Hash.reversedHex: every caller has"
+      "come from littleEndian, which takes each byte modulo 256, or from"
+      "hexadecimal that was already refused if it was bad. An octet outside the"
+      "range cannot arrive. It answers empty rather than falling back on a"
+      "plausible thirty-two bytes, so if the reasoning is ever wrong the"
+      "preimage comes out the wrong length and says so."
+    Result.withDefault(digestOrEmpty(bytes), [])
+
+verify digestOf
+    List.len(digestOf([97, 98, 99])) => 32
+    digestOf([256]) => []
+
+fn digestOrEmpty(bytes: List<Int>) -> Result<List<Int>, String>
+    ? "The fallible half, kept apart so the reason is visible."
+    Result.Ok(Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(Bytes.fromList(bytes)?))))
+
+verify digestOrEmpty
+    List.len(digestOrEmpty([97, 98, 99])?) => 32
+    digestOrEmpty([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn zeroes() -> List<Int>
+    ? "Thirty-two zero bytes: what a hash becomes when this type does not"
+      "commit to that part of the Transaction."
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+verify zeroes
+    List.len(zeroes()) => 32

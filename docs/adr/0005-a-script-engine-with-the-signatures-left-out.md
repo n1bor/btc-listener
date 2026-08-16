@@ -96,6 +96,27 @@ and checking that the signature in Block 170 verifies against the message this
 produces. A wrong message would not have verified. That is a stronger statement
 than any vector file, and it cost less than an hour.
 
+## Update — the segwit message, and a chain we have not got
+
+BIP143 is in, and all nine of the BIP's own examples reproduce exactly: hash
+types 0x01, 0x02, 0x03, 0x81, 0x82 and 0x83, native P2WPKH, P2SH-P2WPKH, native
+P2WSH and P2SH-P2WSH. Ten of the BIP's stated sighashes were confirmed against
+the signatures published beside them, using the same thirty lines of Python
+that settled the legacy algorithm, so the vectors are cryptographically sound
+rather than merely copied.
+
+What could not be done is the other half of the plan. Issue #6 said to check
+against "real segwit transactions from Block 800000 and similar, which we
+already hold", and we do not hold them: the Index names heights up to 962,432
+but only 262,076 Blocks have bodies, and segwit activated at 481,824. There is
+not one segwit Transaction in the directory — confirmed by sampling segments at
+50%, 70%, 90% and 99% of the way through and finding no witness marker in any
+of them.
+
+That also puts the interpreter's 53 million Input Scripts in perspective. Every
+one of them was pre-segwit, which is why only fourteen came back Undecided. The
+engine has never been shown a witness.
+
 ## Two oracles
 
 Bitcoin Core's `script_tests.json` is the canonical corpus and is adversarial in
