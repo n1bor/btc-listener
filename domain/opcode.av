@@ -11,9 +11,18 @@ module Opcode
         "Every byte has an answer. An undefined one is named as undefined rather"
         "than left to a caller to notice, because a Script containing one is"
         "invalid and saying so needs a name to say it about."
-    exposes [nameOf, isDisabled, isPushData, isSmallNumber, pushWidth, smallNumberValue]
+    exposes [Kind, nameOf, isDisabled, isAlwaysInvalid, isPushData, isSmallNumber, pushWidth, smallNumberValue, rearrangeDepth, kindOf]
     depends []
     effects []
+
+type Kind
+    SmallNumber
+    Rearrange
+    UnaryArithmetic
+    BinaryArithmetic
+    Nop
+    Undecidable
+    Invalid
 
 fn nameOf(code: Int) -> String
     ? "The name Bitcoin gives this byte."
@@ -303,3 +312,179 @@ fn smallNumberValue(code: Int) -> Int
 verify smallNumberValue
     smallNumberValue(81) => 1
     smallNumberValue(96) => 16
+
+fn isNop(code: Int) -> Bool
+    ? "OP_NOP and the reserved ones that were left doing nothing."
+      "OP_NOP2 and OP_NOP3 are not among them. They became the two timelocks,"
+      "and treating them as doing nothing would accept Scripts that consensus"
+      "rejects — which is exactly the kind of quiet wrongness this project is"
+      "trying not to have."
+    Bool.or(code == 97, Bool.or(code == 176, Bool.and(code >= 179, code <= 185)))
+
+verify isNop
+    isNop(97) => true
+    isNop(176) => true
+    isNop(179) => true
+    isNop(185) => true
+    isNop(177) => false
+    isNop(178) => false
+    isNop(186) => false
+
+fn rearrangeDepth(code: Int) -> Int
+    ? "How deep an opcode reaches, for the ones that only move items about."
+      "Thirteen opcodes do nothing but shuffle the top of the stack. They vary"
+      "from OP_DROP, which reaches one item down, to OP_2ROT, which reaches"
+      "six, and popping that many one at a time needs a chain of five functions"
+      "none of which has a name worth reading. So the interpreter takes this"
+      "many items and permutes them instead."
+      "Nought means this is not one of them. OP_IFDUP is nought despite looking"
+      "like one, because what it does depends on the value it finds."
+    match code
+        109 -> 2
+        110 -> 2
+        111 -> 3
+        112 -> 4
+        113 -> 6
+        114 -> 4
+        117 -> 1
+        118 -> 1
+        119 -> 2
+        120 -> 2
+        123 -> 3
+        124 -> 2
+        125 -> 2
+        _ -> 0
+
+verify rearrangeDepth
+    rearrangeDepth(109) => 2
+    rearrangeDepth(111) => 3
+    rearrangeDepth(112) => 4
+    rearrangeDepth(113) => 6
+    rearrangeDepth(117) => 1
+    rearrangeDepth(118) => 1
+    rearrangeDepth(125) => 2
+    rearrangeDepth(115) => 0
+    rearrangeDepth(172) => 0
+
+fn isAlwaysInvalid(code: Int) -> Bool
+    ? "OP_VERIF and OP_VERNOTIF, which fail a Script wherever they appear."
+      "The same rule as a disabled opcode and for a different reason: these two"
+      "were never removed, they are simply refused before the condition stack"
+      "is consulted, so an OP_VERIF in a branch that is never taken still"
+      "invalidates the Script."
+    Bool.or(code == 101, code == 102)
+
+verify isAlwaysInvalid
+    isAlwaysInvalid(101) => true
+    isAlwaysInvalid(102) => true
+    isAlwaysInvalid(98) => false
+    isAlwaysInvalid(105) => false
+
+fn kindOf(code: Int) -> Kind
+    ? "Which family an opcode belongs to, once the ones handled by number are"
+      "out of the way."
+      "That proviso is a real precondition and not a turn of phrase. An opcode"
+      "the interpreter names individually — OP_DUP, OP_VERIFY, OP_SHA256 and"
+      "the dozen others — is answered Invalid here, because this only knows the"
+      "families and those opcodes belong to none of them. Ask about one and the"
+      "answer is wrong. The alternative was a second list of the named opcodes"
+      "kept in step with the interpreter's own, which is a worse trade than one"
+      "sentence."
+      "It is here rather than in the interpreter because a family is a fact"
+      "about an opcode rather than about running one, and because the"
+      "interpreter was growing the cascade of predicates this replaces."
+    match isSmallNumber(code)
+        true -> Kind.SmallNumber
+        false -> beyondNumbers(code)
+
+verify kindOf
+    kindOf(81) => Kind.SmallNumber
+    kindOf(96) => Kind.SmallNumber
+    kindOf(118) => Kind.Rearrange
+    kindOf(113) => Kind.Rearrange
+    kindOf(139) => Kind.UnaryArithmetic
+    kindOf(146) => Kind.UnaryArithmetic
+    kindOf(147) => Kind.BinaryArithmetic
+    kindOf(164) => Kind.BinaryArithmetic
+    kindOf(97) => Kind.Nop
+    kindOf(185) => Kind.Nop
+    kindOf(172) => Kind.Undecidable
+    kindOf(177) => Kind.Undecidable
+    kindOf(80) => Kind.Invalid
+    kindOf(187) => Kind.Invalid
+
+fn beyondNumbers(code: Int) -> Kind
+    ? "The opcodes that only move items about."
+    match rearrangeDepth(code) > 0
+        true -> Kind.Rearrange
+        false -> beyondStack(code)
+
+verify beyondNumbers
+    beyondNumbers(118) => Kind.Rearrange
+    beyondNumbers(139) => Kind.UnaryArithmetic
+    beyondNumbers(147) => Kind.BinaryArithmetic
+    beyondNumbers(97) => Kind.Nop
+    beyondNumbers(172) => Kind.Undecidable
+    beyondNumbers(80) => Kind.Invalid
+
+fn beyondStack(code: Int) -> Kind
+    ? "Arithmetic on one operand. OP_2MUL and OP_2DIV sit inside this run and"
+      "are disabled, which is why it is two ranges rather than one."
+    match Bool.or(Bool.and(code >= 139, code <= 140), Bool.and(code >= 143, code <= 146))
+        true -> Kind.UnaryArithmetic
+        false -> beyondUnary(code)
+
+verify beyondStack
+    beyondStack(139) => Kind.UnaryArithmetic
+    beyondStack(143) => Kind.UnaryArithmetic
+    beyondStack(146) => Kind.UnaryArithmetic
+    beyondStack(147) => Kind.BinaryArithmetic
+    beyondStack(97) => Kind.Nop
+    beyondStack(80) => Kind.Invalid
+
+fn beyondUnary(code: Int) -> Kind
+    ? "Arithmetic on two operands, the numeric comparisons included."
+      "OP_MUL through OP_RSHIFT lie between the two runs and are disabled."
+    match Bool.or(Bool.and(code >= 147, code <= 148), Bool.and(code >= 154, code <= 164))
+        true -> Kind.BinaryArithmetic
+        false -> beyondArithmetic(code)
+
+verify beyondUnary
+    beyondUnary(147) => Kind.BinaryArithmetic
+    beyondUnary(154) => Kind.BinaryArithmetic
+    beyondUnary(164) => Kind.BinaryArithmetic
+    beyondUnary(97) => Kind.Nop
+    beyondUnary(172) => Kind.Undecidable
+    beyondUnary(80) => Kind.Invalid
+
+fn beyondArithmetic(code: Int) -> Kind
+    ? "What is left is a no-op, something we cannot decide, or invalid."
+    match isNop(code)
+        true -> Kind.Nop
+        false -> beyondNops(code)
+
+verify beyondArithmetic
+    beyondArithmetic(97) => Kind.Nop
+    beyondArithmetic(172) => Kind.Undecidable
+    beyondArithmetic(80) => Kind.Invalid
+
+fn beyondNops(code: Int) -> Kind
+    ? "Undecidable when the opcode needs a primitive or a Transaction we have"
+      "not got; invalid when it is reserved or undefined, both of which fail a"
+      "Script that runs them."
+      "OP_SHA256 is the hole in the first range: it is the one hash opcode Aver"
+      "can answer, so it is not in here at all."
+    match Bool.or(Bool.and(code >= 166, code <= 167), Bool.or(Bool.and(code >= 169, code <= 175), Bool.or(Bool.and(code >= 177, code <= 178), code == 186)))
+        true -> Kind.Undecidable
+        false -> Kind.Invalid
+
+verify beyondNops
+    beyondNops(166) => Kind.Undecidable
+    beyondNops(168) => Kind.Invalid
+    beyondNops(169) => Kind.Undecidable
+    beyondNops(175) => Kind.Undecidable
+    beyondNops(177) => Kind.Undecidable
+    beyondNops(186) => Kind.Undecidable
+    beyondNops(80) => Kind.Invalid
+    beyondNops(98) => Kind.Invalid
+    beyondNops(187) => Kind.Invalid

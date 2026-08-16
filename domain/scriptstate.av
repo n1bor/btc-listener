@@ -1,0 +1,432 @@
+module ScriptState
+    intent =
+        "The machine a Script runs on, and how a run ends."
+        "Two types where a first attempt had one. An Ending is how a Script"
+        "finished, and is only ever Passed or Failed. An Outcome is what running"
+        "it produced, and adds Undecided. Undecided comes from an opcode and"
+        "never from settling, so one flat type of three constructors gave every"
+        "terminal function an arm it could not reach and the coverage checker"
+        "was right to say so."
+        "Nesting says that structurally rather than by convention: Decided"
+        "carries an Ending, so a settling function cannot return Undecided by"
+        "mistake -- it has no way to name it."
+        "A Step is what one opcode did: carried on with a new State, or stopped"
+        "with an Outcome. It exists so that the opcodes can be written as pure"
+        "transitions and the recursion through a Script can live in one place"
+        "instead of in every one of them."
+        "The condition stack is kept apart from the data stack because it is"
+        "walked even inside a branch that is not being executed. An OP_IF nested"
+        "in a skipped branch still has to be matched by its OP_ENDIF."
+        "Two and Three exist because Aver has no fixed-length list pattern, so"
+        "reaching two or three items deep otherwise means a chain of functions"
+        "each of which can only check one item and none of which has a name"
+        "worth reading."
+    exposes [Ending, Outcome, State, Step, Two, Three, missing, itemsWord, maxScript, longScript, taken, remaining, empty, holding, maxOps, maxItem, maxStack, withStack, withConditions, spent, executing, settled, topTwo, topThree, itemAt, rearranged, zeros, repeated]
+    depends [Domain.Opcode, Domain.StackItem]
+    effects []
+
+type Ending
+    Passed
+    Failed(String)
+
+type Outcome
+    Decided(Ending)
+    Undecided(String)
+
+type Step
+    Continue(State)
+    Stop(Outcome)
+
+record State
+    stack: List<List<Int>>
+    alt: List<List<Int>>
+    conditions: List<Bool>
+    opCount: Int
+
+record Two
+    first: List<Int>
+    second: List<Int>
+    rest: List<List<Int>>
+
+record Three
+    first: List<Int>
+    second: List<Int>
+    third: List<Int>
+    rest: List<List<Int>>
+
+fn maxOps() -> Int
+    ? "Non-push opcodes allowed in one Script."
+    201
+
+verify maxOps
+    maxOps() => 201
+
+fn maxItem() -> Int
+    ? "Bytes allowed in one stack item."
+    520
+
+verify maxItem
+    maxItem() => 520
+
+fn maxScript() -> Int
+    ? "Bytes allowed in one Script."
+      "The only one of these limits that is about the Script rather than what"
+      "running it does, which is why it is applied before parsing rather than"
+      "during."
+    10000
+
+verify maxScript
+    maxScript() => 10000
+
+fn longScript() -> String
+    ? "A Script one byte over the limit, written as hexadecimal."
+      "Joined rather than concatenated a piece at a time: ten thousand string"
+      "appends is ten thousand copies of a string that keeps growing, and this"
+      "runs inside a verify block."
+    String.join(pairs(maxScript() + 1, []), "")
+
+verify longScript
+    String.len(longScript()) => 20002
+
+fn pairs(n: Int, acc: List<String>) -> List<String>
+    ? "n copies of one zero byte, unjoined."
+    match n <= 0
+        true -> acc
+        false -> pairs(n - 1, List.prepend("00", acc))
+
+verify pairs
+    pairs(0, []) => []
+    pairs(2, []) => ["00", "00"]
+
+fn maxStack() -> Int
+    ? "Items allowed on the two stacks together."
+    1000
+
+verify maxStack
+    maxStack() => 1000
+
+fn empty() -> State
+    ? "Nothing on either stack, no branch open, no opcode spent."
+    State(stack = [], alt = [], conditions = [], opCount = 0)
+
+verify empty
+    List.len(empty().stack) => 0
+    empty().opCount => 0
+
+fn holding(items: List<List<Int>>) -> State
+    ? "A State with these items on the data stack and nothing else."
+    State(stack = items, alt = [], conditions = [], opCount = 0)
+
+verify holding
+    List.len(holding([[1]]).stack) => 1
+    holding([[1]]).opCount => 0
+
+fn withStack(state: State, stack: List<List<Int>>) -> State
+    ? "The same State with a different data stack."
+    State(stack = stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount)
+
+verify withStack
+    List.len(withStack(empty(), [[1]]).stack) => 1
+    withStack(holding([[1]]), []).opCount => 0
+
+fn withConditions(state: State, conditions: List<Bool>) -> State
+    ? "The same State with a different condition stack."
+    State(stack = state.stack, alt = state.alt, conditions = conditions, opCount = state.opCount)
+
+verify withConditions
+    List.len(withConditions(empty(), [true]).conditions) => 1
+    List.len(withConditions(holding([[1]]), []).stack) => 1
+
+fn spent(state: State, code: Int) -> State
+    ? "Charge an opcode against the limit, when it is one that counts."
+      "Pushes and OP_0 through OP_16 are free, which is why a Script can be"
+      "thousands of bytes of data and still be inside the two hundred and one."
+    match code > 96
+        true -> State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount + 1)
+        false -> state
+
+verify spent
+    spent(empty(), 81).opCount => 0
+    spent(empty(), 118).opCount => 1
+
+fn executing(conditions: List<Bool>) -> Bool
+    ? "Whether every branch we are inside is one that is being taken."
+    match conditions
+        [] -> true
+        [head, ..tail] -> falseOrOn(head, tail)
+
+verify executing
+    executing([]) => true
+    executing([true]) => true
+    executing([false]) => false
+    executing([true, false]) => false
+
+fn falseOrOn(head: Bool, tail: List<Bool>) -> Bool
+    ? "Stop at the first branch that is not being taken."
+    match head
+        false -> false
+        true -> executing(tail)
+
+verify falseOrOn
+    falseOrOn(false, []) => false
+    falseOrOn(true, []) => true
+    falseOrOn(true, [false]) => false
+
+fn settled(state: State) -> Ending
+    ? "A Script ends well when it leaves one true thing and no branch open."
+    match state.conditions
+        [] -> topOf(state.stack)
+        [head, ..tail] -> Ending.Failed("script ended inside an unclosed OP_IF")
+
+verify settled
+    settled(empty()) => Ending.Failed("script left nothing on the stack")
+    settled(holding([[1]])) => Ending.Passed
+    settled(State(stack = [[1]], alt = [], conditions = [true], opCount = 0)) => Ending.Failed("script ended inside an unclosed OP_IF")
+
+fn topOf(stack: List<List<Int>>) -> Ending
+    ? "The final answer is whether the top of the stack is true."
+      "What is under it does not matter. A Script leaving rubbish beneath a"
+      "true value is valid, which surprises people and is nonetheless the rule."
+    match stack
+        [] -> Ending.Failed("script left nothing on the stack")
+        [head, ..tail] -> passedIf(Domain.StackItem.isTruthy(head))
+
+verify topOf
+    topOf([]) => Ending.Failed("script left nothing on the stack")
+    topOf([[1]]) => Ending.Passed
+    topOf([[0]]) => Ending.Failed("script left a false value on top")
+    topOf([[1], [0]]) => Ending.Passed
+
+fn passedIf(truthy: Bool) -> Ending
+    ? "True on top, or not."
+    match truthy
+        true -> Ending.Passed
+        false -> Ending.Failed("script left a false value on top")
+
+verify passedIf
+    passedIf(true) => Ending.Passed
+    passedIf(false) => Ending.Failed("script left a false value on top")
+
+fn topTwo(stack: List<List<Int>>, name: String) -> Result<Two, String>
+    ? "The top two items and what is under them, or which opcode wanted them."
+      "first is the top of the stack and second is under it, which matters for"
+      "the opcodes that are not commutative: OP_SUB is second minus first."
+    match stack
+        [] -> Result.Err("{name} needs two items")
+        [first, ..tail] -> secondOf(first, tail, name)
+
+verify topTwo
+    topTwo([], "OP_ADD") => Result.Err("OP_ADD needs two items")
+    topTwo([[1]], "OP_ADD") => Result.Err("OP_ADD needs two items")
+    topTwo([[1], [2]], "OP_ADD") => Result.Ok(Two(first = [1], second = [2], rest = []))
+    topTwo([[1], [2], [3]], "OP_ADD")?.rest => [[3]]
+
+fn secondOf(first: List<Int>, tail: List<List<Int>>, name: String) -> Result<Two, String>
+    ? "The second item has to be there too."
+    match tail
+        [] -> Result.Err("{name} needs two items")
+        [second, ..deeper] -> Result.Ok(Two(first = first, second = second, rest = deeper))
+
+verify secondOf
+    secondOf([1], [], "OP_ADD") => Result.Err("OP_ADD needs two items")
+    secondOf([1], [[2]], "OP_ADD") => Result.Ok(Two(first = [1], second = [2], rest = []))
+
+fn topThree(stack: List<List<Int>>, name: String) -> Result<Three, String>
+    ? "The top three items, for OP_WITHIN, which is the only opcode wanting them."
+      "Propagating topTwo's refusal with ? would say the opcode needed two"
+      "items when it needed three, so the shallow case is reworded rather than"
+      "passed on."
+    match topTwo(stack, name)
+        Result.Err(message) -> Result.Err("{name} needs three items")
+        Result.Ok(two) -> thirdOf(two, name)
+
+verify topThree
+    topThree([], "OP_WITHIN") => Result.Err("OP_WITHIN needs three items")
+    topThree([[1], [2]], "OP_WITHIN") => Result.Err("OP_WITHIN needs three items")
+    topThree([[1], [2], [3]], "OP_WITHIN") => Result.Ok(Three(first = [1], second = [2], third = [3], rest = []))
+
+fn thirdOf(two: Two, name: String) -> Result<Three, String>
+    ? "And a third under the two."
+    match two.rest
+        [] -> Result.Err("{name} needs three items")
+        [third, ..deeper] -> Result.Ok(Three(first = two.first, second = two.second, third = third, rest = deeper))
+
+verify thirdOf
+    thirdOf(Two(first = [1], second = [2], rest = []), "OP_WITHIN") => Result.Err("OP_WITHIN needs three items")
+    thirdOf(Two(first = [1], second = [2], rest = [[3]]), "OP_WITHIN") => Result.Ok(Three(first = [1], second = [2], third = [3], rest = []))
+
+fn zeros(n: Int) -> List<Int>
+    ? "A run of n zero bytes."
+      "Here so that the size limits can be tested. Five hundred and twenty-one"
+      "bytes is not something a verify case can write as a literal, and a limit"
+      "whose breach is never exercised is a limit nobody has checked."
+    zerosOnto(n, [])
+
+verify zeros
+    zeros(0) => []
+    zeros(3) => [0, 0, 0]
+    List.len(zeros(521)) => 521
+
+fn zerosOnto(n: Int, acc: List<Int>) -> List<Int>
+    ? "Accumulator form."
+    match n <= 0
+        true -> acc
+        false -> zerosOnto(n - 1, List.prepend(0, acc))
+
+verify zerosOnto
+    zerosOnto(0, []) => []
+    zerosOnto(2, [1]) => [0, 0, 1]
+
+fn repeated(n: Int, item: List<Int>) -> List<List<Int>>
+    ? "A stack of n copies of one item, for the same reason as zeros."
+    repeatedOnto(n, item, [])
+
+verify repeated
+    repeated(0, [1]) => []
+    repeated(2, [1]) => [[1], [1]]
+    List.len(repeated(1000, [1])) => 1000
+
+fn repeatedOnto(n: Int, item: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Accumulator form."
+    match n <= 0
+        true -> acc
+        false -> repeatedOnto(n - 1, item, List.prepend(item, acc))
+
+verify repeatedOnto
+    repeatedOnto(0, [1], []) => []
+    repeatedOnto(2, [1], [[2]]) => [[1], [1], [2]]
+
+fn itemsWord(n: Int) -> String
+    ? "How many items, written so that one of them is not called items."
+      "Error messages get read by people trying to work out what their Script"
+      "did, and the depth an opcode reaches is one of the few genuinely useful"
+      "things one can say."
+    match n == 1
+        true -> "1 item"
+        false -> "{n} items"
+
+verify itemsWord
+    itemsWord(1) => "1 item"
+    itemsWord(2) => "2 items"
+    itemsWord(6) => "6 items"
+
+fn itemAt(items: List<List<Int>>, n: Int) -> List<Int>
+    ? "The nth item down from the top, counting from nought."
+      "An empty item when there is no such position. Every caller has checked"
+      "the depth before asking, so that answer is never the one returned — it"
+      "is here because the function has to be total, not because getting it"
+      "back would mean anything."
+    match items
+        [] -> []
+        [head, ..tail] -> hereOrDeeper(head, tail, n)
+
+verify itemAt
+    itemAt([[1], [2], [3]], 0) => [1]
+    itemAt([[1], [2], [3]], 2) => [3]
+    itemAt([[1], [2], [3]], 3) => []
+    itemAt([], 0) => []
+
+fn hereOrDeeper(head: List<Int>, tail: List<List<Int>>, n: Int) -> List<Int>
+    ? "Count down one position at a time."
+    match n <= 0
+        true -> head
+        false -> itemAt(tail, n - 1)
+
+verify hereOrDeeper
+    hereOrDeeper([1], [[2]], 0) => [1]
+    hereOrDeeper([1], [[2]], 1) => [2]
+
+fn rearranged(code: Int, items: List<List<Int>>) -> List<List<Int>>
+    ? "What the thirteen shuffling opcodes make of the items they reach."
+      "Written top of the stack first, the way the items arrive, which is the"
+      "opposite of how Bitcoin's own documentation writes them: x1 x2 -> x2 x1"
+      "for OP_SWAP means the item named last is the one on top. Turning every"
+      "one of these round by hand is where the mistakes live, so the six"
+      "positions are named rather than indexed and each line reads as the"
+      "stack would be read downward."
+    top = itemAt(items, 0)
+    second = itemAt(items, 1)
+    third = itemAt(items, 2)
+    fourth = itemAt(items, 3)
+    fifth = itemAt(items, 4)
+    sixth = itemAt(items, 5)
+    match code
+        109 -> []
+        110 -> [top, second, top, second]
+        111 -> [top, second, third, top, second, third]
+        112 -> [third, fourth, top, second, third, fourth]
+        113 -> [fifth, sixth, top, second, third, fourth]
+        114 -> [third, fourth, top, second]
+        117 -> []
+        118 -> [top, top]
+        119 -> [top]
+        120 -> [second, top, second]
+        123 -> [third, top, second]
+        124 -> [second, top]
+        125 -> [top, second, top]
+        _ -> items
+
+verify rearranged
+    rearranged(109, [[1], [2]]) => []
+    rearranged(110, [[1], [2]]) => [[1], [2], [1], [2]]
+    rearranged(111, [[1], [2], [3]]) => [[1], [2], [3], [1], [2], [3]]
+    rearranged(112, [[1], [2], [3], [4]]) => [[3], [4], [1], [2], [3], [4]]
+    rearranged(113, [[1], [2], [3], [4], [5], [6]]) => [[5], [6], [1], [2], [3], [4]]
+    rearranged(114, [[1], [2], [3], [4]]) => [[3], [4], [1], [2]]
+    rearranged(117, [[1]]) => []
+    rearranged(118, [[1]]) => [[1], [1]]
+    rearranged(119, [[1], [2]]) => [[1]]
+    rearranged(120, [[1], [2]]) => [[2], [1], [2]]
+    rearranged(123, [[1], [2], [3]]) => [[3], [1], [2]]
+    rearranged(124, [[1], [2]]) => [[2], [1]]
+    rearranged(125, [[1], [2]]) => [[1], [2], [1]]
+    rearranged(172, [[1]]) => [[1]]
+
+fn missing(code: Int) -> String
+    ? "What this opcode needs that Aver has not got."
+      "A reason rather than an Outcome, because a function that can only ever"
+      "return one constructor of a type is claiming a choice it does not have"
+      "-- the same objection that split Ending out of Outcome."
+      "The two reasons are kept apart. RIPEMD160 is a hash somebody could add"
+      "in an afternoon; secp256k1 is elliptic curve arithmetic and is not. A"
+      "reader deciding what to ask for upstream should be able to tell which is"
+      "which from the message alone."
+    match code
+        166 -> "OP_RIPEMD160 needs ripemd160"
+        167 -> "OP_SHA1 needs sha1"
+        169 -> "OP_HASH160 needs ripemd160"
+        170 -> "OP_HASH256 needs ripemd160"
+        171 -> "OP_CODESEPARATOR needs the sighash it changes"
+        177 -> "OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"
+        178 -> "OP_CHECKSEQUENCEVERIFY needs the transaction it locks"
+        _ -> "{Domain.Opcode.nameOf(code)} needs secp256k1"
+
+verify missing
+    missing(166) => "OP_RIPEMD160 needs ripemd160"
+    missing(169) => "OP_HASH160 needs ripemd160"
+    missing(171) => "OP_CODESEPARATOR needs the sighash it changes"
+    missing(172) => "OP_CHECKSIG needs secp256k1"
+    missing(174) => "OP_CHECKMULTISIG needs secp256k1"
+    missing(186) => "OP_CHECKSIGADD needs secp256k1"
+
+fn taken(truthy: Bool, code: Int) -> Bool
+    ? "OP_NOTIF is OP_IF with its condition the other way up."
+    match code == 100
+        true -> Bool.not(truthy)
+        false -> truthy
+
+verify taken
+    taken(true, 99) => true
+    taken(true, 100) => false
+    taken(false, 100) => true
+
+fn remaining(code: Int, tail: List<List<Int>>, n: Int) -> List<List<Int>>
+    ? "OP_ROLL takes the item it found away; OP_PICK leaves it where it was."
+    match code == 122
+        true -> List.concat(List.take(tail, n), List.drop(tail, n + 1))
+        false -> tail
+
+verify remaining
+    remaining(121, [[7], [8]], 1) => [[7], [8]]
+    remaining(122, [[7], [8]], 1) => [[7]]
+    remaining(122, [[7], [8]], 0) => [[8]]

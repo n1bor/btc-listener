@@ -1,0 +1,123 @@
+module ScriptMath
+    intent =
+        "What Script's arithmetic opcodes compute, and nothing else."
+        "Numbers only. Taking the operands off the stack, refusing the ones that"
+        "are too wide, and putting the answer back are the interpreter's, so"
+        "what is left here is a pair of tables that can be read against the"
+        "reference client line by line without any machinery in the way."
+        "Aver has no closures, so an operation cannot be passed to a helper and"
+        "these are matches on the opcode rather than functions of it. That turns"
+        "out to read better anyway: the opcode number and what it does are on"
+        "the same line."
+        "Nothing here needs to know that Script numbers are four bytes wide."
+        "Aver's Int is arbitrary precision, the operands were checked before"
+        "they arrived, and every one of these but OP_ADD and OP_SUB returns"
+        "something narrower than it was given."
+    exposes [oneIf, unaryValue, binaryValue]
+    depends []
+    effects []
+
+fn oneIf(condition: Bool) -> Int
+    ? "How Script writes a true or false answer: a one or an empty item."
+      "Zero here rather than an empty list because the caller encodes it, and"
+      "the encoding of zero is the empty item."
+    match condition
+        true -> 1
+        false -> 0
+
+verify oneIf
+    oneIf(true) => 1
+    oneIf(false) => 0
+
+fn unaryValue(code: Int, a: Int) -> Int
+    ? "What each unary arithmetic opcode makes of its one operand."
+      "OP_NOT and OP_0NOTEQUAL are in here rather than with the comparisons"
+      "because they take one operand, whatever their names suggest."
+    match code
+        139 -> a + 1
+        140 -> a - 1
+        143 -> 0 - a
+        144 -> absolute(a)
+        145 -> oneIf(a == 0)
+        146 -> oneIf(a != 0)
+        _ -> a
+
+verify unaryValue
+    unaryValue(139, 1) => 2
+    unaryValue(140, 1) => 0
+    unaryValue(143, 1) => 0 - 1
+    unaryValue(143, 0 - 1) => 1
+    unaryValue(144, 0 - 5) => 5
+    unaryValue(144, 5) => 5
+    unaryValue(145, 0) => 1
+    unaryValue(145, 7) => 0
+    unaryValue(146, 5) => 1
+    unaryValue(146, 0) => 0
+
+fn absolute(a: Int) -> Int
+    ? "Size without sign."
+    match a < 0
+        true -> 0 - a
+        false -> a
+
+verify absolute
+    absolute(0 - 5) => 5
+    absolute(5) => 5
+    absolute(0) => 0
+
+fn binaryValue(code: Int, a: Int, b: Int) -> Int
+    ? "What each binary arithmetic opcode makes of its two operands."
+      "a was the deeper of the two on the stack and b was on top, so a"
+      "subtraction is a minus b. Getting that round the wrong way is the"
+      "classic mistake here and the only reason it is written down twice."
+    match code
+        147 -> a + b
+        148 -> a - b
+        154 -> oneIf(Bool.and(a != 0, b != 0))
+        155 -> oneIf(Bool.or(a != 0, b != 0))
+        156 -> oneIf(a == b)
+        158 -> oneIf(a != b)
+        159 -> oneIf(a < b)
+        160 -> oneIf(a > b)
+        161 -> oneIf(a <= b)
+        162 -> oneIf(a >= b)
+        163 -> smaller(a, b)
+        164 -> larger(a, b)
+        _ -> 0
+
+verify binaryValue
+    binaryValue(147, 2, 3) => 5
+    binaryValue(148, 5, 3) => 2
+    binaryValue(148, 3, 5) => 0 - 2
+    binaryValue(154, 1, 0) => 0
+    binaryValue(154, 1, 2) => 1
+    binaryValue(155, 1, 0) => 1
+    binaryValue(155, 0, 0) => 0
+    binaryValue(156, 3, 3) => 1
+    binaryValue(158, 3, 3) => 0
+    binaryValue(159, 2, 3) => 1
+    binaryValue(160, 2, 3) => 0
+    binaryValue(161, 3, 3) => 1
+    binaryValue(162, 3, 3) => 1
+    binaryValue(163, 2, 3) => 2
+    binaryValue(164, 2, 3) => 3
+
+fn smaller(a: Int, b: Int) -> Int
+    ? "OP_MIN."
+    match a <= b
+        true -> a
+        false -> b
+
+verify smaller
+    smaller(2, 3) => 2
+    smaller(3, 2) => 2
+
+fn larger(a: Int, b: Int) -> Int
+    ? "OP_MAX."
+    match a >= b
+        true -> a
+        false -> b
+
+verify larger
+    larger(2, 3) => 3
+    larger(3, 2) => 3

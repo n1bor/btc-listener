@@ -18,11 +18,27 @@ never pretends to have decided something it has not.
 ## Three outcomes, not two
 
 ```aver
-type Outcome
+type Ending
     Passed
     Failed(String)
+
+type Outcome
+    Decided(Ending)
     Undecided(String)
 ```
+
+This started as one flat type of three constructors, which is how the rest of
+this document describes it. That version was written and did not survive
+contact with the verifier: thirty-two `verify-coverage` warnings, every one of
+them pointing at a function that decides how a Script *ended* — `settled`,
+`topOf`, `passedIf` — and could therefore never return `Undecided`, because
+`Undecided` comes from an opcode and never from settling.
+
+Waiving them would have been the fourth time this project papered over an
+unreachable arm, and the three previous times the honest fix turned out better.
+The honest fix here is that `Undecided` is not an ending, and nesting says so in
+the types rather than in a comment. All thirty-two warnings went away without a
+single suppression.
 
 Five opcodes need a curve — `OP_CHECKSIG`, `OP_CHECKSIGVERIFY`,
 `OP_CHECKMULTISIG`, `OP_CHECKMULTISIGVERIFY`, `OP_CHECKSIGADD` — and four more

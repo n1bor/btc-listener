@@ -1,0 +1,95 @@
+module Interp
+    intent =
+        "Running a Script, as far as it can be run."
+        "This is the whole of the walk. Every opcode is a pure transition in"
+        "Domain.ScriptOps, so the recursion through a Script happens once, here,"
+        "and nowhere else. A first attempt had every opcode recursing into the"
+        "rest of the Script itself, which meant none of them could be checked"
+        "without also running a Script, and the file was half again as long."
+        "Undecided is not failure. Nine opcodes need a primitive Aver has not"
+        "got -- five want a curve, four want RIPEMD160 -- and three more want a"
+        "Transaction this does not have. Saying so rather than guessing is the"
+        "whole reason an engine can be written before any of them exist."
+        "The minimal-encoding rules are not applied, and Domain.StackItem"
+        "answers them without anything here asking. That is deliberate: they are"
+        "switched on by verification flags rather than by consensus everywhere,"
+        "so applying them unconditionally would refuse Scripts the network"
+        "accepted. They wait for a flags argument, which waits for the test"
+        "corpus that needs one."
+    exposes [run, evaluate]
+    depends [Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState]
+    effects []
+
+fn run(scriptHex: String) -> Outcome
+    ? "Parse and run a Script from its hexadecimal, on an empty stack."
+      "For checking one Script alone. A real spend runs the Input's Script and"
+      "then the Output's on what it leaves, which is a caller's business and"
+      "not this one's."
+      "The ten thousand byte limit is checked here rather than in evaluate,"
+      "because it is a rule about a Script and evaluate is handed Ops. A caller"
+      "reaching past run for the Ops has to apply it itself."
+    match String.len(scriptHex) > Domain.ScriptState.maxScript() * 2
+        true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
+        false -> parsed(scriptHex)
+
+verify run
+    run("51") => Outcome.Decided(Ending.Passed)
+    run("00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    run(Domain.ScriptState.longScript()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+
+fn parsed(scriptHex: String) -> Outcome
+    ? "Parse it, then walk it."
+    match Domain.ScriptParse.opsIn(scriptHex)
+        Result.Err(message) -> Outcome.Decided(Ending.Failed(message))
+        Result.Ok(ops) -> evaluate(ops, Domain.ScriptState.empty())
+
+verify parsed
+    parsed("51") => Outcome.Decided(Ending.Passed)
+    parsed("00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    parsed("") => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    parsed("5152935387") => Outcome.Decided(Ending.Passed)
+    parsed("5152944f87") => Outcome.Decided(Ending.Passed)
+    parsed("515293539c") => Outcome.Decided(Ending.Passed)
+    parsed("5352a2") => Outcome.Decided(Ending.Passed)
+    parsed("515293559f") => Outcome.Decided(Ending.Passed)
+    parsed("535155a5") => Outcome.Decided(Ending.Passed)
+    parsed("51766b6c87") => Outcome.Decided(Ending.Passed)
+    parsed("5758007987") => Outcome.Decided(Ending.Passed)
+    parsed("5758517a93") => Outcome.Decided(Ending.Passed)
+    parsed("5163515168") => Outcome.Decided(Ending.Passed)
+    parsed("5151640068") => Outcome.Decided(Ending.Passed)
+    parsed("51a8") => Outcome.Decided(Ending.Passed)
+    parsed("ac") => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    parsed("a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+    parsed("7e") => Outcome.Decided(Ending.Failed("OP_CAT is disabled"))
+    parsed("00636568") => Outcome.Decided(Ending.Failed("OP_VERIF is not allowed anywhere in a script"))
+    parsed("02aa") => Outcome.Decided(Ending.Failed("push of 2 bytes runs past the end of the script"))
+    parsed("63") => Outcome.Decided(Ending.Failed("OP_IF on an empty stack"))
+    parsed("5163") => Outcome.Decided(Ending.Failed("script ended inside an unclosed OP_IF"))
+    parsed("50") => Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid"))
+    parsed("6a") => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    parsed("5193") => Outcome.Decided(Ending.Failed("OP_ADD needs two items"))
+    parsed("515255a5") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+
+fn evaluate(ops: List<Op>, state: State) -> Outcome
+    ? "One Op at a time until the Script runs out or an Op stops it."
+    match ops
+        [] -> Outcome.Decided(Domain.ScriptState.settled(state))
+        [head, ..tail] -> stepped(head, tail, state)
+
+verify evaluate
+    evaluate([], Domain.ScriptState.holding([[1]])) => Outcome.Decided(Ending.Passed)
+    evaluate([], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    evaluate([Op.Code(172)], Domain.ScriptState.empty()) => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    evaluate([Op.Push(1, [1])], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Passed)
+
+fn stepped(op: Op, rest: List<Op>, state: State) -> Outcome
+    ? "Take the Step the Op asks for, then carry on or stop as it says."
+    match Domain.ScriptOps.step(op, state)
+        Step.Continue(next) -> evaluate(rest, next)
+        Step.Stop(outcome) -> outcome
+
+verify stepped
+    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Passed)
+    stepped(Op.Code(106), [], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    stepped(Op.Code(172), [], Domain.ScriptState.empty()) => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
