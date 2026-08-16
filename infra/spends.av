@@ -18,34 +18,62 @@ module Spends
         "lookup lands in the same one. Threading a held Segment through these"
         "lookups was tried and made an audit of two thousand Blocks go from two"
         "and a half minutes to over ten, because scattered parents miss."
-    exposes [checked, resolve]
-    depends [Domain.Block, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Store]
+    exposes [Checked, checked, resolve]
+    depends [Domain.Block, Domain.Index, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
     effects [Disk.readText]
 
-fn checked(store: Store, blocks: BlockStore, transaction: Transaction) -> Result<Tally, String>
-    ? "Look up every Input of a Transaction and total what it spends."
-    ! [Disk.readText]
-    over(store, blocks, Domain.Transaction.inputsOf(transaction), Domain.Spend.started())
+record Checked
+    tally: Tally
+    scripts: Outcomes
 
-fn over(store: Store, blocks: BlockStore, inputs: List<Input>, tally: Tally) -> Result<Tally, String>
+fn checked(store: Store, blocks: BlockStore, transaction: Transaction) -> Result<Checked, String>
+    ? "Look up every Input of a Transaction, total what it spends, and run the"
+      "Scripts while the Output that answers them is in hand."
+      "Running the Scripts here rather than in a pass of their own is the whole"
+      "reason this reads well: the Output being spent has just been fetched,"
+      "and fetching it again would double the only expensive thing the audit"
+      "does."
+    ! [Disk.readText]
+    over(store, blocks, Domain.Transaction.inputsOf(transaction), Checked(tally = Domain.Spend.started(), scripts = Domain.SpendScript.noOutcomes()))
+
+fn over(store: Store, blocks: BlockStore, inputs: List<Input>, held: Checked) -> Result<Checked, String>
     ? "Each Input in turn."
     ! [Disk.readText]
     match inputs
-        [] -> Result.Ok(tally)
-        [head, ..tail] -> nextInput(store, blocks, head, tail, tally)
+        [] -> Result.Ok(held)
+        [head, ..tail] -> nextInput(store, blocks, head, tail, held)
 
-fn nextInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, tally: Tally) -> Result<Tally, String>
+fn nextInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, held: Checked) -> Result<Checked, String>
     ? "A coinbase Input spends nothing, and marks the whole Transaction."
+      "It has no Script to run either: the bytes in a coinbase Input are"
+      "arbitrary data that consensus never executes."
     ! [Disk.readText]
     match Domain.Spend.isCoinbaseInput(Domain.Transaction.previousTxidOf(input))
-        true -> over(store, blocks, tail, Domain.Spend.markCoinbase(tally))
-        false -> resolvedInput(store, blocks, input, tail, tally)
+        true -> over(store, blocks, tail, Checked(tally = Domain.Spend.markCoinbase(held.tally), scripts = held.scripts))
+        false -> resolvedInput(store, blocks, input, tail, held)
 
-fn resolvedInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, tally: Tally) -> Result<Tally, String>
-    ? "Follow one Input back and fold the answer in."
+fn resolvedInput(store: Store, blocks: BlockStore, input: Input, tail: List<Input>, held: Checked) -> Result<Checked, String>
+    ? "Follow one Input back, fold the value in, and run the two Scripts."
     ! [Disk.readText]
     spend = resolve(store, blocks, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
-    over(store, blocks, tail, Domain.Spend.absorb(tally, spend))
+    over(store, blocks, tail, Checked(tally = Domain.Spend.absorb(held.tally, spend), scripts = scriptCounts(input, spend, held.scripts)))
+
+fn scriptCounts(input: Input, spend: Spend, counts: Outcomes) -> Outcomes
+    ? "A Script pair can only be run when the Output it spends was found."
+      "An Input whose parent is not held is not counted at all, rather than"
+      "counted as undecided: undecided is about what the engine cannot answer,"
+      "and this is about what we have not got."
+    match spend
+        Spend.Resolved(value, script) -> Domain.SpendScript.count(counts, Domain.SpendScript.check(Domain.Transaction.scriptOf(input), script))
+        Spend.Unknown(why) -> counts
+        Spend.Invalid(why) -> counts
+
+verify scriptCounts
+    scriptCounts(Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "51"), Domain.SpendScript.noOutcomes()).passed => 1
+    scriptCounts(Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "a9"), Domain.SpendScript.noOutcomes()).undecided => 1
+    scriptCounts(Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "00"), Domain.SpendScript.noOutcomes()).failed => 1
+    scriptCounts(Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Unknown("no"), Domain.SpendScript.noOutcomes()) => Domain.SpendScript.noOutcomes()
+    scriptCounts(Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Invalid("no"), Domain.SpendScript.noOutcomes()) => Domain.SpendScript.noOutcomes()
 
 fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
     ? "What the Output at this position of this Transaction is worth."
@@ -104,7 +132,7 @@ fn outputAt(found: Option<Transaction>, site: TxSite, position: Int) -> Spend
 
 verify outputAt
     outputAt(Option.None, Domain.Index.TxSite(blockId = "aa", position = 3), 0) => Spend.Invalid("block aa has no transaction at position 3")
-    outputAt(Option.Some(sampleTx()), Domain.Index.TxSite(blockId = "aa", position = 0), 0) => Spend.Resolved(5000)
+    outputAt(Option.Some(sampleTx()), Domain.Index.TxSite(blockId = "aa", position = 0), 0) => Spend.Resolved(5000, "")
     outputAt(Option.Some(sampleTx()), Domain.Index.TxSite(blockId = "aa", position = 0), 4) => Spend.Invalid("output 4 is past the end of the transaction")
 
 fn valueAt(outputs: List<Output>, remaining: Int, position: Int) -> Spend
@@ -117,18 +145,18 @@ fn valueAt(outputs: List<Output>, remaining: Int, position: Int) -> Spend
 
 verify valueAt
     valueAt([], 0, 0) => Spend.Invalid("output 0 is past the end of the transaction")
-    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 0, 0) => Spend.Resolved(5000)
-    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 1, 1) => Spend.Resolved(7000)
+    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 0, 0) => Spend.Resolved(5000, "")
+    valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 1, 1) => Spend.Resolved(7000, "")
     valueAt([Output(value = 5000, script = ""), Output(value = 7000, script = "")], 2, 2) => Spend.Invalid("output 2 is past the end of the transaction")
 
 fn valueOrWalk(head: Output, tail: List<Output>, remaining: Int, position: Int) -> Spend
     ? "This is the Output when the count runs out."
     match remaining <= 0
-        true -> Spend.Resolved(Domain.Transaction.valueOf(head))
+        true -> Spend.Resolved(Domain.Transaction.valueOf(head), Domain.Transaction.outputScriptOf(head))
         false -> valueAt(tail, remaining - 1, position)
 
 verify valueOrWalk
-    valueOrWalk(Output(value = 5000, script = ""), [], 0, 0) => Spend.Resolved(5000)
+    valueOrWalk(Output(value = 5000, script = ""), [], 0, 0) => Spend.Resolved(5000, "")
     valueOrWalk(Output(value = 5000, script = ""), [], 1, 1) => Spend.Invalid("output 1 is past the end of the transaction")
 
 fn sampleOutputs() -> List<Output>

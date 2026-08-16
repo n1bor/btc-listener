@@ -179,6 +179,28 @@ when the next big number arrives.
 Fourteen `Undecided`, every one a scriptSig containing a signature-checking
 opcode, which is the right answer and not a gap.
 
+## Update — the engine, run where it belongs
+
+The spike ran Output Scripts on an empty stack, which meant a P2PKH Script died
+at its first `OP_DUP` and the reach it reported was fiction. `Domain.SpendScript`
+does it properly: the Input's Script, then the Output's on the stack it left,
+with a fresh opcode count and a condition stack that has to be empty in between.
+
+Over the first 30,000 Blocks, with the `t:` index built so every parent
+resolves: **2,869 spends, 0 failed, 0 passed, 2,869 undecided.** Nothing
+unresolved and no faults.
+
+All undecided is the right answer and not a disappointment. Almost every Output
+in that range is P2PK — a public key and `OP_CHECKSIG` — so evaluation gets all
+the way to the signature check and stops there, which is precisely the claim
+this design was built to be able to make. The number to watch is the count of
+`Failed`, because those would be ours, and it is nought.
+
+P2SH is not implemented and cannot be reached: a P2SH Output Script begins with
+`OP_HASH160`, so it stops on the first opcode for want of RIPEMD160 and the
+redeem script is never run. Writing that branch now would be writing something
+nothing can enter; it belongs in #10.
+
 ## Consequences
 
 The engine will never call a Block fully valid, and should not be read as doing

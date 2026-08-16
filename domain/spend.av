@@ -7,13 +7,14 @@ module Spend
         "check worthless. Unknown and Invalid are kept apart everywhere."
         "Nothing here is about signatures. Whether the spender was entitled to"
         "spend needs secp256k1, which Aver has not got. What is checked is that"
-        "the Outputs being spent exist and that value is not created."
+        "the Outputs being spent exist and that value is not created. The Script"
+        "is carried along for whoever does want to run it."
     exposes [Spend, Verdict, Tally, coinbaseTxid, isCoinbaseInput, started, absorb, markCoinbase, verdictOf, feeOf]
     depends []
     effects []
 
 type Spend
-    Resolved(Int)
+    Resolved(Int, String)
     Unknown(String)
     Invalid(String)
 
@@ -58,14 +59,18 @@ fn absorb(tally: Tally, spend: Spend) -> Tally
       "The first Unknown and the first Invalid are kept and later ones dropped:"
       "one reason is enough to explain the verdict, and the first is the one a"
       "reader can act on."
+      "A Resolved carries the Output's Script as well as its value, because"
+      "running it is the only way to say whether the Input was entitled to"
+      "spend, and it is the one place the Script can be got without a second"
+      "lookup of the same parent."
     match spend
-        Spend.Resolved(value) -> Tally(spent = tally.spent + value, unknown = tally.unknown, invalid = tally.invalid, coinbase = tally.coinbase)
+        Spend.Resolved(value, script) -> Tally(spent = tally.spent + value, unknown = tally.unknown, invalid = tally.invalid, coinbase = tally.coinbase)
         Spend.Unknown(why) -> Tally(spent = tally.spent, unknown = Option.Some(firstReason(tally.unknown, why)), invalid = tally.invalid, coinbase = tally.coinbase)
         Spend.Invalid(why) -> Tally(spent = tally.spent, unknown = tally.unknown, invalid = Option.Some(firstReason(tally.invalid, why)), coinbase = tally.coinbase)
 
 verify absorb
-    absorb(started(), Spend.Resolved(500)) => Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false)
-    absorb(absorb(started(), Spend.Resolved(500)), Spend.Resolved(200)).spent => 700
+    absorb(started(), Spend.Resolved(500, "")) => Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false)
+    absorb(absorb(started(), Spend.Resolved(500, "")), Spend.Resolved(200, "")).spent => 700
     absorb(started(), Spend.Unknown("no record")).unknown => Option.Some("no record")
     absorb(started(), Spend.Invalid("no such output")).invalid => Option.Some("no such output")
     absorb(absorb(started(), Spend.Unknown("first")), Spend.Unknown("second")).unknown => Option.Some("first")

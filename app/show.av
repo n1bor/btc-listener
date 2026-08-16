@@ -7,8 +7,8 @@ module Show
         "A body that will not decode is described rather than raised. show is"
         "what you reach for when something looks wrong, and an error that hid"
         "the rest of the report would be the wrong trade."
-    exposes [describeFound, describeSited, describeSpend, transactionSited]
-    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Network, Domain.Spend, Domain.Transaction, Infra.Chain]
+    exposes [describeScripts, describeFound, describeSited, describeSpend, transactionSited]
+    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Network, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Chain]
     effects []
 
 fn describeFound(found: Found, below: Int, withTransactions: Bool) -> List<String>
@@ -258,8 +258,8 @@ fn describeSpend(transaction: Transaction, tally: Tally) -> List<String>
     )
 
 verify describeSpend
-    List.take(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000))), 1) => ["txid   cc"]
-    List.len(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000)))) => 4
+    List.take(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000, ""))), 1) => ["txid   cc"]
+    List.len(describeSpend(spendSample(), Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000, "")))) => 4
 
 fn spendSample() -> Transaction
     ? "A Transaction paying out 5000, for the cases above."
@@ -297,8 +297,8 @@ fn verdictLines(tally: Tally, paid: Int) -> List<String>
 
 verify verdictLines
     verdictLines(Domain.Spend.markCoinbase(Domain.Spend.started()), 0) => ["spend  coinbase: it creates value rather than moving it"]
-    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000)), 5000) => ["spend  inputs cover outputs, fee 0.00002000 BTC"]
-    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(1000)), 5000) => ["spend  INVALID: outputs exceed inputs by 0.00004000 BTC"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(7000, "")), 5000) => ["spend  inputs cover outputs, fee 0.00002000 BTC"]
+    verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Resolved(1000, "")), 5000) => ["spend  INVALID: outputs exceed inputs by 0.00004000 BTC"]
     verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Invalid("bad")), 5000) => ["spend  INVALID: bad"]
     verdictLines(Domain.Spend.absorb(Domain.Spend.started(), Domain.Spend.Spend.Unknown("no idea")), 5000) => ["spend  cannot tell: no idea"]
 
@@ -309,3 +309,14 @@ fn amountLine(satoshis: Int) -> String
 verify amountLine
     amountLine(0) => "0.00000000 BTC"
     amountLine(5000) => "0.00005000 BTC"
+
+fn describeScripts(outcomes: Outcomes) -> List<String>
+    ? "What running the Scripts of every resolved Input came to."
+      "Undecided is not a failure and is shown apart from one. Until Aver has"
+      "secp256k1 it is the answer for almost every real spend, and a line that"
+      "read as a pass would be the most misleading thing in the output."
+    ["script {outcomes.passed} passed, {outcomes.failed} failed, {outcomes.undecided} undecided"]
+
+verify describeScripts
+    describeScripts(Domain.SpendScript.noOutcomes()) => ["script 0 passed, 0 failed, 0 undecided"]
+    describeScripts(Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3)) => ["script 1 passed, 2 failed, 3 undecided"]

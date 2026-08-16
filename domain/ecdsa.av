@@ -23,6 +23,11 @@ module Ecdsa
         "sketched. Aver has no way to build a Digest32 from bytes it did not"
         "hash itself, so a Digest here would mean this module could only be"
         "given a hash it computed, which is the opposite of a seam."
+        "The type is Ruling rather than Verdict, which ADR 0005 called it, and"
+        "which Domain.Spend had already taken for whether a Transaction adds"
+        "up. Aver refers to imported types by their bare names, so two types"
+        "called the same thing anywhere in one dependency chain is a collision"
+        "and the older one wins."
         "There is no Valid. ADR 0005 sketched three answers and two of them are"
         "all this can give: nothing here can say a signature is good, so a"
         "constructor saying so would be a constructor nothing returns -- the"
@@ -33,15 +38,15 @@ module Ecdsa
         "The function is decide rather than verify, which ADR 0005 called it."
         "Aver keeps verify for its own use, and a seam whose name will not"
         "compile is not much of a seam."
-    exposes [Verdict, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
+    exposes [Ruling, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
     depends [Bytes]
     effects []
 
-type Verdict
+type Ruling
     Invalid(String)
     Undecidable(String)
 
-fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Verdict
+fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
     ? "Whether this signature is this key's signature over this message."
       "Undecidable is the answer for anything that needs the curve, which is"
       "every signature that is well formed. The two that are not need no curve"
@@ -52,11 +57,11 @@ fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Verdict
     decideShape(Bytes.toList(signature), Bytes.toList(publicKey))
 
 verify decide
-    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Verdict.Invalid("empty signature")
-    decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
-    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Verdict.Undecidable("no secp256k1")
+    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Ruling.Invalid("empty signature")
+    decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
+    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Undecidable("no secp256k1")
 
-fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Verdict
+fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Ruling
     ? "The same question without the message, for a caller that has not got one."
       "The interpreter is handed a stack and no Transaction, so it cannot build"
       "a message and cannot call decide. It can still be told that an empty"
@@ -64,23 +69,23 @@ fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Verdict
       "is decidable today, so decide is written in terms of this rather than"
       "the other way round."
     match signature
-        [] -> Verdict.Invalid("empty signature")
+        [] -> Ruling.Invalid("empty signature")
         [head, ..tail] -> shapedKey(publicKey)
 
 verify decideShape
-    decideShape([], [2]) => Verdict.Invalid("empty signature")
-    decideShape([1, 2], [170, 187]) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
-    decideShape([1, 2], Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Verdict.Undecidable("no secp256k1")
+    decideShape([], [2]) => Ruling.Invalid("empty signature")
+    decideShape([1, 2], [170, 187]) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
+    decideShape([1, 2], Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Ruling.Undecidable("no secp256k1")
 
-fn shapedKey(publicKey: List<Int>) -> Verdict
+fn shapedKey(publicKey: List<Int>) -> Ruling
     ? "A key of the wrong shape fails before any arithmetic would have started."
     match isValidPublicKey(publicKey)
-        false -> Verdict.Invalid("public key is {List.len(publicKey)} bytes, which is not a public key")
-        true -> Verdict.Undecidable("no secp256k1")
+        false -> Ruling.Invalid("public key is {List.len(publicKey)} bytes, which is not a public key")
+        true -> Ruling.Undecidable("no secp256k1")
 
 verify shapedKey
-    shapedKey([170, 187]) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
-    shapedKey(Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Verdict.Undecidable("no secp256k1")
+    shapedKey([170, 187]) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
+    shapedKey(Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Ruling.Undecidable("no secp256k1")
 
 fn isValidPublicKey(publicKey: List<Int>) -> Bool
     ? "Whether these bytes could be a public key at all."

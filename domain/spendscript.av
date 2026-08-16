@@ -1,0 +1,125 @@
+module SpendScript
+    intent =
+        "Running the two Scripts a spend is made of, in the order Bitcoin runs"
+        "them."
+        "An Input's Script and the Output's Script are not two questions. The"
+        "Input's runs first and leaves things on the stack; the Output's runs on"
+        "what it left. Running either on its own answers nothing: a P2PKH Output"
+        "Script on an empty stack dies at its first OP_DUP, and an Input Script"
+        "on its own is a couple of pushes that prove nothing. The spike in ADR"
+        "0005 did exactly that and reported a reach it did not have."
+        "Only the stack carries between them. The opcode count starts again and"
+        "the condition stack has to be empty at the end of each, which is why"
+        "an OP_IF opened in the Input's Script cannot be closed by the Output's."
+        "P2SH is not here. A P2SH Output Script is OP_HASH160, a push, and"
+        "OP_EQUAL, so it stops on the first opcode for want of RIPEMD160 and"
+        "the redeem script is never reached. Writing the re-run now would be"
+        "writing a branch nothing can enter; it belongs with #10, in the change"
+        "that makes OP_HASH160 answer."
+    exposes [check, Outcomes, noOutcomes, count, merged]
+    depends [Domain.Interp, Domain.ScriptParse, Domain.ScriptState]
+    effects []
+
+fn check(inputScriptHex: String, outputScriptHex: String) -> Outcome
+    ? "Whether this Input is allowed to spend this Output."
+      "Undecided is the honest answer for almost every real spend today, and"
+      "the count of them is the measure of how much of consensus this checks."
+    match Domain.ScriptParse.opsIn(inputScriptHex)
+        Result.Err(message) -> Outcome.Decided(Ending.Failed("input script: {message}"))
+        Result.Ok(ops) -> afterInput(ops, outputScriptHex)
+
+verify check
+    check("51", "51") => Outcome.Decided(Ending.Passed)
+    check("51", "00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    check("", "") => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    check("5152", "935387") => Outcome.Decided(Ending.Passed)
+    check("02aa", "51") => Outcome.Decided(Ending.Failed("input script: push of 2 bytes runs past the end of the script"))
+    check("51", "02aa") => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
+    check("6a", "51") => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    check("51", "a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+    check("5163", "68") => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+
+fn afterInput(ops: List<Op>, outputScriptHex: String) -> Outcome
+    ? "The Input's Script, run for the stack it leaves rather than for a"
+      "verdict."
+    match Domain.Interp.reach(ops, Domain.ScriptState.empty())
+        Step.Stop(outcome) -> outcome
+        Step.Continue(state) -> closedOrNot(state, outputScriptHex)
+
+verify afterInput
+    afterInput([Op.Code(81)], "51") => Outcome.Decided(Ending.Passed)
+    afterInput([Op.Code(106)], "51") => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    afterInput([Op.Code(169)], "51") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+
+fn closedOrNot(state: State, outputScriptHex: String) -> Outcome
+    ? "A branch opened in the Input's Script cannot be closed by the Output's."
+      "Each Script is its own run and the condition stack does not survive it,"
+      "which is a rule people are surprised by until they think about who"
+      "supplies each half."
+    match state.conditions
+        [] -> withOutput(state, outputScriptHex)
+        [head, ..tail] -> Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+
+verify closedOrNot
+    closedOrNot(Domain.ScriptState.empty(), "51") => Outcome.Decided(Ending.Passed)
+    closedOrNot(State(stack = [], alt = [], conditions = [true], opCount = 0), "51") => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+    closedOrNot(Domain.ScriptState.empty(), "a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+
+fn withOutput(state: State, outputScriptHex: String) -> Outcome
+    ? "The Output's Script, on the stack the Input's Script left."
+      "Only the stack carries over. holding gives a fresh opcode count and no"
+      "open branch, which is what starting a new Script means."
+    match Domain.ScriptParse.opsIn(outputScriptHex)
+        Result.Err(message) -> Outcome.Decided(Ending.Failed("output script: {message}"))
+        Result.Ok(ops) -> Domain.Interp.evaluate(ops, Domain.ScriptState.holding(state.stack))
+
+verify withOutput
+    withOutput(Domain.ScriptState.empty(), "51") => Outcome.Decided(Ending.Passed)
+    withOutput(Domain.ScriptState.empty(), "02aa") => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
+    withOutput(Domain.ScriptState.empty(), "a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+    withOutput(Domain.ScriptState.holding([[1], [1]]), "87") => Outcome.Decided(Ending.Passed)
+
+record Outcomes
+    passed: Int
+    failed: Int
+    undecided: Int
+
+fn noOutcomes() -> Outcomes
+    ? "Nothing run yet."
+    Outcomes(passed = 0, failed = 0, undecided = 0)
+
+verify noOutcomes
+    noOutcomes() => Outcomes(passed = 0, failed = 0, undecided = 0)
+
+fn count(counts: Outcomes, outcome: Outcome) -> Outcomes
+    ? "Fold one spend's answer into a running total."
+      "Undecided is counted apart from failed rather than folded into it,"
+      "which is the same rule the audit already applies to unresolved Inputs."
+      "Over real Blocks almost everything is Undecided, and a count that hid"
+      "that would look like a passing check and be nothing of the sort."
+    match outcome
+        Outcome.Undecided(why) -> Outcomes(passed = counts.passed, failed = counts.failed, undecided = counts.undecided + 1)
+        Outcome.Decided(ending) -> settled(counts, ending)
+
+verify count
+    count(noOutcomes(), Outcome.Undecided("x")) => Outcomes(passed = 0, failed = 0, undecided = 1)
+    count(noOutcomes(), Outcome.Decided(Ending.Passed)) => Outcomes(passed = 1, failed = 0, undecided = 0)
+    count(noOutcomes(), Outcome.Decided(Ending.Failed("x"))) => Outcomes(passed = 0, failed = 1, undecided = 0)
+
+fn settled(counts: Outcomes, ending: Ending) -> Outcomes
+    ? "Nested constructor patterns do not parse, so the Ending is matched apart."
+    match ending
+        Ending.Passed -> Outcomes(passed = counts.passed + 1, failed = counts.failed, undecided = counts.undecided)
+        Ending.Failed(why) -> Outcomes(passed = counts.passed, failed = counts.failed + 1, undecided = counts.undecided)
+
+verify settled
+    settled(noOutcomes(), Ending.Passed) => Outcomes(passed = 1, failed = 0, undecided = 0)
+    settled(noOutcomes(), Ending.Failed("x")) => Outcomes(passed = 0, failed = 1, undecided = 0)
+
+fn merged(left: Outcomes, right: Outcomes) -> Outcomes
+    ? "Two totals added together, for rolling a Transaction into a Block."
+    Outcomes(passed = left.passed + right.passed, failed = left.failed + right.failed, undecided = left.undecided + right.undecided)
+
+verify merged
+    merged(noOutcomes(), noOutcomes()) => noOutcomes()
+    merged(Outcomes(passed = 1, failed = 2, undecided = 3), Outcomes(passed = 10, failed = 20, undecided = 30)) => Outcomes(passed = 11, failed = 22, undecided = 33)

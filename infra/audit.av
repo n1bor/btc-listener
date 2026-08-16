@@ -21,7 +21,7 @@ module Audit
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
     exposes [Counts, run]
-    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
 
 record Counts
@@ -31,6 +31,7 @@ record Counts
     coinbase: Int
     unresolved: Int
     faults: Int
+    scripts: Outcomes
 
 fn reportEvery() -> Int
     ? "How many Blocks between progress lines."
@@ -44,7 +45,7 @@ fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0))
+    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -181,7 +182,7 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     faults = faultsIn(findings, [])
     _said = reportFaults(height, faults)
     _progress = maybeReport(height, counts)
-    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults)), transactions)
+    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions)
 
 fn maybeReport(height: Int, counts: Counts) -> Unit
     ? "Say where the walk has got to, every so often."
@@ -192,7 +193,7 @@ fn maybeReport(height: Int, counts: Counts) -> Unit
     ! [Console.print]
     match Result.withDefault(Int.mod(counts.blocks, reportEvery()), 1) == 0
         false -> Unit
-        true -> Console.print("  ... height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.faults} faults")
+        true -> Console.print("  ... height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults")
 
 fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
     ? "Check what each Transaction spends."
@@ -206,10 +207,18 @@ fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, heig
       "Resolving reads parent Blocks and does not share the Segment held here,"
       "since a parent may sit anywhere below."
     ! [Console.print, Disk.readText]
-    tally = Infra.Spends.checked(store, blocks, transaction)?
+    held = Infra.Spends.checked(store, blocks, transaction)?
     paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
-    grown = judged(height, counts, transaction, Domain.Spend.verdictOf(tally, paid))
+    grown = judged(height, withScripts(counts, held.scripts), transaction, Domain.Spend.verdictOf(held.tally, paid))
     overTransactions(store, blocks, loaded, height, to, grown, tail)
+
+fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
+    ? "Roll one Transaction's Script outcomes into the running total."
+    Counts(blocks = counts.blocks, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults, scripts = Domain.SpendScript.merged(counts.scripts, scripts))
+
+verify withScripts
+    withScripts(zero(), Domain.SpendScript.noOutcomes()) => zero()
+    withScripts(zero(), Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3)).scripts => Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3)
 
 fn paidBy(outputs: List<Output>, acc: Int) -> Int
     ? "Total the Output values."
@@ -228,11 +237,11 @@ fn judged(height: Int, counts: Counts, transaction: Transaction, verdict: Verdic
     seen = counts.transactions + 1
     faulted = counts.faults + 1
     match verdict
-        Verdict.Coinbase -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase + 1, unresolved = counts.unresolved, faults = counts.faults)
-        Verdict.Conserved -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved + 1, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults)
-        Verdict.Created(excess) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted)
-        Verdict.Broken(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted)
-        Verdict.Incomplete(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved + 1, faults = counts.faults)
+        Verdict.Coinbase -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase + 1, unresolved = counts.unresolved, faults = counts.faults, scripts = counts.scripts)
+        Verdict.Conserved -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved + 1, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults, scripts = counts.scripts)
+        Verdict.Created(excess) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted, scripts = counts.scripts)
+        Verdict.Broken(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted, scripts = counts.scripts)
+        Verdict.Incomplete(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved + 1, faults = counts.faults, scripts = counts.scripts)
 
 verify judged
     judged(1, zero(), sampleTx(), Verdict.Conserved).resolved => 1
@@ -244,7 +253,7 @@ verify judged
 
 fn zero() -> Counts
     ? "Nothing counted yet."
-    Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0)
+    Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes())
 
 verify zero
     zero().faults => 0
