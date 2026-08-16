@@ -87,6 +87,15 @@ undertaking, it is pure, it needs no curve, and BIP test vectors verify it
 completely today. The same is true of the opcode table, the parser, the stack
 element encoding and every non-cryptographic opcode.
 
+The legacy half of that is now written, and the claim held: all 500 of Bitcoin
+Core's `sighash.json` vectors pass, and they are in the repo as cases rather
+than as a number in a commit message. The oracle question — how do you know your
+reference is right, when your reference is your own understanding twice over —
+was settled by writing secp256k1 verification in about thirty lines of Python
+and checking that the signature in Block 170 verifies against the message this
+produces. A wrong message would not have verified. That is a stronger statement
+than any vector file, and it cost less than an hour.
+
 ## Two oracles
 
 Bitcoin Core's `script_tests.json` is the canonical corpus and is adversarial in
@@ -98,6 +107,32 @@ thousand Blocks. Every script in them was accepted by the network, so **any
 `Failed` on mainnet data is a defect in us**. That is the same shape of argument
 as the prefix oracle that made the spend soak worth running — a property the
 data guarantees, turned into a test.
+
+## Update — the chain oracle, run
+
+53,317,573 non-coinbase Input Scripts, over every Block held. Four `Failed`, and
+all four traced by hand:
+
+| script | what it is |
+|---|---|
+| `010075` | a push and an `OP_DROP`, leaving nothing |
+| `516352676a675168948c` | `OP_IF`/`OP_ELSE`/`OP_ELSE`/`OP_ENDIF` then `OP_SUB` `OP_1SUB`, which comes to zero |
+| `4c50…518c` | the genesis Block header pushed as data, then `OP_1` `OP_1SUB` |
+| `0101493046…0100` | a signature and some pushes, ending `OP_0` |
+
+Not one of them is a defect. A scriptSig is allowed to end with a false or empty
+stack, because consensus never runs one on its own — it runs it followed by the
+Output script, and only the end of that is checked. The oracle was over-strict,
+not the engine.
+
+That is the second time this oracle was wrong before the engine was. The first
+was coinbase Input Scripts, which are arbitrary data that consensus never
+executes at all, and which produced 15,000 confident failures. Both corrections
+made the number smaller; neither changed a line of the engine. Worth remembering
+when the next big number arrives.
+
+Fourteen `Undecided`, every one a scriptSig containing a signature-checking
+opcode, which is the right answer and not a gap.
 
 ## Consequences
 

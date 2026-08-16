@@ -8,7 +8,7 @@ module CompactSize
         "Running out of bytes reads as zero rather than as an error. A count is"
         "always followed by the items it counts, so a truncated Message fails when"
         "those items are read, with something to say about what was missing."
-    exposes [Count, read, widthOf]
+    exposes [Count, read, widthOf, encode]
     depends [Domain.Message]
     effects []
 
@@ -73,3 +73,47 @@ verify widthOf
     widthOf(253) => 3
     widthOf(254) => 5
     widthOf(255) => 9
+
+fn encode(value: Int) -> List<Int>
+    ? "The count written back out, in the narrowest form that holds it."
+      "The narrowest form is the only one anything here produces, though read"
+      "accepts wider ones. Bitcoin calls a wider encoding non-canonical and"
+      "rejects it in most places, so writing one would be a way of producing"
+      "Transactions nothing would accept."
+    match value < 253
+        true -> [value]
+        false -> narrowOrWide(value)
+
+verify encode
+    encode(0) => [0]
+    encode(5) => [5]
+    encode(252) => [252]
+    encode(253) => [253, 253, 0]
+    encode(257) => [253, 1, 1]
+    encode(2000) => [253, 208, 7]
+    encode(65535) => [253, 255, 255]
+    encode(65536) => [254, 0, 0, 1, 0]
+    encode(4294967295) => [254, 255, 255, 255, 255]
+    encode(4294967296) => [255, 0, 0, 0, 0, 1, 0, 0, 0]
+
+fn narrowOrWide(value: Int) -> List<Int>
+    ? "Two, four or eight bytes behind the marker that names the width."
+    match value < 65536
+        true -> List.prepend(253, Domain.Message.littleEndian(value, 2))
+        false -> wider(value)
+
+verify narrowOrWide
+    narrowOrWide(253) => [253, 253, 0]
+    narrowOrWide(65535) => [253, 255, 255]
+    narrowOrWide(65536) => [254, 0, 0, 1, 0]
+
+fn wider(value: Int) -> List<Int>
+    ? "Four bytes or eight."
+    match value < 4294967296
+        true -> List.prepend(254, Domain.Message.littleEndian(value, 4))
+        false -> List.prepend(255, Domain.Message.littleEndian(value, 8))
+
+verify wider
+    wider(65536) => [254, 0, 0, 1, 0]
+    wider(4294967295) => [254, 255, 255, 255, 255]
+    wider(4294967296) => [255, 0, 0, 0, 0, 1, 0, 0, 0]

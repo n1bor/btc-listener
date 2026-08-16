@@ -12,7 +12,7 @@ module ScriptParse
         "can push the same data with different opcodes, only one of which is the"
         "minimal encoding, and the rule against the others needs to know which"
         "was used."
-    exposes [Op, parse, opsIn]
+    exposes [Op, parse, opsIn, bytesOf]
     depends [Bytes, Domain.Message, Domain.Opcode]
     effects []
 
@@ -108,3 +108,64 @@ verify taken
     taken(1, 1, [170], []) => Result.Ok([Op.Push(1, [170])])
     taken(2, 2, [170], []) => Result.Err("push of 2 bytes runs past the end of the script")
     taken(1, 1, [170, 118], []) => Result.Ok([Op.Push(1, [170]), Op.Code(118)])
+
+fn bytesOf(ops: List<Op>) -> List<Int>
+    ? "Ops written back out as the bytes they came from."
+      "Exact, not merely equivalent: a Push carries the opcode that made it, so"
+      "a Script that pushed one byte with OP_PUSHDATA1 comes back out that way"
+      "rather than being tidied into the minimal form. Sighash serialises the"
+      "script it was given and a tidier would change the message being signed."
+    intoBytes(ops, [])
+
+verify bytesOf
+    bytesOf([]) => []
+    bytesOf([Op.Code(118)]) => [118]
+    bytesOf([Op.Push(2, [170, 187])]) => [2, 170, 187]
+    bytesOf([Op.Push(76, [170])]) => [76, 1, 170]
+    bytesOf([Op.Push(77, [170])]) => [77, 1, 0, 170]
+    bytesOf([Op.Push(78, [170])]) => [78, 1, 0, 0, 0, 170]
+    bytesOf(parse([118, 169, 1, 170])?) => [118, 169, 1, 170]
+
+fn intoBytes(ops: List<Op>, acc: List<Int>) -> List<Int>
+    ? "Accumulator form, turned round at the end."
+    match ops
+        [] -> List.reverse(acc)
+        [head, ..tail] -> intoBytes(tail, prependReversed(oneOp(head), acc))
+
+verify intoBytes
+    intoBytes([], []) => []
+    intoBytes([Op.Code(118)], []) => [118]
+    intoBytes([Op.Code(118), Op.Code(169)], []) => [118, 169]
+
+fn oneOp(op: Op) -> List<Int>
+    ? "One Op's bytes: its opcode, any length it needs, and its data."
+    match op
+        Op.Code(code) -> [code]
+        Op.Push(code, data) -> List.concat(pushHead(code, List.len(data)), data)
+
+verify oneOp
+    oneOp(Op.Code(118)) => [118]
+    oneOp(Op.Push(2, [170, 187])) => [2, 170, 187]
+    oneOp(Op.Push(76, [170])) => [76, 1, 170]
+
+fn pushHead(code: Int, length: Int) -> List<Int>
+    ? "The opcode, and the length field the wide pushes carry after it."
+    match Domain.Opcode.pushWidth(code)
+        0 -> [code]
+        _ -> List.prepend(code, Domain.Message.littleEndian(length, Domain.Opcode.pushWidth(code)))
+
+verify pushHead
+    pushHead(2, 2) => [2]
+    pushHead(76, 1) => [76, 1]
+    pushHead(77, 1) => [77, 1, 0]
+    pushHead(78, 1) => [78, 1, 0, 0, 0]
+
+fn prependReversed(bytes: List<Int>, acc: List<Int>) -> List<Int>
+    ? "Push a run of bytes onto an accumulator that is being built backwards."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> prependReversed(tail, List.prepend(head, acc))
+
+verify prependReversed
+    prependReversed([], [9]) => [9]
+    prependReversed([1, 2], [9]) => [2, 1, 9]
