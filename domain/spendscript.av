@@ -24,20 +24,43 @@ fn check(inputScriptHex: String, outputScriptHex: String) -> Outcome
     ? "Whether this Input is allowed to spend this Output."
       "Undecided is the honest answer for almost every real spend today, and"
       "the count of them is the measure of how much of consensus this checks."
+      "The ten thousand byte limit applies to each Script on its own and is"
+      "applied here rather than left to Domain.Interp.run, which this does not"
+      "go through. Core's own corpus caught that: it has a case with an"
+      "oversized Output Script that this accepted until the limit was put back."
+    match Bool.or(tooLong(inputScriptHex), tooLong(outputScriptHex))
+        true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
+        false -> parsed(inputScriptHex, outputScriptHex)
+
+verify check
+    check("51", "51") => Outcome.Decided(Ending.Passed)
+    check(Domain.ScriptState.longScript(), "51") => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("51", Domain.ScriptState.longScript()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+
+fn tooLong(scriptHex: String) -> Bool
+    ? "Two hexadecimal characters to the byte."
+    String.len(scriptHex) > Domain.ScriptState.maxScript() * 2
+
+verify tooLong
+    tooLong("51") => false
+    tooLong(Domain.ScriptState.longScript()) => true
+
+fn parsed(inputScriptHex: String, outputScriptHex: String) -> Outcome
+    ? "Parse the Input's Script and run the pair."
     match Domain.ScriptParse.opsIn(inputScriptHex)
         Result.Err(message) -> Outcome.Decided(Ending.Failed("input script: {message}"))
         Result.Ok(ops) -> afterInput(ops, outputScriptHex)
 
-verify check
-    check("51", "51") => Outcome.Decided(Ending.Passed)
-    check("51", "00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
-    check("", "") => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
-    check("5152", "935387") => Outcome.Decided(Ending.Passed)
-    check("02aa", "51") => Outcome.Decided(Ending.Failed("input script: push of 2 bytes runs past the end of the script"))
-    check("51", "02aa") => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
-    check("6a", "51") => Outcome.Decided(Ending.Failed("OP_RETURN"))
-    check("51", "a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
-    check("5163", "68") => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+verify parsed
+    parsed("51", "51") => Outcome.Decided(Ending.Passed)
+    parsed("51", "00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    parsed("", "") => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    parsed("5152", "935387") => Outcome.Decided(Ending.Passed)
+    parsed("02aa", "51") => Outcome.Decided(Ending.Failed("input script: push of 2 bytes runs past the end of the script"))
+    parsed("51", "02aa") => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
+    parsed("6a", "51") => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    parsed("51", "a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
+    parsed("5163", "68") => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
 
 fn afterInput(ops: List<Op>, outputScriptHex: String) -> Outcome
     ? "The Input's Script, run for the stack it leaves rather than for a"

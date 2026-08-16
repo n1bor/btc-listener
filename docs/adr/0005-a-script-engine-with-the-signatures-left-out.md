@@ -201,6 +201,56 @@ P2SH is not implemented and cannot be reached: a P2SH Output Script begins with
 redeem script is never run. Writing that branch now would be writing something
 nothing can enter; it belongs in #10.
 
+## Update — Core's corpus, and what disagreeing with it means
+
+`script_tests.json` is in, converted by `tools/script_tests_to_aver.py` and kept
+as `domain/scriptcases1.av` through `scriptcases5.av`. The generator assembles;
+the engine answers; Python compares. Keeping those three apart is what stops
+this from being a test that agrees with itself.
+
+Of 1,288 rows, 1,120 assemble into Script pairs — the rest are comments or
+segwit cases carrying a witness, which this engine does not run. Of those 1,120:
+
+| | |
+|---|---|
+| agree with Core | 865 |
+| undecided — needs a primitive | 159 |
+| **we refuse what Core accepts** | **0** |
+| we accept what Core refuses | 96 |
+
+The nought is the number that matters. Not one case in Core's adversarial
+corpus is refused by this engine and accepted by the reference client, which is
+the direction a defect would show up in.
+
+The 96 in the other direction are each attributable to a verification flag this
+engine deliberately does not apply:
+
+| count | Core's error | flag |
+|---|---|---|
+| 54 | `SCRIPTNUM` | `MINIMALDATA` |
+| 21 | `MINIMALDATA` | `MINIMALDATA` |
+| 9 | `DISCOURAGE_UPGRADABLE_NOPS` | policy, not consensus |
+| 8 | `SIG_DER` | `DERSIG` |
+| 2 | `NULLFAIL` | `NULLFAIL` |
+| 1 | `SIG_NULLDUMMY` | `NULLDUMMY` |
+| 1 | `WITNESS_PROGRAM_WITNESS_EMPTY` | segwit, out of scope |
+
+Every one of those rules was switched on by a soft fork after Blocks that
+break it were already valid, which is why applying them unconditionally would
+reject history. `Domain.StackItem` and `Domain.Ecdsa` compute them and offer
+them as questions; nothing asks yet, and what will ask is a flags argument.
+
+The corpus found one real defect, which is what it is for. `Domain.SpendScript`
+did not apply the ten-thousand-byte Script limit, because it does not go through
+`Domain.Interp.run` — where the limit had been put, with a note saying that a
+caller reaching past it has to apply the limit itself. A caller promptly did
+not. It is applied in both places now.
+
+Two cases are left out of the generated corpus: Core's maximum-size pair, at
+ten thousand bytes each, exhausts the verify VM's million-step budget. The
+compiled engine runs both and agrees with Core on both — `OK` for the one at the
+limit, a size refusal for the one over it.
+
 ## Consequences
 
 The engine will never call a Block fully valid, and should not be read as doing
