@@ -1,0 +1,185 @@
+module Checks
+    intent =
+        "What can be checked about a Block without a Peer or a signature."
+        "One place decides, two places read the answer. show renders each finding"
+        "as a line for someone looking at one Block; audit counts the ones that"
+        "are not clean over a range. Both had their own copy of these rules and"
+        "two implementations of a consensus rule drift silently, which is the"
+        "sort of thing that is only noticed when they disagree about real data."
+        "A finding says what was found rather than whether it passed, so a caller"
+        "that wants to explain a failure has the computed value to hand and one"
+        "that only wants a count does not have to parse a sentence to get it."
+        "Nothing here needs the chain, only the Block and what the Index recorded"
+        "about it, which is what lets it be pure."
+    exposes [Finding, findingsFor, isFault, genesisHexFor]
+    depends [Bytes, Domain.Block]
+    effects []
+
+type Finding
+    MerkleAgrees
+    MerkleDiffers(String)
+    MerkleUncomputable(String)
+    IdAgrees
+    IdDiffers(String)
+    ParentUnrecorded
+    ParentAgrees
+    ParentDiffers(String)
+    WorkMet
+    WorkUnmet
+    WorkUncheckable(String)
+
+fn findingsFor(payload: Bytes, blockId: String, parentBlockId: Option<String>) -> Result<List<Finding>, String>
+    ? "Everything checkable about one Block, in the order a reader wants it."
+      "Identity first, then the body, then where it sits: a reader wants to know"
+      "this is the Block that was asked for before hearing anything about it."
+      "The Header has to decode before anything else can be said, so that is the"
+      "one failure that stops the rest rather than becoming a finding."
+      "A body whose Transactions will not decode is not one of those. It becomes"
+      "a finding of its own and the other three are still made -- a Block with a"
+      "damaged body still has a Header that either hashes to its recorded Id or"
+      "does not, and that is worth knowing at the same time."
+    header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
+    Result.Ok([idFinding(blockId, header), merkleFinding(payload, header), parentFinding(parentBlockId, header), workFinding(blockId, header)])
+
+verify findingsFor
+    List.len(findingsFor(Bytes.fromHex(genesisHexFor())?, genesisId(), Option.None)?) => 4
+    findingsFor(Bytes.fromHex(genesisHexFor())?, genesisId(), Option.None)? => [Finding.IdAgrees, Finding.MerkleAgrees, Finding.ParentUnrecorded, Finding.WorkMet]
+    findingsFor(Bytes.fromHex(genesisHexFor())?, "wrong", Option.None)? => [Finding.IdDiffers(genesisId()), Finding.MerkleAgrees, Finding.ParentUnrecorded, Finding.WorkUncheckable("Bytes.fromHex: invalid hexadecimal character 'w'")]
+    findingsFor(Bytes.fromHex("00")?, genesisId(), Option.None) => Result.Err("Block Header must be 80 bytes, got 1")
+
+fn rootOf(payload: Bytes) -> Result<String, String>
+    ? "The Merkle Root the Transactions in this body produce."
+    transactions = Domain.Block.transactionsOf(payload)?
+    Domain.Block.merkleRootOf(Domain.Block.txidsOf(transactions))
+
+verify rootOf
+    rootOf(Bytes.fromHex(genesisHexFor())?) => Result.Ok("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    rootOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?) => Result.Err("Transaction ends before its lock time")
+
+fn merkleFinding(payload: Bytes, header: BlockHeader) -> Finding
+    ? "Whether the Transactions build the Root the Header committed to."
+    match rootOf(payload)
+        Result.Err(message) -> Finding.MerkleUncomputable(message)
+        Result.Ok(root) -> merkleAgreement(root, header)
+
+verify merkleFinding
+    merkleFinding(Bytes.fromHex(genesisHexFor())?, headerWith("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "cc", "bb")) => Finding.MerkleAgrees
+    merkleFinding(Bytes.fromHex(genesisHexFor())?, headerWith("zz", "cc", "bb")) => Finding.MerkleDiffers("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    merkleFinding(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, headerWith("aa", "cc", "bb")) => Finding.MerkleUncomputable("a Block with no Transactions has no Merkle Root")
+
+fn merkleAgreement(root: String, header: BlockHeader) -> Finding
+    ? "The Root computed, against the Root claimed."
+    match root == header.merkleRoot
+        true -> Finding.MerkleAgrees
+        false -> Finding.MerkleDiffers(root)
+
+verify merkleAgreement
+    merkleAgreement("aa", headerWith("aa", "cc", "bb")) => Finding.MerkleAgrees
+    merkleAgreement("zz", headerWith("aa", "cc", "bb")) => Finding.MerkleDiffers("zz")
+
+fn idFinding(blockId: String, header: BlockHeader) -> Finding
+    ? "Whether the Header hashes to the Block Id the Index recorded."
+    match header.blockId == blockId
+        true -> Finding.IdAgrees
+        false -> Finding.IdDiffers(header.blockId)
+
+verify idFinding
+    idFinding("cc", headerWith("aa", "cc", "bb")) => Finding.IdAgrees
+    idFinding("zz", headerWith("aa", "cc", "bb")) => Finding.IdDiffers("cc")
+
+fn parentFinding(parentBlockId: Option<String>, header: BlockHeader) -> Finding
+    ? "Whether the Header names the Block the Index holds one Height down."
+      "Genesis has no parent and neither has a Height whose Header has been"
+      "pruned away, so having none recorded is an answer rather than a failure."
+    match parentBlockId
+        Option.None -> Finding.ParentUnrecorded
+        Option.Some(recorded) -> parentAgreement(recorded, header)
+
+verify parentFinding
+    parentFinding(Option.None, headerWith("aa", "cc", "bb")) => Finding.ParentUnrecorded
+    parentFinding(Option.Some("bb"), headerWith("aa", "cc", "bb")) => Finding.ParentAgrees
+    parentFinding(Option.Some("zz"), headerWith("aa", "cc", "bb")) => Finding.ParentDiffers("bb")
+
+fn parentAgreement(recorded: String, header: BlockHeader) -> Finding
+    ? "The Index named a parent, so the two have to match."
+    match header.previousBlockId == recorded
+        true -> Finding.ParentAgrees
+        false -> Finding.ParentDiffers(header.previousBlockId)
+
+verify parentAgreement
+    parentAgreement("bb", headerWith("aa", "cc", "bb")) => Finding.ParentAgrees
+    parentAgreement("zz", headerWith("aa", "cc", "bb")) => Finding.ParentDiffers("bb")
+
+fn workFinding(blockId: String, header: BlockHeader) -> Finding
+    ? "Whether the Block Id falls under the target the Header claims."
+    match Domain.Block.meetsTarget(blockId, header.bits)
+        Result.Err(message) -> Finding.WorkUncheckable(message)
+        Result.Ok(met) -> workMet(met)
+
+verify workFinding
+    workFinding(genesisId(), headerWith("aa", "cc", "bb")) => Finding.WorkMet
+    workFinding("ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", headerWith("aa", "cc", "bb")) => Finding.WorkUnmet
+    workFinding("zz", headerWith("aa", "cc", "bb")) => Finding.WorkUncheckable("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn workMet(met: Bool) -> Finding
+    ? "Under the target or over it."
+    match met
+        true -> Finding.WorkMet
+        false -> Finding.WorkUnmet
+
+verify workMet
+    workMet(true) => Finding.WorkMet
+    workMet(false) => Finding.WorkUnmet
+
+fn isFault(finding: Finding) -> Bool
+    ? "Whether a finding is something wrong."
+      "An unrecorded parent is not: genesis has none, and neither has a Height"
+      "below the Prune Watermark. Everything else that is not agreement is."
+    match finding
+        Finding.MerkleAgrees -> false
+        Finding.IdAgrees -> false
+        Finding.ParentUnrecorded -> false
+        Finding.ParentAgrees -> false
+        Finding.WorkMet -> false
+        Finding.MerkleDiffers(root) -> true
+        Finding.MerkleUncomputable(why) -> true
+        Finding.IdDiffers(id) -> true
+        Finding.ParentDiffers(named) -> true
+        Finding.WorkUnmet -> true
+        Finding.WorkUncheckable(why) -> true
+
+verify isFault
+    isFault(Finding.MerkleAgrees) => false
+    isFault(Finding.IdAgrees) => false
+    isFault(Finding.ParentAgrees) => false
+    isFault(Finding.ParentUnrecorded) => false
+    isFault(Finding.WorkMet) => false
+    isFault(Finding.MerkleDiffers("aa")) => true
+    isFault(Finding.MerkleUncomputable("why")) => true
+    isFault(Finding.IdDiffers("aa")) => true
+    isFault(Finding.ParentDiffers("aa")) => true
+    isFault(Finding.WorkUnmet) => true
+    isFault(Finding.WorkUncheckable("why")) => true
+
+fn headerWith(merkleRoot: String, blockId: String, previousBlockId: String) -> BlockHeader
+    ? "A Header with the three fields the cases above vary."
+    BlockHeader(blockId = blockId, version = 1, previousBlockId = previousBlockId, merkleRoot = merkleRoot, timestamp = 0, bits = 486604799, nonce = 0)
+
+verify headerWith
+    headerWith("aa", "cc", "bb").merkleRoot => "aa"
+
+fn genesisId() -> String
+    ? "The first Block of mainnet, for the cases above."
+    "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+verify genesisId
+    String.len(genesisId()) => 64
+
+fn genesisHexFor() -> String
+    ? "The whole first Block of mainnet, for the cases above."
+      "The text rather than the Bytes: a fixture returning a Result that nothing"
+      "can make fail is a coverage obligation no case can discharge."
+    "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000"
+
+verify genesisHexFor
+    String.len(genesisHexFor()) => 570

@@ -1,10 +1,11 @@
 module Maintain
     intent =
         "The commands that change a chain directory without a Peer."
-        "prune discards Blocks below a Height and txindex records where"
-        "Transactions sit. Both write, so both claim the directory first."
-    exposes [prune, txIndex]
-    depends [Domain.Index, Infra.Blocks, Infra.Lock, Infra.Prune, Infra.Store, Infra.TxIndex]
+        "prune discards Blocks below a Height, txindex records where Transactions"
+        "sit, and audit checks a range against everything we know how to check."
+        "The first two write and claim the directory; audit only reads."
+    exposes [prune, txIndex, audit]
+    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
@@ -95,6 +96,26 @@ fn txIndexDone(dir: String, span: Span) -> Result<String, String>
     blocks = Infra.Blocks.open("{dir}/blocks")?
     built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
     Result.Ok("{built.transactions} Transactions recorded from {built.blocks} Blocks")
+
+fn audit(rest: List<String>) -> Unit
+    ? "Checking a range needs no claim: it only reads."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match rest
+        [] -> Console.error("usage: <dir> <a> <b>")
+        [dir, ..more] -> auditRange(dir, more)
+
+fn auditRange(dir: String, more: List<String>) -> Unit
+    ? "Both Heights must be given."
+    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    match heights(more)
+        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.Some(span) -> said(auditRun(dir, span))
+
+fn auditRun(dir: String, span: Span) -> Result<String, String>
+    ? "Walk the range and report what it found."
+    ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    counts = Infra.Audit.run(dir, span.from, span.to)?
+    Result.Ok("blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  FAULTS {counts.faults}")
 
 fn heights(range: List<String>) -> Option<Span>
     ? "Two whole numbers, or nothing."

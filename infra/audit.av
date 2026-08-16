@@ -5,20 +5,19 @@ module Audit
         "lower Height, so holding 1..N means holding every parent. Over a prefix"
         "an unresolved Input is a defect rather than a gap in coverage, which is"
         "what makes this worth running."
+        "The Block checks come from Domain.Checks, which is where show gets them"
+        "too. Counting what is wrong and describing it are different jobs; making"
+        "the same judgement twice is not."
         "Progress is reported as it goes. A run over a hundred thousand Blocks"
         "takes hours, and one that says nothing until it finishes cannot be told"
-        "from one that has stopped -- which came up during exactly such a run."
-        "Blocks are read through Infra.Blocks.fetch rather than Infra.Chain.at,"
-        "which reads one Block at a time and re-reads its whole Segment to do it."
-        "Nine thousand seven hundred early Blocks share a Segment, so that walk"
-        "is quadratic; holding the Segment between Heights is not."
-    exposes [main]
-    depends [Bytes, Domain.Block, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
-    effects [
-        Args.get,
-        Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
-    ]
+        "from one that has stopped."
+        "Blocks are read through Infra.Blocks.fetch, which holds a Segment between"
+        "Heights. Resolving a spend reads its parent through Infra.Blocks.read"
+        "instead, because parents are scattered and fetch would decode a whole"
+        "Segment to use one Block out of it."
+    exposes [Counts, run]
+    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Spend, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    effects [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
 
 record Counts
     blocks: Int
@@ -29,56 +28,114 @@ record Counts
 
 fn reportEvery() -> Int
     ? "How many Blocks between progress lines."
-      "Often enough that a stall is visible within a minute or so at the slowest"
-      "part of the chain, rare enough that the output stays readable."
     2000
 
 verify reportEvery
     reportEvery() => 2000
 
-fn main() -> Unit
-    ? "Audit a range of Heights."
-    ! [
-        Args.get,
-        Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
-    ]
-    run(Args.get())
-
-fn run(args: List<String>) -> Unit
-    ? "Directory, first Height, last Height."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
-    match args
-        [] -> Console.error("usage: <dir> <from> <to>")
-        [dir, ..rest] -> withFrom(dir, rest)
-
-fn withFrom(dir: String, rest: List<String>) -> Unit
-    ? "The first Height."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
-    match rest
-        [] -> Console.error("usage: <dir> <from> <to>")
-        [from, ..more] -> withTo(dir, from, more)
-
-fn withTo(dir: String, from: String, more: List<String>) -> Unit
-    ? "The last Height."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
-    match more
-        [] -> Console.error("usage: <dir> <from> <to>")
-        [to, ..extra] -> started(dir, Int.fromString(from), Int.fromString(to))
-
-fn started(dir: String, from: Result<Int, String>, to: Result<Int, String>) -> Unit
-    ? "Open the store and walk."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
-    reported(audited(dir, from, to))
-
-fn audited(dir: String, from: Result<Int, String>, to: Result<Int, String>) -> Result<Counts, String>
+fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ? "Walk the range, checking every Block and every Transaction in it."
     ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
-    a = from?
-    b = to?
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, a, b, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0))
+    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0))
+
+fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
+    ? "The Block Id one Height down, which the parent check needs."
+    match height <= 0
+        true -> Result.Ok(Option.None)
+        false -> named(store, height)
+
+verify parentOf
+    parentOf(Infra.Store.fixture([]), 0) => Result.Ok(Option.None)
+    parentOf(Infra.Store.fixture([("h:00000004", "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    parentOf(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
+    parentOf(Infra.Store.fixture([("h:00000004", "")]), 5) => Result.Err("index has no Block Id at height 4")
+
+fn named(store: Store, height: Int) -> Result<Option<String>, String>
+    ? "A Height that names nothing is a damaged Index, not a missing parent."
+    held = Infra.Store.get(store, Domain.Index.heightKey(height - 1))?
+    match held
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(blockId) -> nonEmpty(height, blockId)
+
+verify named
+    named(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
+    named(Infra.Store.fixture([("h:00000004", "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    named(Infra.Store.fixture([("h:00000004", "")]), 5) => Result.Err("index has no Block Id at height 4")
+
+fn nonEmpty(height: Int, blockId: String) -> Result<Option<String>, String>
+    ? "An empty Block Id is corruption."
+    match String.len(blockId) > 0
+        false -> Result.Err("index has no Block Id at height {height - 1}")
+        true -> Result.Ok(Option.Some(blockId))
+
+verify nonEmpty
+    nonEmpty(5, "aa") => Result.Ok(Option.Some("aa"))
+    nonEmpty(5, "") => Result.Err("index has no Block Id at height 4")
+
+fn faultsIn(findings: List<Finding>, acc: List<Finding>) -> List<Finding>
+    ? "Only the findings that are something wrong."
+    match findings
+        [] -> List.reverse(acc)
+        [head, ..tail] -> faultsIn(tail, keptIfFault(head, acc))
+
+verify faultsIn
+    faultsIn([], []) => []
+    faultsIn([Finding.MerkleAgrees], []) => []
+    faultsIn([Finding.WorkUnmet], []) => [Finding.WorkUnmet]
+    faultsIn([Finding.MerkleAgrees, Finding.WorkUnmet], []) => [Finding.WorkUnmet]
+
+fn keptIfFault(finding: Finding, acc: List<Finding>) -> List<Finding>
+    ? "Keep it only if it is a fault."
+    match Domain.Checks.isFault(finding)
+        false -> acc
+        true -> List.prepend(finding, acc)
+
+verify keptIfFault
+    keptIfFault(Finding.MerkleAgrees, []) => []
+    keptIfFault(Finding.WorkUnmet, []) => [Finding.WorkUnmet]
+
+fn reportFaults(height: Int, faults: List<Finding>) -> Unit
+    ? "Print any Block-level fault as it is found."
+    ! [Console.print]
+    match faults
+        [] -> Unit
+        [head, ..tail] -> printFault(height, head, tail)
+
+fn printFault(height: Int, fault: Finding, rest: List<Finding>) -> Unit
+    ? "One fault, then the rest."
+    ! [Console.print]
+    _printed = Console.print("height {height}: {faultText(fault)}")
+    reportFaults(height, rest)
+
+fn faultText(finding: Finding) -> String
+    ? "A fault in one line."
+    match finding
+        Finding.MerkleDiffers(root) -> "transactions build merkle root {root}, not the one in the header"
+        Finding.MerkleUncomputable(why) -> "cannot compute merkle root: {why}"
+        Finding.IdDiffers(id) -> "header hashes to {id}, not the id the index recorded"
+        Finding.ParentDiffers(named) -> "header names parent {named}, not the block below it"
+        Finding.WorkUnmet -> "block id is above the target"
+        Finding.WorkUncheckable(why) -> "cannot check work: {why}"
+        Finding.MerkleAgrees -> "merkle agrees"
+        Finding.IdAgrees -> "id agrees"
+        Finding.ParentAgrees -> "parent agrees"
+        Finding.ParentUnrecorded -> "no parent recorded"
+        Finding.WorkMet -> "work met"
+
+verify faultText
+    faultText(Finding.WorkUnmet) => "block id is above the target"
+    faultText(Finding.MerkleDiffers("aa")) => "transactions build merkle root aa, not the one in the header"
+    faultText(Finding.IdDiffers("aa")) => "header hashes to aa, not the id the index recorded"
+    faultText(Finding.ParentDiffers("aa")) => "header names parent aa, not the block below it"
+    faultText(Finding.MerkleUncomputable("why")) => "cannot compute merkle root: why"
+    faultText(Finding.WorkUncheckable("why")) => "cannot check work: why"
+    faultText(Finding.MerkleAgrees) => "merkle agrees"
+    faultText(Finding.IdAgrees) => "id agrees"
+    faultText(Finding.ParentAgrees) => "parent agrees"
+    faultText(Finding.ParentUnrecorded) => "no parent recorded"
+    faultText(Finding.WorkMet) => "work met"
 
 fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
     ? "Each Height in turn, keeping the Segment in hand between them."
@@ -114,71 +171,11 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     ? "The Block's own checks, then every Transaction it holds."
     ! [Console.print, Disk.readText]
     transactions = Domain.Block.transactionsOf(payload)?
-    root = Domain.Block.merkleRootOf(Domain.Block.txidsOf(transactions))?
-    header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
-    faults = blockFaults(height, blockId, header, root)
-    _said = reportBlock(height, faults)
+    findings = Domain.Checks.findingsFor(payload, blockId, parentOf(store, height)?)?
+    faults = faultsIn(findings, [])
+    _said = reportFaults(height, faults)
     _progress = maybeReport(height, counts)
     overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, faults = counts.faults + List.len(faults)), transactions)
-
-fn blockFaults(height: Int, blockId: String, header: BlockHeader, root: String) -> List<String>
-    ? "Whatever is wrong with the Block itself."
-    List.concat(merkleFault(height, header, root), List.concat(idFault(height, blockId, header), workFault(height, blockId, header)))
-
-fn merkleFault(height: Int, header: BlockHeader, root: String) -> List<String>
-    ? "The Transactions must build the Root the Header committed to."
-    match root == header.merkleRoot
-        true -> []
-        false -> ["height {height}: merkle root {root} but header says {header.merkleRoot}"]
-
-verify merkleFault
-    merkleFault(1, sampleHeader("aa"), "aa") => []
-    List.len(merkleFault(1, sampleHeader("aa"), "bb")) => 1
-
-fn idFault(height: Int, blockId: String, header: BlockHeader) -> List<String>
-    ? "The Header must hash to the Block Id the Index recorded."
-    match header.blockId == blockId
-        true -> []
-        false -> ["height {height}: header hashes to {header.blockId} but index says {blockId}"]
-
-verify idFault
-    idFault(1, "cc", sampleHeaderWithId("cc")) => []
-    List.len(idFault(1, "cc", sampleHeaderWithId("dd"))) => 1
-
-fn workFault(height: Int, blockId: String, header: BlockHeader) -> List<String>
-    ? "The Block Id must fall under the target."
-    match Domain.Block.meetsTarget(blockId, header.bits)
-        Result.Err(message) -> ["height {height}: cannot check work: {message}"]
-        Result.Ok(met) -> workOrNot(height, met)
-
-verify workFault
-    workFault(1, "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", sampleHeader("aa")) => []
-    List.len(workFault(1, "zz", sampleHeader("aa"))) => 1
-    List.len(workFault(1, "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", sampleHeader("aa"))) => 1
-
-fn workOrNot(height: Int, met: Bool) -> List<String>
-    ? "Report only a failure."
-    match met
-        true -> []
-        false -> ["height {height}: block id is above the target"]
-
-verify workOrNot
-    workOrNot(1, true) => []
-    List.len(workOrNot(1, false)) => 1
-
-fn sampleHeader(root: String) -> BlockHeader
-    ? "A Header with a chosen Merkle Root, for the cases above."
-    BlockHeader(blockId = "cc", version = 1, previousBlockId = "bb", merkleRoot = root, timestamp = 0, bits = 486604799, nonce = 0)
-
-verify sampleHeader
-    sampleHeader("aa").merkleRoot => "aa"
-
-fn sampleHeaderWithId(blockId: String) -> BlockHeader
-    ? "A Header with a chosen Block Id, for the cases above."
-    BlockHeader(blockId = blockId, version = 1, previousBlockId = "bb", merkleRoot = "aa", timestamp = 0, bits = 486604799, nonce = 0)
-
-verify sampleHeaderWithId
-    sampleHeaderWithId("cc").blockId => "cc"
 
 fn maybeReport(height: Int, counts: Counts) -> Unit
     ? "Say where the walk has got to, every so often."
@@ -190,26 +187,6 @@ fn maybeReport(height: Int, counts: Counts) -> Unit
     match Result.withDefault(Int.mod(counts.blocks, reportEvery()), 1) == 0
         false -> Unit
         true -> Console.print("  ... height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.faults} faults")
-
-fn reportBlock(height: Int, faults: List<String>) -> Unit
-    ? "Print any Block-level fault as it is found."
-    ! [Console.print]
-    match faults
-        [] -> Unit
-        [head, ..tail] -> printAll(faults)
-
-fn printAll(lines: List<String>) -> Unit
-    ? "Print each line."
-    ! [Console.print]
-    match lines
-        [] -> Unit
-        [head, ..tail] -> printThen(head, tail)
-
-fn printThen(line: String, rest: List<String>) -> Unit
-    ? "One line, then the rest."
-    ! [Console.print]
-    _printed = Console.print(line)
-    printAll(rest)
 
 fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
     ? "Check what each Transaction spends."
@@ -271,10 +248,3 @@ fn sampleTx() -> Transaction
 
 verify sampleTx
     Domain.Transaction.txidOf(sampleTx()) => "cc"
-
-fn reported(outcome: Result<Counts, String>) -> Unit
-    ? "The totals, or why the walk stopped."
-    ! [Console.error, Console.print]
-    match outcome
-        Result.Err(message) -> Console.error("error: {message}")
-        Result.Ok(counts) -> Console.print("blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  FAULTS {counts.faults}")
