@@ -90,11 +90,15 @@ fn classify(script: List<Int>) -> String
         118 -> named(isPayToPubKeyHash(script), "P2PKH")
         169 -> named(isPayToScriptHash(script), "P2SH")
         0 -> witnessKind(script)
-        81 -> named(isWitnessProgram(script, 81, 34), "P2TR")
+        81 -> versionOneOrMultisig(script)
         106 -> "OP_RETURN"
-        _ -> "nonstandard"
+        33 -> named(isPayToPubKey(script, 33), "P2PK")
+        65 -> named(isPayToPubKey(script, 65), "P2PK")
+        _ -> multisigOrNot(script)
 
 verify classify
+    classify(bytesOf("410496b538e853519c726a2c91e61ec11600ae1390813a627c66fb8be7947be63c52da7589379515d4e0a604f8141781e62294721166bf621e73a82cbf2342c858eeac")) => "P2PK"
+    classify(bytesOf("514104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac4410461cbdcc5409fb4b4d42b51d33381354d80e550078cb532a34bfa2fcfdeb7d76519aecc62770f5b0e4ef8551946d8a540911abe3e7854a26f39f58b25c15342af52ae")) => "P2MS"
     classify(bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => "P2PKH"
     classify(bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => "P2SH"
     classify(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "P2WPKH"
@@ -103,6 +107,66 @@ verify classify
     classify(bytesOf("6a0b68656c6c6f20776f726c64")) => "OP_RETURN"
     classify(bytesOf("ffff")) => "nonstandard"
     classify(bytesOf("76ff")) => "nonstandard"
+
+fn versionOneOrMultisig(script: List<Int>) -> String
+    ? "A leading OP_1 opens a version-one witness program or a bare multisig."
+      "The two share their first byte and nothing else, so the length settles it:"
+      "a Taproot output is OP_1 and a thirty-two byte push and stops there."
+    match isWitnessProgram(script, 81, 34)
+        true -> "P2TR"
+        false -> multisigOrNot(script)
+
+verify versionOneOrMultisig
+    versionOneOrMultisig(bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => "P2TR"
+    versionOneOrMultisig(bytesOf("514104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac4410461cbdcc5409fb4b4d42b51d33381354d80e550078cb532a34bfa2fcfdeb7d76519aecc62770f5b0e4ef8551946d8a540911abe3e7854a26f39f58b25c15342af52ae")) => "P2MS"
+    versionOneOrMultisig(bytesOf("5100")) => "nonstandard"
+
+fn multisigOrNot(script: List<Int>) -> String
+    ? "Bare multisig: OP_m, the keys, OP_n, OP_CHECKMULTISIG."
+    named(isBareMultisig(script), "P2MS")
+
+verify multisigOrNot
+    multisigOrNot(bytesOf("514104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac4410461cbdcc5409fb4b4d42b51d33381354d80e550078cb532a34bfa2fcfdeb7d76519aecc62770f5b0e4ef8551946d8a540911abe3e7854a26f39f58b25c15342af52ae")) => "P2MS"
+    multisigOrNot(bytesOf("ffff")) => "nonstandard"
+
+fn isPayToPubKey(script: List<Int>, keyLength: Int) -> Bool
+    ? "A push of a public key, then OP_CHECKSIG, and nothing else."
+      "Sixty-five bytes uncompressed or thirty-three compressed. This was how"
+      "coins were paid before addresses existed, so it is most of the early"
+      "chain -- and it has no address form, which is why it went away."
+    Bool.and(List.len(script) == keyLength + 2, byteAt(script, keyLength + 1) == 172)
+
+verify isPayToPubKey
+    isPayToPubKey(bytesOf("410496b538e853519c726a2c91e61ec11600ae1390813a627c66fb8be7947be63c52da7589379515d4e0a604f8141781e62294721166bf621e73a82cbf2342c858eeac"), 65) => true
+    isPayToPubKey(bytesOf("21038282263212c609d9ea2a6e3e172de238d8c39cabd5ac1ca10646e23fd5f51508ac"), 33) => true
+    isPayToPubKey(bytesOf("4104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac41"), 65) => false
+    isPayToPubKey(bytesOf("41ac"), 65) => false
+
+fn isBareMultisig(script: List<Int>) -> Bool
+    ? "OP_m, one or more key pushes, OP_n, OP_CHECKMULTISIG, with m at most n."
+      "Only the frame is checked here, not that the pushes are well formed keys."
+      "Anything claiming to be multisig and failing the frame is nonstandard,"
+      "which is the same answer it would get for failing anywhere else."
+    last = List.len(script) - 1
+    total = byteAt(script, last - 1)
+    Bool.and(isSmallNumber(byteAt(script, 0)), Bool.and(byteAt(script, last) == 174, Bool.and(isSmallNumber(total), byteAt(script, 0) <= total)))
+
+verify isBareMultisig
+    isBareMultisig(bytesOf("514104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac4410461cbdcc5409fb4b4d42b51d33381354d80e550078cb532a34bfa2fcfdeb7d76519aecc62770f5b0e4ef8551946d8a540911abe3e7854a26f39f58b25c15342af52ae")) => true
+    isBareMultisig(bytesOf("5251ae")) => false
+    isBareMultisig(bytesOf("5152ae")) => true
+    isBareMultisig(bytesOf("5152ac")) => false
+    isBareMultisig(bytesOf("ffff")) => false
+
+fn isSmallNumber(byte: Int) -> Bool
+    ? "OP_1 through OP_16, which is how a multisig writes its two counts."
+    Bool.and(byte >= 81, byte <= 96)
+
+verify isSmallNumber
+    isSmallNumber(81) => true
+    isSmallNumber(96) => true
+    isSmallNumber(80) => false
+    isSmallNumber(97) => false
 
 fn witnessKind(script: List<Int>) -> String
     ? "A leading zero is a version-zero program; its length says which."

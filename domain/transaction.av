@@ -7,7 +7,7 @@ module Transaction
         "The Transaction Id is the double-SHA256 of the legacy serialisation, so"
         "for a SegWit Transaction the marker, flag and Witnesses are excluded —"
         "which is why decoding tracks where each section began."
-    exposes [decode, decodeNext, Decoded, summaryLines, amount, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
+    exposes [decode, decodeNext, Decoded, summaryLines, amount, witnessOf, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Script, Domain.Text]
     effects []
 
@@ -16,7 +16,7 @@ record Input
     previousIndex: Int
     script: String
     sequence: Int
-    witnessItems: Int
+    witness: List<String>
 
 record Output
     value: Int
@@ -41,7 +41,8 @@ record WitnessRead
     rest: List<Int>
     consumed: Int
 
-record Skipped
+record Taken
+    items: List<String>
     rest: List<Int>
     consumed: Int
 
@@ -98,9 +99,16 @@ fn sequenceOf(input: Input) -> Int
     ? "The Input's sequence number."
     input.sequence
 
+fn witnessOf(input: Input) -> List<String>
+    ? "The Witness stack this Input carried, innermost item first."
+      "Kept rather than counted. A segwit Input puts its signatures here instead"
+      "of in its script, so anything that means to evaluate one needs the items"
+      "themselves and a count says nothing."
+    input.witness
+
 fn witnessItemsOf(input: Input) -> Int
     ? "How many Witness stack items this Input carried."
-    input.witnessItems
+    List.len(input.witness)
 
 fn valueOf(output: Output) -> Int
     ? "The Output's amount, in satoshis."
@@ -140,11 +148,11 @@ fn inputLines(inputs: List<Input>, acc: List<String>) -> List<String>
 
 verify inputLines
     List.len(inputLines([], [])) => 0
-    List.len(inputLines([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 1, witnessItems = 2)], [])) => 1
+    List.len(inputLines([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 1, witness = ["aabb", "cc"])], [])) => 1
 
 fn inputLine(input: Input) -> String
     ? "An Input: what it spends, and how much Witness data it carried."
-    "   in  {input.previousTxid}:{input.previousIndex} seq {input.sequence} witness {input.witnessItems}"
+    "   in  {input.previousTxid}:{input.previousIndex} seq {input.sequence} witness {List.len(input.witness)}"
 
 fn outputLines(outputs: List<Output>, acc: List<String>) -> List<String>
     ? "One line per Output."
@@ -181,7 +189,7 @@ fn decode(raw: List<Int>) -> Result<Transaction, String>
     Result.Ok(decodeNext(raw)?.transaction)
 
 verify decode
-    decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => Result.Ok(Transaction(version = 2, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 0, script = "", sequence = 4294967295, witnessItems = 2)], outputs = [Output(value = 5000, script = "5151")], lockTime = 0, txid = "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c", size = 70, isSegWit = true))
+    decode(Bytes.toList(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => Result.Ok(Transaction(version = 2, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 0, script = "", sequence = 4294967295, witness = ["aabb", "cc"])], outputs = [Output(value = 5000, script = "5151")], lockTime = 0, txid = "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c", size = 70, isSegWit = true))
     decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("Transaction ends before its lock time")
     txidOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
     sizeOf(decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => 204
@@ -311,46 +319,64 @@ fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>, consum
 verify countWitnesses
     List.len(countWitnesses([], [], [], 0).items) => 0
     countWitnesses([], [9], [], 0).rest => [9]
-    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187], [], 0).items)) => 2
-    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187, 9], [], 0).rest => [9]
-    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0)], [2, 1, 170, 1, 187, 9], [], 0).consumed => 5
+    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187], [], 0).items)) => 2
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0).rest => [9]
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0).consumed => 5
 
 fn headOf(inputs: List<Input>) -> Input
     ? "The first Input, for the verify cases above."
-    Option.withDefault(Vector.get(Vector.fromList(inputs), 0), Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0 - 1))
+    Option.withDefault(Vector.get(Vector.fromList(inputs), 0), Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []))
 
 verify headOf
-    witnessItemsOf(headOf([])) => 0 - 1
+    witnessItemsOf(headOf([])) => 0
 
 fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>, consumed: Int) -> WitnessRead
     ? "Read one Input's Witness stack and carry on to the next."
     stack = Domain.CompactSize.read(rest)
-    skipped = skipWitnessItems(stack.rest, stack.value, 0)
-    countWitnesses(remaining, skipped.rest, List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witnessItems = stack.value), acc), consumed + stack.width + skipped.consumed)
+    taken = takeWitnessItems(stack.rest, stack.value, 0, [])
+    countWitnesses(remaining, taken.rest, List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witness = taken.items), acc), consumed + stack.width + taken.consumed)
 
 verify countOne
-    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170], [], 0).items) => 1
-    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170, 9], [], 0).rest => [9]
-    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witnessItems = 0), [], [1, 1, 170, 9], [], 0).consumed => 3
+    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170], [], 0).items) => 1
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0).rest => [9]
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0).consumed => 3
 
-fn skipWitnessItems(rest: List<Int>, count: Int, consumed: Int) -> Skipped
-    ? "Step over `count` length-prefixed Witness items, counting the bytes."
+fn takeWitnessItems(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Taken
+    ? "Read `count` length-prefixed Witness items, keeping each one."
+      "Accumulated by prepending and turned round at the end, so the cost is the"
+      "number of items rather than its square."
     match count <= 0
-        true -> Skipped(rest = rest, consumed = consumed)
-        false -> skipOneItem(rest, count, consumed)
+        true -> Taken(items = List.reverse(acc), rest = rest, consumed = consumed)
+        false -> takeOneItem(rest, count, consumed, acc)
 
-verify skipWitnessItems
-    skipWitnessItems([9], 0, 0) => Skipped(rest = [9], consumed = 0)
-    skipWitnessItems([1, 170, 9], 1, 0) => Skipped(rest = [9], consumed = 2)
-    skipWitnessItems([1, 170, 1, 187, 9], 2, 0) => Skipped(rest = [9], consumed = 4)
+verify takeWitnessItems
+    takeWitnessItems([9], 0, 0, []) => Taken(items = [], rest = [9], consumed = 0)
+    takeWitnessItems([1, 170, 9], 1, 0, []) => Taken(items = ["aa"], rest = [9], consumed = 2)
+    takeWitnessItems([1, 170, 1, 187, 9], 2, 0, []) => Taken(items = ["aa", "bb"], rest = [9], consumed = 4)
+    takeWitnessItems([0, 9], 1, 0, []) => Taken(items = [""], rest = [9], consumed = 1)
 
-fn skipOneItem(rest: List<Int>, count: Int, consumed: Int) -> Skipped
-    ? "Step over one length-prefixed Witness item."
+fn hexOf(bytes: List<Int>) -> String
+    ? "One Witness item as text."
+      "Total: the bytes came out of a Bytes and are octets by construction, so"
+      "Bytes.fromList cannot refuse them and the default is unreachable."
+    match Bytes.fromList(bytes)
+        Result.Err(message) -> ""
+        Result.Ok(raw) -> Bytes.toHex(raw)
+
+verify hexOf
+    hexOf([170, 187]) => "aabb"
+    hexOf([]) => ""
+
+fn takeOneItem(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Taken
+    ? "Read one length-prefixed Witness item."
+      "An item that will not render as hexadecimal cannot arise: its bytes came"
+      "out of a Bytes and are octets by construction, so the default is dead."
     item = Domain.CompactSize.read(rest)
-    skipWitnessItems(List.drop(item.rest, item.value), count - 1, consumed + item.width + item.value)
+    text = hexOf(List.take(item.rest, item.value))
+    takeWitnessItems(List.drop(item.rest, item.value), count - 1, consumed + item.width + item.value, List.prepend(text, acc))
 
-verify skipOneItem
-    skipOneItem([1, 170, 9], 1, 0) => Skipped(rest = [9], consumed = 2)
+verify takeOneItem
+    takeOneItem([1, 170, 9], 1, 0, []) => Taken(items = ["aa"], rest = [9], consumed = 2)
 
 fn readInputs(body: List<Int>) -> Result<InputsRead, String>
     ? "Read the Input count, then that many Inputs."
@@ -391,7 +417,7 @@ fn inputFrom(remaining: Int, previous: List<Int>, index: Int, scriptLength: Int,
     script = Bytes.fromList(List.take(afterLength, scriptLength))?
     previousBytes = Bytes.fromList(List.reverse(previous))?
     afterScript = List.drop(afterLength, scriptLength)
-    readInputsInto(remaining - 1, List.drop(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witnessItems = 0), acc), consumed)
+    readInputsInto(remaining - 1, List.drop(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witness = []), acc), consumed)
 
 verify inputFrom
     List.len(inputFrom(1, [], 0, 0, [0, 0, 0, 0], [], 41)?.items) => 1

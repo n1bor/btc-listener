@@ -1,0 +1,100 @@
+# A Script engine with the signatures left out
+
+Bitcoin decides whether a spend is allowed by running a small stack language.
+Nothing here runs it. `domain/script.av` matches five output shapes by their
+leading byte to render an address, and that is all — no opcode is evaluated, no
+stack exists.
+
+Aver has no secp256k1. Its whole cryptographic surface is `Crypto.sha256`,
+`Crypto.sha256Bytes`, `Crypto.Digest32` and `Crypto.compress`, so `OP_CHECKSIG`
+cannot be answered. Writing the elliptic curve arithmetic in Aver is possible —
+`Int` is arbitrary-precision — but a verification is some hundreds of modular
+multiplications over a 256-bit field, and Block 800000 alone would need
+thousands of them. That is a different project and probably the wrong one.
+
+So the engine is worth building without the part that needs a curve, provided it
+never pretends to have decided something it has not.
+
+## Three outcomes, not two
+
+```aver
+type Outcome
+    Passed
+    Failed(String)
+    Undecided(String)
+```
+
+Every opcode except `OP_CHECKSIG`, `OP_CHECKSIGVERIFY`, `OP_CHECKMULTISIG`,
+`OP_CHECKMULTISIGVERIFY` and `OP_CHECKSIGADD` is decidable today. Those five
+reach the seam and return `Undecided`, which propagates to the whole script. A
+script that fails on stack discipline, a bad push, or an opcode limit still
+reports `Failed` — a real answer about a real fault.
+
+A `Bool` here would force a lie in one direction: either every unverifiable
+signature passes, or every one fails. The project already refuses that trade
+three times over — a body is `Missing` or `Pruned`, never merely absent; a spend
+is `Resolved`, `Unknown` or `Invalid`; an audit counts `unresolved` apart from
+`faults`. This is the same rule applied to the same kind of ignorance.
+
+## Where the curve plugs in
+
+One module, `domain/ecdsa.av`, exposing one function:
+
+```aver
+fn verify(publicKey: Bytes, signature: Bytes, message: Digest) -> Verdict
+```
+
+Its body returns `Verdict.Undecidable` and nothing else. When a curve arrives,
+that body is replaced and its signature is not — the arrangement `infra/store.av`
+already uses for the key-value store it expects to swap for a database. Unlike
+that one, this seam has no representation to leak, so `exposes opaque` is not
+needed; the whole contract is the one signature.
+
+Everything above it is written against `Verdict` rather than against a curve, so
+the day secp256k1 lands the diff is one file and the test suite is what says
+whether it worked.
+
+## What can be finished before then
+
+Most of it, and the hard part especially.
+
+`domain/sighash.av` computes the message a signature is over — legacy, BIP143
+for segwit v0, BIP341 for taproot. It is the subtlest code in the whole
+undertaking, it is pure, it needs no curve, and BIP test vectors verify it
+completely today. The same is true of the opcode table, the parser, the stack
+element encoding and every non-cryptographic opcode.
+
+## Two oracles
+
+Bitcoin Core's `script_tests.json` is the canonical corpus and is adversarial in
+a way nothing written here would be. Aver cannot read JSON at verify time, so it
+needs converting into cases.
+
+The second is free and specific to this project: `audit` already walks a hundred
+thousand Blocks. Every script in them was accepted by the network, so **any
+`Failed` on mainnet data is a defect in us**. That is the same shape of argument
+as the prefix oracle that made the spend soak worth running — a property the
+data guarantees, turned into a test.
+
+## Consequences
+
+The engine will never call a Block fully valid, and should not be read as doing
+so. `Undecided` is the answer for every real spend until there is a curve, and
+the count of them is the honest measure of how much of consensus is being
+checked.
+
+Taproot is out of scope for a first version: BIP341 and BIP342 are a different
+execution model with a different signature scheme, and folding them in early
+would double the surface before any of it is proven.
+
+Speed is the risk that could invalidate the design rather than delay it.
+Resolving 116,576 Inputs already takes about three hours, and that is only
+fetching parents. If evaluation makes a full soak impractical the shape has to
+change, so the interpreter gets measured on a thousand Blocks before the sighash
+work starts rather than after.
+
+Two things have to happen first, and neither is part of the engine.
+`Domain.Transaction` keeps `witnessItems` as a count and discards the items, so
+no segwit script could be evaluated at all. And `Domain.Script` reports P2PK as
+`nonstandard`, which is most of the early chain — a classification bug worth
+fixing on its own, independent of anything above.
