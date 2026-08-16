@@ -2,9 +2,14 @@ module Audit
     intent =
         "Run every check we have over a range of Heights and report what fails."
         "A prefix of the chain is self-contained: every Input names a parent at a"
-        "lower Height, so holding 1..N means holding every parent. Over a prefix"
-        "an unresolved Input is a defect rather than a gap in coverage, which is"
-        "what makes this worth running."
+        "lower Height, so holding 1..N means holding every parent. Over such a"
+        "prefix an unresolved Input is a defect rather than a gap in coverage,"
+        "which is what makes this worth running."
+        "That holds until the directory is pruned, and then it does not: a parent"
+        "below the Prune Watermark is gone on purpose. So unresolved is counted"
+        "on its own rather than folded into the faults, and the reader decides"
+        "which it is looking at. A Transaction that is wrong -- value created, or"
+        "an Output that cannot exist -- is a fault either way."
         "The Block checks come from Domain.Checks, which is where show gets them"
         "too. Counting what is wrong and describing it are different jobs; making"
         "the same judgement twice is not."
@@ -24,6 +29,7 @@ record Counts
     transactions: Int
     resolved: Int
     coinbase: Int
+    unresolved: Int
     faults: Int
 
 fn reportEvery() -> Int
@@ -38,7 +44,7 @@ fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0))
+    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -175,7 +181,7 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     faults = faultsIn(findings, [])
     _said = reportFaults(height, faults)
     _progress = maybeReport(height, counts)
-    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, faults = counts.faults + List.len(faults)), transactions)
+    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults)), transactions)
 
 fn maybeReport(height: Int, counts: Counts) -> Unit
     ? "Say where the walk has got to, every so often."
@@ -222,22 +228,23 @@ fn judged(height: Int, counts: Counts, transaction: Transaction, verdict: Verdic
     seen = counts.transactions + 1
     faulted = counts.faults + 1
     match verdict
-        Verdict.Coinbase -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase + 1, faults = counts.faults)
-        Verdict.Conserved -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved + 1, coinbase = counts.coinbase, faults = counts.faults)
-        Verdict.Created(excess) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, faults = faulted)
-        Verdict.Broken(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, faults = faulted)
-        Verdict.Incomplete(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, faults = faulted)
+        Verdict.Coinbase -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase + 1, unresolved = counts.unresolved, faults = counts.faults)
+        Verdict.Conserved -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved + 1, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults)
+        Verdict.Created(excess) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted)
+        Verdict.Broken(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = faulted)
+        Verdict.Incomplete(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved + 1, faults = counts.faults)
 
 verify judged
     judged(1, zero(), sampleTx(), Verdict.Conserved).resolved => 1
     judged(1, zero(), sampleTx(), Verdict.Coinbase).coinbase => 1
     judged(1, zero(), sampleTx(), Verdict.Created(5)).faults => 1
     judged(1, zero(), sampleTx(), Verdict.Broken("x")).faults => 1
-    judged(1, zero(), sampleTx(), Verdict.Incomplete("x")).faults => 1
+    judged(1, zero(), sampleTx(), Verdict.Incomplete("x")).unresolved => 1
+    judged(1, zero(), sampleTx(), Verdict.Incomplete("x")).faults => 0
 
 fn zero() -> Counts
     ? "Nothing counted yet."
-    Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, faults = 0)
+    Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0)
 
 verify zero
     zero().faults => 0

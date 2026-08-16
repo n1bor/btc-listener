@@ -256,6 +256,24 @@ answered separately again, because its Input spends nothing.
 and that value is not created. Whether the spender was *entitled* to spend them
 is a signature question, and Aver has no secp256k1 — see the note at the end.
 
+### Checking a range
+
+`audit` runs every check over a range of Heights: each Block against its Header,
+its parent and its target, and each Transaction against what its Inputs spend.
+
+```bash
+./target/release/main audit ~/chain 1 20000
+  ... height 18001: 18000 blocks, 18129 transactions, 129 spends, 0 faults
+blocks 20000  transactions 20136  spends resolved 136  coinbase 20000  unresolved 0  FAULTS 0
+```
+
+**unresolved** and **FAULTS** are separate on purpose. Over a prefix of the
+chain every Input's parent is held, so `unresolved 0` is a real claim and
+anything else is a defect. Once a directory has been pruned that stops being
+true — a parent below the Watermark is gone deliberately — so unresolved counts
+those and the faults stay clean. A Transaction that is *wrong*, paying out more
+than it spends or naming an Output that cannot exist, is a fault either way.
+
 ### Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.
@@ -284,6 +302,18 @@ Pruning is safe to repeat and the Watermark only ever rises: pruning below a
 Height already passed leaves it where it is. There is no command to lower it,
 and `bodies` will re-fetch a pruned range if you ask for it — the Watermark
 records what was discarded, it does not refuse to fetch it again.
+
+Worked example, on 20,000 Blocks in three Segments:
+
+```bash
+./target/release/main prune ~/chain 15000
+1 Segments deleted, 9355 Locations dropped, Prune Watermark now 15000
+```
+
+Only Segment 0 goes, because Segment 1 still holds Blocks above the Height.
+8.6 MB becomes 4.6 MB. Afterwards `show` on a discarded Height says so rather
+than reporting it missing, and `audit` over the range counts the Inputs it can
+no longer follow as unresolved rather than as faults.
 
 ### Running under WSL
 
