@@ -1,0 +1,362 @@
+module StackItem
+    intent =
+        "What a Script stack holds, and what it means."
+        "Everything on the stack is a byte string. Reading one as a number and"
+        "asking whether one is true are two different questions with two"
+        "different answers, and conflating them is a classic way to be wrong:"
+        "the empty string is false and reads as zero, but so does a single"
+        "eighty, which is negative zero and is not the same string."
+        "Numbers are little-endian with the sign in the top bit of the last"
+        "byte, so the sign lives at the far end from where a reader looks first."
+        "Arithmetic takes at most four bytes. That is not a property of the"
+        "encoding -- the stack holds longer numbers happily -- it is a rule the"
+        "arithmetic opcodes apply to their inputs, so it is offered here as a"
+        "question rather than enforced."
+        "Minimal encoding is a rule about how a push was written rather than"
+        "what it pushed, so it needs the opcode as well as the bytes."
+    exposes [asNumber, fromNumber, isTruthy, fitsArithmetic, isMinimalNumber, isMinimalPush]
+    depends [Domain.Opcode]
+    effects []
+
+fn asNumber(item: List<Int>) -> Int
+    ? "A stack item read as a number."
+      "The empty string is zero. So is a single eighty, which is negative zero:"
+      "a different string that means the same number, which is why the minimal"
+      "encoding rule exists at all."
+    match List.reverse(item)
+        [] -> 0
+        [top, ..rest] -> valued(top, rest)
+
+verify asNumber
+    asNumber([]) => 0
+    asNumber([1]) => 1
+    asNumber([129]) => 0 - 1
+    asNumber([128]) => 0
+    asNumber([0]) => 0
+    asNumber([255, 0]) => 255
+    asNumber([255, 128]) => 0 - 255
+    asNumber([1, 2]) => 513
+    asNumber([255, 255, 255, 127]) => 2147483647
+    asNumber([255, 255, 255, 255]) => 0 - 2147483647
+
+fn valued(top: Int, rest: List<Int>) -> Int
+    ? "The most significant byte carries the sign; the rest are magnitude."
+    signedBy(bigEndian(List.prepend(unsigned(top), rest), 0), top >= 128)
+
+verify valued
+    valued(1, []) => 1
+    valued(129, []) => 0 - 1
+    valued(0, [255]) => 255
+
+fn unsigned(top: Int) -> Int
+    ? "The magnitude bits of the top byte, with the sign taken off."
+    match top >= 128
+        true -> top - 128
+        false -> top
+
+verify unsigned
+    unsigned(1) => 1
+    unsigned(129) => 1
+    unsigned(128) => 0
+
+fn signedBy(magnitude: Int, negative: Bool) -> Int
+    ? "Apply the sign."
+    match negative
+        true -> 0 - magnitude
+        false -> magnitude
+
+verify signedBy
+    signedBy(5, false) => 5
+    signedBy(5, true) => 0 - 5
+
+fn bigEndian(bytes: List<Int>, acc: Int) -> Int
+    ? "Most significant byte first, which is what reversing the item gives."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> bigEndian(tail, acc * 256 + head)
+
+verify bigEndian
+    bigEndian([], 0) => 0
+    bigEndian([1], 0) => 1
+    bigEndian([1, 2], 0) => 258
+
+fn fromNumber(value: Int) -> List<Int>
+    ? "A number written the way Script writes one, minimally."
+      "Zero is the empty string rather than a zero byte, which is the one case"
+      "that surprises everybody."
+    match value == 0
+        true -> []
+        false -> signedBytes(magnitudeOf(value), value < 0)
+
+verify fromNumber
+    fromNumber(0) => []
+    fromNumber(1) => [1]
+    fromNumber(0 - 1) => [129]
+    fromNumber(127) => [127]
+    fromNumber(128) => [128, 0]
+    fromNumber(0 - 128) => [128, 128]
+    fromNumber(255) => [255, 0]
+    fromNumber(256) => [0, 1]
+    fromNumber(513) => [1, 2]
+    fromNumber(2147483647) => [255, 255, 255, 127]
+
+fn magnitudeOf(value: Int) -> Int
+    ? "Size without sign."
+    match value < 0
+        true -> 0 - value
+        false -> value
+
+verify magnitudeOf
+    magnitudeOf(5) => 5
+    magnitudeOf(0 - 5) => 5
+
+fn signedBytes(magnitude: Int, negative: Bool) -> List<Int>
+    ? "The magnitude little-endian, then somewhere to put the sign."
+      "When the top byte already uses its high bit there is nowhere to put the"
+      "sign, so another byte is added for it alone."
+    bytes = littleEndian(magnitude, [])
+    withSign(bytes, negative)
+
+verify signedBytes
+    signedBytes(1, false) => [1]
+    signedBytes(1, true) => [129]
+    signedBytes(128, false) => [128, 0]
+    signedBytes(128, true) => [128, 128]
+
+fn littleEndian(value: Int, acc: List<Int>) -> List<Int>
+    ? "Least significant byte first, with no leading zero."
+    match value == 0
+        true -> List.reverse(acc)
+        false -> littleEndian(Int.div(value, 256), List.prepend(Int.mod(value, 256), acc))
+
+verify littleEndian
+    littleEndian(0, []) => []
+    littleEndian(1, []) => [1]
+    littleEndian(258, []) => [2, 1]
+
+fn withSign(bytes: List<Int>, negative: Bool) -> List<Int>
+    ? "Put the sign in the top byte, or in a new one when that byte is full."
+    match List.reverse(bytes)
+        [] -> []
+        [top, ..rest] -> placed(top, rest, negative)
+
+verify withSign
+    withSign([1], false) => [1]
+    withSign([1], true) => [129]
+    withSign([128], false) => [128, 0]
+    withSign([128], true) => [128, 128]
+
+fn placed(top: Int, rest: List<Int>, negative: Bool) -> List<Int>
+    ? "The top byte has room for the sign only if its high bit is clear."
+    match top >= 128
+        true -> List.concat(List.reverse(List.prepend(top, rest)), [signByte(negative)])
+        false -> List.reverse(List.prepend(orSign(top, negative), rest))
+
+verify placed
+    placed(1, [], false) => [1]
+    placed(1, [], true) => [129]
+    placed(128, [], false) => [128, 0]
+    placed(128, [], true) => [128, 128]
+
+fn signByte(negative: Bool) -> Int
+    ? "The extra byte that carries a sign and nothing else."
+    match negative
+        true -> 128
+        false -> 0
+
+verify signByte
+    signByte(true) => 128
+    signByte(false) => 0
+
+fn orSign(top: Int, negative: Bool) -> Int
+    ? "Set the sign bit on a byte that has room for it."
+    match negative
+        true -> top + 128
+        false -> top
+
+verify orSign
+    orSign(1, true) => 129
+    orSign(1, false) => 1
+
+fn isTruthy(item: List<Int>) -> Bool
+    ? "Whether Script counts this item as true."
+      "False is the empty string, all zeroes, and all zeroes with a sign bit --"
+      "negative zero. Everything else is true, including a long string of"
+      "nothing but a single one somewhere in the middle."
+    match List.reverse(item)
+        [] -> false
+        [top, ..rest] -> Bool.or(Bool.and(top != 0, top != 128), anyNonZero(rest))
+
+verify isTruthy
+    isTruthy([]) => false
+    isTruthy([0]) => false
+    isTruthy([128]) => false
+    isTruthy([0, 128]) => false
+    isTruthy([0, 0, 0]) => false
+    isTruthy([1]) => true
+    isTruthy([0, 1]) => true
+    isTruthy([1, 0]) => true
+    isTruthy([129]) => true
+    isTruthy([0, 0, 1]) => true
+
+fn anyNonZero(bytes: List<Int>) -> Bool
+    ? "Whether anything below the top byte is set."
+      "Accumulator form so the recursion stays in tail position; a stack item"
+      "can be five hundred and twenty bytes."
+    match bytes
+        [] -> false
+        [head, ..tail] -> nonZeroOrOn(head, tail)
+
+verify anyNonZero
+    anyNonZero([]) => false
+    anyNonZero([0]) => false
+    anyNonZero([0, 0]) => false
+    anyNonZero([1]) => true
+    anyNonZero([0, 1]) => true
+
+fn nonZeroOrOn(head: Int, tail: List<Int>) -> Bool
+    ? "Stop at the first byte that is set."
+    match head != 0
+        true -> true
+        false -> anyNonZero(tail)
+
+verify nonZeroOrOn
+    nonZeroOrOn(1, []) => true
+    nonZeroOrOn(0, []) => false
+    nonZeroOrOn(0, [1]) => true
+
+fn fitsArithmetic(item: List<Int>) -> Bool
+    ? "Whether the arithmetic opcodes will accept this item."
+      "Four bytes. The stack holds longer numbers and they are not invalid; the"
+      "arithmetic opcodes simply refuse them, so this is a question rather than"
+      "a rule enforced here."
+    List.len(item) <= 4
+
+verify fitsArithmetic
+    fitsArithmetic([]) => true
+    fitsArithmetic([1, 2, 3, 4]) => true
+    fitsArithmetic([1, 2, 3, 4, 5]) => false
+
+fn isMinimalNumber(item: List<Int>) -> Bool
+    ? "Whether a number is written the shortest way it could be."
+      "A trailing zero byte is redundant unless the byte below it needs the"
+      "high bit that byte is carrying the sign for."
+    match List.reverse(item)
+        [] -> true
+        [top, ..rest] -> topIsNeeded(top, rest)
+
+verify isMinimalNumber
+    isMinimalNumber([]) => true
+    isMinimalNumber([1]) => true
+    isMinimalNumber([129]) => true
+    isMinimalNumber([0]) => false
+    isMinimalNumber([128]) => false
+    isMinimalNumber([1, 0]) => false
+    isMinimalNumber([128, 0]) => true
+    isMinimalNumber([255, 0]) => true
+    isMinimalNumber([1, 2]) => true
+
+fn topIsNeeded(top: Int, rest: List<Int>) -> Bool
+    ? "A top byte of zero or eighty is spare unless the byte under it is full."
+    match Bool.or(top == 0, top == 128)
+        false -> true
+        true -> underneathIsFull(rest)
+
+verify topIsNeeded
+    topIsNeeded(1, []) => true
+    topIsNeeded(0, []) => false
+    topIsNeeded(0, [128]) => true
+    topIsNeeded(0, [1]) => false
+
+fn underneathIsFull(rest: List<Int>) -> Bool
+    ? "The byte below the top, and whether it already uses its high bit."
+    match rest
+        [] -> false
+        [next, ..deeper] -> next >= 128
+
+verify underneathIsFull
+    underneathIsFull([]) => false
+    underneathIsFull([128]) => true
+    underneathIsFull([1]) => false
+
+fn isMinimalPush(code: Int, data: List<Int>) -> Bool
+    ? "Whether these bytes were pushed by the smallest opcode that could."
+      "A rule about how the push was written rather than what it pushed, so it"
+      "needs the opcode. Anything one byte long that OP_1 to OP_16 or"
+      "OP_1NEGATE could have pushed had to use those."
+    length = List.len(data)
+    match length
+        0 -> code == 0
+        1 -> singleByteMinimal(code, data)
+        _ -> widthMinimal(code, length)
+
+verify isMinimalPush
+    isMinimalPush(0, []) => true
+    isMinimalPush(1, []) => false
+    isMinimalPush(81, [1]) => true
+    isMinimalPush(1, [1]) => false
+    isMinimalPush(96, [16]) => true
+    isMinimalPush(79, [129]) => true
+    isMinimalPush(1, [17]) => true
+    isMinimalPush(76, [17]) => false
+    isMinimalPush(75, [1, 2, 3]) => false
+
+fn singleByteMinimal(code: Int, data: List<Int>) -> Bool
+    ? "One byte: the small-number opcodes claim 1 to 16 and negative one."
+    value = asNumber(data)
+    match value == 0 - 1
+        true -> code == 79
+        false -> smallOrDirect(code, value)
+
+verify singleByteMinimal
+    singleByteMinimal(79, [129]) => true
+    singleByteMinimal(1, [129]) => false
+    singleByteMinimal(81, [1]) => true
+    singleByteMinimal(1, [17]) => true
+
+fn smallOrDirect(code: Int, value: Int) -> Bool
+    ? "One to sixteen must use their own opcode; anything else a direct push."
+    match Bool.and(value >= 1, value <= 16)
+        true -> code == value + 80
+        false -> code == 1
+
+verify smallOrDirect
+    smallOrDirect(81, 1) => true
+    smallOrDirect(1, 1) => false
+    smallOrDirect(96, 16) => true
+    smallOrDirect(1, 17) => true
+    smallOrDirect(76, 17) => false
+
+fn widthMinimal(code: Int, length: Int) -> Bool
+    ? "Longer data must use the narrowest push wide enough to say its length."
+    match length <= 75
+        true -> code == length
+        false -> wideMinimal(code, length)
+
+verify widthMinimal
+    widthMinimal(3, 3) => true
+    widthMinimal(76, 3) => false
+    widthMinimal(76, 76) => true
+    widthMinimal(77, 76) => false
+
+fn wideMinimal(code: Int, length: Int) -> Bool
+    ? "One byte of length up to 255, two up to 65535, four beyond."
+    match length <= 255
+        true -> code == 76
+        false -> widerMinimal(code, length)
+
+verify wideMinimal
+    wideMinimal(76, 100) => true
+    wideMinimal(77, 100) => false
+    wideMinimal(77, 300) => true
+
+fn widerMinimal(code: Int, length: Int) -> Bool
+    ? "Two bytes of length, or four."
+    match length <= 65535
+        true -> code == 77
+        false -> code == 78
+
+verify widerMinimal
+    widerMinimal(77, 300) => true
+    widerMinimal(78, 300) => false
+    widerMinimal(78, 70000) => true
