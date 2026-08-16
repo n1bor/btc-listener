@@ -77,6 +77,30 @@ Everything above it is written against `Verdict` rather than against a curve, so
 the day secp256k1 lands the diff is one file and the test suite is what says
 whether it worked.
 
+### Update — what the seam turned out to be
+
+Three things about the sketch above were wrong, and the code says so.
+
+`verify` is a reserved word in Aver. The function is `decide`.
+
+`message: Digest` cannot be written. Aver has no way to build a `Digest32` from
+bytes it did not hash itself, so a `Digest` parameter would mean the module can
+only be handed a hash it computed — the opposite of a seam. It takes `Bytes`.
+
+And there is no `Verdict.Valid`. Nothing in the module can return it, so it
+would be a constructor nothing produces, which is the thing this project has now
+refused four times. It arrives in the same change that gives `decide` a body,
+and because Aver matches exhaustively, adding it will name every caller that has
+to start thinking about success instead of quietly treating it as failure. That
+is a better property than the one a three-valued stub would have had.
+
+What the seam does answer today is more than nothing. An empty signature always
+fails and a public key that is not a public key always fails — the reference
+client returns false for both before it does any arithmetic — so both are
+decidable, and `Domain.Checksig` uses them. Strict DER and low-S are computed
+but offered rather than applied: they are flag-gated, and Blocks below 363,725
+contain signatures they refuse.
+
 ## What can be finished before then
 
 Most of it, and the hard part especially.

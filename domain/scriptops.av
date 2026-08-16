@@ -16,7 +16,7 @@ module ScriptOps
         "fail a Script wherever they appear, so none of them may wait behind a"
         "branch that is not being taken."
     exposes [step]
-    depends [Bytes, Crypto.Digest32, Domain.Opcode, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.StackItem]
+    depends [Bytes, Crypto.Digest32, Domain.Checksig, Domain.Opcode, Domain.ScriptStep, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.StackItem]
     effects []
 
 fn step(op: Op, state: State) -> Step
@@ -47,32 +47,12 @@ fn pushedIfExecuting(data: List<Int>, state: State) -> Step
     ? "Otherwise a push only happens in a branch being executed."
     match Domain.ScriptState.executing(state.conditions)
         false -> Step.Continue(state)
-        true -> pushing(data, state)
+        true -> Domain.ScriptStep.pushing(data, state)
 
 verify pushedIfExecuting
     pushedIfExecuting([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     pushedIfExecuting([1], State(stack = [], alt = [], conditions = [false], opCount = 0)) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
     pushedIfExecuting([1], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2]))) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
-
-fn pushing(item: List<Int>, state: State) -> Step
-    ? "One more item on the data stack."
-    landed(List.prepend(item, state.stack), state)
-
-verify pushing
-    pushing([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    pushing([1], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2]))) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
-
-fn landed(stack: List<List<Int>>, state: State) -> Step
-    ? "Carry on with a new data stack, unless the two stacks together have"
-      "grown past the limit."
-    limit = Domain.ScriptState.maxStack()
-    match List.len(stack) + List.len(state.alt) > limit
-        true -> Step.Stop(Outcome.Decided(Ending.Failed("stack is over the {limit} item limit")))
-        false -> Step.Continue(Domain.ScriptState.withStack(state, stack))
-
-verify landed
-    landed([[1]], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    landed(Domain.ScriptState.repeated(1001, [1]), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
 
 fn coded(code: Int, state: State) -> Step
     ? "Opcodes above OP_16 count against the limit whether executed or not, and"
@@ -180,14 +160,14 @@ verify whenExecuting
 fn operated(code: Int, state: State) -> Step
     ? "The opcodes worth naming by number; the rest go by kind."
     match code
-        0 -> pushing(Domain.StackItem.fromNumber(0), state)
-        79 -> pushing(Domain.StackItem.fromNumber(0 - 1), state)
+        0 -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(0), state)
+        79 -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(0 - 1), state)
         105 -> verified(state)
         106 -> Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
         107 -> toAlt(state)
         108 -> fromAlt(state)
         115 -> ifDup(state)
-        116 -> pushing(Domain.StackItem.fromNumber(List.len(state.stack)), state)
+        116 -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(List.len(state.stack)), state)
         121 -> pickedOrRolled(code, state)
         122 -> pickedOrRolled(code, state)
         130 -> sized(state)
@@ -195,7 +175,7 @@ fn operated(code: Int, state: State) -> Step
         136 -> equality(code, state)
         165 -> within(state)
         168 -> hashed(state)
-        _ -> byGroup(code, state)
+        _ -> signedOrGrouped(code, state)
 
 verify operated
     operated(0, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
@@ -203,10 +183,23 @@ verify operated
     operated(106, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
     operated(116, Domain.ScriptState.holding([[1], [2]])) => Step.Continue(Domain.ScriptState.holding([[2], [1], [2]]))
 
+fn signedOrGrouped(code: Int, state: State) -> Step
+    ? "The signature opcodes have their own module: they are the only ones that"
+      "reach a variable depth, they charge their own opcodes against the limit,"
+      "and there was no room left in this file for them."
+    match Domain.Checksig.isSignatureOpcode(code)
+        true -> Domain.Checksig.step(code, state)
+        false -> byGroup(code, state)
+
+verify signedOrGrouped
+    signedOrGrouped(81, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    signedOrGrouped(172, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
+    signedOrGrouped(169, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_HASH160 needs ripemd160"))
+
 fn byGroup(code: Int, state: State) -> Step
     ? "By family, once the ones handled by number are out of the way."
     match Domain.Opcode.kindOf(code)
-        Domain.Opcode.Kind.SmallNumber -> pushing(Domain.StackItem.fromNumber(Domain.Opcode.smallNumberValue(code)), state)
+        Domain.Opcode.Kind.SmallNumber -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.Opcode.smallNumberValue(code)), state)
         Domain.Opcode.Kind.Rearrange -> shuffled(code, state)
         Domain.Opcode.Kind.UnaryArithmetic -> unaryArith(code, state)
         Domain.Opcode.Kind.BinaryArithmetic -> binaryArith(code, state)
@@ -217,7 +210,7 @@ fn byGroup(code: Int, state: State) -> Step
 verify byGroup
     byGroup(81, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     byGroup(97, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
-    byGroup(172, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
+    byGroup(166, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_RIPEMD160 needs ripemd160"))
     byGroup(80, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid")))
     byGroup(118, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
     byGroup(139, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[2]]))
@@ -227,23 +220,12 @@ fn verified(state: State) -> Step
     ? "OP_VERIFY takes the top item and stops if it was false."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))
-        [head, ..tail] -> stoppedUnless(Domain.StackItem.isTruthy(head), "OP_VERIFY found a false value", tail, state)
+        [head, ..tail] -> Domain.ScriptStep.stoppedUnless(Domain.StackItem.isTruthy(head), "OP_VERIFY found a false value", tail, state)
 
 verify verified
     verified(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))
     verified(Domain.ScriptState.holding([[1], [2]])) => Step.Continue(Domain.ScriptState.holding([[2]]))
     verified(Domain.ScriptState.holding([[0]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY found a false value")))
-
-fn stoppedUnless(ok: Bool, why: String, tail: List<List<Int>>, state: State) -> Step
-    ? "The shape every VERIFY opcode has: consume the items, and stop when the"
-      "answer was false rather than pushing it."
-    match ok
-        false -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
-        true -> Step.Continue(Domain.ScriptState.withStack(state, tail))
-
-verify stoppedUnless
-    stoppedUnless(false, "no", [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
-    stoppedUnless(true, "no", [[1]], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn toAlt(state: State) -> Step
     ? "OP_TOALTSTACK moves the top item across."
@@ -281,7 +263,7 @@ fn duplicatedIfTrue(top: List<Int>, state: State) -> Step
     ? "True on top, or leave it alone."
     match Domain.StackItem.isTruthy(top)
         false -> Step.Continue(state)
-        true -> pushing(top, state)
+        true -> Domain.ScriptStep.pushing(top, state)
 
 verify duplicatedIfTrue
     duplicatedIfTrue([1], Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
@@ -292,7 +274,7 @@ fn sized(state: State) -> Step
       "which is the opposite of what most of these do."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("OP_SIZE needs an item")))
-        [head, ..tail] -> pushing(Domain.StackItem.fromNumber(List.len(head)), state)
+        [head, ..tail] -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(List.len(head)), state)
 
 verify sized
     sized(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_SIZE needs an item")))
@@ -315,7 +297,7 @@ fn hashedTop(top: List<Int>, tail: List<List<Int>>, state: State) -> Step
       "not know it."
     match Bytes.fromList(top)
         Result.Err(message) -> Step.Stop(Outcome.Decided(Ending.Failed(message)))
-        Result.Ok(raw) -> landed(List.prepend(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw))), tail), state)
+        Result.Ok(raw) -> Domain.ScriptStep.landed(List.prepend(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw))), tail), state)
 
 verify hashedTop
     hashedTop([256], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("byte 256 at index 0 is outside 0..=255")))
@@ -328,7 +310,7 @@ fn shuffled(code: Int, state: State) -> Step
     items = List.take(state.stack, depth)
     match List.len(items) == depth
         false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs {Domain.ScriptState.itemsWord(depth)}")))
-        true -> landed(List.concat(Domain.ScriptState.rearranged(code, items), List.drop(state.stack, depth)), state)
+        true -> Domain.ScriptStep.landed(List.concat(Domain.ScriptState.rearranged(code, items), List.drop(state.stack, depth)), state)
 
 verify shuffled
     shuffled(118, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_DUP needs 1 item")))
@@ -365,7 +347,7 @@ fn atDepth(code: Int, n: Int, tail: List<List<Int>>, state: State) -> Step
       "item can still be picked from."
     match Bool.or(n < 0, n >= List.len(tail))
         true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} reaches past the bottom of the stack")))
-        false -> landed(List.prepend(Domain.ScriptState.itemAt(tail, n), Domain.ScriptState.remaining(code, tail, n)), state)
+        false -> Domain.ScriptStep.landed(List.prepend(Domain.ScriptState.itemAt(tail, n), Domain.ScriptState.remaining(code, tail, n)), state)
 
 verify atDepth
     atDepth(121, 0, [[7]], Domain.ScriptState.holding([[1], [7]])) => Step.Continue(Domain.ScriptState.holding([[7], [7]]))
@@ -390,8 +372,8 @@ fn equalityOn(code: Int, two: Two, state: State) -> Step
     ? "One pushes the answer, the other stops on it."
     same = two.first == two.second
     match code == 136
-        true -> stoppedUnless(same, "OP_EQUALVERIFY found two different items", two.rest, state)
-        false -> pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.oneIf(same)), Domain.ScriptState.withStack(state, two.rest))
+        true -> Domain.ScriptStep.stoppedUnless(same, "OP_EQUALVERIFY found two different items", two.rest, state)
+        false -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.oneIf(same)), Domain.ScriptState.withStack(state, two.rest))
 
 verify equalityOn
     equalityOn(135, Two(first = [1], second = [1], rest = []), Domain.ScriptState.holding([[1], [1]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
@@ -413,7 +395,7 @@ fn unaryOn(code: Int, top: List<Int>, tail: List<List<Int>>, state: State) -> St
     ? "Arithmetic takes at most four bytes, whatever the stack is willing to hold."
     match Domain.StackItem.fitsArithmetic(top)
         false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} operand is over four bytes")))
-        true -> pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.unaryValue(code, Domain.StackItem.asNumber(top))), Domain.ScriptState.withStack(state, tail))
+        true -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.unaryValue(code, Domain.StackItem.asNumber(top))), Domain.ScriptState.withStack(state, tail))
 
 verify unaryOn
     unaryOn(139, [1, 2, 3, 4, 5], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_1ADD operand is over four bytes")))
@@ -446,8 +428,8 @@ fn binaryDone(code: Int, a: Int, b: Int, deeper: List<List<Int>>, state: State) 
     ? "a was the deeper of the two and b was on top, so OP_SUB is a minus b."
       "OP_NUMEQUALVERIFY stops on its answer instead of pushing it."
     match code == 157
-        true -> stoppedUnless(a == b, "OP_NUMEQUALVERIFY found two different numbers", deeper, state)
-        false -> pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.binaryValue(code, a, b)), Domain.ScriptState.withStack(state, deeper))
+        true -> Domain.ScriptStep.stoppedUnless(a == b, "OP_NUMEQUALVERIFY found two different numbers", deeper, state)
+        false -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.binaryValue(code, a, b)), Domain.ScriptState.withStack(state, deeper))
 
 verify binaryDone
     binaryDone(147, 2, 3, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[5]]))
@@ -480,7 +462,7 @@ verify withinOn
 
 fn inRange(value: Int, lower: Int, upper: Int, deeper: List<List<Int>>, state: State) -> Step
     ? "Lower bound included, upper bound not."
-    pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.oneIf(Bool.and(value >= lower, value < upper))), Domain.ScriptState.withStack(state, deeper))
+    Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.oneIf(Bool.and(value >= lower, value < upper))), Domain.ScriptState.withStack(state, deeper))
 
 verify inRange
     inRange(3, 1, 5, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))

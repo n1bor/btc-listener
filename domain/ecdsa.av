@@ -1,0 +1,314 @@
+module Ecdsa
+    intent =
+        "The seam a curve will plug into, and everything about a signature that"
+        "can be decided without one."
+        "verify answers Undecidable and will keep answering it until Aver has"
+        "secp256k1. The point is that everything above can be written against"
+        "the answer rather than against the absence of one, so the day the"
+        "primitive arrives the change is a body and not a design."
+        "It is not only Undecidable, though, and that is worth more than it"
+        "looks. Two things make a signature check fail whatever the curve would"
+        "have said: an empty signature, and a public key that is not a public"
+        "key. The reference client returns false for both before it does any"
+        "arithmetic, so both are decidable today and this says so."
+        "The encoding rules are offered as questions rather than applied. Strict"
+        "DER and low-S are switched on by verification flags, and were not"
+        "always on: Scripts that break them are on the chain, in Blocks that"
+        "were valid when they were mined. Applying them here unconditionally"
+        "would refuse history. The interpreter asks when it knows the flags."
+        "Only decide takes Bytes. Everything else takes the bytes as a list,"
+        "because that is what a Script stack holds and converting each way at"
+        "each question was friction with nothing on the other side of it."
+        "The message is Bytes rather than a Digest, which is not what ADR 0005"
+        "sketched. Aver has no way to build a Digest32 from bytes it did not"
+        "hash itself, so a Digest here would mean this module could only be"
+        "given a hash it computed, which is the opposite of a seam."
+        "There is no Valid. ADR 0005 sketched three answers and two of them are"
+        "all this can give: nothing here can say a signature is good, so a"
+        "constructor saying so would be a constructor nothing returns -- the"
+        "thing this project has now refused four times. Valid arrives in the"
+        "same change that gives decide a body, and because Aver matches"
+        "exhaustively, adding it will name every caller that has to think about"
+        "success rather than letting them quietly keep treating it as failure."
+        "The function is decide rather than verify, which ADR 0005 called it."
+        "Aver keeps verify for its own use, and a seam whose name will not"
+        "compile is not much of a seam."
+    exposes [Verdict, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
+    depends [Bytes]
+    effects []
+
+type Verdict
+    Invalid(String)
+    Undecidable(String)
+
+fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Verdict
+    ? "Whether this signature is this key's signature over this message."
+      "Undecidable is the answer for anything that needs the curve, which is"
+      "every signature that is well formed. The two that are not need no curve"
+      "to refuse."
+      "The message is unused and that is deliberate: it is here so that callers"
+      "are written against the real shape, and so that the day this gets a body"
+      "nothing above it changes."
+    decideShape(Bytes.toList(signature), Bytes.toList(publicKey))
+
+verify decide
+    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Verdict.Invalid("empty signature")
+    decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
+    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Verdict.Undecidable("no secp256k1")
+
+fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Verdict
+    ? "The same question without the message, for a caller that has not got one."
+      "The interpreter is handed a stack and no Transaction, so it cannot build"
+      "a message and cannot call decide. It can still be told that an empty"
+      "signature or a key that is not a key fails, which is the whole of what"
+      "is decidable today, so decide is written in terms of this rather than"
+      "the other way round."
+    match signature
+        [] -> Verdict.Invalid("empty signature")
+        [head, ..tail] -> shapedKey(publicKey)
+
+verify decideShape
+    decideShape([], [2]) => Verdict.Invalid("empty signature")
+    decideShape([1, 2], [170, 187]) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
+    decideShape([1, 2], Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Verdict.Undecidable("no secp256k1")
+
+fn shapedKey(publicKey: List<Int>) -> Verdict
+    ? "A key of the wrong shape fails before any arithmetic would have started."
+    match isValidPublicKey(publicKey)
+        false -> Verdict.Invalid("public key is {List.len(publicKey)} bytes, which is not a public key")
+        true -> Verdict.Undecidable("no secp256k1")
+
+verify shapedKey
+    shapedKey([170, 187]) => Verdict.Invalid("public key is 2 bytes, which is not a public key")
+    shapedKey(Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => Verdict.Undecidable("no secp256k1")
+
+fn isValidPublicKey(publicKey: List<Int>) -> Bool
+    ? "Whether these bytes could be a public key at all."
+      "Thirty-three bytes behind an 02 or an 03, or sixty-five behind an 04."
+      "The 06 and 07 prefixes are the hybrid encoding, which nobody uses and"
+      "the reference client still accepts, so this does too."
+      "Shape only. Whether the point is on the curve needs the curve."
+    lengthed(publicKey)
+
+verify isValidPublicKey
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => true
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => true
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")?)) => true
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("")?)) => false
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("aabb")?)) => false
+    isValidPublicKey(Bytes.toList(Bytes.fromHex("0179be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?)) => false
+
+fn lengthed(bytes: List<Int>) -> Bool
+    ? "The prefix says how long the key should be; the key has to agree."
+    match bytes
+        [] -> false
+        [head, ..tail] -> matchesPrefix(head, List.len(bytes))
+
+verify lengthed
+    lengthed([]) => false
+    lengthed([2]) => false
+    lengthed([4]) => false
+
+fn matchesPrefix(prefix: Int, length: Int) -> Bool
+    ? "Thirty-three for the compressed prefixes, sixty-five for the rest."
+    match prefix
+        2 -> length == 33
+        3 -> length == 33
+        4 -> length == 65
+        6 -> length == 65
+        7 -> length == 65
+        _ -> false
+
+verify matchesPrefix
+    matchesPrefix(2, 33) => true
+    matchesPrefix(3, 33) => true
+    matchesPrefix(2, 65) => false
+    matchesPrefix(4, 65) => true
+    matchesPrefix(6, 65) => true
+    matchesPrefix(7, 65) => true
+    matchesPrefix(1, 33) => false
+
+fn hashTypeOf(signature: List<Int>) -> Result<Int, String>
+    ? "The byte on the end of a signature saying which message it signed."
+      "Not part of the DER at all: it is tacked on afterwards, which is why"
+      "every length rule here counts it separately."
+    lastOf(signature)
+
+verify hashTypeOf
+    hashTypeOf(Bytes.toList(Bytes.fromHex("300602010102010101")?)) => Result.Ok(1)
+    hashTypeOf(Bytes.toList(Bytes.fromHex("300602010102010183")?)) => Result.Ok(131)
+    hashTypeOf(Bytes.toList(Bytes.fromHex("")?)) => Result.Err("signature is empty and has no hash type")
+
+fn lastOf(bytes: List<Int>) -> Result<Int, String>
+    ? "The final byte."
+    match bytes
+        [] -> Result.Err("signature is empty and has no hash type")
+        [head, ..tail] -> firstOfReversed(List.reverse(bytes))
+
+verify lastOf
+    lastOf([]) => Result.Err("signature is empty and has no hash type")
+    lastOf([1, 2, 3]) => Result.Ok(3)
+
+fn firstOfReversed(reversed: List<Int>) -> Result<Int, String>
+    ? "Which, turned round, is the first."
+    match reversed
+        [] -> Result.Err("signature is empty and has no hash type")
+        [head, ..tail] -> Result.Ok(head)
+
+verify firstOfReversed
+    firstOfReversed([]) => Result.Err("signature is empty and has no hash type")
+    firstOfReversed([3, 2, 1]) => Result.Ok(3)
+
+fn signatureBody(signature: List<Int>) -> List<Int>
+    ? "The DER, without the hash type byte the curve never sees."
+    List.take(signature, List.len(signature) - 1)
+
+verify signatureBody
+    signatureBody(Bytes.toList(Bytes.fromHex("300602010102010101")?)) => [48, 6, 2, 1, 1, 2, 1, 1]
+    signatureBody(Bytes.toList(Bytes.fromHex("")?)) => []
+
+fn isValidEncoding(signature: List<Int>) -> Bool
+    ? "Whether a signature is strict DER, as BIP66 defines it."
+      "Offered rather than applied. This became a consensus rule at Block"
+      "363,725 and there are valid Blocks below that containing signatures it"
+      "refuses, so anything applying it needs to know which rules were in force."
+      "The signature includes its hash type byte here, because that is what is"
+      "on the stack and what every length in the rule is stated against."
+    shaped(signature)
+
+verify isValidEncoding
+    isValidEncoding(Bytes.toList(Bytes.fromHex("304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901")?)) => true
+    isValidEncoding(Bytes.toList(Bytes.fromHex("")?)) => false
+    isValidEncoding(Bytes.toList(Bytes.fromHex("3006020101020101")?)) => false
+    isValidEncoding(Bytes.toList(Bytes.fromHex("30060201010201010101")?)) => false
+
+fn shaped(sig: List<Int>) -> Bool
+    ? "Length first: nine bytes is the shortest possible and seventy-three the"
+      "longest, both counting the hash type."
+    total = List.len(sig)
+    match Bool.or(total < 9, total > 73)
+        true -> false
+        false -> headed(sig, total)
+
+verify shaped
+    shaped([]) => false
+    shaped([48, 6, 2, 1, 1, 2, 1, 1]) => false
+
+fn headed(sig: List<Int>, total: Int) -> Bool
+    ? "A sequence marker, and a length covering everything but the marker, its"
+      "own byte, and the hash type."
+    match Bool.and(at(sig, 0) == 48, at(sig, 1) == total - 3)
+        false -> false
+        true -> partsOf(sig, total)
+
+verify headed
+    headed([48, 6, 2, 1, 1, 2, 1, 1, 1], 9) => true
+    headed([49, 6, 2, 1, 1, 2, 1, 1, 1], 9) => false
+    headed([48, 7, 2, 1, 1, 2, 1, 1, 1], 9) => false
+
+fn partsOf(sig: List<Int>, total: Int) -> Bool
+    ? "The two integers have to account for exactly the whole signature."
+    lenR = at(sig, 3)
+    sMarker = 5 + lenR
+    lenS = at(sig, sMarker)
+    match Bool.or(sMarker >= total, lenR + lenS + 7 != total)
+        true -> false
+        false -> Bool.and(integerAt(sig, 2, lenR), integerAt(sig, lenR + 4, lenS))
+
+verify partsOf
+    partsOf([48, 6, 2, 1, 1, 2, 1, 1, 1], 9) => true
+    partsOf([48, 6, 2, 2, 1, 2, 1, 1, 1], 9) => false
+
+fn integerAt(sig: List<Int>, marker: Int, length: Int) -> Bool
+    ? "A DER integer: an 02 marker, a length above zero, no sign bit set, and"
+      "no leading zero unless the byte after it needs one."
+      "The last rule is the one people get wrong. A leading zero is required"
+      "when the number would otherwise look negative, and forbidden otherwise,"
+      "so exactly one encoding of each number is legal."
+    first = at(sig, marker + 2)
+    match Bool.or(at(sig, marker) != 2, Bool.or(length == 0, first >= 128))
+        true -> false
+        false -> notPadded(sig, marker, length, first)
+
+verify integerAt
+    integerAt([48, 6, 2, 1, 1, 2, 1, 1, 1], 2, 1) => true
+    integerAt([48, 6, 3, 1, 1, 2, 1, 1, 1], 2, 1) => false
+    integerAt([48, 6, 2, 1, 128, 2, 1, 1, 1], 2, 1) => false
+    integerAt([48, 6, 2, 0, 1, 2, 1, 1, 1], 2, 0) => false
+
+fn notPadded(sig: List<Int>, marker: Int, length: Int, first: Int) -> Bool
+    ? "A leading zero is only allowed when the next byte has its sign bit set."
+    match Bool.and(length > 1, first == 0)
+        false -> true
+        true -> at(sig, marker + 3) >= 128
+
+verify notPadded
+    notPadded([48, 7, 2, 2, 0, 129, 2, 1, 1, 1], 2, 2, 0) => true
+    notPadded([48, 7, 2, 2, 0, 1, 2, 1, 1, 1], 2, 2, 0) => false
+    notPadded([48, 6, 2, 1, 1, 2, 1, 1, 1], 2, 1, 1) => true
+
+fn at(bytes: List<Int>, n: Int) -> Int
+    ? "The nth byte, or nought when there is no such byte."
+      "Total on purpose. Every caller has checked the length first, and a"
+      "signature that is too short has already been refused by the time"
+      "anything asks for a byte inside it."
+    match List.take(List.drop(bytes, n), 1)
+        [] -> 0
+        [head, ..tail] -> head
+
+verify at
+    at([1, 2, 3], 0) => 1
+    at([1, 2, 3], 2) => 3
+    at([1, 2, 3], 5) => 0
+    at([], 0) => 0
+
+fn order() -> Int
+    ? "The order of the secp256k1 group: how many points the curve has."
+    115792089237316195423570985008687907852837564279074904382605163141518161494337
+
+verify order
+    order() => 115792089237316195423570985008687907852837564279074904382605163141518161494337
+
+fn halfOrder() -> Int
+    ? "Half of it, rounded down, which is the largest S that BIP146 allows."
+    57896044618658097711785492504343953926418782139537452191302581570759080747168
+
+verify halfOrder
+    halfOrder() => 57896044618658097711785492504343953926418782139537452191302581570759080747168
+    halfOrder() * 2 + 1 => order()
+
+fn isLowS(signature: List<Int>) -> Bool
+    ? "Whether S is in the lower half of the range, as BIP146 requires."
+      "Every signature has a twin with S replaced by the order minus S, and"
+      "both are valid to a curve. That makes a Transaction Id malleable by"
+      "anyone relaying it, which is what this rule exists to stop."
+      "Offered rather than applied, for the same reason as the encoding rule."
+      "A signature that is not valid DER has no S to speak of and answers false."
+    match isValidEncoding(signature)
+        false -> false
+        true -> lowValue(signature)
+
+verify isLowS
+    isLowS(Bytes.toList(Bytes.fromHex("304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901")?)) => true
+    isLowS(Bytes.toList(Bytes.fromHex("")?)) => false
+    isLowS(Bytes.toList(Bytes.fromHex("304502204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd41022100e7eadd137b135f821b9f5b5322ed6f627ce43a41a76bcd6e1d3f31eaf9e1b0d801")?)) => false
+
+fn lowValue(sig: List<Int>) -> Bool
+    ? "Read S and compare it with half the order."
+    lenR = at(sig, 3)
+    valueOf(List.take(List.drop(sig, lenR + 6), at(sig, lenR + 5)), 0) <= halfOrder()
+
+verify lowValue
+    lowValue([48, 6, 2, 1, 1, 2, 1, 1, 1]) => true
+
+fn valueOf(bytes: List<Int>, acc: Int) -> Int
+    ? "A DER integer's bytes, most significant first."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> valueOf(tail, acc * 256 + head)
+
+verify valueOf
+    valueOf([], 0) => 0
+    valueOf([1], 0) => 1
+    valueOf([1, 0], 0) => 256
+    valueOf([255, 255], 0) => 65535

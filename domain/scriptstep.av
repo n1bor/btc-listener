@@ -1,0 +1,45 @@
+module ScriptStep
+    intent =
+        "The three ways an opcode finishes, kept where more than one module can"
+        "reach them."
+        "Putting an item on the stack, replacing the stack, and stopping when an"
+        "answer came out false. Every opcode ends in one of these, and the"
+        "signature opcodes are in their own module because Domain.ScriptOps had"
+        "no room left, so these had to come out from under it."
+        "The stack limit lives here rather than in each caller because it is"
+        "checked on the way out of every opcode that grows the stack, and one"
+        "place is easier to be sure of than fifteen."
+    exposes [landed, pushing, stoppedUnless]
+    depends [Domain.Opcode, Domain.ScriptState]
+    effects []
+
+fn landed(stack: List<List<Int>>, state: State) -> Step
+    ? "Carry on with a new data stack, unless the two stacks together have"
+      "grown past the limit."
+    limit = Domain.ScriptState.maxStack()
+    match List.len(stack) + List.len(state.alt) > limit
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("stack is over the {limit} item limit")))
+        false -> Step.Continue(Domain.ScriptState.withStack(state, stack))
+
+verify landed
+    landed([[1]], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    landed(Domain.ScriptState.repeated(1001, [1]), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
+
+fn pushing(item: List<Int>, state: State) -> Step
+    ? "One more item on the data stack."
+    landed(List.prepend(item, state.stack), state)
+
+verify pushing
+    pushing([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pushing([1], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2]))) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
+
+fn stoppedUnless(ok: Bool, why: String, tail: List<List<Int>>, state: State) -> Step
+    ? "The shape every VERIFY opcode has: consume the items, and stop when the"
+      "answer was false rather than pushing it."
+    match ok
+        false -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        true -> Step.Continue(Domain.ScriptState.withStack(state, tail))
+
+verify stoppedUnless
+    stoppedUnless(false, "no", [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
+    stoppedUnless(true, "no", [[1]], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))

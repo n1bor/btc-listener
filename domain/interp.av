@@ -6,10 +6,16 @@ module Interp
         "and nowhere else. A first attempt had every opcode recursing into the"
         "rest of the Script itself, which meant none of them could be checked"
         "without also running a Script, and the file was half again as long."
-        "Undecided is not failure. Nine opcodes need a primitive Aver has not"
-        "got -- five want a curve, four want RIPEMD160 -- and three more want a"
-        "Transaction this does not have. Saying so rather than guessing is the"
-        "whole reason an engine can be written before any of them exist."
+        "Undecided is not failure. Four opcodes want RIPEMD160 or SHA1, three"
+        "want a Transaction this has not got, and the four that check"
+        "signatures want both a Transaction and a curve. Saying so rather than"
+        "guessing is the whole reason an engine can be written before any of"
+        "them exist."
+        "The signature opcodes are not entirely undecidable, which is why they"
+        "go through Domain.Checksig rather than being lumped in with the rest."
+        "Their stack discipline is exact, an empty signature always fails, and"
+        "a public key that is not a public key always fails. Only what is left"
+        "over needs the curve."
         "The minimal-encoding rules are not applied, and Domain.StackItem"
         "answers them without anything here asking. That is deliberate: they are"
         "switched on by verification flags rather than by consensus everywhere,"
@@ -59,7 +65,10 @@ verify parsed
     parsed("5163515168") => Outcome.Decided(Ending.Passed)
     parsed("5151640068") => Outcome.Decided(Ending.Passed)
     parsed("51a8") => Outcome.Decided(Ending.Passed)
-    parsed("ac") => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    parsed("ac") => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
+    parsed("010121020000000000000000000000000000000000000000000000000000000000000000ac") => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    parsed("0021020000000000000000000000000000000000000000000000000000000000000000ac") => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    parsed("ae") => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count"))
     parsed("a9") => Outcome.Undecided("OP_HASH160 needs ripemd160")
     parsed("7e") => Outcome.Decided(Ending.Failed("OP_CAT is disabled"))
     parsed("00636568") => Outcome.Decided(Ending.Failed("OP_VERIF is not allowed anywhere in a script"))
@@ -80,7 +89,8 @@ fn evaluate(ops: List<Op>, state: State) -> Outcome
 verify evaluate
     evaluate([], Domain.ScriptState.holding([[1]])) => Outcome.Decided(Ending.Passed)
     evaluate([], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
-    evaluate([Op.Code(172)], Domain.ScriptState.empty()) => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    evaluate([Op.Code(172)], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
+    evaluate([Op.Code(169)], Domain.ScriptState.empty()) => Outcome.Undecided("OP_HASH160 needs ripemd160")
     evaluate([Op.Push(1, [1])], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Passed)
 
 fn stepped(op: Op, rest: List<Op>, state: State) -> Outcome
@@ -92,4 +102,4 @@ fn stepped(op: Op, rest: List<Op>, state: State) -> Outcome
 verify stepped
     stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Passed)
     stepped(Op.Code(106), [], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
-    stepped(Op.Code(172), [], Domain.ScriptState.empty()) => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    stepped(Op.Code(169), [], Domain.ScriptState.empty()) => Outcome.Undecided("OP_HASH160 needs ripemd160")
