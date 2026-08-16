@@ -24,11 +24,18 @@ type Outcome
     Undecided(String)
 ```
 
-Every opcode except `OP_CHECKSIG`, `OP_CHECKSIGVERIFY`, `OP_CHECKMULTISIG`,
-`OP_CHECKMULTISIGVERIFY` and `OP_CHECKSIGADD` is decidable today. Those five
-reach the seam and return `Undecided`, which propagates to the whole script. A
-script that fails on stack discipline, a bad push, or an opcode limit still
-reports `Failed` — a real answer about a real fault.
+Five opcodes need a curve — `OP_CHECKSIG`, `OP_CHECKSIGVERIFY`,
+`OP_CHECKMULTISIG`, `OP_CHECKMULTISIGVERIFY`, `OP_CHECKSIGADD` — and four more
+need a hash Aver has not got: `OP_HASH160`, `OP_RIPEMD160`, `OP_HASH256` and
+`OP_SHA1`. RIPEMD160 is absent as surely as secp256k1 is, and `OP_HASH160` is in
+every P2PKH and P2SH output, which is most of the chain. So the reach of this
+engine without new primitives is smaller than it first looks, and the two gaps
+should be counted apart: one is a hash somebody could add in an afternoon, the
+other is elliptic curve arithmetic.
+
+Everything else is decidable today. A script that fails on stack discipline, a
+bad push, or an opcode limit still reports `Failed` — a real answer about a real
+fault.
 
 A `Bool` here would force a lie in one direction: either every unverifiable
 signature passes, or every one fails. The project already refuses that trade
@@ -98,3 +105,25 @@ Two things have to happen first, and neither is part of the engine.
 no segwit script could be evaluated at all. And `Domain.Script` reports P2PK as
 `nonstandard`, which is most of the early chain — a classification bug worth
 fixing on its own, independent of anything above.
+
+## Update, 16 August 2026 — the spike
+
+A throwaway parser and stack machine, run over real Blocks, to find out whether
+speed forces a different design. It does not.
+
+| range | scripts | ops | ms |
+|---|---|---|---|
+| Blocks 1–1,000 | 2,062 | 4,095 | 1,332 |
+| Blocks 90,000–91,000 | 5,858 | 14,172 | 1,634 |
+
+Three and a half times the ops cost a quarter more time, so it is not the ops
+that scale — reading and decoding the Blocks is. Against the three hours that
+resolving 116,576 Inputs already takes, evaluating their scripts is noise. The
+risk this ADR flagged as the one that could invalidate the design is not there.
+
+The same spike measured its own reach badly, in a way worth writing down.
+Running an Output script on an empty stack, as it did, means a P2PKH script dies
+at its first `OP_DUP` long before reaching `OP_HASH160`, so it reported no
+RIPEMD160 problem at all. Real evaluation runs the Input script first and the
+Output script on what it leaves. Until the engine does that, any count of what
+it can and cannot decide is measuring the wrong thing.
