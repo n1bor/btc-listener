@@ -1,0 +1,110 @@
+module ScriptParse
+    intent =
+        "Turning a Script's bytes into the things it is made of."
+        "An Op is a push of data or an opcode, and that is the whole vocabulary."
+        "A push carries its bytes rather than a length, so nothing downstream has"
+        "to walk back into the original Script to find what was pushed."
+        "There is exactly one way to fail: a push that claims more bytes than are"
+        "left. Everything else parses, including opcodes that are disabled,"
+        "undefined, or make no sense where they are — those are the interpreter's"
+        "to refuse, and refusing them here would leave it unable to say which."
+        "The opcode that a push came from is kept beside its bytes. Two Scripts"
+        "can push the same data with different opcodes, only one of which is the"
+        "minimal encoding, and the rule against the others needs to know which"
+        "was used."
+    exposes [Op, parse, opsIn]
+    depends [Bytes, Domain.Message, Domain.Opcode]
+    effects []
+
+type Op
+    Push(Int, List<Int>)
+    Code(Int)
+
+fn parse(bytes: List<Int>) -> Result<List<Op>, String>
+    ? "Every Op in a Script, in order."
+    from(bytes, [])
+
+verify parse
+    parse([]) => Result.Ok([])
+    parse([118]) => Result.Ok([Op.Code(118)])
+    parse([2, 170, 187]) => Result.Ok([Op.Push(2, [170, 187])])
+    parse([118, 169, 1, 170]) => Result.Ok([Op.Code(118), Op.Code(169), Op.Push(1, [170])])
+    parse([2, 170]) => Result.Err("push of 2 bytes runs past the end of the script")
+    parse([76, 1, 170]) => Result.Ok([Op.Push(76, [170])])
+    parse([76]) => Result.Err("push length runs past the end of the script")
+    parse([0]) => Result.Ok([Op.Code(0)])
+
+fn opsIn(scriptHex: String) -> Result<List<Op>, String>
+    ? "The same, from the hexadecimal a Transaction carries."
+    raw = Bytes.fromHex(scriptHex)?
+    parse(Bytes.toList(raw))
+
+verify opsIn
+    List.len(opsIn("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")?) => 5
+    opsIn("51") => Result.Ok([Op.Code(81)])
+    opsIn("76a914") => Result.Err("push of 20 bytes runs past the end of the script")
+    opsIn("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn from(bytes: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
+    ? "Accumulator form, turned round at the end."
+    match bytes
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> nextOp(head, tail, acc)
+
+verify from
+    from([], []) => Result.Ok([])
+    from([118], []) => Result.Ok([Op.Code(118)])
+    from([2, 170], []) => Result.Err("push of 2 bytes runs past the end of the script")
+
+fn nextOp(code: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
+    ? "A byte is a direct push, a wide push, or an opcode."
+      "OP_0 pushes nothing and is an opcode rather than a push of zero bytes,"
+      "which matters because the minimal-encoding rule treats them differently."
+    match Domain.Opcode.isPushData(code)
+        false -> from(rest, List.prepend(Op.Code(code), acc))
+        true -> pushOf(code, rest, acc)
+
+verify nextOp
+    nextOp(118, [], []) => Result.Ok([Op.Code(118)])
+    nextOp(0, [], []) => Result.Ok([Op.Code(0)])
+    nextOp(1, [170], []) => Result.Ok([Op.Push(1, [170])])
+    nextOp(2, [170], []) => Result.Err("push of 2 bytes runs past the end of the script")
+
+fn pushOf(code: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
+    ? "A direct push says its own length; a wide one says it in the bytes after."
+    match Domain.Opcode.pushWidth(code)
+        0 -> taken(code, code, rest, acc)
+        _ -> wide(code, Domain.Opcode.pushWidth(code), rest, acc)
+
+verify pushOf
+    pushOf(1, [170], []) => Result.Ok([Op.Push(1, [170])])
+    pushOf(76, [1, 170], []) => Result.Ok([Op.Push(76, [170])])
+    pushOf(76, [], []) => Result.Err("push length runs past the end of the script")
+
+fn wide(code: Int, width: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
+    ? "Read the length, then the bytes it names."
+    length = List.take(rest, width)
+    match List.len(length) == width
+        false -> Result.Err("push length runs past the end of the script")
+        true -> taken(code, Domain.Message.readLittleEndian(length), List.drop(rest, width), acc)
+
+verify wide
+    wide(76, 1, [1, 170], []) => Result.Ok([Op.Push(76, [170])])
+    wide(76, 1, [], []) => Result.Err("push length runs past the end of the script")
+    wide(77, 2, [1, 0, 170], []) => Result.Ok([Op.Push(77, [170])])
+
+fn taken(code: Int, count: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
+    ? "Take the pushed bytes, or say the Script ended in the middle of them."
+      "This is the only way parsing fails, and it is worth being exact about"
+      "which push it was: a Script can be long and the one that runs off the"
+      "end is otherwise hard to find."
+    data = List.take(rest, count)
+    match List.len(data) == count
+        false -> Result.Err("push of {count} bytes runs past the end of the script")
+        true -> from(List.drop(rest, count), List.prepend(Op.Push(code, data), acc))
+
+verify taken
+    taken(0, 0, [], []) => Result.Ok([Op.Push(0, [])])
+    taken(1, 1, [170], []) => Result.Ok([Op.Push(1, [170])])
+    taken(2, 2, [170], []) => Result.Err("push of 2 bytes runs past the end of the script")
+    taken(1, 1, [170, 118], []) => Result.Ok([Op.Push(1, [170]), Op.Code(118)])
