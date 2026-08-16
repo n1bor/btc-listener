@@ -163,9 +163,7 @@ txs    3721
 `full` is the default and says so explicitly; anything else prints the usage.
 
 `summary` saves the printing, not the work: the count means every Transaction
-has already been decoded. That Block takes about five and a half seconds, nearly
-all of it turning two megabytes of hexadecimal back into bytes
-([jasisz/aver#911](https://github.com/jasisz/aver/issues/911)).
+has already been decoded. That Block takes about three and a half seconds.
 
 Four things are checked, and each says which one failed:
 

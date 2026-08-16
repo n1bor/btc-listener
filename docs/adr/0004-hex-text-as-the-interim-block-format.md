@@ -35,3 +35,30 @@ Blocks. When byte I/O lands, the cap can rise.
 Segments written by this version will not be readable by the binary one: hex is
 newline-framed, binary will be length-framed. For a bounded range of Blocks,
 re-downloading is cheaper than a migration, so no upgrade path is provided.
+
+## Update, 16 August 2026 — the decode cost is largely gone
+
+[jasisz/aver#911](https://github.com/jasisz/aver/issues/911) is fixed. `fromHex`
+was building a `String` per hexadecimal character before looking at any of them;
+the compiler's fusion pass now walks the string with a cursor instead. Measured
+on the same reproduction, decoding a mebibyte:
+
+| | before | after |
+|---|---|---|
+| `Bytes.fromHex`, 1 MiB | 1,239 ms | **28 ms** |
+
+Forty-four times, and about 37 MB/s against 0.81. The thirteen-day figure above
+was arithmetic on the old rate; on the new one the same sum is hours rather than
+days.
+
+That does not mean hex is now free, and the interesting number is smaller than
+the ratio suggests. Reading Block 800000 back and checking it — 1.6 MB, 3,721
+Transactions — went from 5.6 s to 3.3 s, not from 5.6 s to 0.2 s. Decoding the
+hexadecimal is no longer what dominates; reading the whole Segment and decoding
+the Transactions inside it now is.
+
+So the decision stands, but its reason has moved. Hex text was chosen because
+`Disk` cannot write binary, and that is still true. It was defended by arguing
+the decode cost was tolerable, and that argument is now much stronger than when
+it was made — while the case for binary rests on the Segment read and the
+storage doubling rather than on `fromHex`.

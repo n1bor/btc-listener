@@ -5,6 +5,9 @@ module Audit
         "lower Height, so holding 1..N means holding every parent. Over a prefix"
         "an unresolved Input is a defect rather than a gap in coverage, which is"
         "what makes this worth running."
+        "Progress is reported as it goes. A run over a hundred thousand Blocks"
+        "takes hours, and one that says nothing until it finishes cannot be told"
+        "from one that has stopped -- which came up during exactly such a run."
         "Blocks are read through Infra.Blocks.fetch rather than Infra.Chain.at,"
         "which reads one Block at a time and re-reads its whole Segment to do it."
         "Nine thousand seven hundred early Blocks share a Segment, so that walk"
@@ -23,6 +26,15 @@ record Counts
     resolved: Int
     coinbase: Int
     faults: Int
+
+fn reportEvery() -> Int
+    ? "How many Blocks between progress lines."
+      "Often enough that a stall is visible within a minute or so at the slowest"
+      "part of the chain, rare enough that the output stays readable."
+    2000
+
+verify reportEvery
+    reportEvery() => 2000
 
 fn main() -> Unit
     ? "Audit a range of Heights."
@@ -106,6 +118,7 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
     faults = blockFaults(height, blockId, header, root)
     _said = reportBlock(height, faults)
+    _progress = maybeReport(height, counts)
     overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, faults = counts.faults + List.len(faults)), transactions)
 
 fn blockFaults(height: Int, blockId: String, header: BlockHeader, root: String) -> List<String>
@@ -166,6 +179,17 @@ fn sampleHeaderWithId(blockId: String) -> BlockHeader
 
 verify sampleHeaderWithId
     sampleHeaderWithId("cc").blockId => "cc"
+
+fn maybeReport(height: Int, counts: Counts) -> Unit
+    ? "Say where the walk has got to, every so often."
+      "Reported before this Block is counted, so the numbers are what was true"
+      "at the Height named rather than one ahead of it."
+      "Total: reportEvery is two thousand and the checker cannot see that a"
+      "constant divisor is not zero, so the default is unreachable."
+    ! [Console.print]
+    match Result.withDefault(Int.mod(counts.blocks, reportEvery()), 1) == 0
+        false -> Unit
+        true -> Console.print("  ... height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.faults} faults")
 
 fn reportBlock(height: Int, faults: List<String>) -> Unit
     ? "Print any Block-level fault as it is found."
