@@ -3,6 +3,10 @@
 Connects to a single Bitcoin node over the peer-to-peer protocol, listens for
 transaction announcements, and prints each transaction's decoded structure.
 
+It also downloads the chain from that node and checks what it holds: Blocks
+against their Headers, Transactions against the Outputs they claim to spend, and
+Scripts as far as they can be run without a curve to verify signatures against.
+
 Written in [Aver](https://averlang.dev).
 
 ```
@@ -14,6 +18,42 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
    out 0.00015448 BTC  P2WPKH bc1qrwwaqv2fvhhu67tp6pqc0uy83sn0aw3gxgmeuz
    out 7.46148541 BTC  P2WPKH bc1qywkyxsjrcuj06m47dywvlz68evfvagr3tqe0cs
 ```
+
+## Commands
+
+Ten of them. Only the first three need a Peer; everything else reads what those
+wrote and works offline.
+
+| command | what it does | Peer |
+|---|---|---|
+| `[peer-address] [port]` | [listen](#running) for Transactions and print each one decoded | yes |
+| `headers <peer> <dir>` | [fetch](#downloading-the-chain) every Block Header, in Height order | yes |
+| `bodies <peer> <dir> <a> <b>` | [fetch](#downloading-the-chain) the Blocks for Heights a..b | yes |
+| `txindex <dir> <a> <b>` | [record](#finding-a-transaction) where each Transaction in a..b sits | no |
+| `show <dir> <height> [summary]` | [read](#looking-at-one-block) one Block back off disk and check it four ways | no |
+| `tx <dir> <txid>` | [find](#finding-a-transaction) one Transaction by its Id | no |
+| `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
+| `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
+| `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
+| `help` | print the usage | no |
+
+The three fetching commands have to run in this order, because each needs what
+the one before it wrote:
+
+```
+headers ─→ bodies ─→ txindex
+```
+
+`show` and `prune` then need `bodies`. `tx`, `spend` and the spend half of
+`audit` need `txindex` as well — without it every Input reads as unresolved,
+which is an answer rather than an error.
+
+Everything but the listener takes a `<dir>`, where the Index and the Segments
+live. Point them all at the same one.
+
+All of them run under `aver run`. The examples below use a compiled binary for
+everything but the listener, because anything that opens the Index is several
+times faster that way; [see why](#downloading-the-chain).
 
 ## Requirements
 
@@ -66,10 +106,24 @@ where announcements arrive constantly, but worth knowing.
 `aver run` prints a warning that verify blocks in dependency modules are not
 sampled. That is expected — `aver verify --deps` is what checks them.
 
-### Downloading the chain
+### Running under WSL
 
-Two further subcommands fetch the chain rather than listen to it. **Compile
-them.** They will now run interpreted — [jasisz/aver#900](https://github.com/jasisz/aver/issues/900)
+If the node is on the Windows host, `127.0.0.1` inside WSL will not reach it —
+WSL2 has its own network namespace. Use the gateway address:
+
+```bash
+aver run main.av --module-root . -- $(ip route show default | awk '{print $3}')
+```
+
+That address is reassigned when Windows reboots, so resolve it rather than
+writing it down.
+
+## Downloading the chain
+
+`headers` and `bodies` fetch the chain rather than listen to it, and they are the
+last two commands that need a Peer. **Compile first** — everything from here on
+is shown running from a compiled binary, and this is the build step that makes
+one. They will run interpreted — [jasisz/aver#900](https://github.com/jasisz/aver/issues/900)
 closed on 17 August 2026, and the Index that could not be opened under `aver run`
 at 40,000 entries opens at 1,454,101 in 14 seconds — but compiled is four times
 faster on the same log and wants a third of the memory, and a download measured
@@ -116,7 +170,7 @@ stores nothing and widening one fetches only the difference:
 Heights 1–20 are 215-byte Blocks from 2009. Modern Blocks are 1–2 MB, and
 reaching them means letting `headers` finish first.
 
-### Looking at one Block
+## Looking at one Block
 
 `show` reads a Block back off disk, checks it, and prints its Transactions the
 same way the listener prints loose ones. It needs no Peer.
@@ -198,7 +252,7 @@ body   not fetched                                    # never asked for
 body   discarded by pruning, Prune Watermark 100      # deliberately deleted
 ```
 
-### Finding a Transaction
+## Finding a Transaction
 
 `txindex` records where each Transaction sits, and `tx` looks one up. Neither
 needs a Peer, and `bodies` must have run over the range first.
@@ -226,7 +280,7 @@ Transaction index is exactly what `infra/store.av` says it cannot back. Over a
 range it works today, and the keyspace is the one a real database would be
 given.
 
-### Checking a spend
+## Checking a spend
 
 `spend` follows each Input back to the Output it spends and reports whether the
 Transaction adds up. No Peer, and `txindex` must cover the Blocks the parents
@@ -238,6 +292,7 @@ txid   f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
 in     50.00000000 BTC over 1 inputs
 out    50.00000000 BTC over 2 outputs
 spend  inputs cover outputs, fee 0.00000000 BTC
+script 0 passed, 0 failed, 1 undecided
 ```
 
 There are **three** answers, not two, and the difference matters more than the
@@ -254,20 +309,69 @@ that as invalid would make the whole check worthless, so a gap in what we hold
 and a fault in the Transaction are never the same answer. A coinbase is
 answered separately again, because its Input spends nothing.
 
-**This is not full validation.** It checks that the Outputs being spent exist
-and that value is not created. Whether the spender was *entitled* to spend them
-is a signature question, and Aver has no secp256k1 — see the note at the end.
+**This is not full validation.** It checks that the Outputs being spent exist,
+that value is not created, and that the Scripts run — but the Scripts mostly do
+not finish, for the reason below.
 
-### Checking a range
+## Running the Scripts
+
+`spend` and `audit` both run the Script pair behind each Input: the Input's
+Script, then the Output's Script on the stack the first one left. That is one
+answer per Input, and again there are three of them rather than two:
+
+```
+script 0 passed, 0 failed, 1 undecided
+```
+
+**undecided** is by far the most common, and it is the honest answer rather than
+a missing feature. Aver has no RIPEMD-160 and no secp256k1, so `OP_HASH160` and
+all four signature opcodes stop instead of guessing. On the early chain that is
+most Inputs; on a modern Block it is every one of them.
+
+Counting it apart from **failed** is the whole discipline. An engine that called
+"cannot tell" invalid would be worthless over a chain held in part — and one that
+called it valid would be worse. That second one is not hypothetical: running
+three Blocks from 2023 produced **6,363 passes from an engine that has never
+verified a signature**, and every one was wrong. Segwit was deployed as a soft
+fork, which *required* a witness program to look valid to nodes that could not
+read it — a version byte and a push of a hash leaves the hash on the stack and
+comes out true. Witness programs are refused before they are run now, and those
+Blocks read `0 passed / 0 failed / 6493 undecided`.
+
+Bitcoin Core's own `script_tests.json` is the adversarial test, and nothing
+written here would be half as unkind. Of its 1,288 rows, 1,120 assemble into
+Script pairs — the rest are comments, or segwit cases carrying a witness this
+engine does not run:
+
+| | |
+|---|---|
+| agree with Core | 865 |
+| undecided — needs a primitive | 159 |
+| **we refuse what Core accepts** | **0** |
+| we accept what Core refuses | 96 |
+
+The nought is the one that matters — that is the direction a defect would show
+up in. All 96 in the other direction are attributable to verification flags this
+engine deliberately does not apply, each of which became a rule after Blocks
+breaking it were already valid. See
+[ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md).
+
+## Checking a range
 
 `audit` runs every check over a range of Heights: each Block against its Header,
-its parent and its target, and each Transaction against what its Inputs spend.
+its parent and its target, each Transaction against what its Inputs spend, and
+each Input's Script pair as far as it runs.
 
 ```bash
 ./target/release/main audit ~/chain 1 20000
-  ... height 18001: 18000 blocks, 18129 transactions, 129 spends, 0 faults
-blocks 20000  transactions 20136  spends resolved 136  coinbase 20000  unresolved 0  FAULTS 0
+  ... height 18001: 18000 blocks, 18129 transactions, 129 spends, 1008 undecided scripts, 0 failed scripts, 0 faults
+blocks 20000  transactions 20136  spends resolved 136  coinbase 20000  unresolved 0  scripts 0 passed / 0 failed / 1157 undecided  FAULTS 0
 ```
+
+The two counts are over different things, which is why they differ so widely.
+**spends** counts Transactions — 136 of the 20,136 here are not coinbases.
+**scripts** counts Inputs, one Script pair each, and those 136 Transactions have
+1,157 Inputs between them.
 
 **unresolved** and **FAULTS** are separate on purpose. Over a prefix of the
 chain every Input's parent is held, so `unresolved 0` is a real claim and
@@ -276,7 +380,7 @@ true — a parent below the Watermark is gone deliberately — so unresolved cou
 those and the faults stay clean. A Transaction that is *wrong*, paying out more
 than it spends or naming an Output that cannot exist, is a fault either way.
 
-### Reclaiming space
+## Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.
 
@@ -317,59 +421,83 @@ Only Segment 0 goes, because Segment 1 still holds Blocks above the Height.
 than reporting it missing, and `audit` over the range counts the Inputs it can
 no longer follow as unresolved rather than as faults.
 
-### Running under WSL
-
-If the node is on the Windows host, `127.0.0.1` inside WSL will not reach it —
-WSL2 has its own network namespace. Use the gateway address:
+## Checking the code
 
 ```bash
-aver run main.av --module-root . -- $(ip route show default | awk '{print $3}')
+aver audit   .                          # all three of the below, in one pass
+aver check   . --module-root . --deps   # contracts, coverage, lints
+aver verify  . --module-root . --deps   # every verify block
+aver format  . --check                  # formatting
 ```
 
-That address is reassigned when Windows reboots, so resolve it rather than
-writing it down.
+54 files, 0 check errors, 0 format issues, and **3,699 verify cases** across 687
+verify blocks — 32,461 case runs with `--deps`, which re-checks each dependency
+from every module that depends on it. Everything except the socket is pure and
+covered.
 
-## Checking
-
-```bash
-aver check  . --module-root . --deps    # contracts, coverage, lints
-aver verify . --module-root . --deps    # every verify block
-```
-
-Everything except the socket is pure and covered. The wire format is pinned
-against values derived independently rather than captured from this
-implementation: a `verack` and a `ping` frame, a full `version` payload, the
-genesis coinbase transaction id (which is published), and a SegWit transaction
-id computed from the specification.
+Values are pinned against sources outside this implementation rather than
+captured from it. The wire format: a `verack` and a `ping` frame, a full
+`version` payload, the genesis coinbase transaction id (which is published), and
+a SegWit transaction id computed from the specification. The Script engine and
+the signing messages: Bitcoin Core's `script_tests.json` and `sighash.json`,
+converted into cases by `tools/script_tests_to_aver.py` and answered by the
+engine rather than by the file. And Block 170's real signature, which was
+verified against the message this code computes using thirty lines of Python
+secp256k1 written for the purpose — because a reference implementation and the
+code under test, written by the same hand, agree with each other whether or not
+they agree with Bitcoin.
 
 ## Layout
 
+Fifty-four files. Grouped by what they are for rather than listed:
+
 ```
 CONTEXT.md          glossary — the vocabulary this project commits to
-aver.toml           two lint suppressions, each with its reasoning
+aver.toml           three lint suppressions, each with its reasoning
 docs/adr/           architecture decisions
+tools/              the generator that turns Core's test vectors into cases
 main.av             argv entrypoint, deliberately thin
-app/cli.av          argument handling
-domain/
-  address.av        opaque PeerAddress; parsing is the only way in
-  network.av        mainnet/testnet/regtest, and their magic bytes
-  message.av        framing: magic, command, length, checksum
-  version.av        the version payload, built purely
-  inventory.av      reading announcements, building getdata
+
+app/                cli.av argument handling, show.av / lookup.av /
+                    maintain.av one per group of commands
+
+domain/  the wire
+  address.av network.av message.av version.av inventory.av dns.av
   transaction.av    the SegWit-aware decoder
-  dns.av            DNS questions and answers, for seed lookups
+  compactsize.av hash.av text.av
+
+domain/  addresses
   script.av         recognising output scripts, naming who they pay
-  base58.av         Base58Check, for pre-SegWit addresses
-  bech32.av         Bech32 and Bech32m, for SegWit addresses
-infra/
+  base58.av bech32.av
+
+domain/  the chain
+  block.av          Block Headers: reading, naming, asking for more
+  checks.av segment.av index.av spend.av
+
+domain/  Script
+  opcode.av scriptparse.av stackitem.av scriptstate.av scriptmath.av
+  scriptstep.av scriptops.av
+  interp.av         the walk: one recursion over a Script, and only one
+  spendscript.av    the Input's Script then the Output's, in that order
+  sighash.av bip143.av   what a signature is actually over
+  ecdsa.av checksig.av   the seam a curve will plug into
+  scriptcases1-5.av sighashcases1-2.av  Core's vectors, 1,618 of them
+
+infra/  the network
   peer.av           the Peer session: handshake and listen loop
-  resolver.av       seed lookups over DNS
+  resolver.av download.av
+
+infra/  the disk
+  store.av          append-only keyed store, the database seam
+  blocks.av chain.av txindex.av lock.av prune.av
+  spends.av audit.av
 ```
 
-The split is deliberate: only `infra/` touches the network, and everything it
-does is an arrangement of pure parts from `domain/`. That is why
-the wire format can be tested without a peer, and why a failure against a live
-node is a socket problem rather than an ambiguity.
+The split is deliberate: only `infra/` touches the network or the disk, and
+everything it does is an arrangement of pure parts from `domain/`. That is why
+the wire format can be tested without a peer, why the whole Script engine is
+checked without one, and why a failure against a live node is a socket problem
+rather than an ambiguity.
 
 ## Protocol notes
 
@@ -416,6 +544,21 @@ those inputs spend — measured on mainnet, 29 of 29 such requests came back
 `notfound`, and across 441 inputs none had its parent in the same stream.
 Getting fees means asking the node over RPC instead, which is a different
 program; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md).
+
+Three things are out of reach, and each is waiting on something outside this
+repository rather than on work here:
+
+| | needs | what it would unlock |
+|---|---|---|
+| `OP_HASH160`, `OP_RIPEMD160` | RIPEMD-160 in Aver | P2PKH and P2SH — most of the early chain |
+| `OP_CHECKSIG` and friends | secp256k1 in Aver | the actual entitlement to spend |
+| witness and Taproot Scripts | both, plus Schnorr | 90% of a modern Block |
+
+The signing messages both Scripts would need are already written and checked
+against Core's vectors, legacy and BIP143 alike. What is missing is the
+arithmetic, and the seam it plugs into — `domain/ecdsa.av` — deliberately has no
+`Valid` constructor, so the day a curve arrives the compiler names every caller
+that has to change.
 
 ## Licence
 
