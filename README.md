@@ -103,8 +103,22 @@ seconds ([jasisz/aver#782](https://github.com/jasisz/aver/issues/782)), so a
 peer that says nothing for that long ends the session — unlikely on mainnet,
 where announcements arrive constantly, but worth knowing.
 
-`aver run` prints a warning that verify blocks in dependency modules are not
-sampled. That is expected — `aver verify --deps` is what checks them.
+`aver run` prints **45 warnings** before it starts, one per dependency module,
+each saying that module's verify blocks are not sampled and suggesting you move
+them to the entry module. Ignore the suggestion — it would mean collapsing 3,699
+cases into a `main.av` that is deliberately thin. The blocks are checked, by
+`aver verify --deps`; it is `aver run` that does not sample them.
+
+There is no flag to quiet it
+([jasisz/aver#857](https://github.com/jasisz/aver/issues/857)), so filter that
+one line off stderr and leave the rest alone:
+
+```bash
+aver run main.av --module-root . -- 2> >(grep -v "non-law verify block" >&2)
+```
+
+Real errors still come through: an unparseable address still says
+`error: octet 999 is out of range (0-255)`.
 
 ### Running under WSL
 
