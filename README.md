@@ -68,10 +68,12 @@ sampled. That is expected — `aver verify --deps` is what checks them.
 
 ### Downloading the chain
 
-Two further subcommands fetch the chain rather than listen to it. **Both must be
-compiled** — building a `Map` is quadratic under `aver run`
-([jasisz/aver#900](https://github.com/jasisz/aver/issues/900)), so an
-interpreted Index stops making progress at any real size. See
+Two further subcommands fetch the chain rather than listen to it. **Compile
+them.** They will now run interpreted — [jasisz/aver#900](https://github.com/jasisz/aver/issues/900)
+closed on 17 August 2026, and the Index that could not be opened under `aver run`
+at 40,000 entries opens at 1,454,101 in 14 seconds — but compiled is four times
+faster on the same log and wants a third of the memory, and a download measured
+in hours is not the place to give that up. See
 [ADR 0003](docs/adr/0003-compile-rather-than-interpret.md).
 
 ```bash

@@ -30,6 +30,10 @@ module Store
         "cost of a call is the size of the Store rather than the size of the"
         "change. One putAll of 40000 entries takes 64 milliseconds; the same"
         "40000 entries one put at a time take 35 seconds."
+        "That is jasisz/aver#890 and it is still open. Re-measured compiled on 17"
+        "August 2026, 40000 entries: 52 milliseconds through one putAll against"
+        "24404 one put at a time, so the ratio stands at about 470 and so does"
+        "every batch in the callers."
     exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, compact, fixture]
     exposes opaque [Store]
     depends [Domain.Text]
@@ -76,8 +80,8 @@ fn openLog(path: String) -> Result<Store, String>
 fn reopen(path: String, contents: Result<String, String>) -> Result<Store, String>
     ? "Replay a log that was read, or report why it could not be."
     log = contents?
-    changes = parseAll(Domain.Text.completeLines(log), [])?
-    Result.Ok(Store(path = path, entries = applyChanges(changes, empty())))
+    entries = replayed(Domain.Text.completeLines(log), empty())?
+    Result.Ok(Store(path = path, entries = entries))
 
 verify reopen
     reopen("s.log", Result.Ok("+a\tb\n"))?.entries => Map.set(empty(), "a", "b")
@@ -224,7 +228,7 @@ verify nextTombstone
 fn forgetAll(keys: List<String>, into: Map<String, String>) -> Map<String, String>
     ? "Remove the same keys from the in-memory map."
       "Map.remove appears in the recursive call rather than behind a helper, for"
-      "the reason applyChanges gives: a Map handed back from a function is copied."
+      "the reason replayApplied gives: a Map handed back from a function is copied."
     match keys
         [] -> into
         [head, ..tail] -> forgetAll(tail, Map.remove(into, head))
@@ -380,58 +384,52 @@ verify usableValue
     usableValue("a\tb") => false
     usableValue("a\nb") => false
 
-fn parseAll(records: List<String>, acc: List<Change>) -> Result<List<Change>, String>
-    ? "Read every log record into a Change, in the order they were written."
-      "Parsing and applying are two passes rather than one because threading a"
-      "Map through a Result-returning recursion is quadratic in Aver 0.28.1 --"
-      "either alone is linear, the pair is not. See the note on applyChanges."
+fn replayed(records: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
+    ? "Read the log into a Map, one record at a time, so a later record wins."
+      "This was two passes until 17 August 2026, because threading a Map through"
+      "a Result-returning recursion used to be quadratic while either half alone"
+      "was linear. jasisz/aver#961 closed that. Measured on the shape this file"
+      "has, compiled: fused and split now agree at every size tried, 41 ms"
+      "against 45 at 40000 records and 216 against 219 at 160000. The"
+      "intermediate list of Changes bought nothing and is gone."
+      "What has not changed is where Map.set may appear. See replayApplied."
     match records
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> parseNext(head, tail, acc)
+        [] -> Result.Ok(into)
+        [head, ..tail] -> replayNext(head, tail, into)
 
-verify parseAll
-    parseAll([], []) => Result.Ok([])
-    parseAll(["+a\tb"], []) => Result.Ok([Change.Put(Entry(key = "a", value = "b"))])
-    parseAll(["+a\tb", "-a"], []) => Result.Ok([Change.Put(Entry(key = "a", value = "b")), Change.Drop("a")])
-    parseAll(["nope"], []) => Result.Err("Store log record is neither a put nor a delete: 'nope'")
+verify replayed
+    replayed([], empty()) => Result.Ok(empty())
+    replayed(["+a\tb"], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
+    replayed(["+a\tb", "-a"], empty()) => Result.Ok(empty())
+    replayed(["+a\tb", "+a\tc"], empty()) => Result.Ok(Map.set(empty(), "a", "c"))
+    replayed(["nope"], empty()) => Result.Err("Store log record is neither a put nor a delete: 'nope'")
 
-fn parseNext(head: String, tail: List<String>, acc: List<Change>) -> Result<List<Change>, String>
-    ? "Parse one record and continue with the rest."
+fn replayNext(head: String, tail: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
+    ? "Parse one record, then apply it and continue."
     parsed = parseOne(head)?
-    parseAll(tail, List.prepend(parsed, acc))
+    replayApplied(parsed, tail, into)
 
-verify parseNext
-    parseNext("+a\tb", [], []) => Result.Ok([Change.Put(Entry(key = "a", value = "b"))])
-    parseNext("bad", [], []) => Result.Err("Store log record is neither a put nor a delete: 'bad'")
-    parseNext("", [], []) => Result.Err("Store log record is neither a put nor a delete: ''")
+verify replayNext
+    replayNext("+a\tb", [], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
+    replayNext("bad", [], empty()) => Result.Err("Store log record is neither a put nor a delete: 'bad'")
+    replayNext("", [], empty()) => Result.Err("Store log record is neither a put nor a delete: ''")
 
-fn applyChanges(changes: List<Change>, into: Map<String, String>) -> Map<String, String>
-    ? "Replay parsed Changes in order, so a later one wins over an earlier one."
-      "No Result here, and no helper that hands a Map back, both deliberately."
-      "In Aver 0.28.1 a Map returned from a function is copied, so a fold that"
-      "routes each step through one costs quadratic time: 40000 entries took 27"
-      "seconds that way and 9 milliseconds when Map.set appears directly in the"
-      "recursive call. applyNext branches and then tail-calls for the same reason,"
-      "so the Map is only ever an argument and never a return value."
-      "Every record has already been validated by parseAll, so nothing here fails."
-    match changes
-        [] -> into
-        [head, ..tail] -> applyNext(head, tail, into)
-
-verify applyChanges
-    applyChanges([], empty()) => empty()
-    applyChanges([Change.Put(Entry(key = "a", value = "b"))], empty()) => Map.set(empty(), "a", "b")
-    applyChanges([Change.Put(Entry(key = "a", value = "b")), Change.Drop("a")], empty()) => empty()
-
-fn applyNext(head: Change, tail: List<Change>, into: Map<String, String>) -> Map<String, String>
+fn replayApplied(change: Change, tail: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
     ? "A put sets a key and a tombstone forgets one, each continuing by tail call."
-    match head
-        Change.Put(entry) -> applyChanges(tail, Map.set(into, entry.key, entry.value))
-        Change.Drop(key) -> applyChanges(tail, Map.remove(into, key))
+      "Map.set and Map.remove appear directly in the tail call, and no helper here"
+      "hands a Map back. jasisz/aver#890 is open: a Map returned from a function"
+      "is copied, so a fold routed through one costs quadratic time. Re-measured"
+      "compiled on 17 August 2026 at 80000 entries: 48 ms with the insert inline,"
+      "49 ms branching first as this does, 105633 ms through a helper. That is why"
+      "this branches into a third function rather than calling a fourth."
+    match change
+        Change.Put(entry) -> replayed(tail, Map.set(into, entry.key, entry.value))
+        Change.Drop(key) -> replayed(tail, Map.remove(into, key))
 
-verify applyNext
-    applyNext(Change.Put(Entry(key = "a", value = "b")), [], empty()) => Map.set(empty(), "a", "b")
-    applyNext(Change.Drop("a"), [], Map.set(empty(), "a", "b")) => empty()
+verify replayApplied
+    replayApplied(Change.Put(Entry(key = "a", value = "b")), [], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
+    replayApplied(Change.Drop("a"), [], Map.set(empty(), "a", "b")) => Result.Ok(empty())
+    replayApplied(Change.Put(Entry(key = "a", value = "b")), ["nope"], empty()) => Result.Err("Store log record is neither a put nor a delete: 'nope'")
 
 fn parseOne(line: String) -> Result<Change, String>
     ? "A record is a put or a tombstone, told apart by its first character."

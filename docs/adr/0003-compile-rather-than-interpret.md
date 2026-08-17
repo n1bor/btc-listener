@@ -98,6 +98,10 @@ the above.
 
 ## Update, 14 August 2026 — a necessity again, for a different reason
 
+> **Superseded by the 17 August update below.** #900 is closed. The interpreted
+> Store now opens the whole real Index, so the "unable to finish" argument in
+> this section is spent. #890, the other half, is untouched and still is.
+
 The decision stands, and not as a preference. What restores it is not the list
 defect that prompted it but two `Map` defects that arrived with the Index:
 [#890](https://github.com/jasisz/aver/issues/890), a `Map` handed back from a
@@ -149,3 +153,96 @@ let `infra/store.av` be written the natural way. They are independent: either ca
 land without the other, and only the first bears on this decision. The compiled
 path stays valid either way, so nothing depends on this beyond the build
 instructions and the note in the README.
+
+## Update, 17 August 2026 — a preference again, and this time it holds
+
+[#961](https://github.com/jasisz/aver/pull/961) closed
+[#900](https://github.com/jasisz/aver/issues/900), and
+[#960](https://github.com/jasisz/aver/pull/960) closed
+[#955](https://github.com/jasisz/aver/issues/955) and #898. The toolchain here is
+`7f7bf00a`, still version 0.28.1.
+
+### The table from 14 August, re-measured
+
+Same truncated prefixes of the same mainnet Index, same machine, `aver run`:
+
+| entries | 14 August | 17 August |
+|---|---|---|
+| 10,000 | 3,480 ms / 2,059 MB | 67 ms / 23 MB |
+| 20,000 | 17,710 ms / 8,189 MB | 146 ms / 37 MB |
+| 40,000 | 107,950 ms / 30,425 MB | 312 ms / 67 MB |
+
+Linear, and 346× faster at the size where it used to want 30 GB. So the whole
+Index can be opened interpreted now, and was: a 1,484,520-record log holding
+1,454,101 live entries takes 13.9 s and 1.7 GB under `aver run`, against 3.2 s
+and 615 MB compiled.
+
+That is 4× on time and 2.8× on memory. Real, worth having for a download that
+takes hours, and nothing like the difference between finishing and not. So the
+README no longer says the downloader *must* be compiled; it says compile it, and
+gives the ratio as the reason.
+
+### #890 is untouched, so the batching stays
+
+Building an 80,000-entry `Map` three ways, compiled, against the same three
+measured on 14 August:
+
+| fold | 14 August | 17 August |
+|---|---|---|
+| `Map.set` inline in the recursive call | 58 ms | 48 ms |
+| branch, then tail-call — what `store.av` does | 55 ms | 49 ms |
+| via a helper that returns a `Map` | 101,496 ms | 105,633 ms |
+
+Unchanged: roughly 2,150× for writing the obvious helper. The Store's own writes
+say the same thing, compiled, 40,000 entries: **52 ms** through one `putAll`
+against **24,404 ms** one `put` at a time, because each `put` hands back a Store
+holding a copy of the whole `Map`. Every batch in `infra/download.av`,
+`infra/txindex.av` and `infra/prune.av` earns its keep, and `absorbAll`,
+`forgetAll` and `replayApplied` still have to keep `Map.set` out of a helper.
+
+Curiously the three folds are now *equal* under `aver run` — 6,423 / 6,666 /
+6,055 ms at 40,000 — because all three are equally slowed by something else. See
+below.
+
+### What did come out: the two-pass replay
+
+`Infra.Store.open` parsed its log into a `List<Change>` and then applied the
+list, because threading a `Map` through a `Result`-returning recursion used to be
+quadratic while either half alone was linear. That is what #961 fixed. Compiled,
+fused against split:
+
+| records | split | fused |
+|---|---|---|
+| 20,000 | 20 ms | 17 ms |
+| 40,000 | 45 ms | 41 ms |
+| 80,000 | 98 ms | 103 ms |
+| 160,000 | 219 ms | 216 ms |
+
+Equal at every size, and on the real 1,454,101-entry Index equal on time and
+52 MB cheaper, the intermediate list being gone. `parseAll`, `parseNext`,
+`applyChanges` and `applyNext` are replaced by `replayed`, `replayNext` and
+`replayApplied`, which read the log in one walk. This is the first workaround in
+this project that a fix upstream has actually retired.
+
+### The residue, filed as #963
+
+One shape is still quadratic under `aver run`: a `Map` filled with keys
+**interpolated in the loop that inserts them**. 40,000 inserts take 7,023 ms that
+way, 27 ms when the keys come from a list built beforehand, and 29 ms when they
+are sliced out of one large String. Compiled, all three are linear.
+
+That is why the fold table above went flat interpreted — all three folds
+interpolate, so all three pay it — and it is
+[#963](https://github.com/jasisz/aver/issues/963).
+
+It does not touch this project. `Infra.Store` slices its keys out of the log
+text, which is the fast column, which is why the real Index opens linearly at a
+million and a half entries while a 40,000-iteration benchmark does not.
+
+### What is left to retire
+
+#890 closing would let `infra/store.av` be written the natural way and would
+remove the batching from three callers.
+[#782](https://github.com/jasisz/aver/issues/782), the 30-second TCP read
+deadline, is also still open and still hardcoded in `aver-rt/src/tcp.rs`, so the
+note in the README about an idle peer stands.
