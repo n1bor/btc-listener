@@ -1,9 +1,13 @@
-# Bitcoin Peer Listener
+# Bitcoin Peer Listener, Chain Downloader and Auditor
 
 Connects to a single Bitcoin node over the peer-to-peer protocol, listens for
 transaction announcements, and prints each transaction's decoded structure. It
 also downloads the chain — every Block Header, then Block bodies for a chosen
 range — keeping the bytes in Segments on disk and their whereabouts in an Index.
+
+What it holds it then checks: each Block against its Header, its parent and its
+target, each Transaction against the Outputs its Inputs claim to spend, and each
+Input's pair of Scripts as far as they run without RIPEMD-160 or a curve.
 
 ## Language
 

@@ -1,4 +1,4 @@
-# Bitcoin Peer Listener
+# Bitcoin Peer Listener, Chain Downloader and Auditor
 
 Connects to a single Bitcoin node over the peer-to-peer protocol, listens for
 transaction announcements, and prints each transaction's decoded structure.
