@@ -263,6 +263,47 @@ ten thousand bytes each, exhausts the verify VM's million-step budget. The
 compiled engine runs both and agrees with Core on both — `OK` for the one at the
 limit, a size refusal for the one over it.
 
+## Update — six thousand passes that meant nothing
+
+Asked to run the spend check over recent Blocks rather than early ones, on the
+three Blocks the directory holds from August 2023 (799,999 to 800,001):
+
+```
+blocks 3  transactions 13018  spends resolved 6332  coinbase 3  unresolved 6683
+scripts 6363 passed / 0 failed / 130 undecided   FAULTS 0
+```
+
+Six thousand three hundred and sixty-three `Passed`, from an engine that has
+never verified a signature. Every one of them was wrong, and not by accident.
+
+Segwit was deployed as a soft fork, which required that a witness program look
+valid to every node that could not read it. A P2WPKH Output is `OP_0` and a push
+of twenty bytes; run under the old rules that leaves the hash on the stack and
+the hash is not zero, so the Script comes out **true**. The same holds for P2WSH
+and for Taproot. An engine with no witness evaluation does not fail on segwit —
+it passes, silently and confidently, and on a recent Block that is nine spends
+in ten.
+
+So the engine was behaving exactly like a 2016 node, which is correct behaviour
+for a 2016 node and a lie in a report headed `passed`. This is the failure mode
+the three-valued discipline exists to prevent, and it got in anyway, because
+`Undecided` only ever came from an opcode refusing to answer and here no opcode
+refused: every one of them ran and the answer was true.
+
+`Domain.Script.isAnyWitnessProgram` now asks BIP141's question — any version
+from nought to sixteen, any push from two bytes to forty, including versions
+nobody has defined — and `Domain.SpendScript` answers `Undecided` before running
+such a pair rather than after.
+
+Two things worth taking from it. The first is that a Script engine cannot be
+trusted to notice its own ignorance from the inside: soft forks are designed so
+that old rules accept what they cannot read, so every future soft fork will look
+like a pass to this code, and the only defence is to recognise the shape and
+refuse. The second is about the corpus: this cost one case in Core's
+`script_tests.json`, which moved out of "we accept what Core refuses" and into
+"undecided" — the only case in 1,120 that had been covering this, and it had
+been dismissed as an out-of-scope segwit case rather than read.
+
 ## Consequences
 
 The engine will never call a Block fully valid, and should not be read as doing

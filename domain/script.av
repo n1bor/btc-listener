@@ -6,7 +6,7 @@ module Script
         "plus an encoding, never a hash of a public key."
         "Anything unrecognised keeps its hex: guessing at a script that does not"
         "match a known shape would be worse than saying so."
-    exposes [describe, kindOf]
+    exposes [describe, kindOf, isAnyWitnessProgram]
     depends [Bytes, Domain.Base58, Domain.Bech32]
     effects []
 
@@ -252,3 +252,50 @@ verify addressOf
     addressOf("P2WPKH", bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
     addressOf("P2TR", bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => Result.Ok("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
     addressOf("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
+
+fn isAnyWitnessProgram(scriptHex: String) -> Bool
+    ? "Whether this Output is a witness program of any version, as BIP141 has it."
+      "A different question from kindOf, which names the three shapes anyone"
+      "actually uses. This covers every version from nought to sixteen and every"
+      "push from two bytes to forty, including versions nobody has defined."
+      "It matters because of what such a Script means to an engine that cannot"
+      "read it. A version byte and a push of a hash, run under the old rules,"
+      "leaves the hash on the stack and comes out true -- which is exactly how"
+      "segwit was deployed without splitting the network, and which means an"
+      "engine with no witness evaluation calls every segwit spend valid. This"
+      "is the question that has to be asked before that answer is believed."
+    witnessShaped(bytesOf(scriptHex))
+
+verify isAnyWitnessProgram
+    isAnyWitnessProgram("0014751e76e8199196d454941c45d1b3a323f1433bd6") => true
+    isAnyWitnessProgram("0020701a8d401c84fb13e6baf169d59684e17abd9fa216c8cc5b9fc63d622ff8c58d") => true
+    isAnyWitnessProgram("5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c") => true
+    isAnyWitnessProgram("60020102") => true
+    isAnyWitnessProgram("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => false
+    isAnyWitnessProgram("a914751e76e8199196d454941c45d1b3a323f1433bd687") => false
+    isAnyWitnessProgram("51") => false
+    isAnyWitnessProgram("0001") => false
+
+fn witnessShaped(script: List<Int>) -> Bool
+    ? "A version byte, then one push that accounts for all the rest."
+      "Four bytes at the least and forty-two at the most, so the push is between"
+      "two and forty and there is no room for anything after it."
+    length = List.len(script)
+    Bool.and(Bool.and(length >= 4, length <= 42), Bool.and(isVersionByte(byteAt(script, 0)), byteAt(script, 1) == length - 2))
+
+verify witnessShaped
+    witnessShaped(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => true
+    witnessShaped(bytesOf("60020102")) => true
+    witnessShaped(bytesOf("0002010203")) => false
+    witnessShaped(bytesOf("0101")) => false
+
+fn isVersionByte(byte: Int) -> Bool
+    ? "OP_0, or OP_1 through OP_16, and nothing else."
+    Bool.or(byte == 0, Bool.and(byte >= 81, byte <= 96))
+
+verify isVersionByte
+    isVersionByte(0) => true
+    isVersionByte(81) => true
+    isVersionByte(96) => true
+    isVersionByte(97) => false
+    isVersionByte(80) => false

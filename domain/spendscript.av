@@ -11,13 +11,16 @@ module SpendScript
         "Only the stack carries between them. The opcode count starts again and"
         "the condition stack has to be empty at the end of each, which is why"
         "an OP_IF opened in the Input's Script cannot be closed by the Output's."
+        "A witness program is refused before it is run rather than after. What"
+        "it means to an engine that cannot read it is not failure but success,"
+        "which is the one kind of wrong answer this project cannot afford."
         "P2SH is not here. A P2SH Output Script is OP_HASH160, a push, and"
         "OP_EQUAL, so it stops on the first opcode for want of RIPEMD160 and"
         "the redeem script is never reached. Writing the re-run now would be"
         "writing a branch nothing can enter; it belongs with #10, in the change"
         "that makes OP_HASH160 answer."
     exposes [check, Outcomes, noOutcomes, count, merged]
-    depends [Domain.Interp, Domain.ScriptParse, Domain.ScriptState]
+    depends [Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState]
     effects []
 
 fn check(inputScriptHex: String, outputScriptHex: String) -> Outcome
@@ -30,12 +33,35 @@ fn check(inputScriptHex: String, outputScriptHex: String) -> Outcome
       "oversized Output Script that this accepted until the limit was put back."
     match Bool.or(tooLong(inputScriptHex), tooLong(outputScriptHex))
         true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
-        false -> parsed(inputScriptHex, outputScriptHex)
+        false -> notWitness(inputScriptHex, outputScriptHex)
 
 verify check
     check("51", "51") => Outcome.Decided(Ending.Passed)
     check(Domain.ScriptState.longScript(), "51") => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("51", Domain.ScriptState.longScript()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6") => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+
+fn notWitness(inputScriptHex: String, outputScriptHex: String) -> Outcome
+    ? "A witness program cannot be answered by running it, and running it"
+      "anyway does not fail -- it passes, which is worse."
+      "Segwit was deployed as a soft fork, which means a witness program had to"
+      "look valid to every node that could not read it: a version byte and a"
+      "push of a hash, which under the old rules leaves the hash on top of the"
+      "stack and comes out true. An engine with no witness evaluation therefore"
+      "calls every segwit spend valid, silently and confidently, and over a"
+      "recent Block that is nine spends in ten."
+      "This was found by running three Blocks from 2023 and getting 6,363"
+      "passes out of an engine that has never verified a signature. The number"
+      "was real and meant nothing."
+    match Domain.Script.isAnyWitnessProgram(outputScriptHex)
+        true -> Outcome.Undecided("output is a witness program and needs the witness evaluated")
+        false -> parsed(inputScriptHex, outputScriptHex)
+
+verify notWitness
+    notWitness("51", "51") => Outcome.Decided(Ending.Passed)
+    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6") => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    notWitness("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c") => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    notWitness("51", "00") => Outcome.Decided(Ending.Failed("script left a false value on top"))
 
 fn tooLong(scriptHex: String) -> Bool
     ? "Two hexadecimal characters to the byte."
