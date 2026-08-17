@@ -186,15 +186,27 @@ at its first `OP_DUP` and the reach it reported was fiction. `Domain.SpendScript
 does it properly: the Input's Script, then the Output's on the stack it left,
 with a fresh opcode count and a condition stack that has to be empty in between.
 
-Over the first 30,000 Blocks, with the `t:` index built so every parent
-resolves: **2,869 spends, 0 failed, 0 passed, 2,869 undecided.** Nothing
-unresolved and no faults.
+Over the first 100,000 Blocks, with the `t:` index built so every parent
+resolves:
 
-All undecided is the right answer and not a disappointment. Almost every Output
-in that range is P2PK — a public key and `OP_CHECKSIG` — so evaluation gets all
-the way to the signature check and stops there, which is precisely the claim
-this design was built to be able to make. The number to watch is the count of
-`Failed`, because those would be ours, and it is nought.
+```
+blocks 100000  transactions 216576  spends resolved 116576  coinbase 100000
+unresolved 0   scripts 0 passed / 0 failed / 192363 undecided   FAULTS 0
+```
+
+192,363 real Input and Output Script pairs, run together the way Bitcoin runs
+them. Nothing unresolved, no faults, and not one `Failed`.
+
+All undecided is the right answer and not a disappointment. Every Output in
+that range is P2PK or P2PKH, so evaluation runs to `OP_CHECKSIG` or to
+`OP_HASH160` and stops there — which is precisely the claim this design was
+built to be able to make. The number to watch is `Failed`, because those would
+be ours, and it is nought across all 192,363.
+
+It is also the measure this ADR promised: the count of `Undecided` is how much
+of consensus is not being checked, and today it is all of it. Nothing here
+should be read as saying these spends are valid. It says the engine got as far
+as the signature and knows that it cannot go further.
 
 P2SH is not implemented and cannot be reached: a P2SH Output Script begins with
 `OP_HASH160`, so it stops on the first opcode for want of RIPEMD160 and the
