@@ -290,6 +290,18 @@ the three-valued discipline exists to prevent, and it got in anyway, because
 `Undecided` only ever came from an opcode refusing to answer and here no opcode
 refused: every one of them ran and the answer was true.
 
+With the shape recognised, the same three Blocks read:
+
+```
+blocks 3  transactions 13018  spends resolved 6332  coinbase 3  unresolved 6683
+scripts 0 passed / 0 failed / 6493 undecided   FAULTS 0
+```
+
+Every one of the 6,363 passes became `Undecided`, and 6,493 is exactly the count
+of Inputs in those Blocks whose parent the `t:` index holds — counted
+independently, outside the engine, before the fix was written. Nought passed and
+nought failed, which for a 2023 Block is the whole truth.
+
 `Domain.Script.isAnyWitnessProgram` now asks BIP141's question — any version
 from nought to sixteen, any push from two bytes to forty, including versions
 nobody has defined — and `Domain.SpendScript` answers `Undecided` before running
