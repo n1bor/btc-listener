@@ -51,19 +51,21 @@ module Ecdsa
         "libsecp256k1 is what Bitcoin Core itself runs, and the provider hands"
         "the question to it. RIPEMD-160 followed the curve behind the same"
         "contract afterwards, so there is one boundary rather than two."
-        "What that costs is written down where it is paid. The cases here bind"
-        "an Aver stub through given and test what this module does with an"
-        "answer rather than whether the answer is right. Whether it is right is"
-        "checked in the provider's own language, against the published vectors"
-        "and against the first spend Bitcoin ever made."
-        "That is now a smaller gap than it was. jasisz/aver#987 lets aver run"
-        "and aver verify take --providers and reach the real implementation, so"
-        "an interpreted audit works again and agrees with the compiled one. It"
-        "does not reach the suite yet: --providers refuses any module that does"
-        "not use the capability, which is most of them, so aver audit cannot"
-        "carry it. That is jasisz/aver#989. When it closes the stubs go."
+        "For a fortnight it cost the cases their subject. They bound an Aver"
+        "stub through given and tested what this module does with an answer"
+        "rather than whether the answer was right, because aver verify had no"
+        "provider to ask."
+        "That is over. jasisz/aver#987 gave aver run and aver verify a"
+        "--providers flag, and #989 made it work across a whole project, so"
+        "aver audit . --providers now runs every case here against"
+        "libsecp256k1 itself. The stub table is deleted and every expectation"
+        "it had been standing in for holds against the real curve."
+        "Whether the curve is right is still checked in the provider's own"
+        "language too, against the published vectors and against the first"
+        "spend Bitcoin ever made. Two independent checks of the same thing is"
+        "the right number for a consensus rule."
     exposes [Ruling, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
-    depends [Bytes, Domain.Primitives, Domain.PrimitiveStub]
+    depends [Bytes, Domain.Primitives]
     effects []
 
 type Ruling
@@ -76,14 +78,17 @@ fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
       "Undecidable is the answer for anything that needs the curve, which is"
       "every signature that is well formed. The two that are not need no curve"
       "to refuse."
-      "The message is unused and that is deliberate: it is here so that callers"
-      "are written against the real shape, and so that the day this gets a body"
-      "nothing above it changes."
+      "The signature arrives with its hash type byte still on it, as it sits"
+      "in an Input, and overCurve drops it before it crosses to the provider."
+      "The first case below is the first spend Bitcoin ever made: the key and"
+      "the DER out of Block 170, and the message Domain.SpendContext builds"
+      "for it. It could not be written until aver audit could reach the real"
+      "curve, and it is the one case here that proves the boundary carries"
+      "what it says it carries."
     ruled(decideShape(Bytes.toList(signature), Bytes.toList(publicKey)), publicKey, signature, message)
 
 verify decide
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
+    decide(Bytes.fromHex("0411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3")?, Bytes.fromHex("304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901")?, Bytes.fromHex("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")?) => Ruling.Valid
     decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Ruling.Invalid("empty signature")
     decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
     decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("signature does not verify")
@@ -110,8 +115,6 @@ fn overCurve(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
     verdict(Domain.Primitives.verifySignature(octets(publicKey), listOctets(signatureBody(Bytes.toList(signature))), octets(message)))
 
 verify overCurve
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Domain.Primitives.verifySignature(octets(Bytes.fromList([])), listOctets(signatureBody(Bytes.toList(Bytes.fromList([])))), octets(Bytes.fromList([]))))
 
 fn verdict(valid: Bool) -> Ruling

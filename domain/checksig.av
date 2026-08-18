@@ -32,7 +32,7 @@ module Checksig
         "a real spend gives, and it is the only thing left between this module"
         "and an answer."
     exposes [step, isSignatureOpcode]
-    depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.PrimitiveStub, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Domain.Primitives]
+    depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Domain.Primitives]
     effects []
 
 fn isSignatureOpcode(code: Int) -> Bool
@@ -54,8 +54,6 @@ fn step(code: Int, state: State, context: Context) -> Step
         _ -> multiple(code, state, context)
 
 verify step
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     step(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
     step(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     step(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
@@ -69,8 +67,6 @@ fn single(code: Int, state: State, context: Context) -> Step
         Result.Ok(two) -> singleOn(code, two, state, context)
 
 verify single
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     single(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
     single(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     single(172, Domain.ScriptState.holding([[2, 3], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
@@ -86,8 +82,6 @@ fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
         Option.None -> againstMessage(code, two, state, context)
 
 verify singleOn
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     singleOn(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
     singleOn(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
@@ -104,8 +98,6 @@ fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
         Result.Ok(hashType) -> overMessage(code, two, state, Domain.SpendContext.messageFor(context, hashType))
 
 verify againstMessage
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     againstMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
 
 fn overMessage(code: Int, two: Two, state: State, message: Option<String>) -> Step
@@ -118,8 +110,6 @@ fn overMessage(code: Int, two: Two, state: State, message: Option<String>) -> St
         Option.Some(hex) -> ruled(code, two, state, decided(two, hex))
 
 verify overMessage
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.None) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
     overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00")) => Step.Continue(Domain.ScriptState.holding([[]]))
 
@@ -133,8 +123,6 @@ fn decided(two: Two, messageHex: String) -> Ruling
         Result.Ok(message) -> Domain.Ecdsa.decide(bytesOf(two.first), bytesOf(two.second), message)
 
 verify decided
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     decided(Two(first = validKey(), second = [4, 5], rest = []), "zz") => Domain.Ecdsa.Ruling.Undecidable("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn bytesOf(values: List<Int>) -> Bytes
@@ -225,8 +213,6 @@ fn multiple(code: Int, state: State, context: Context) -> Step
         [head, ..tail] -> withKeyCount(code, Domain.StackItem.asNumber(head), tail, state, context)
 
 verify multiple
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     multiple(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
     multiple(174, Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     multiple(174, Domain.ScriptState.holding([[21]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))
@@ -304,8 +290,6 @@ fn decidedMultiple(code: Int, keyItems: List<List<Int>>, sigItems: List<List<Int
         [head, ..tail] -> multiAnswered(code, multiRuling(sigItems, keyItems, context), below, state)
 
 verify decidedMultiple
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     decidedMultiple(174, [], [], [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     decidedMultiple(174, [validKey()], [[]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     decidedMultiple(174, [validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
@@ -335,8 +319,6 @@ fn multiRuling(sigItems: List<List<Int>>, keyItems: List<List<Int>>, context: Co
         [head, ..tail] -> multiAgainst(head, tail, keyItems, context)
 
 verify multiRuling
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     multiRuling([], [], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Valid
     multiRuling([[]], [validKey()], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
 
@@ -347,8 +329,6 @@ fn multiAgainst(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List
         [head, ..tail] -> multiAdvanced(oneRuling(signature, head, context), signature, rest, tail, context)
 
 verify multiAgainst
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     multiAgainst([], [], [], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
     multiAgainst([], [], [validKey()], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
 
@@ -360,8 +340,6 @@ fn multiAdvanced(ruling: Ruling, signature: List<Int>, rest: List<List<Int>>, ke
         Domain.Ecdsa.Ruling.Undecidable(why) -> Domain.Ecdsa.Ruling.Undecidable(why)
 
 verify multiAdvanced
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     multiAdvanced(Domain.Ecdsa.Ruling.Valid, [], [], [], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Valid
     multiAdvanced(Domain.Ecdsa.Ruling.Undecidable("no"), [], [], [], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Undecidable("no")
     multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [], [], [], Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
@@ -376,8 +354,6 @@ fn oneRuling(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ru
         Domain.Ecdsa.Ruling.Undecidable(why) -> overOne(signature, publicKey, context)
 
 verify oneRuling
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     oneRuling([], validKey(), Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Invalid("empty signature")
     oneRuling([4, 5], validKey(), Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
 
@@ -388,8 +364,6 @@ fn overOne(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ruli
         Result.Ok(hashType) -> overOneMessage(signature, publicKey, Domain.SpendContext.messageFor(context, hashType))
 
 verify overOne
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     overOne([4, 5], validKey(), Domain.SpendContext.bare()) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
 
 fn overOneMessage(signature: List<Int>, publicKey: List<Int>, message: Option<String>) -> Ruling
@@ -399,6 +373,4 @@ fn overOneMessage(signature: List<Int>, publicKey: List<Int>, message: Option<St
         Option.Some(hex) -> decided(Two(first = publicKey, second = signature, rest = []), hex)
 
 verify overOneMessage
-    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     overOneMessage([4, 5], validKey(), Option.None) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")

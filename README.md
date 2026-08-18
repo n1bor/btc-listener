@@ -536,16 +536,20 @@ needs. The full table, and why the log is being kept anyway, are in
 ## Checking the code
 
 ```bash
-aver audit   .                          # all three of the below, in one pass
+aver audit   . --providers              # all three of the below, in one pass
 aver check   . --module-root . --deps   # contracts, coverage, lints
-aver verify  . --module-root . --deps   # every verify block
+aver verify  . --module-root . --providers --deps   # every verify block
 aver format  . --check                  # formatting
 ```
 
-54 files, 0 check errors, 0 format issues, and **3,699 verify cases** across 687
-verify blocks — 32,461 case runs with `--deps`, which re-checks each dependency
-from every module that depends on it. Everything except the socket is pure and
-covered.
+60 files, 0 check errors, 0 format issues, and **3,889 verify cases**.
+Everything except the socket is pure and covered.
+
+`--providers` is not optional. The verify cases that reach RIPEMD-160 or a
+signature check run the real implementations through the provider, so without
+it 50 of them fail rather than passing on a fixture. That is the right way
+round: a suite that quietly substituted a stub for the curve would report
+passes it had not earned.
 
 Values are pinned against sources outside this implementation rather than
 captured from it. The wire format: a `verack` and a `ping` frame, a full
@@ -730,19 +734,24 @@ databases and hands out ids, and refuses an id it did not issue.
 
 ### What this costs
 
-`aver verify` has no provider of its own, so:
+For a while it cost the corpus its teeth. `aver verify` had no provider, so
+every case that reached RIPEMD-160 or a signature check bound an Aver stub
+through `given` — a hand-built table of published digests, which tested that
+the engine pushes, hashes, compares and settles, and no longer tested whether
+RIPEMD-160 was RIPEMD-160.
 
-- Verify cases that reach an operation bind an Aver stub through `given`
-  ([`domain/primitivestub.av`](domain/primitivestub.av)). They test what this
-  project wrote — that the engine pushes, hashes, compares and settles — and no
-  longer test whether RIPEMD-160 is RIPEMD-160. That becomes undoable when
-  [#989](https://github.com/jasisz/aver/issues/989) closes.
-- That check moved to where the implementation is: the provider's own Rust
-  tests, against the eight published vectors and against the first spend Bitcoin
-  ever made. The database provider is tested the same way — round trip,
-  overwrite, delete, reopen, prefix order, a handle it never issued, and a batch
-  whose write-ahead record is deliberately torn, which comes back absent rather
-  than half applied.
+That is over. [jasisz/aver#989](https://github.com/jasisz/aver/issues/989)
+closed, `aver audit . --providers` runs the whole project against the real
+implementations, and the stub table is deleted. Every expectation the fixtures
+had been standing in for holds against the real thing.
+
+What remains:
+
+- The implementations are still tested where they live, in the providers' own
+  Rust tests: the eight published RIPEMD-160 vectors and the first spend
+  Bitcoin ever made; and for the database, round trip, overwrite, delete,
+  reopen, prefix order, a handle it never issued, and a batch whose write-ahead
+  record is deliberately torn, which comes back absent rather than half applied.
 - **Plain `aver run` cannot start this program**, and that is the safe failure:
   an interpreter running the audit with no crypto would report passes it had not
   earned. Pass `--providers` and it works — Aver builds a thin Rust host from the
@@ -753,12 +762,5 @@ databases and hands out ids, and refuses an id it did not issue.
   aver run main.av --module-root . --providers -- audit chain 1 2000
   ```
 
-- **`aver verify --providers` runs the real provider too**, but only per file, and
-  only for files that reach the capability — a module that does not use it is
-  rejected as an unused binding
-  ([jasisz/aver#989](https://github.com/jasisz/aver/issues/989)). `aver audit` has
-  no such flag either, so the suite still binds Aver stubs through `given` and the
-  gate is still plain `aver audit .`.
-
-`aver check`, `aver audit`, `aver format` and `aver capabilities` are unaffected —
-none of them needs a provider, and the verify suite runs on stubs.
+`aver check`, `aver format` and `aver capabilities` need no provider. `aver
+verify` and `aver audit` do, and take `--providers` to get one.
