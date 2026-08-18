@@ -518,6 +518,7 @@ infra/  the network
 infra/  the disk
   store.av          keyed store over two backends, the database seam
   storelog.av       the append-only log's record format and replay
+  kv.av             the key-value database capability contract
   blocks.av chain.av txindex.av lock.av prune.av
   spends.av audit.av
 ```
@@ -595,16 +596,18 @@ MIT — see [LICENSE](LICENSE).
 
 ## Providers
 
-Two primitives are not written here and not written in Aver: RIPEMD-160 and
-secp256k1 signature verification. They are declared in
-[`primitives.av`](primitives.av) as a **capability contract** — operations with
-no body — and supplied at run time by a Rust provider in
-[`providers/primitives`](providers/primitives), which is named in
-[`aver.toml`](aver.toml).
+Some things this program needs are not written here and are not written in Aver.
+They are declared as **capability contracts** — operations with no body — and
+supplied at run time by Rust providers named in [`aver.toml`](aver.toml).
+
+| Contract | What it is | Provider |
+| --- | --- | --- |
+| [`domain/primitives.av`](domain/primitives.av) | RIPEMD-160 and secp256k1 signature verification | [`providers/primitives`](providers/primitives) |
+| [`infra/kv.av`](infra/kv.av) | a key-value database | [`providers/kv`](providers/kv) |
 
 ```toml
 [[providers.bindings]]
-capability = "Primitives"
+capability = "Domain.Primitives"
 crate = "btc_listener_primitives"
 path = "providers/primitives"
 factory = "primitives_binding"
@@ -623,10 +626,22 @@ false audit rather than a slow one. The provider hands the question to
 `libsecp256k1`, which is what Bitcoin Core itself runs. RIPEMD-160 then followed
 the curve behind the same contract, so there is one boundary rather than two.
 
+`Infra.Kv` is the second contract and the newer one. `Infra.Store` keeps the
+whole index in a Map rebuilt from an append-only log, which opens 962,268
+entries in 1.9 seconds and 414 MB and cannot be stretched to the two hundred
+million an output keyspace would need. That is a database, and Aver has not
+got one. Unlike the primitives it is **effectful**, so every operation declares
+an Oracle dimension and what a replay does with it, and an open database is an
+opaque `Handle` the program cannot forge. Nothing calls it yet — the Store
+grows a third backend in
+[#15](https://github.com/n1bor/btc-listener/issues/15). The provider is
+`rusty-leveldb`, chosen over RocksDB because it needs no C++ toolchain, and
+the choice is provisional: swapping the crate changes one Rust file and no
+Aver at all.
+
 ### What this costs
 
-`aver verify` has no provider — by design, since Aver never loads Rust into
-`aver verify` or `aver run`. So:
+`aver verify` has no provider of its own, so:
 
 - Verify cases that reach an operation bind an Aver stub through `given`
   ([`domain/primitivestub.av`](domain/primitivestub.av)). They test what this
@@ -635,7 +650,9 @@ the curve behind the same contract, so there is one boundary rather than two.
   [#989](https://github.com/jasisz/aver/issues/989) closes.
 - That check moved to where the implementation is: the provider's own Rust
   tests, against the eight published vectors and against the first spend Bitcoin
-  ever made.
+  ever made. The database provider is tested the same way — round trip,
+  overwrite, delete, reopen, prefix order, and a batch whose write-ahead record
+  is deliberately torn, which comes back absent rather than half applied.
 - **Plain `aver run` cannot start this program**, and that is the safe failure:
   an interpreter running the audit with no crypto would report passes it had not
   earned. Pass `--providers` and it works — Aver builds a thin Rust host from the

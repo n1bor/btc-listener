@@ -1,0 +1,94 @@
+module Kv
+    intent =
+        "A key-value database, declared as a contract rather than written."
+        "Aver has Disk and nothing else, so Infra.Store keeps its index in a Map"
+        "rebuilt from an append-only log. That works to about a million entries"
+        "and costs 1.9 seconds and 414 MB to open at 962268 of them. The output"
+        "keyspace this project wants next is two hundred million, which is some"
+        "eighty gigabytes of Map. No arrangement of Disk fixes that; what is"
+        "missing is a database, and a capability is how Aver says so."
+        "Effectful, unlike Domain.Primitives. A hash of the same bytes is always"
+        "the same hash and there is nothing to record; a read from a database is"
+        "an answer about the world at a moment, so every operation here declares"
+        "an Oracle dimension and what a replay should do with it. Reads are"
+        "generative and recorded. Writes return a Result rather than Unit, so"
+        "they are generativeOutput and recorded too: a caller has to be able to"
+        "learn that a write failed, and that answer is a value."
+        "Handle is opaque. An open database is a resource, not a description of"
+        "one, and a program that could forge one could name a database it never"
+        "opened. Only open produces a Handle and only this contract's operations"
+        "consume one."
+        "No owned carrier type is needed here. Contract v1 requires every"
+        "boundary type to be declared in the capability module, and Domain."
+        "Primitives had to declare Octets because the stdlib Bytes is not owned."
+        "String, Int, Bool, Unit, Option, Result, List and Tuple are all legal"
+        "as they stand, so keys and values cross as themselves and nothing is"
+        "converted at the edge."
+        "The operations are the ones Infra.Store already has, batched the same"
+        "way, because backing that Store is what this is for. There is no put"
+        "and no delete for one key: a single change is a batch of one, and"
+        "having only the batch form is what stops a caller writing the loop"
+        "that costs a copy of the store per entry."
+        "count walks the keyspace. LevelDB does not keep a count, and there is"
+        "one caller — the line that says how many entries the index holds — so"
+        "the scan is paid once at the end of a build rather than in a loop."
+        "Nothing here can be checked by aver verify. A verify case that reaches"
+        "one of these operations runs a stub; whether the database is right is"
+        "the provider's business and is tested in the provider's own language,"
+        "against a real database on a real disk."
+    kind = capability
+    semantics = effectful
+    exposes [Handle, open, get, putAll, deleteAll, count, prefixed, compact]
+
+opaque Handle
+
+operation open(dir: String) -> Result<Handle, String>
+    ? "Open the database in this directory, creating it if it is not there."
+      "A directory rather than a file, which is what Infra.Store.open already"
+      "promises its callers and what a database wants anyway."
+    oracle = generativeOutput
+    replay = recorded
+
+operation get(handle: Handle, key: String) -> Result<Option<String>, String>
+    ? "What is stored under a key, if anything."
+      "None means the key is absent. An Err means the read itself failed, which"
+      "is the distinction Infra.Store.get was given a Result for before there"
+      "was anything here that could fail."
+    oracle = generative
+    replay = recorded
+
+operation putAll(handle: Handle, entries: List<Tuple<String, String>>) -> Result<Unit, String>
+    ? "Write these pairs in one batch, all of them or none of them."
+      "Atomic, which the log backend could only approximate by making a batch"
+      "one append and discarding a torn tail on the next open."
+    oracle = generativeOutput
+    replay = recorded
+
+operation deleteAll(handle: Handle, keys: List<String>) -> Result<Unit, String>
+    ? "Remove these keys in one batch, all of them or none of them."
+      "A key that is not there is not an error. Pruning drops the Location of"
+      "every Block in a Segment and does not first ask which of them it wrote."
+    oracle = generativeOutput
+    replay = recorded
+
+operation count(handle: Handle) -> Result<Int, String>
+    ? "How many keys the database holds."
+      "A walk of the keyspace. LevelDB keeps no count, and inventing one would"
+      "mean a second write on every batch to keep it true."
+    oracle = generative
+    replay = recorded
+
+operation prefixed(handle: Handle, prefix: String) -> Result<List<Tuple<String, String>>, String>
+    ? "Every pair whose key starts with this prefix, in key order."
+      "The one thing the Map backend cannot do at all and the reason the output"
+      "keyspace becomes possible: outputs of one Transaction share a prefix, so"
+      "resolving an Input is a range read rather than a scan of everything."
+    oracle = generative
+    replay = recorded
+
+operation compact(handle: Handle) -> Result<Unit, String>
+    ? "Ask the database to reclaim the space held by overwrites and tombstones."
+      "The same request Infra.Store.compact makes of the log, which rewrites it"
+      "in full. A database decides for itself how much of the work to do now."
+    oracle = generativeOutput
+    replay = recorded
