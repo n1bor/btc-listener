@@ -18,7 +18,10 @@ module Prune
         "present, so removing it would move the append point backwards."
     exposes [Pruned, run]
     depends [Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store]
-    effects [Disk.appendText, Disk.delete, Disk.exists]
+    effects [
+        Disk.appendText, Disk.delete, Disk.exists,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+    ]
 
 record Pruned
     segments: Int
@@ -37,7 +40,7 @@ fn run(store: Store, blocks: BlockStore, below: Int) -> Result<Pruned, String>
       "Blocks on disk that nothing names, which merely wastes the space pruning"
       "was trying to reclaim. Neither is good and the second is recoverable, so"
       "the Watermark is written last and the whole thing is safe to run again."
-    ! [Disk.appendText, Disk.delete, Disk.exists]
+    ! [Disk.appendText, Disk.delete, Disk.exists, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
     watermark = watermarkFor(store, below)?
     floor = floorSegment(store, watermark, Infra.Blocks.currentSegment(blocks))?
     segments = Infra.Blocks.prune(blocks, floor)?
@@ -52,6 +55,7 @@ fn watermarkFor(store: Store, below: Int) -> Result<Int, String>
       "a lowered Watermark reports Blocks that were discarded on purpose as ones"
       "that simply never arrived. Nothing can put them back, so nothing should"
       "be able to forget that they went."
+    ! [Infra.Kv.get]
     existing = Infra.Chain.watermark(store)?
     Result.Ok(higher(existing, below))
 
@@ -77,6 +81,7 @@ fn floorSegment(store: Store, below: Int, current: Int) -> Result<Int, String>
       "loses nothing that is being kept. Bounded by the Segment in hand, so that"
       "an Index naming no Height at or above the Watermark still does not delete"
       "the file the next Block is going into."
+    ! [Infra.Kv.get]
     lowestAtOrAbove(store, below, current)
 
 verify floorSegment
@@ -88,6 +93,7 @@ fn lowestAtOrAbove(store: Store, height: Int, best: Int) -> Result<Int, String>
     ? "Walk the Heights the Index still names, keeping the lowest Segment used."
       "Stops at the first Height with no Block Id, because the Index names a"
       "prefix of the chain and there is nothing above the end of it."
+    ! [Infra.Kv.get]
     named = Infra.Store.get(store, Domain.Index.heightKey(height))?
     match named
         Option.None -> Result.Ok(best)
@@ -100,6 +106,7 @@ verify lowestAtOrAbove
 
 fn lowestWith(store: Store, height: Int, blockId: String, best: Int) -> Result<Int, String>
     ? "A Height the Index names: lower the answer only if its Block is held."
+    ! [Infra.Kv.get]
     located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> lowestAtOrAbove(store, height + 1, best)
@@ -112,6 +119,7 @@ verify lowestWith
 
 fn lowerBy(store: Store, height: Int, text: String, best: Int) -> Result<Int, String>
     ? "The Block is held, so the Segment holding it cannot be deleted."
+    ! [Infra.Kv.get]
     location = Domain.Index.decodeLocation(text)?
     lowestAtOrAbove(store, height + 1, lower(best, location.segment))
 
@@ -135,6 +143,7 @@ fn locationsBelow(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<S
       "Only Heights below the Watermark are examined: a Height at or above it"
       "sits at or above the floor by the way the floor was chosen, so its"
       "Location was never in a deleted Segment."
+    ! [Infra.Kv.get]
     match height >= sweep.below
         true -> Result.Ok(List.reverse(acc))
         false -> locationAt(sweep, height, acc)
@@ -149,6 +158,7 @@ fn locationAt(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<Strin
     ? "A Height with no Block Id names nothing to forget."
       "Unlike the walk that finds the floor, this one does not stop at a gap: a"
       "Height the Index has lost still leaves the Heights above it to sweep."
+    ! [Infra.Kv.get]
     named = Infra.Store.get(sweep.store, Domain.Index.heightKey(height))?
     match named
         Option.None -> locationsBelow(sweep, height + 1, acc)
@@ -161,6 +171,7 @@ verify locationAt
 
 fn locationOf(sweep: Sweep, height: Int, blockId: String, acc: List<String>) -> Result<List<String>, String>
     ? "A Block Id with no Location has nothing on disk to have lost."
+    ! [Infra.Kv.get]
     located = Infra.Store.get(sweep.store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> locationsBelow(sweep, height + 1, acc)
@@ -173,6 +184,7 @@ verify locationOf
 
 fn keepIfGone(sweep: Sweep, height: Int, blockId: String, text: String, acc: List<String>) -> Result<List<String>, String>
     ? "Forget the Location only if its Segment was one of the deleted ones."
+    ! [Infra.Kv.get]
     location = Domain.Index.decodeLocation(text)?
     locationsBelow(sweep, height + 1, dropped(location.segment, sweep.floor, blockId, acc))
 

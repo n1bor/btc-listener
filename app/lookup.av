@@ -7,25 +7,37 @@ module Lookup
         "two paths that happen to agree."
     exposes [byTxid]
     depends [App.Show, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
-    effects [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    effects [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
 
 fn byTxid(rest: List<String>, spending: Bool) -> Unit
     ? "Both commands want a directory and a Transaction Id."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match rest
         [] -> Console.error("usage: <dir> <txid>")
         [dir, ..more] -> withTxid(dir, more, spending)
 
 fn withTxid(dir: String, more: List<String>, spending: Bool) -> Unit
     ? "The Transaction Id follows the directory."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match more
         [] -> Console.error("usage: <dir> <txid>")
         [txid, ..extra] -> said(txidRun(dir, txid, spending))
 
 fn txidRun(dir: String, txid: String, spending: Bool) -> Result<List<String>, String>
     ? "Find the Transaction, then either show it or check what it spends."
-    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Infra.Kv.get, Infra.Kv.open]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     sited = Infra.Store.get(store, Domain.Index.txKey(txid))?
@@ -35,14 +47,14 @@ fn txidRun(dir: String, txid: String, spending: Bool) -> Result<List<String>, St
 
 fn reported(store: Store, blocks: BlockStore, transaction: Transaction, txid: String, sited: Option<String>, found: Found, spending: Bool) -> Result<List<String>, String>
     ? "Which of the two reports was asked for."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     match spending
         false -> App.Show.describeSited(found, txid, sited)
         true -> spendReport(store, blocks, transaction)
 
 fn spendReport(store: Store, blocks: BlockStore, transaction: Transaction) -> Result<List<String>, String>
     ? "Follow every Input back and report whether the Transaction adds up."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     held = Infra.Spends.checked(store, blocks, transaction)?
     Result.Ok(List.concat(App.Show.describeSpend(transaction, held.tally), App.Show.describeScripts(held.scripts)))
 

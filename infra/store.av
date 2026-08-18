@@ -47,14 +47,18 @@ module Store
         "different names. That is jasisz/aver#991: cse-duplicate counts across"
         "mutually exclusive arms, and the binding it asks for cannot be extracted"
         "because the arm pattern is what introduces it."
-    exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, compact, fixture]
+    exposes [Entry, open, openLogged, heldBy, databaseHere, databasePath, get, has, size, put, putAll, delete, deleteAll, compact, fixture]
     exposes opaque [Store]
-    depends [Domain.Text, Infra.StoreLog]
-    effects [Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText]
+    depends [Domain.Text, Infra.Kv, Infra.StoreLog]
+    effects [
+        Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.compact, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
 
 type Store
     Memory(Map<String, String>)
     Logged(String, Map<String, String>)
+    Database(Infra.Kv.Handle)
 
 fn open(dir: String) -> Result<Store, String>
     ? "Rebuild a Store from what is in a directory, or start an empty one."
@@ -63,9 +67,70 @@ fn open(dir: String) -> Result<Store, String>
       "directory of its own, and no caller would have to be told."
       "The directory is created if absent, so a caller never has to know that this"
       "implementation appends to a file and will not make the folder holding it."
+    ! [Disk.exists, Disk.makeDir, Disk.readText, Infra.Kv.open]
+    _made = Disk.makeDir(dir)?
+    openBacking(dir, Disk.exists(databaseMark(dir)))
+
+fn openLogged(dir: String) -> Result<Store, String>
+    ? "Open this directory's log, whatever else the directory may also hold."
+      "open decides by what is on disk, which is right for every caller but one:"
+      "the migration has to read the log precisely when a database exists beside"
+      "it, because making that database is what it is doing."
     ! [Disk.exists, Disk.makeDir, Disk.readText]
     _made = Disk.makeDir(dir)?
     openLog(logPath(dir))
+
+fn heldBy(store: Store) -> Result<List<Tuple<String, String>>, String>
+    ? "Everything a Store holds in memory, which only the two file backends do."
+      "Not a general listing. A database would have to walk its whole keyspace"
+      "to answer and no caller wants that; the one caller is the migration,"
+      "which is reading a log by construction."
+    match store
+        Store.Memory(held) -> Result.Ok(Map.entries(held))
+        Store.Logged(path, logged) -> Result.Ok(Map.entries(logged))
+        Store.Database(handle) -> Result.Err("a database does not list itself")
+
+verify heldBy
+    heldBy(Store.Memory(Map.fromList([("a", "b")]))) => Result.Ok([("a", "b")])
+    heldBy(Store.Memory(Map.fromList([]))) => Result.Ok([])
+    heldBy(Store.Logged("s.log", Map.fromList([("a", "b")]))) => Result.Ok([("a", "b")])
+
+fn databaseHere(dir: String) -> Result<Bool, String>
+    ? "Whether this directory already holds a database."
+    ! [Disk.exists]
+    Result.Ok(Disk.exists(databaseMark(dir)))
+
+fn openBacking(dir: String, database: Bool) -> Result<Store, String>
+    ? "A directory that has a database in it is opened as one; otherwise the log."
+      "The backend is a property of the directory rather than of the invocation,"
+      "which is the only place it could honestly live: the data is in one shape"
+      "or the other and no flag changes that. main migrate makes the database,"
+      "so moving is a command and moving back is renaming a directory."
+    ! [Disk.exists, Disk.readText, Infra.Kv.open]
+    match database
+        true -> holding(Infra.Kv.open(databasePath(dir)))
+        false -> openLog(logPath(dir))
+
+fn holding(opened: Result<Infra.Kv.Handle, String>) -> Result<Store, String>
+    ? "A database that opened is a Store; one that did not is the reason it did not."
+    Result.Ok(Store.Database(opened?))
+
+fn databasePath(dir: String) -> String
+    ? "Where this implementation keeps the database inside the directory it is given."
+    "{dir}/kv"
+
+verify databasePath
+    databasePath("chain") => "chain/kv"
+    databasePath("/tmp/chain") => "/tmp/chain/kv"
+
+fn databaseMark(dir: String) -> String
+    ? "The file LevelDB always writes, and so the sign that there is a database."
+      "Asking for the directory would not do: open makes the directory it is"
+      "given, and a half-made one holding no database has to read as the log."
+    "{databasePath(dir)}/CURRENT"
+
+verify databaseMark
+    databaseMark("chain") => "chain/kv/CURRENT"
 
 fn logPath(dir: String) -> String
     ? "Where this implementation keeps its records inside the directory it is given."
@@ -89,9 +154,8 @@ fn reopen(path: String, contents: Result<String, String>) -> Result<Store, Strin
     Result.Ok(Store.Logged(path, entries))
 
 verify reopen
-    get(reopen("s.log", Result.Ok("+a\tb\n"))?, "a") => Result.Ok(Option.Some("b"))
-    size(reopen("s.log", Result.Ok("+a\tb\n"))?) => 1
-    size(reopen("s.log", Result.Ok(""))?) => 0
+    reopen("s.log", Result.Ok("+a\tb\n")) => Result.Ok(Store.Logged("s.log", Map.set(Map.fromList([]), "a", "b")))
+    reopen("s.log", Result.Ok("")) => Result.Ok(Store.Logged("s.log", Map.fromList([])))
     reopen("s.log", Result.Err("no such file")) => Result.Err("no such file")
     reopen("s.log", Result.Ok("?bad\n")) => Result.Err("Store log record is neither a put nor a delete: '?bad'")
 
@@ -112,6 +176,7 @@ fn get(store: Store, key: String) -> Result<Option<String>, String>
       "That is also what the seam needs. A read from a real database can fail for"
       "reasons this one has not got, and a caller written against a total lookup"
       "would have to be restructured rather than recompiled when one arrives."
+    ! [Infra.Kv.get]
     match Infra.StoreLog.usableKey(key)
         false -> Result.Err(Infra.StoreLog.keyRefused(key))
         true -> looked(store, key)
@@ -124,9 +189,11 @@ verify get
 
 fn looked(store: Store, key: String) -> Result<Option<String>, String>
     ? "The key is usable, so whichever backend holds the entries answers from them."
+    ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.get(held, key))
         Store.Logged(path, logged) -> Result.Ok(Map.get(logged, key))
+        Store.Database(handle) -> Infra.Kv.get(handle, key)
 
 verify looked
     looked(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
@@ -135,6 +202,7 @@ verify looked
 
 fn has(store: Store, key: String) -> Result<Bool, String>
     ? "Whether a key is present, refusing one that could never have been stored."
+    ! [Infra.Kv.get]
     match Infra.StoreLog.usableKey(key)
         false -> Result.Err(Infra.StoreLog.keyRefused(key))
         true -> present(store, key)
@@ -146,30 +214,51 @@ verify has
 
 fn present(store: Store, key: String) -> Result<Bool, String>
     ? "The key is usable, so ask the entries the backend holds."
+    ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.has(held, key))
         Store.Logged(path, logged) -> Result.Ok(Map.has(logged, key))
+        Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
 
 verify present
     present(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(true)
     present(Store.Memory(Map.fromList([])), "a") => Result.Ok(false)
     present(Store.Logged("s.log", Map.fromList([("a", "b")])), "a") => Result.Ok(true)
 
-fn size(store: Store) -> Int
-    ? "How many keys the Store holds."
-      "The one read that names no key, and so the one with nothing to refuse and"
-      "no Result to carry. Left total deliberately rather than for symmetry: a"
-      "database would make this fallible, but it has a single caller and that"
-      "caller already sits inside a Result, so the change costs one line there"
-      "rather than the restructuring a total get or has would have cost."
-    match store
-        Store.Memory(held) -> Map.len(held)
-        Store.Logged(path, logged) -> Map.len(logged)
+fn wasFound(found: Result<Option<String>, String>) -> Result<Bool, String>
+    ? "Whether a lookup found anything."
+      "The database has no cheaper existence check than a read, so has costs a"
+      "read and throws the value away rather than pretending otherwise."
+    Result.Ok(anything(found?))
 
-verify size
-    size(Store.Memory(Map.fromList([]))) => 0
-    size(Store.Memory(Map.fromList([("a", "b")]))) => 1
-    size(Store.Logged("s.log", Map.fromList([("a", "b"), ("c", "d")]))) => 2
+verify wasFound
+    wasFound(Result.Ok(Option.Some("b"))) => Result.Ok(true)
+    wasFound(Result.Ok(Option.None)) => Result.Ok(false)
+    wasFound(Result.Err("no")) => Result.Err("no")
+
+fn anything(found: Option<String>) -> Bool
+    ? "Whether a lookup found anything."
+    match found
+        Option.Some(value) -> true
+        Option.None -> false
+
+verify anything
+    anything(Option.Some("b")) => true
+    anything(Option.None) => false
+
+fn size(store: Store) -> Result<Int, String>
+    ? "How many keys the Store holds."
+      "This was an Int and is now a Result, which is the change its own note"
+      "predicted: a database makes it fallible, it had one caller, and that"
+      "caller already sat inside a Result, so the move cost one line there."
+      "It costs the database a walk of the keyspace. LevelDB keeps no count and"
+      "keeping one would mean a second write on every batch; the single caller"
+      "asks once, at the end of a build, so the walk is paid once."
+    ! [Infra.Kv.count]
+    match store
+        Store.Memory(held) -> Result.Ok(Map.len(held))
+        Store.Logged(path, logged) -> Result.Ok(Map.len(logged))
+        Store.Database(handle) -> Infra.Kv.count(handle)
 
 fn fixture(pairs: List<Tuple<String, String>>) -> Store
     ? "A Store holding exactly these pairs, for verify blocks in other modules."
@@ -184,16 +273,15 @@ fn fixture(pairs: List<Tuple<String, String>>) -> Store
 
 verify fixture
     fixture([]) => Store.Memory(Map.fromList([]))
-    size(fixture([])) => 0
-    size(fixture([("a", "b"), ("c", "d")])) => 2
-    get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
+    fixture([("a", "b")]) => Store.Memory(Map.set(Map.fromList([]), "a", "b"))
+    fixture([("a", "b"), ("c", "d")]) => Store.Memory(Map.fromList([("a", "b"), ("c", "d")]))
 
 fn put(store: Store, key: String, value: String) -> Result<Store, String>
     ? "Record one key, appending to the log before believing it in memory."
       "Convenience for a single change. Anything in bulk should go through"
       "putAll: this returns a Store, and returning one costs a copy of every"
       "entry it holds, so a loop over put is quadratic in the size of the Store."
-    ! [Disk.appendText]
+    ! [Disk.appendText, Infra.Kv.putAll]
     putAll(store, [Entry(key = key, value = value)])
 
 fn putAll(store: Store, entries: List<Entry>) -> Result<Store, String>
@@ -201,21 +289,42 @@ fn putAll(store: Store, entries: List<Entry>) -> Result<Store, String>
       "Aver cannot flush or fence, so a batch is one appendText call rather than a"
       "transaction: it either reaches the file or it does not, and a torn tail is"
       "discarded on the next open."
-    ! [Disk.appendText]
+    ! [Disk.appendText, Infra.Kv.putAll]
     match store
         Store.Memory(held) -> heldPut(held, entries)
         Store.Logged(path, logged) -> loggedPut(path, logged, entries)
+        Store.Database(handle) -> storedPut(handle, entries)
+
+fn storedPut(handle: Infra.Kv.Handle, entries: List<Entry>) -> Result<Store, String>
+    ? "Hand the batch to the database, which is where it then lives."
+      "No Map comes back, which is the whole point: this is the only backend"
+      "whose Store does not grow with what has been written to it."
+    ! [Infra.Kv.putAll]
+    _checked = Infra.StoreLog.acceptable(entries)?
+    _written = Infra.Kv.putAll(handle, asPairs(entries, []))?
+    Result.Ok(Store.Database(handle))
+
+fn asPairs(entries: List<Entry>, acc: List<Tuple<String, String>>) -> List<Tuple<String, String>>
+    ? "The batch as the pairs the contract carries."
+    match entries
+        [] -> List.reverse(acc)
+        [head, ..tail] -> asPairs(tail, List.prepend((head.key, head.value), acc))
+
+verify asPairs
+    asPairs([], []) => []
+    asPairs([Entry(key = "a", value = "b")], []) => [("a", "b")]
+    asPairs([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")], []) => [("a", "b"), ("c", "d")]
 
 fn heldPut(held: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
     ? "Absorb a batch into memory, having first encoded it and thrown the text away."
       "The encoding is the check. Memory has no log to refuse a key, so it borrows"
       "the log's refusal rather than repeating the rule, which is what keeps a"
       "fixture evidence about the Store the program actually runs on."
-    _checked = Infra.StoreLog.recordsFor(entries)?
+    _checked = Infra.StoreLog.acceptable(entries)?
     Result.Ok(Store.Memory(absorbAll(entries, held)))
 
 verify heldPut
-    size(heldPut(empty(), [Entry(key = "a", value = "b")])?) => 1
+    heldPut(empty(), [Entry(key = "a", value = "b")]) => Result.Ok(Store.Memory(Map.set(empty(), "a", "b")))
     heldPut(empty(), [Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
     heldPut(empty(), [Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
 
@@ -231,7 +340,7 @@ fn delete(store: Store, key: String) -> Result<Store, String>
       "Pruning needs this: a Block whose Segment was deleted must have no Location"
       "entry, or the Prune Watermark could not tell a discarded Block from one"
       "that never arrived."
-    ! [Disk.appendText]
+    ! [Disk.appendText, Infra.Kv.deleteAll]
     deleteAll(store, [key])
 
 fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
@@ -240,18 +349,26 @@ fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
       "tens of thousands of keys at once. delete hands back a Store and handing"
       "one back copies every entry it holds, so a loop over delete is quadratic"
       "in the size of the Store rather than in the size of the change."
-    ! [Disk.appendText]
+    ! [Disk.appendText, Infra.Kv.deleteAll]
     match store
         Store.Memory(held) -> heldDelete(held, keys)
         Store.Logged(path, logged) -> loggedDelete(path, logged, keys)
+        Store.Database(handle) -> storedDelete(handle, keys)
+
+fn storedDelete(handle: Infra.Kv.Handle, keys: List<String>) -> Result<Store, String>
+    ? "Ask the database to forget the keys, in one batch as the log does."
+    ! [Infra.Kv.deleteAll]
+    _checked = Infra.StoreLog.acceptableKeys(keys)?
+    _removed = Infra.Kv.deleteAll(handle, keys)?
+    Result.Ok(Store.Database(handle))
 
 fn heldDelete(held: Map<String, String>, keys: List<String>) -> Result<Store, String>
     ? "Forget the keys in memory, refusing any the log could not have tombstoned."
-    _checked = Infra.StoreLog.deleteRecordsFor(keys)?
+    _checked = Infra.StoreLog.acceptableKeys(keys)?
     Result.Ok(Store.Memory(forgetAll(keys, held)))
 
 verify heldDelete
-    size(heldDelete(Map.set(empty(), "a", "b"), ["a"])?) => 0
+    heldDelete(Map.set(empty(), "a", "b"), ["a"]) => Result.Ok(Store.Memory(empty()))
     heldDelete(empty(), [""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
 fn loggedDelete(path: String, logged: Map<String, String>, keys: List<String>) -> Result<Store, String>
@@ -283,10 +400,17 @@ fn compact(store: Store) -> Result<Store, String>
       "A Memory Store has no overwrites to discard because it never wrote them"
       "down, so compacting one is the identity rather than an error. The caller"
       "asked for the space back, and there is none owed."
-    ! [Disk.writeText]
+    ! [Disk.writeText, Infra.Kv.compact]
     match store
         Store.Memory(held) -> Result.Ok(store)
         Store.Logged(path, logged) -> loggedCompact(path, logged)
+        Store.Database(handle) -> storedCompact(handle)
+
+fn storedCompact(handle: Infra.Kv.Handle) -> Result<Store, String>
+    ? "Ask the database to reclaim its own space, and keep the same Handle."
+    ! [Infra.Kv.compact]
+    _reclaimed = Infra.Kv.compact(handle)?
+    Result.Ok(Store.Database(handle))
 
 fn loggedCompact(path: String, logged: Map<String, String>) -> Result<Store, String>
     ? "Write every surviving entry back as a fresh log, then keep the same entries."

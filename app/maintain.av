@@ -4,11 +4,18 @@ module Maintain
         "prune discards Blocks below a Height, txindex records where Transactions"
         "sit, and audit checks a range against everything we know how to check."
         "The first two write and claim the directory; audit only reads."
-    exposes [prune, txIndex, audit]
-    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Prune, Infra.Store, Infra.TxIndex]
+        "migrate is the odd one. It is run once, it moves the Index from the"
+        "log into the database beside it, and after it nothing else behaves"
+        "differently: the same commands read the same keys through the same"
+        "Store. It takes the directory claim like any writer, because a peer"
+        "still appending to the log while it copies would leave what it copied"
+        "short of what the log holds."
+    exposes [prune, txIndex, audit, migrate]
+    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
 
 record Span
@@ -20,6 +27,7 @@ fn prune(rest: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
         [] -> Console.error("usage: <dir> <height>")
@@ -30,6 +38,7 @@ fn pruneHeight(dir: String, more: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match more
         [] -> Console.error("usage: <dir> <height>")
@@ -40,6 +49,7 @@ fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match parsed
         Result.Err(message) -> Console.error("usage: <dir> <height>")
@@ -48,24 +58,55 @@ fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
 fn pruneRun(dir: String, below: Int) -> Result<String, String>
     ? "Open the Index and the Segments, then discard what is below the Height."
     ! [
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     _claimed = Infra.Lock.claim(dir, "prune")?
     Infra.Lock.releasingAfter(dir, pruneDone(dir, below))
 
 fn pruneDone(dir: String, below: Int) -> Result<String, String>
     ? "Discard the Blocks, with the claim already taken."
-    ! [Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     pruned = Infra.Prune.run(store, blocks, below)?
     Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
+
+fn migrate(rest: List<String>) -> Unit
+    ? "Migrating is local: a directory, and nothing else to choose."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir>")
+        [dir, ..extra] -> said(migrateRun(dir))
+
+fn migrateRun(dir: String) -> Result<String, String>
+    ? "Take the directory claim, then move the Index."
+    ! [
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    _claimed = Infra.Lock.claim(dir, "migrate")?
+    Infra.Lock.releasingAfter(dir, migrateDone(dir))
+
+fn migrateDone(dir: String) -> Result<String, String>
+    ? "Copy the log into the database, with the claim already taken."
+    ! [Disk.exists, Disk.makeDir, Disk.readText, Infra.Kv.open, Infra.Kv.putAll]
+    moved = Infra.Migrate.migrate(dir)?
+    Result.Ok("{moved} entries moved into {Infra.Store.databasePath(dir)}; the log is still there")
 
 fn txIndex(rest: List<String>) -> Unit
     ? "Indexing is local: a directory and a range of Heights."
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
         [] -> Console.error("usage: <dir> <a> <b>")
@@ -76,6 +117,7 @@ fn txIndexRange(dir: String, more: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match heights(more)
         Option.None -> Console.error("usage: <dir> <a> <b>")
@@ -84,14 +126,18 @@ fn txIndexRange(dir: String, more: List<String>) -> Unit
 fn txIndexRun(dir: String, span: Span) -> Result<String, String>
     ? "Record where every Transaction in the range sits."
     ! [
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     _claimed = Infra.Lock.claim(dir, "txindex")?
     Infra.Lock.releasingAfter(dir, txIndexDone(dir, span))
 
 fn txIndexDone(dir: String, span: Span) -> Result<String, String>
     ? "Record the Transactions, with the claim already taken."
-    ! [Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
@@ -99,21 +145,33 @@ fn txIndexDone(dir: String, span: Span) -> Result<String, String>
 
 fn audit(rest: List<String>) -> Unit
     ? "Checking a range needs no claim: it only reads."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match rest
         [] -> Console.error("usage: <dir> <a> <b>")
         [dir, ..more] -> auditRange(dir, more)
 
 fn auditRange(dir: String, more: List<String>) -> Unit
     ? "Both Heights must be given."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match heights(more)
         Option.None -> Console.error("usage: <dir> <a> <b>")
         Option.Some(span) -> said(auditRun(dir, span))
 
 fn auditRun(dir: String, span: Span) -> Result<String, String>
     ? "Walk the range and report what it found."
-    ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     counts = Infra.Audit.run(dir, span.from, span.to)?
     Result.Ok("blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  unresolved {counts.unresolved}  scripts {counts.scripts.passed} passed / {counts.scripts.failed} failed / {counts.scripts.undecided} undecided  FAULTS {counts.faults}")
 

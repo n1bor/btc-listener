@@ -111,13 +111,15 @@ _Avoid_: checkpoint, cursor, bookmark
 ### What we store
 
 **Store**:
-A keyed byte store offering get, put, delete and batch. The seam a real
-key-value database will eventually fill; today one module backed by files.
+A keyed byte store offering get, put, delete and batch. One API over three
+**backends**: Memory, which fixtures return; Logged, an append-only file; and
+Database, a LevelDB behind the `Infra.Kv` capability. Which one a directory
+uses is decided by what is in it, not by a flag.
 _Avoid_: database, cache, map, persistence
 
 **Index**:
 What we keep in a Store: Block Ids to Locations, Heights to Block Ids. Content,
-where a Store is mechanism.
+where a Store is mechanism, and unchanged by which backend holds it.
 _Avoid_: db, catalogue, lookup, registry
 
 **Segment**:

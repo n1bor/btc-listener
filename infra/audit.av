@@ -22,7 +22,11 @@ module Audit
         "Segment to use one Block out of it."
     exposes [Counts, run]
     depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
-    effects [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    effects [
+        Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
 
 record Counts
     blocks: Int
@@ -42,13 +46,18 @@ verify reportEvery
 
 fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ? "Walk the range, checking every Block and every Transaction in it."
-    ! [Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
+    ! [Infra.Kv.get]
     match height <= 0
         true -> Result.Ok(Option.None)
         false -> named(store, height)
@@ -61,6 +70,7 @@ verify parentOf
 
 fn named(store: Store, height: Int) -> Result<Option<String>, String>
     ? "A Height that names nothing is a damaged Index, not a missing parent."
+    ! [Infra.Kv.get]
     held = Infra.Store.get(store, Domain.Index.heightKey(height - 1))?
     match held
         Option.None -> Result.Ok(Option.None)
@@ -146,14 +156,14 @@ verify faultText
 
 fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
     ? "Each Height in turn, keeping the Segment in hand between them."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     match height > to
         true -> Result.Ok(counts)
         false -> atHeight(store, blocks, loaded, height, to, counts)
 
 fn atHeight(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
     ? "A Height the Index does not name ends the range."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     holding = Infra.Store.get(store, Domain.Index.heightKey(height))?
     match holding
         Option.None -> Result.Ok(counts)
@@ -161,7 +171,7 @@ fn atHeight(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: In
 
 fn atBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String) -> Result<Counts, String>
     ? "A Block whose body is not held is stepped over."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> walk(store, blocks, loaded, height + 1, to, counts)
@@ -169,14 +179,14 @@ fn atBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int
 
 fn readBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, text: String) -> Result<Counts, String>
     ? "Read it through fetch, so a Segment is read once and not once per Block."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     location = Domain.Index.decodeLocation(text)?
     got = Infra.Blocks.fetch(blocks, loaded, location)?
     checkedBlock(store, blocks, Option.Some(got.loaded), height, to, counts, blockId, got.payload)
 
 fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, payload: Bytes) -> Result<Counts, String>
     ? "The Block's own checks, then every Transaction it holds."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     transactions = Domain.Block.transactionsOf(payload)?
     findings = Domain.Checks.findingsFor(payload, blockId, parentOf(store, height)?)?
     faults = faultsIn(findings, [])
@@ -197,7 +207,7 @@ fn maybeReport(height: Int, counts: Counts) -> Unit
 
 fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
     ? "Check what each Transaction spends."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     match transactions
         [] -> walk(store, blocks, loaded, height + 1, to, counts)
         [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail)
@@ -206,7 +216,7 @@ fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, heig
     ? "Resolve its Inputs and judge the sums."
       "Resolving reads parent Blocks and does not share the Segment held here,"
       "since a parent may sit anywhere below."
-    ! [Console.print, Disk.readText]
+    ! [Console.print, Disk.readText, Infra.Kv.get]
     held = Infra.Spends.checked(store, blocks, transaction)?
     paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
     grown = judged(height, withScripts(counts, held.scripts), transaction, Domain.Spend.verdictOf(held.tally, paid))

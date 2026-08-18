@@ -14,16 +14,28 @@ module Kv
         "generative and recorded. Writes return a Result rather than Unit, so"
         "they are generativeOutput and recorded too: a caller has to be able to"
         "learn that a write failed, and that answer is a value."
-        "Handle is opaque. An open database is a resource, not a description of"
-        "one, and a program that could forge one could name a database it never"
-        "opened. Only open produces a Handle and only this contract's operations"
-        "consume one."
-        "No owned carrier type is needed here. Contract v1 requires every"
-        "boundary type to be declared in the capability module, and Domain."
-        "Primitives had to declare Octets because the stdlib Bytes is not owned."
-        "String, Int, Bool, Unit, Option, Result, List and Tuple are all legal"
-        "as they stand, so keys and values cross as themselves and nothing is"
-        "converted at the edge."
+        "Handle should be opaque. An open database is a resource, not a"
+        "description of one, and a program that could forge one could name a"
+        "database it never opened."
+        "It is a record holding an Int instead, and that is a workaround rather"
+        "than a design. jasisz/aver#994: an opaque capability resource can be"
+        "passed and returned, but a user record or sum that has one as a field"
+        "checks and verifies and then fails to compile on the Rust target,"
+        "because the generated newtype has neither PartialEq nor AverDisplay."
+        "Infra.Store is a sum over its backends and the database arm has to hold"
+        "the open database, so opaque was not available."
+        "What is lost is that the type no longer proves the database was opened:"
+        "any module that depends on this one can write Handle(id = 7). What is"
+        "kept is that it is still its own type, so an Int cannot be passed where"
+        "a Handle is wanted, and the provider refuses an id it did not issue"
+        "rather than doing something undefined with it. When #994 closes this"
+        "becomes an opaque resource again and no caller changes."
+        "Nothing else needs an owned carrier. Contract v1 requires every boundary"
+        "type to be declared in the capability module, and Domain.Primitives had"
+        "to declare Octets because the stdlib Bytes is not owned. String, Int,"
+        "Bool, Unit, Option, Result, List and Tuple are all legal as they stand,"
+        "so keys and values cross as themselves and nothing is converted at the"
+        "edge."
         "The operations are the ones Infra.Store already has, batched the same"
         "way, because backing that Store is what this is for. There is no put"
         "and no delete for one key: a single change is a batch of one, and"
@@ -40,7 +52,8 @@ module Kv
     semantics = effectful
     exposes [Handle, open, get, putAll, deleteAll, count, prefixed, compact]
 
-opaque Handle
+record Handle
+    id: Int
 
 operation open(dir: String) -> Result<Handle, String>
     ? "Open the database in this directory, creating it if it is not there."

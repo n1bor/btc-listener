@@ -21,8 +21,8 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Ten of them. Only the first three need a Peer; everything else reads what those
-wrote and works offline.
+Eleven of them. Only the first three need a Peer; everything else reads what
+those wrote and works offline.
 
 | command | what it does | Peer |
 |---|---|---|
@@ -35,6 +35,7 @@ wrote and works offline.
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
+| `migrate <dir>` | [move](#the-index-and-its-backends) the Index from the log into a LevelDB, once | no |
 | `help` | print the usage | no |
 
 The three fetching commands have to run in this order, because each needs what
@@ -300,10 +301,10 @@ The entry names a **Block**, not a Height, so a reorganisation that moves a
 Height leaves it true.
 
 **Index a range, not the chain.** Bitcoin holds well over a billion
-Transactions and the Store keeps every entry in memory — a whole-chain
-Transaction index is exactly what `infra/store.av` says it cannot back. Over a
-range it works today, and the keyspace is the one a real database would be
-given.
+Transactions. On the file backends the Store keeps every entry in memory, so a
+whole-chain Transaction index is exactly what `infra/store.av` says it cannot
+back. On the database backend the ceiling is the disk instead, and the keyspace
+was always the one a database would be given.
 
 ## Checking a spend
 
@@ -449,6 +450,45 @@ Only Segment 0 goes, because Segment 1 still holds Blocks above the Height.
 than reporting it missing, and `audit` over the range counts the Inputs it can
 no longer follow as unresolved rather than as faults.
 
+## The Index and its backends
+
+The Index is a keyed store — Block Ids to Locations, Heights to Block Ids,
+Transaction Ids to sites — and `infra/store.av` offers it over three backends
+behind one API. Callers cannot tell them apart: `Store` is opaque, so the same
+`get`, `putAll` and `deleteAll` reach whichever is there.
+
+| backend | what it is | where it comes from |
+|---|---|---|
+| Memory | a `Map`, holding exactly what it was handed | `Store.fixture`, used by 71 verify cases |
+| Logged | that `Map`, rebuilt on open from an append-only file | a directory with `index.log` and no `kv/` |
+| Database | a LevelDB, read a key at a time | a directory with a `kv/` in it |
+
+Which one a directory uses is a fact about the directory rather than about the
+invocation, because the data really is in one shape or the other. `migrate`
+makes the database and leaves the log alone, so going back is renaming a
+directory:
+
+```bash
+./target/release/main migrate ~/chain
+1454101 entries moved into ~/chain/kv; the log is still there
+```
+
+The log backend holds every entry in memory. Measured on the same 124 MB index,
+the same binary, and the same two ranges:
+
+| | log | database |
+|---|---|---|
+| `audit chain 1 4000` | 7.6 s, 615 MB | 4.0 s, 67 MB |
+| `audit chain 170000 172000` | 44.5 s, 615 MB | 49.4 s, 97 MB |
+| totals | identical | identical |
+
+Memory is the point, not speed. 615 MB is the whole Index held open regardless
+of what is being read; 67 MB is what the audit itself needs. The second range
+is 11% slower and the first is nearly twice as fast, which is the shape you
+would expect when a lookup stops being free and an open stops costing two
+seconds. What this buys is a ceiling set by the disk rather than by RAM, which
+is what an output keyspace at two hundred million entries needs.
+
 ## Checking the code
 
 ```bash
@@ -516,9 +556,10 @@ infra/  the network
   resolver.av download.av
 
 infra/  the disk
-  store.av          keyed store over two backends, the database seam
+  store.av          keyed store over three backends, one opaque API
   storelog.av       the append-only log's record format and replay
   kv.av             the key-value database capability contract
+  migrate.av        one-shot: the log into the database beside it
   blocks.av chain.av txindex.av lock.av prune.av
   spends.av audit.av
 ```
@@ -626,18 +667,22 @@ false audit rather than a slow one. The provider hands the question to
 `libsecp256k1`, which is what Bitcoin Core itself runs. RIPEMD-160 then followed
 the curve behind the same contract, so there is one boundary rather than two.
 
-`Infra.Kv` is the second contract and the newer one. `Infra.Store` keeps the
-whole index in a Map rebuilt from an append-only log, which opens 962,268
-entries in 1.9 seconds and 414 MB and cannot be stretched to the two hundred
-million an output keyspace would need. That is a database, and Aver has not
-got one. Unlike the primitives it is **effectful**, so every operation declares
-an Oracle dimension and what a replay does with it, and an open database is an
-opaque `Handle` the program cannot forge. Nothing calls it yet — the Store
-grows a third backend in
-[#15](https://github.com/n1bor/btc-listener/issues/15). The provider is
-`rusty-leveldb`, chosen over RocksDB because it needs no C++ toolchain, and
-the choice is provisional: swapping the crate changes one Rust file and no
-Aver at all.
+`Infra.Kv` is the second contract and the newer one. The file backends keep the
+whole index in a Map, which cannot be stretched to the two hundred million
+entries an output keyspace would need. That is a database, and Aver has not got
+one. Unlike the primitives it is **effectful**, so every operation declares an
+Oracle dimension and what a replay does with it. The provider is
+`rusty-leveldb`, chosen over RocksDB because it needs no C++ toolchain, and the
+choice is provisional: swapping the crate changes one Rust file and no Aver at
+all.
+
+`Handle` should be an opaque capability resource and is a record holding an
+`Int` instead. That is
+[jasisz/aver#994](https://github.com/jasisz/aver/issues/994): an opaque resource
+can be passed and returned, but a user record or sum holding one checks,
+verifies, and then fails to compile on the Rust target — and the Store is a sum
+whose database arm has to hold the open database. So the provider keeps the
+databases and hands out ids, and refuses an id it did not issue.
 
 ### What this costs
 

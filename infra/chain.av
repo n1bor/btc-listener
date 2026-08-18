@@ -11,7 +11,7 @@ module Chain
         "what it discarded or reports a hole where there was a decision."
     exposes [Body, Found, at, transactionAt, watermark]
     depends [Bytes, Domain.Index, Infra.Blocks, Infra.Store]
-    effects [Disk.readText]
+    effects [Disk.readText, Infra.Kv.get]
 
 type Body
     Held(Location, Bytes)
@@ -26,7 +26,7 @@ record Found
 
 fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
     ? "Everything known about one Height, including why its body is absent."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     named = Infra.Store.get(store, Domain.Index.heightKey(height))?
     match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
@@ -34,7 +34,7 @@ fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
 
 fn withBlockId(store: Store, blocks: BlockStore, height: Int, blockId: String) -> Result<Found, String>
     ? "The Height names a Block; whether the bytes are here is a second question."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     stored = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
     below = watermark(store)?
     state = Domain.Index.bodyStateOf(stored, height, below)?
@@ -45,6 +45,7 @@ fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id the Index holds one Height down, if there is one."
       "Genesis has no parent and neither has a Height below the Prune Watermark"
       "whose Header has gone, so this is an Option rather than an error."
+    ! [Infra.Kv.get]
     match height <= 0
         true -> Result.Ok(Option.None)
         false -> parentNamed(store, height)
@@ -58,6 +59,7 @@ verify parentOf
 
 fn parentNamed(store: Store, height: Int) -> Result<Option<String>, String>
     ? "A Height below the one asked about may name a Block, or may be gone."
+    ! [Infra.Kv.get]
     held = Infra.Store.get(store, Domain.Index.heightKey(height - 1))?
     match held
         Option.None -> Result.Ok(Option.None)
@@ -81,6 +83,7 @@ verify parentIsNamed
 fn watermark(store: Store) -> Result<Int, String>
     ? "The Prune Watermark, or zero when nothing has ever been pruned."
       "One place reads it, so one place decides what an absent record means."
+    ! [Infra.Kv.get]
     held = Infra.Store.get(store, Domain.Index.prunedBelowKey())?
     Domain.Index.prunedBelowOf(held)
 
@@ -109,7 +112,7 @@ fn transactionAt(store: Store, blocks: BlockStore, txid: String) -> Result<Found
     ? "The Block a Transaction sits in, found through the t: keyspace."
       "Returns the Block rather than the Transaction, because picking the"
       "Transaction out needs the position and the caller has that already."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     sited = Infra.Store.get(store, Domain.Index.txKey(txid))?
     match sited
         Option.None -> Result.Err("no record of transaction {txid}; index the Heights that hold it first")
@@ -117,7 +120,7 @@ fn transactionAt(store: Store, blocks: BlockStore, txid: String) -> Result<Found
 
 fn blockOfSite(store: Store, blocks: BlockStore, text: String) -> Result<Found, String>
     ? "The site names a Block; the Index says where its bytes are."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     site = Domain.Index.decodeTxSite(text)?
     located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
     match located

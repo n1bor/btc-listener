@@ -20,7 +20,7 @@ module Spends
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Checked, checked, resolve]
     depends [Domain.Block, Domain.Primitives, Domain.PrimitiveStub, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
-    effects [Disk.readText]
+    effects [Disk.readText, Infra.Kv.get]
 
 record Checked
     tally: Tally
@@ -33,14 +33,14 @@ fn checked(store: Store, blocks: BlockStore, transaction: Transaction) -> Result
       "reason this reads well: the Output being spent has just been fetched,"
       "and fetching it again would double the only expensive thing the audit"
       "does."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     over(store, blocks, transaction, 0, Domain.Transaction.inputsOf(transaction), Checked(tally = Domain.Spend.started(), scripts = Domain.SpendScript.noOutcomes()))
 
 fn over(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, inputs: List<Input>, held: Checked) -> Result<Checked, String>
     ? "Each Input in turn, carrying the Transaction they belong to and which"
       "one of them this is. A signature commits to both, so a walk that keeps"
       "only the Input cannot check one -- which is what this walk used to be."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     match inputs
         [] -> Result.Ok(held)
         [head, ..tail] -> nextInput(store, blocks, transaction, index, head, tail, held)
@@ -49,14 +49,14 @@ fn nextInput(store: Store, blocks: BlockStore, transaction: Transaction, index: 
     ? "A coinbase Input spends nothing, and marks the whole Transaction."
       "It has no Script to run either: the bytes in a coinbase Input are"
       "arbitrary data that consensus never executes."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     match Domain.Spend.isCoinbaseInput(Domain.Transaction.previousTxidOf(input))
         true -> over(store, blocks, transaction, index + 1, tail, Checked(tally = Domain.Spend.markCoinbase(held.tally), scripts = held.scripts))
         false -> resolvedInput(store, blocks, transaction, index, input, tail, held)
 
 fn resolvedInput(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, input: Input, tail: List<Input>, held: Checked) -> Result<Checked, String>
     ? "Follow one Input back, fold the value in, and run the two Scripts."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     spend = resolve(store, blocks, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
     over(store, blocks, transaction, index + 1, tail, Checked(tally = Domain.Spend.absorb(held.tally, spend), scripts = scriptCounts(transaction, index, input, spend, held.scripts)))
 
@@ -84,7 +84,7 @@ fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int
       "Not indexed is Unknown rather than Invalid: the t: keyspace covers the"
       "Heights someone chose to index, and everything else in the chain is"
       "simply absent from it."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     sited = Infra.Store.get(store, Domain.Index.txKey(previousTxid))?
     match sited
         Option.None -> Result.Ok(Spend.Unknown("transaction {previousTxid} is not indexed"))
@@ -92,7 +92,7 @@ fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int
 
 fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Result<Spend, String>
     ? "The site names a Block; the Index says whether its bytes are held."
-    ! [Disk.readText]
+    ! [Disk.readText, Infra.Kv.get]
     site = Domain.Index.decodeTxSite(text)?
     located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
     match located

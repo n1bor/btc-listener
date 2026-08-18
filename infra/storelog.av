@@ -10,9 +10,14 @@ module StoreLog
         "It performs no effects. Reading the file and writing to it belong to the"
         "Store, which knows which backend it is; encoding and parsing what goes in"
         "the file do not need to know, and are total functions over Strings."
-        "The key rules stay the log's even for a Store backed by memory. A fixture"
-        "that accepted a key the real Store would refuse would not be a fixture."
-    exposes [Entry, Change, keyRefused, usableKey, usableValue, recordsFor, deleteRecordsFor, replayed]
+        "The key rules stay the log's for every backend, not only for the log."
+        "A fixture that accepted a key the real Store would refuse would not be a"
+        "fixture, and a directory that moved from the log to a database would"
+        "otherwise start accepting keys it could never move back with. So there"
+        "are two ways to ask: recordsFor, which encodes and refuses as it goes,"
+        "and acceptable, which only refuses. A backend that is not writing"
+        "records should not pay to build them."
+    exposes [Entry, Change, keyRefused, usableKey, usableValue, acceptable, acceptableKeys, recordsFor, deleteRecordsFor, replayed]
     depends []
     effects []
 
@@ -33,6 +38,70 @@ fn keyRefused(key: String) -> String
 verify keyRefused
     keyRefused("") => "Store key must not be empty or contain a tab or newline, got ''"
     keyRefused("a\tb") => "Store key must not be empty or contain a tab or newline, got 'a\tb'"
+
+fn valueRefused(value: String) -> String
+    ? "Why a value cannot be stored, in the one wording every entry point gives."
+    "Store value must not contain a tab or newline, got '{value}'"
+
+verify valueRefused
+    valueRefused("a\tb") => "Store value must not contain a tab or newline, got 'a\tb'"
+    valueRefused("a\nb") => "Store value must not contain a tab or newline, got 'a\nb'"
+
+fn acceptable(entries: List<Entry>) -> Result<Unit, String>
+    ? "Whether a whole batch could be stored, naming the first entry that could not."
+      "The same refusal recordsFor makes, without the text. A backend that keeps"
+      "no records still has to refuse what the log would, or a directory could"
+      "accept a key on one backend and lose it on the other."
+    match entries
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> acceptableNext(head, tail)
+
+verify acceptable
+    acceptable([]) => Result.Ok(Unit)
+    acceptable([Entry(key = "a", value = "b")]) => Result.Ok(Unit)
+    acceptable([Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
+    acceptable([Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
+
+fn acceptableNext(head: Entry, tail: List<Entry>) -> Result<Unit, String>
+    ? "Refuse this entry's key, then its value, then carry on with the rest."
+    match usableKey(head.key)
+        false -> Result.Err(keyRefused(head.key))
+        true -> acceptableValue(head.value, tail)
+
+verify acceptableNext
+    acceptableNext(Entry(key = "a", value = "b"), []) => Result.Ok(Unit)
+    acceptableNext(Entry(key = "", value = "b"), []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn acceptableValue(value: String, tail: List<Entry>) -> Result<Unit, String>
+    ? "The key was usable; the value still has to be."
+    match usableValue(value)
+        false -> Result.Err(valueRefused(value))
+        true -> acceptable(tail)
+
+verify acceptableValue
+    acceptableValue("b", []) => Result.Ok(Unit)
+    acceptableValue("b\tc", []) => Result.Err("Store value must not contain a tab or newline, got 'b\tc'")
+
+fn acceptableKeys(keys: List<String>) -> Result<Unit, String>
+    ? "Whether every key in a batch could have been stored."
+    match keys
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> acceptableKeyNext(head, tail)
+
+verify acceptableKeys
+    acceptableKeys([]) => Result.Ok(Unit)
+    acceptableKeys(["a", "b"]) => Result.Ok(Unit)
+    acceptableKeys(["a", ""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn acceptableKeyNext(head: String, tail: List<String>) -> Result<Unit, String>
+    ? "Refuse this key, then carry on with the rest."
+    match usableKey(head)
+        false -> Result.Err(keyRefused(head))
+        true -> acceptableKeys(tail)
+
+verify acceptableKeyNext
+    acceptableKeyNext("a", []) => Result.Ok(Unit)
+    acceptableKeyNext("", []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
 fn usableKey(key: String) -> Bool
     ? "A key must be present and must not disturb the record format."
@@ -109,7 +178,7 @@ verify putRecordFor
 fn withKey(key: String, value: String) -> Result<String, String>
     ? "The key was usable; the value still has to be."
     match usableValue(value)
-        false -> Result.Err("Store value must not contain a tab or newline, got '{value}'")
+        false -> Result.Err(valueRefused(value))
         true -> Result.Ok("+{key}\t{value}\n")
 
 verify withKey

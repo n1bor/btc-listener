@@ -9,6 +9,7 @@ module Cli
         Args.get,
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -32,6 +33,7 @@ fn usageLines() -> List<String>
         "  tx      <dir> <txid>                  find one Transaction by its Id",
         "  spend   <dir> <txid>                  check what it spends against what it pays",
         "  audit   <dir> <a> <b>                 check every Block and spend in a..b",
+        "  migrate <dir>                         move the Index from the log into a database",
         "",
         "  peer-address   IPv4 address of the Peer. Omit it, when listening,",
         "                 to ask a Bitcoin DNS seed for one.",
@@ -45,10 +47,14 @@ fn usageLines() -> List<String>
         "  prune deletes whole Segments only, so it frees nothing until a Segment",
         "  holds no Block you are still keeping, and never deletes the one the",
         "  next Block goes into.",
+        "",
+        "  migrate runs once. After it, every command reads the same keys from a",
+        "  LevelDB instead of a replayed log, and the log is left where it is so",
+        "  the move can be undone by renaming <dir>/kv.",
     ]
 
 verify usageLines
-    List.len(usageLines()) => 24
+    List.len(usageLines()) => 29
     List.contains(usageLines(), "Bitcoin peer listener, chain downloader and auditor") => true
 
 fn describe(address: PeerAddress) -> String
@@ -65,6 +71,7 @@ fn runCli() -> Unit
         Args.get,
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -76,6 +83,7 @@ fn run(args: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -89,6 +97,7 @@ fn dispatch(command: String, rest: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -99,6 +108,7 @@ fn dispatch(command: String, rest: List<String>) -> Unit
         "prune" -> App.Maintain.prune(rest)
         "txindex" -> App.Maintain.txIndex(rest)
         "audit" -> App.Maintain.audit(rest)
+        "migrate" -> App.Maintain.migrate(rest)
         "tx" -> App.Lookup.byTxid(rest, false)
         "spend" -> App.Lookup.byTxid(rest, true)
         "show" -> needShow(rest)
@@ -110,6 +120,7 @@ fn needTwo(rest: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -123,6 +134,7 @@ fn withDir(address: String, more: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -136,6 +148,7 @@ fn startHeaders(parsed: Result<PeerAddress, String>, dir: String) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -152,6 +165,7 @@ fn headerRun(address: PeerAddress, dir: String) -> Result<String, String>
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.count, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -164,19 +178,22 @@ fn headersDone(address: PeerAddress, dir: String) -> Result<String, String>
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText,
+        Infra.Kv.count, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     grown = Infra.Download.headers(Network.Mainnet, address, store)?
-    Result.Ok("index holds {Infra.Store.size(grown)} entries")
+    held = Infra.Store.size(grown)?
+    Result.Ok("index holds {held} entries")
 
 fn needFour(rest: List<String>) -> Unit
     ? "The body phase wants an address, a directory and two Heights."
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -190,6 +207,7 @@ fn bodyDir(address: String, more: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -203,6 +221,7 @@ fn bodyRange(address: String, dir: String, range: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -258,6 +277,7 @@ fn startBodies(parsed: Result<PeerAddress, String>, dir: String, span: Span) -> 
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -271,6 +291,7 @@ fn bodyRun(address: PeerAddress, dir: String, span: Span) -> Result<String, Stri
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -283,6 +304,7 @@ fn bodiesDone(address: PeerAddress, dir: String, span: Span) -> Result<String, S
     ! [
         Console.error, Console.print,
         Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -294,28 +316,44 @@ fn bodiesDone(address: PeerAddress, dir: String, span: Span) -> Result<String, S
 
 fn needShow(rest: List<String>) -> Unit
     ? "Showing a Block is local: a directory and a Height, no Peer."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match rest
         [] -> printLines(usageLines())
         [dir, ..more] -> showHeight(dir, more)
 
 fn showHeight(dir: String, more: List<String>) -> Unit
     ? "Take the Height that follows the directory."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match more
         [] -> printLines(usageLines())
         [height, ..extra] -> showMode(dir, Int.fromString(height), extra)
 
 fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Unit
     ? "An optional third word chooses how much of the Block to print."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match extra
         [] -> startShow(dir, parsed, true)
         [mode, ..rest] -> namedMode(dir, parsed, mode)
 
 fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
     ? "Only two words mean anything here; anything else is a typo worth showing."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match mode
         "full" -> startShow(dir, parsed, true)
         "summary" -> startShow(dir, parsed, false)
@@ -323,14 +361,18 @@ fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
 
 fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -> Unit
     ? "Show, or the usage if the Height was not a whole number."
-    ! [Console.error, Console.print, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     match parsed
         Result.Err(message) -> printLines(usageLines())
         Result.Ok(height) -> shown(showRun(dir, height, withTransactions))
 
 fn showRun(dir: String, height: Int, withTransactions: Bool) -> Result<List<String>, String>
     ? "What the Index and the Segments hold for one Height."
-    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Infra.Kv.get, Infra.Kv.open]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
     found = Infra.Chain.at(store, blocks, height)?
