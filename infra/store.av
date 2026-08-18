@@ -1,16 +1,25 @@
 module Store
     intent =
-        "A keyed byte store: get, put, delete and batch, backed by an append-only"
-        "log that is replayed into memory when it is opened."
+        "A keyed byte store: get, put, delete and batch, over a backend that is"
+        "either a Map held in memory or that same Map rebuilt from an append-only"
+        "log on disk."
         "This module is a seam. When a real key-value database is reachable from"
-        "Aver, its body is replaced and its signatures are not. The Store is"
-        "opaque, so the representation is enforced rather than merely agreed: a"
-        "caller cannot build one, read a field from it, or match on it, and every"
-        "attempt is a compile error rather than something a reviewer has to catch."
-        "The reads return a Result although this implementation cannot fail, and"
-        "open is given a directory rather than a file name. Both are shaped for"
-        "the database rather than for the log. A caller written against a total"
-        "lookup or a known file name would have to be restructured when the"
+        "Aver it arrives as a third backend beside these two, and the signatures"
+        "here do not change. The Store is opaque, so the representation is"
+        "enforced rather than merely agreed: a caller cannot build one, read a"
+        "field from it, or match on it, and every attempt is a compile error"
+        "rather than something a reviewer has to catch. That is what lets the sum"
+        "grow an arm without a caller noticing."
+        "Memory is not a lesser Store. It is what fixture returns, and 71 verify"
+        "blocks in four other modules are written against it, so it has to refuse"
+        "exactly what the log refuses or those blocks stop being evidence about"
+        "the real thing. It gets that for free: a write to a Memory Store encodes"
+        "the batch through Infra.StoreLog and throws the text away, so the two"
+        "backends cannot drift apart in what they accept."
+        "The reads return a Result although neither of these backends can fail,"
+        "and open is given a directory rather than a file name. Both are shaped"
+        "for the database rather than for the log. A caller written against a"
+        "total lookup or a known file name would have to be restructured when the"
         "database arrives; written this way it only has to be recompiled."
         "What is left to do at that point is declare the effects a read performs."
         "Adding an effect is mechanical and the checker names every site; changing"
@@ -20,11 +29,11 @@ module Store
         "already has, which is why it can be swapped for one. Rewriting the whole"
         "file on every put would work at a hundred entries and cost a terabyte of"
         "writes at a million."
-        "Capacity, not capability, is what bounds this implementation: it holds"
-        "every entry in memory, so it suits the Index at around a million entries"
+        "Capacity, not capability, is what bounds both backends here: each holds"
+        "every entry in memory, so they suit the Index at around a million entries"
         "and cannot back a UTXO set at two hundred million. Opening a log of"
         "962268 entries takes 1.9 seconds and 414 MB; two hundred million would"
-        "want some eighty gigabytes."
+        "want some eighty gigabytes. That is the reason for the third arm."
         "Write in batches. A Map returned from a function is copied in Aver"
         "0.28.1, and every mutation here hands back a Store holding one, so the"
         "cost of a call is the size of the Store rather than the size of the"
@@ -34,22 +43,18 @@ module Store
         "August 2026, 40000 entries: 52 milliseconds through one putAll against"
         "24404 one put at a time, so the ratio stands at about 470 and so does"
         "every batch in the callers."
+        "Where two arms of a match read the same thing they bind it under"
+        "different names. That is jasisz/aver#991: cse-duplicate counts across"
+        "mutually exclusive arms, and the binding it asks for cannot be extracted"
+        "because the arm pattern is what introduces it."
     exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, compact, fixture]
     exposes opaque [Store]
-    depends [Domain.Text]
+    depends [Domain.Text, Infra.StoreLog]
     effects [Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText]
 
-record Entry
-    key: String
-    value: String
-
-type Change
-    Put(Entry)
-    Drop(String)
-
-record Store
-    path: String
-    entries: Map<String, String>
+type Store
+    Memory(Map<String, String>)
+    Logged(String, Map<String, String>)
 
 fn open(dir: String) -> Result<Store, String>
     ? "Rebuild a Store from what is in a directory, or start an empty one."
@@ -74,18 +79,19 @@ fn openLog(path: String) -> Result<Store, String>
     ? "Replay the log if it is there, otherwise start empty."
     ! [Disk.exists, Disk.readText]
     match Disk.exists(path)
-        false -> Result.Ok(Store(path = path, entries = empty()))
+        false -> Result.Ok(Store.Logged(path, empty()))
         true -> reopen(path, Disk.readText(path))
 
 fn reopen(path: String, contents: Result<String, String>) -> Result<Store, String>
     ? "Replay a log that was read, or report why it could not be."
     log = contents?
-    entries = replayed(Domain.Text.completeLines(log), empty())?
-    Result.Ok(Store(path = path, entries = entries))
+    entries = Infra.StoreLog.replayed(Domain.Text.completeLines(log), empty())?
+    Result.Ok(Store.Logged(path, entries))
 
 verify reopen
-    reopen("s.log", Result.Ok("+a\tb\n"))?.entries => Map.set(empty(), "a", "b")
-    reopen("s.log", Result.Ok(""))?.entries => empty()
+    get(reopen("s.log", Result.Ok("+a\tb\n"))?, "a") => Result.Ok(Option.Some("b"))
+    size(reopen("s.log", Result.Ok("+a\tb\n"))?) => 1
+    size(reopen("s.log", Result.Ok(""))?) => 0
     reopen("s.log", Result.Err("no such file")) => Result.Err("no such file")
     reopen("s.log", Result.Ok("?bad\n")) => Result.Err("Store log record is neither a put nor a delete: '?bad'")
 
@@ -106,9 +112,9 @@ fn get(store: Store, key: String) -> Result<Option<String>, String>
       "That is also what the seam needs. A read from a real database can fail for"
       "reasons this one has not got, and a caller written against a total lookup"
       "would have to be restructured rather than recompiled when one arrives."
-    match usableKey(key)
-        false -> Result.Err(keyRefused(key))
-        true -> Result.Ok(Map.get(store.entries, key))
+    match Infra.StoreLog.usableKey(key)
+        false -> Result.Err(Infra.StoreLog.keyRefused(key))
+        true -> looked(store, key)
 
 verify get
     get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
@@ -116,16 +122,38 @@ verify get
     get(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
     get(fixture([]), "a\tb") => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
 
+fn looked(store: Store, key: String) -> Result<Option<String>, String>
+    ? "The key is usable, so whichever backend holds the entries answers from them."
+    match store
+        Store.Memory(held) -> Result.Ok(Map.get(held, key))
+        Store.Logged(path, logged) -> Result.Ok(Map.get(logged, key))
+
+verify looked
+    looked(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
+    looked(Store.Memory(Map.fromList([])), "a") => Result.Ok(Option.None)
+    looked(Store.Logged("s.log", Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
+
 fn has(store: Store, key: String) -> Result<Bool, String>
     ? "Whether a key is present, refusing one that could never have been stored."
-    match usableKey(key)
-        false -> Result.Err(keyRefused(key))
-        true -> Result.Ok(Map.has(store.entries, key))
+    match Infra.StoreLog.usableKey(key)
+        false -> Result.Err(Infra.StoreLog.keyRefused(key))
+        true -> present(store, key)
 
 verify has
     has(fixture([("a", "b")]), "a") => Result.Ok(true)
     has(fixture([]), "a") => Result.Ok(false)
     has(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn present(store: Store, key: String) -> Result<Bool, String>
+    ? "The key is usable, so ask the entries the backend holds."
+    match store
+        Store.Memory(held) -> Result.Ok(Map.has(held, key))
+        Store.Logged(path, logged) -> Result.Ok(Map.has(logged, key))
+
+verify present
+    present(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(true)
+    present(Store.Memory(Map.fromList([])), "a") => Result.Ok(false)
+    present(Store.Logged("s.log", Map.fromList([("a", "b")])), "a") => Result.Ok(true)
 
 fn size(store: Store) -> Int
     ? "How many keys the Store holds."
@@ -134,23 +162,28 @@ fn size(store: Store) -> Int
       "database would make this fallible, but it has a single caller and that"
       "caller already sits inside a Result, so the change costs one line there"
       "rather than the restructuring a total get or has would have cost."
-    Map.len(store.entries)
+    match store
+        Store.Memory(held) -> Map.len(held)
+        Store.Logged(path, logged) -> Map.len(logged)
 
 verify size
-    size(fixture([])) => 0
-    size(fixture([("a", "b")])) => 1
+    size(Store.Memory(Map.fromList([]))) => 0
+    size(Store.Memory(Map.fromList([("a", "b")]))) => 1
+    size(Store.Logged("s.log", Map.fromList([("a", "b"), ("c", "d")]))) => 2
 
 fn fixture(pairs: List<Tuple<String, String>>) -> Store
     ? "A Store holding exactly these pairs, for verify blocks in other modules."
       "An opaque Store cannot be built from outside, and functions elsewhere that"
       "take one still have to be checked, so the seam supplies the fixture rather"
       "than leaving each caller to invent a representation it should not know."
-      "It touches no disk. The path is empty because nothing here writes; a Store"
-      "made this way is for reading in a verify block and nothing else, and an"
-      "implementation backed by a database would open a scratch handle instead."
-    Store(path = "", entries = Map.fromList(pairs))
+      "It touches no disk, and now says so in the type rather than by carrying an"
+      "empty path a write would have appended to. A Store made this way refuses"
+      "the same keys the log does and can be written to; what it cannot do is"
+      "outlive the call."
+    Store.Memory(Map.fromList(pairs))
 
 verify fixture
+    fixture([]) => Store.Memory(Map.fromList([]))
     size(fixture([])) => 0
     size(fixture([("a", "b"), ("c", "d")])) => 2
     get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
@@ -169,9 +202,29 @@ fn putAll(store: Store, entries: List<Entry>) -> Result<Store, String>
       "transaction: it either reaches the file or it does not, and a torn tail is"
       "discarded on the next open."
     ! [Disk.appendText]
-    records = recordsFor(entries)?
-    _written = appended(store.path, records)?
-    Result.Ok(Store(path = store.path, entries = absorbAll(entries, store.entries)))
+    match store
+        Store.Memory(held) -> heldPut(held, entries)
+        Store.Logged(path, logged) -> loggedPut(path, logged, entries)
+
+fn heldPut(held: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
+    ? "Absorb a batch into memory, having first encoded it and thrown the text away."
+      "The encoding is the check. Memory has no log to refuse a key, so it borrows"
+      "the log's refusal rather than repeating the rule, which is what keeps a"
+      "fixture evidence about the Store the program actually runs on."
+    _checked = Infra.StoreLog.recordsFor(entries)?
+    Result.Ok(Store.Memory(absorbAll(entries, held)))
+
+verify heldPut
+    size(heldPut(empty(), [Entry(key = "a", value = "b")])?) => 1
+    heldPut(empty(), [Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
+    heldPut(empty(), [Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
+
+fn loggedPut(path: String, logged: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
+    ? "Append the batch to the log, and believe it only once the disk has it."
+    ! [Disk.appendText]
+    records = Infra.StoreLog.recordsFor(entries)?
+    _written = appended(path, records)?
+    Result.Ok(Store.Logged(path, absorbAll(entries, logged)))
 
 fn delete(store: Store, key: String) -> Result<Store, String>
     ? "Forget one key, leaving a tombstone in the log so a replay forgets it too."
@@ -179,9 +232,7 @@ fn delete(store: Store, key: String) -> Result<Store, String>
       "entry, or the Prune Watermark could not tell a discarded Block from one"
       "that never arrived."
     ! [Disk.appendText]
-    tombstone = deleteRecordFor(key)?
-    _written = appended(store.path, tombstone)?
-    Result.Ok(Store(path = store.path, entries = Map.remove(store.entries, key)))
+    deleteAll(store, [key])
 
 fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
     ? "Forget several keys in one append, as putAll records several in one."
@@ -190,45 +241,31 @@ fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
       "one back copies every entry it holds, so a loop over delete is quadratic"
       "in the size of the Store rather than in the size of the change."
     ! [Disk.appendText]
-    records = deleteRecordsFor(keys)?
-    _written = appended(store.path, records)?
-    Result.Ok(Store(path = store.path, entries = forgetAll(keys, store.entries)))
+    match store
+        Store.Memory(held) -> heldDelete(held, keys)
+        Store.Logged(path, logged) -> loggedDelete(path, logged, keys)
 
-fn deleteRecordsFor(keys: List<String>) -> Result<String, String>
-    ? "The log text for a batch of tombstones, or the first key that cannot be stored."
-    parts = deletePartsFor(keys, [])?
-    Result.Ok(String.join(parts, ""))
+fn heldDelete(held: Map<String, String>, keys: List<String>) -> Result<Store, String>
+    ? "Forget the keys in memory, refusing any the log could not have tombstoned."
+    _checked = Infra.StoreLog.deleteRecordsFor(keys)?
+    Result.Ok(Store.Memory(forgetAll(keys, held)))
 
-verify deleteRecordsFor
-    deleteRecordsFor([]) => Result.Ok("")
-    deleteRecordsFor(["a"]) => Result.Ok("-a\n")
-    deleteRecordsFor(["a", "b"]) => Result.Ok("-a\n-b\n")
-    deleteRecordsFor([""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+verify heldDelete
+    size(heldDelete(Map.set(empty(), "a", "b"), ["a"])?) => 0
+    heldDelete(empty(), [""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
-fn deletePartsFor(keys: List<String>, acc: List<String>) -> Result<List<String>, String>
-    ? "One tombstone per key, in order."
-    match keys
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> nextTombstone(head, tail, acc)
-
-verify deletePartsFor
-    deletePartsFor([], []) => Result.Ok([])
-    deletePartsFor(["a"], []) => Result.Ok(["-a\n"])
-    deletePartsFor([""], []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-
-fn nextTombstone(head: String, tail: List<String>, acc: List<String>) -> Result<List<String>, String>
-    ? "Encode one tombstone and continue with the rest."
-    text = deleteRecordFor(head)?
-    deletePartsFor(tail, List.prepend(text, acc))
-
-verify nextTombstone
-    nextTombstone("a", [], []) => Result.Ok(["-a\n"])
-    nextTombstone("", [], []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+fn loggedDelete(path: String, logged: Map<String, String>, keys: List<String>) -> Result<Store, String>
+    ? "Append the tombstones, then forget the keys in memory."
+    ! [Disk.appendText]
+    records = Infra.StoreLog.deleteRecordsFor(keys)?
+    _written = appended(path, records)?
+    Result.Ok(Store.Logged(path, forgetAll(keys, logged)))
 
 fn forgetAll(keys: List<String>, into: Map<String, String>) -> Map<String, String>
     ? "Remove the same keys from the in-memory map."
       "Map.remove appears in the recursive call rather than behind a helper, for"
-      "the reason replayApplied gives: a Map handed back from a function is copied."
+      "the reason Infra.StoreLog.replayApplied gives: a Map handed back from a"
+      "function is copied."
     match keys
         [] -> into
         [head, ..tail] -> forgetAll(tail, Map.remove(into, head))
@@ -243,10 +280,20 @@ fn compact(store: Store) -> Result<Store, String>
       "The one place the whole file is rewritten, done deliberately and rarely"
       "rather than on every put. A log-structured store calls this compaction and"
       "does it in the background; here the caller chooses the moment."
+      "A Memory Store has no overwrites to discard because it never wrote them"
+      "down, so compacting one is the identity rather than an error. The caller"
+      "asked for the space back, and there is none owed."
     ! [Disk.writeText]
-    records = recordsFor(asEntries(Map.entries(store.entries), []))?
-    _rewritten = Disk.writeText(store.path, records)?
-    Result.Ok(store)
+    match store
+        Store.Memory(held) -> Result.Ok(store)
+        Store.Logged(path, logged) -> loggedCompact(path, logged)
+
+fn loggedCompact(path: String, logged: Map<String, String>) -> Result<Store, String>
+    ? "Write every surviving entry back as a fresh log, then keep the same entries."
+    ! [Disk.writeText]
+    records = Infra.StoreLog.recordsFor(asEntries(Map.entries(logged), []))?
+    _rewritten = Disk.writeText(path, records)?
+    Result.Ok(Store.Logged(path, logged))
 
 fn asEntries(pairs: List<Tuple<String, String>>, acc: List<Entry>) -> List<Entry>
     ? "The Store's contents as Entries, ready to be written back."
@@ -281,188 +328,3 @@ verify absorbAll
     absorbAll([], empty()) => empty()
     absorbAll([Entry(key = "a", value = "b")], empty()) => Map.set(empty(), "a", "b")
     Map.get(absorbAll([Entry(key = "a", value = "b"), Entry(key = "a", value = "c")], empty()), "a") => Option.Some("c")
-
-fn recordsFor(entries: List<Entry>) -> Result<String, String>
-    ? "The log text for a batch, or the first entry that cannot be stored."
-      "Joined at the end rather than concatenated as it goes: repeated `acc + text`"
-      "copies the whole accumulator each time, which took 4.1 seconds for 80000"
-      "short pieces where one join takes milliseconds."
-    parts = recordPartsFor(entries, [])?
-    Result.Ok(String.join(parts, ""))
-
-verify recordsFor
-    recordsFor([]) => Result.Ok("")
-    recordsFor([Entry(key = "a", value = "b")]) => Result.Ok("+a\tb\n")
-    recordsFor([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")]) => Result.Ok("+a\tb\n+c\td\n")
-    recordsFor([Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
-
-fn recordPartsFor(entries: List<Entry>, acc: List<String>) -> Result<List<String>, String>
-    ? "One log record per entry, in order."
-    match entries
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> nextRecord(head, tail, acc)
-
-verify recordPartsFor
-    recordPartsFor([], []) => Result.Ok([])
-    recordPartsFor([Entry(key = "a", value = "b")], []) => Result.Ok(["+a\tb\n"])
-    recordPartsFor([Entry(key = "", value = "b")], []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-
-fn nextRecord(head: Entry, tail: List<Entry>, acc: List<String>) -> Result<List<String>, String>
-    ? "Encode one entry and continue with the rest."
-    text = putRecordFor(head.key, head.value)?
-    recordPartsFor(tail, List.prepend(text, acc))
-
-verify nextRecord
-    nextRecord(Entry(key = "a", value = "b"), [], []) => Result.Ok(["+a\tb\n"])
-    nextRecord(Entry(key = "", value = "b"), [], []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-
-fn keyRefused(key: String) -> String
-    ? "Why a key cannot be used, in the one wording every entry point gives."
-      "Reads and writes reject the same keys, so they say so the same way; a"
-      "caller that learns the rule from a put should recognise it from a get."
-    "Store key must not be empty or contain a tab or newline, got '{key}'"
-
-verify keyRefused
-    keyRefused("") => "Store key must not be empty or contain a tab or newline, got ''"
-    keyRefused("a\tb") => "Store key must not be empty or contain a tab or newline, got 'a\tb'"
-
-fn putRecordFor(key: String, value: String) -> Result<String, String>
-    ? "A put record, once the key and value are known to survive the log format."
-    match usableKey(key)
-        false -> Result.Err(keyRefused(key))
-        true -> withKey(key, value)
-
-verify putRecordFor
-    putRecordFor("a", "b") => Result.Ok("+a\tb\n")
-    putRecordFor("a", "") => Result.Ok("+a\t\n")
-    putRecordFor("", "b") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-    putRecordFor("a", "b\nc") => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
-
-fn withKey(key: String, value: String) -> Result<String, String>
-    ? "The key was usable; the value still has to be."
-    match usableValue(value)
-        false -> Result.Err("Store value must not contain a tab or newline, got '{value}'")
-        true -> Result.Ok("+{key}\t{value}\n")
-
-verify withKey
-    withKey("a", "b") => Result.Ok("+a\tb\n")
-    withKey("a", "b\tc") => Result.Err("Store value must not contain a tab or newline, got 'b\tc'")
-
-fn deleteRecordFor(key: String) -> Result<String, String>
-    ? "A tombstone record for a key."
-    match usableKey(key)
-        false -> Result.Err(keyRefused(key))
-        true -> Result.Ok("-{key}\n")
-
-verify deleteRecordFor
-    deleteRecordFor("a") => Result.Ok("-a\n")
-    deleteRecordFor("") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-
-fn usableKey(key: String) -> Bool
-    ? "A key must be present and must not disturb the record format."
-    match String.len(key) > 0
-        false -> false
-        true -> usableValue(key)
-
-verify usableKey
-    usableKey("b:aa") => true
-    usableKey("") => false
-    usableKey("a\tb") => false
-    usableKey("a\nb") => false
-
-fn usableValue(value: String) -> Bool
-    ? "Records are one line with one separator, so neither may appear in the text."
-      "Every key and value the Index uses is hexadecimal, digits or a colon, so"
-      "this rejects nothing the program itself produces."
-    match String.contains(value, "\t")
-        true -> false
-        false -> String.contains(value, "\n") == false
-
-verify usableValue
-    usableValue("7:1234") => true
-    usableValue("") => true
-    usableValue("a\tb") => false
-    usableValue("a\nb") => false
-
-fn replayed(records: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
-    ? "Read the log into a Map, one record at a time, so a later record wins."
-      "This was two passes until 17 August 2026, because threading a Map through"
-      "a Result-returning recursion used to be quadratic while either half alone"
-      "was linear. jasisz/aver#961 closed that. Measured on the shape this file"
-      "has, compiled: fused and split now agree at every size tried, 41 ms"
-      "against 45 at 40000 records and 216 against 219 at 160000. The"
-      "intermediate list of Changes bought nothing and is gone."
-      "What has not changed is where Map.set may appear. See replayApplied."
-    match records
-        [] -> Result.Ok(into)
-        [head, ..tail] -> replayNext(head, tail, into)
-
-verify replayed
-    replayed([], empty()) => Result.Ok(empty())
-    replayed(["+a\tb"], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
-    replayed(["+a\tb", "-a"], empty()) => Result.Ok(empty())
-    replayed(["+a\tb", "+a\tc"], empty()) => Result.Ok(Map.set(empty(), "a", "c"))
-    replayed(["nope"], empty()) => Result.Err("Store log record is neither a put nor a delete: 'nope'")
-
-fn replayNext(head: String, tail: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
-    ? "Parse one record, then apply it and continue."
-    parsed = parseOne(head)?
-    replayApplied(parsed, tail, into)
-
-verify replayNext
-    replayNext("+a\tb", [], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
-    replayNext("bad", [], empty()) => Result.Err("Store log record is neither a put nor a delete: 'bad'")
-    replayNext("", [], empty()) => Result.Err("Store log record is neither a put nor a delete: ''")
-
-fn replayApplied(change: Change, tail: List<String>, into: Map<String, String>) -> Result<Map<String, String>, String>
-    ? "A put sets a key and a tombstone forgets one, each continuing by tail call."
-      "Map.set and Map.remove appear directly in the tail call, and no helper here"
-      "hands a Map back. jasisz/aver#890 is open: a Map returned from a function"
-      "is copied, so a fold routed through one costs quadratic time. Re-measured"
-      "compiled on 17 August 2026 at 80000 entries: 48 ms with the insert inline,"
-      "49 ms branching first as this does, 105633 ms through a helper. That is why"
-      "this branches into a third function rather than calling a fourth."
-    match change
-        Change.Put(entry) -> replayed(tail, Map.set(into, entry.key, entry.value))
-        Change.Drop(key) -> replayed(tail, Map.remove(into, key))
-
-verify replayApplied
-    replayApplied(Change.Put(Entry(key = "a", value = "b")), [], empty()) => Result.Ok(Map.set(empty(), "a", "b"))
-    replayApplied(Change.Drop("a"), [], Map.set(empty(), "a", "b")) => Result.Ok(empty())
-    replayApplied(Change.Put(Entry(key = "a", value = "b")), ["nope"], empty()) => Result.Err("Store log record is neither a put nor a delete: 'nope'")
-
-fn parseOne(line: String) -> Result<Change, String>
-    ? "A record is a put or a tombstone, told apart by its first character."
-    body = String.slice(line, 1, String.len(line))
-    match String.slice(line, 0, 1)
-        "+" -> parsePut(line, String.split(body, "\t"))
-        "-" -> Result.Ok(Change.Drop(body))
-        _ -> Result.Err("Store log record is neither a put nor a delete: '{line}'")
-
-verify parseOne
-    parseOne("+a\tb") => Result.Ok(Change.Put(Entry(key = "a", value = "b")))
-    parseOne("-a") => Result.Ok(Change.Drop("a"))
-    parseOne("") => Result.Err("Store log record is neither a put nor a delete: ''")
-    parseOne("+a") => Result.Err("Store log put has no separator: '+a'")
-
-fn parsePut(line: String, parts: List<String>) -> Result<Change, String>
-    ? "A put carries a key and a value, separated once."
-    match parts
-        [] -> Result.Err("Store log put has no separator: '{line}'")
-        [key, ..rest] -> withParsedKey(line, key, rest)
-
-verify parsePut
-    parsePut("+a\tb", ["a", "b"]) => Result.Ok(Change.Put(Entry(key = "a", value = "b")))
-    parsePut("+a", ["a"]) => Result.Err("Store log put has no separator: '+a'")
-    parsePut("+", []) => Result.Err("Store log put has no separator: '+'")
-    parsePut("", []) => Result.Err("Store log put has no separator: ''")
-
-fn withParsedKey(line: String, key: String, rest: List<String>) -> Result<Change, String>
-    ? "Everything after the separator is the value."
-    match rest
-        [] -> Result.Err("Store log put has no separator: '{line}'")
-        [value, ..extra] -> Result.Ok(Change.Put(Entry(key = key, value = value)))
-
-verify withParsedKey
-    withParsedKey("+a\tb", "a", ["b"]) => Result.Ok(Change.Put(Entry(key = "a", value = "b")))
-    withParsedKey("+a", "a", []) => Result.Err("Store log put has no separator: '+a'")

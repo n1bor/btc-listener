@@ -516,7 +516,8 @@ infra/  the network
   resolver.av download.av
 
 infra/  the disk
-  store.av          append-only keyed store, the database seam
+  store.av          keyed store over two backends, the database seam
+  storelog.av       the append-only log's record format and replay
   blocks.av chain.av txindex.av lock.av prune.av
   spends.av audit.av
 ```
