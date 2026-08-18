@@ -24,6 +24,12 @@ module Store
         "What is left to do at that point is declare the effects a read performs."
         "Adding an effect is mechanical and the checker names every site; changing"
         "a return type is not, which is why the Result is here already."
+        "There is no compact. The log grows tombstones a prune never reclaims"
+        "and the function to rewrite it existed from the first commit, exposed,"
+        "and was never once called by anything on any backend. A database"
+        "compacts itself, so the only backend it would still have meant work"
+        "for is the one being replaced. It can come back the day something"
+        "calls it."
         "Appending one record per put and rebuilding on open is not a shortcut"
         "around writing a real index. It is the shape a log-structured store"
         "already has, which is why it can be swapped for one. Rewriting the whole"
@@ -47,12 +53,12 @@ module Store
         "different names. That is jasisz/aver#991: cse-duplicate counts across"
         "mutually exclusive arms, and the binding it asks for cannot be extracted"
         "because the arm pattern is what introduces it."
-    exposes [Entry, open, openLogged, heldBy, databaseHere, databasePath, get, has, size, put, putAll, delete, deleteAll, compact, fixture]
+    exposes [Entry, open, openLogged, heldBy, databaseHere, databasePath, get, has, size, put, putAll, delete, deleteAll, fixture]
     exposes opaque [Store]
     depends [Domain.Text, Infra.Kv, Infra.StoreLog]
     effects [
-        Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
-        Infra.Kv.compact, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
 
 type Store
@@ -391,51 +397,6 @@ verify forgetAll
     forgetAll([], empty()) => empty()
     forgetAll(["a"], Map.set(empty(), "a", "b")) => empty()
     Map.len(forgetAll(["a"], Map.set(Map.set(empty(), "a", "b"), "c", "d"))) => 1
-
-fn compact(store: Store) -> Result<Store, String>
-    ? "Rewrite the log as one put per surviving key, discarding overwrites and tombstones."
-      "The one place the whole file is rewritten, done deliberately and rarely"
-      "rather than on every put. A log-structured store calls this compaction and"
-      "does it in the background; here the caller chooses the moment."
-      "A Memory Store has no overwrites to discard because it never wrote them"
-      "down, so compacting one is the identity rather than an error. The caller"
-      "asked for the space back, and there is none owed."
-    ! [Disk.writeText, Infra.Kv.compact]
-    match store
-        Store.Memory(held) -> Result.Ok(store)
-        Store.Logged(path, logged) -> loggedCompact(path, logged)
-        Store.Database(handle) -> storedCompact(handle)
-
-fn storedCompact(handle: Infra.Kv.Handle) -> Result<Store, String>
-    ? "Ask the database to reclaim its own space, and keep the same Handle."
-    ! [Infra.Kv.compact]
-    _reclaimed = Infra.Kv.compact(handle)?
-    Result.Ok(Store.Database(handle))
-
-fn loggedCompact(path: String, logged: Map<String, String>) -> Result<Store, String>
-    ? "Write every surviving entry back as a fresh log, then keep the same entries."
-    ! [Disk.writeText]
-    records = Infra.StoreLog.recordsFor(asEntries(Map.entries(logged), []))?
-    _rewritten = Disk.writeText(path, records)?
-    Result.Ok(Store.Logged(path, logged))
-
-fn asEntries(pairs: List<Tuple<String, String>>, acc: List<Entry>) -> List<Entry>
-    ? "The Store's contents as Entries, ready to be written back."
-    match pairs
-        [] -> List.reverse(acc)
-        [head, ..tail] -> asEntries(tail, List.prepend(entryOf(head), acc))
-
-verify asEntries
-    asEntries([], []) => []
-    asEntries([("a", "b")], []) => [Entry(key = "a", value = "b")]
-
-fn entryOf(pair: Tuple<String, String>) -> Entry
-    ? "One key and value from the map."
-    match pair
-        (key, value) -> Entry(key = key, value = value)
-
-verify entryOf
-    entryOf(("a", "b")) => Entry(key = "a", value = "b")
 
 fn appended(path: String, records: String) -> Result<Unit, String>
     ? "Put the records on the end of the log."

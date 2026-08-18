@@ -31,15 +31,10 @@ use rusty_leveldb::{LdbIterator, Options, WriteBatch, DB};
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
 /// than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:7c93cf0f314b590489643e331c2dd78b4751a5de4b2d7d1719fe10dc099200f4";
+    "sha256:d71f2dc311d4ead14a8b7e9e58b533ad874b9f6b8799568311422bdb11437022";
 
 /// The type name the contract gives the handle record.
 const HANDLE: &str = "Infra.Kv.Handle";
-
-/// Greater than any key the contract can carry: keys cross the boundary as
-/// Aver `String`s, so they are valid UTF-8, and 0xff never appears in valid
-/// UTF-8. That makes it a safe upper bound for a whole-keyspace compaction.
-const ABOVE_EVERY_KEY: &[u8] = &[0xff];
 
 /// The open databases, by the id handed to Aver, and which directory each
 /// came from. Each is behind its own lock because the LevelDB handle wants
@@ -286,20 +281,6 @@ impl CapabilityProvider for Kv {
                 }
                 Ok(ok(ProviderValue::List(found)))
             }
-            "Infra.Kv.compact" => {
-                let [handle] = args else {
-                    return Err(ProviderFault::new("bad_arity", "compact takes a Handle"));
-                };
-                let open = database!(handle, "handle");
-                let mut db = open.lock().expect("Kv handle poisoned");
-                if let Err(why) = db.flush() {
-                    return Ok(failed("cannot flush before compacting", why));
-                }
-                Ok(match db.compact_range(&[], ABOVE_EVERY_KEY) {
-                    Ok(()) => ok(ProviderValue::Unit),
-                    Err(why) => failed("cannot compact", why),
-                })
-            }
             other => Err(ProviderFault::new("bad_operation", other)),
         }
     }
@@ -311,7 +292,6 @@ pub fn kv_binding() -> ProviderBinding {
         "Infra.Kv",
         CONTRACT_HASH,
         [
-            "Infra.Kv.compact",
             "Infra.Kv.count",
             "Infra.Kv.deleteAll",
             "Infra.Kv.get",
@@ -573,8 +553,9 @@ mod tests {
         assert_eq!(under(&handle, "z"), vec![]);
     }
 
+    /// Fifty overwrites and a delete leave exactly what survived them.
     #[test]
-    fn compacting_keeps_what_survived_the_overwrites() {
+    fn overwrites_and_deletes_leave_only_what_survived() {
         let dir = tempfile::tempdir().unwrap();
         let handle = opened(dir.path());
         for round in 0..50 {
@@ -583,7 +564,6 @@ mod tests {
         let keys = ProviderValue::List(vec![text("b:aa")]);
         did(call("deleteAll", &[handle.clone(), keys]));
         put(&handle, &[("b:bb", "kept")]);
-        did(call("compact", &[handle.clone()]));
         assert_eq!(got(&handle, "b:aa"), None);
         assert_eq!(got(&handle, "b:bb"), Some("kept".to_string()));
         assert_eq!(counted(&handle), 1);
@@ -680,6 +660,6 @@ mod tests {
         let binding = kv_binding();
         assert_eq!(binding.capability(), "Infra.Kv");
         assert_eq!(binding.contract_hash(), CONTRACT_HASH);
-        assert_eq!(binding.operations().len(), 7);
+        assert_eq!(binding.operations().len(), 6);
     }
 }

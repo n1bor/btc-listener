@@ -483,11 +483,14 @@ the same binary, and the same two ranges:
 | totals | identical | identical |
 
 Memory is the point, not speed. 615 MB is the whole Index held open regardless
-of what is being read; 67 MB is what the audit itself needs. The second range
-is 11% slower and the first is nearly twice as fast, which is the shape you
-would expect when a lookup stops being free and an open stops costing two
-seconds. What this buys is a ceiling set by the disk rather than by RAM, which
-is what an output keyspace at two hundred million entries needs.
+of what is being read; 67 MB is what the audit itself needs. The sharpest
+difference is on the small commands: `tx` does one lookup and exits, and goes
+from 4.5 s and 667 MB to 0.04 s and 19.8 MB, because opening stopped costing
+anything. The second audit range is 11% slower, which is what a lookup costs
+once it stops being free. What this buys is a ceiling set by the disk rather
+than by RAM, which is what an output keyspace at two hundred million entries
+needs. The full table, and why the log is being kept anyway, are in
+[ADR 0006](docs/adr/0006-a-leveldb-under-the-index.md).
 
 ## Checking the code
 
@@ -696,8 +699,9 @@ databases and hands out ids, and refuses an id it did not issue.
 - That check moved to where the implementation is: the provider's own Rust
   tests, against the eight published vectors and against the first spend Bitcoin
   ever made. The database provider is tested the same way — round trip,
-  overwrite, delete, reopen, prefix order, and a batch whose write-ahead record
-  is deliberately torn, which comes back absent rather than half applied.
+  overwrite, delete, reopen, prefix order, a handle it never issued, and a batch
+  whose write-ahead record is deliberately torn, which comes back absent rather
+  than half applied.
 - **Plain `aver run` cannot start this program**, and that is the safe failure:
   an interpreter running the audit with no crypto would report passes it had not
   earned. Pass `--providers` and it works — Aver builds a thin Rust host from the
