@@ -51,14 +51,19 @@ module Ecdsa
         "libsecp256k1 is what Bitcoin Core itself runs, and the provider hands"
         "the question to it. RIPEMD-160 followed the curve behind the same"
         "contract afterwards, so there is one boundary rather than two."
-        "What that costs is written down where it is paid. aver verify has no"
-        "provider, so the cases here bind an Aver stub through given and test"
-        "what this module does with an answer rather than whether the answer"
-        "is right. Whether it is right is checked in the provider's own"
-        "language, against the published vectors and against the first spend"
-        "Bitcoin ever made."
+        "What that costs is written down where it is paid. The cases here bind"
+        "an Aver stub through given and test what this module does with an"
+        "answer rather than whether the answer is right. Whether it is right is"
+        "checked in the provider's own language, against the published vectors"
+        "and against the first spend Bitcoin ever made."
+        "That is now a smaller gap than it was. jasisz/aver#987 lets aver run"
+        "and aver verify take --providers and reach the real implementation, so"
+        "an interpreted audit works again and agrees with the compiled one. It"
+        "does not reach the suite yet: --providers refuses any module that does"
+        "not use the capability, which is most of them, so aver audit cannot"
+        "carry it. That is jasisz/aver#989. When it closes the stubs go."
     exposes [Ruling, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
-    depends [Bytes, Primitives, Domain.PrimitiveStub]
+    depends [Bytes, Domain.Primitives, Domain.PrimitiveStub]
     effects []
 
 type Ruling
@@ -77,8 +82,8 @@ fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
     ruled(decideShape(Bytes.toList(signature), Bytes.toList(publicKey)), publicKey, signature, message)
 
 verify decide
-    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
+    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Ruling.Invalid("empty signature")
     decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
     decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("signature does not verify")
@@ -102,12 +107,12 @@ fn overCurve(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
     ? "The provider's answer, turned back into a Ruling."
       "The hash type byte is dropped before the signature crosses: it is not"
       "part of the DER and the curve has no use for it."
-    verdict(Primitives.verifySignature(octets(publicKey), listOctets(signatureBody(Bytes.toList(signature))), octets(message)))
+    verdict(Domain.Primitives.verifySignature(octets(publicKey), listOctets(signatureBody(Bytes.toList(signature))), octets(message)))
 
 verify overCurve
-    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
-    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
-    overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Primitives.verifySignature(octets(Bytes.fromList([])), listOctets(signatureBody(Bytes.toList(Bytes.fromList([])))), octets(Bytes.fromList([]))))
+    given hash: Domain.Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Domain.Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
+    overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Domain.Primitives.verifySignature(octets(Bytes.fromList([])), listOctets(signatureBody(Bytes.toList(Bytes.fromList([])))), octets(Bytes.fromList([]))))
 
 fn verdict(valid: Bool) -> Ruling
     ? "True is Valid and false is Invalid. There is no third answer once the"
@@ -129,7 +134,7 @@ verify octets
 
 fn listOctets(values: List<Int>) -> Octets
     ? "The same, from the list form the shape checks already work in."
-    Primitives.Octets(values = values)
+    Domain.Primitives.Octets(values = values)
 
 verify listOctets
     listOctets([1, 2]).values => [1, 2]

@@ -13,14 +13,13 @@ use aver_rt::provider::{
     CapabilityProvider, ProviderBinding, ProviderContext, ProviderFault, ProviderValue,
 };
 use ripemd::{Digest, Ripemd160};
-use sha2::Sha256;
 
 /// Pinned to the contract in `primitives.av`. A mismatch fails at startup
 /// rather than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:20c76a5ba9fb3b1292c65c3dc218ba12755a4878537343419611b34781712a0c";
+    "sha256:a4ada0e3b33296aadc557423913af5e456be0c8395bf7b89e6bae8298c8991ec";
 
-const CARRIER: &str = "Primitives.Octets";
+const CARRIER: &str = "Domain.Primitives.Octets";
 
 struct Primitives;
 
@@ -109,13 +108,13 @@ impl CapabilityProvider for Primitives {
         args: &[ProviderValue],
     ) -> Result<ProviderValue, ProviderFault> {
         match context.operation.as_str() {
-            "Primitives.ripemd160" => {
+            "Domain.Primitives.ripemd160" => {
                 let [input] = args else {
                     return Err(ProviderFault::new("bad_arity", "ripemd160 takes one Octets"));
                 };
                 Ok(octets_out(&ripemd160(&octets_in(input, "input")?)))
             }
-            "Primitives.verifySignature" => {
+            "Domain.Primitives.verifySignature" => {
                 let [key, sig, msg] = args else {
                     return Err(ProviderFault::new(
                         "bad_arity",
@@ -136,9 +135,12 @@ impl CapabilityProvider for Primitives {
 /// The zero-argument factory `aver.toml` names.
 pub fn primitives_binding() -> ProviderBinding {
     ProviderBinding::new(
-        "Primitives",
+        "Domain.Primitives",
         CONTRACT_HASH,
-        ["Primitives.ripemd160", "Primitives.verifySignature"],
+        [
+            "Domain.Primitives.ripemd160",
+            "Domain.Primitives.verifySignature",
+        ],
         Arc::new(Primitives),
     )
 }

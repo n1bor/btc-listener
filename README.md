@@ -51,11 +51,11 @@ which is an answer rather than an error.
 Everything but the listener takes a `<dir>`, where the Index and the Segments
 live. Point them all at the same one.
 
-**All of them need the compiled binary.** Since RIPEMD-160 and secp256k1 moved
-behind a capability provider, `aver run` cannot start this program at all — it
-fails preflight before any code runs, including on `--help`. See
-[Providers](#providers). Build once with `aver compile` and `cargo build`, and
-use the binary for everything.
+All of them run either way. `aver run --providers` builds the provider host once
+and caches it, so the interpreted path works; the examples below use a compiled
+binary because anything that opens the Index is several times faster that way.
+Plain `aver run`, with no flag, cannot start this program — see
+[Providers](#providers).
 
 ## Requirements
 
@@ -70,6 +70,12 @@ use the binary for everything.
 
 ```bash
 cd btc-listener
+aver run main.av --module-root . --providers -- [peer-address] [port]
+```
+
+or compiled, which is what the rest of these examples use:
+
+```bash
 aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release
 ./target/release/main [peer-address] [port]
@@ -624,25 +630,27 @@ the curve behind the same contract, so there is one boundary rather than two.
 - Verify cases that reach an operation bind an Aver stub through `given`
   ([`domain/primitivestub.av`](domain/primitivestub.av)). They test what this
   project wrote — that the engine pushes, hashes, compares and settles — and no
-  longer test whether RIPEMD-160 is RIPEMD-160.
+  longer test whether RIPEMD-160 is RIPEMD-160. That becomes undoable when
+  [#989](https://github.com/jasisz/aver/issues/989) closes.
 - That check moved to where the implementation is: the provider's own Rust
   tests, against the eight published vectors and against the first spend Bitcoin
   ever made.
-- **`aver run` cannot start this program at all.** It is not that an audit stops
-  at the first hash: the required-operation preflight runs before any Aver code,
-  so every command fails, including printing the usage banner. Measured:
+- **Plain `aver run` cannot start this program**, and that is the safe failure:
+  an interpreter running the audit with no crypto would report passes it had not
+  earned. Pass `--providers` and it works — Aver builds a thin Rust host from the
+  `[providers]` composition, caches it, and runs the ordinary VM with the binding
+  installed.
 
+  ```bash
+  aver run main.av --module-root . --providers -- audit chain 1 2000
   ```
-  $ aver run main.av --module-root . --
-  Runtime error: error[capability-provider-missing]:
-  capability provider missing for 'Primitives.ripemd160'
-  ```
 
-  That is the safe failure. An interpreter that ran the audit with no crypto
-  would report passes it had not earned, which is the one wrong answer this
-  project has refused throughout. But it does mean the compiled binary is now
-  the only way to run anything, and `aver run` is no longer part of the loop.
+- **`aver verify --providers` runs the real provider too**, but only per file, and
+  only for files that reach the capability — a module that does not use it is
+  rejected as an unused binding
+  ([jasisz/aver#989](https://github.com/jasisz/aver/issues/989)). `aver audit` has
+  no such flag either, so the suite still binds Aver stubs through `given` and the
+  gate is still plain `aver audit .`.
 
-`aver check`, `aver verify`, `aver audit`, `aver format` and `aver capabilities`
-are all unaffected — none of them needs a provider, and the verify suite runs on
-stubs.
+`aver check`, `aver audit`, `aver format` and `aver capabilities` are unaffected —
+none of them needs a provider, and the verify suite runs on stubs.
