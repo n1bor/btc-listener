@@ -19,13 +19,20 @@ module Checksig
         "of Transactions that depend on it."
         "It also charges its public keys against the opcode limit, which is why"
         "a Script can hold fewer multisig checks than it can hold opcodes."
-        "What is missing is the message. A signature commits to a Transaction,"
-        "and this is handed a stack and nothing else, so even a well formed"
-        "signature over a valid key cannot be looked up against anything. That"
-        "gap closes when the interpreter is given a spend to run rather than a"
-        "Script on its own."
+        "The message used to be missing. A signature commits to a Transaction,"
+        "and this was handed a stack and nothing else, so even a well formed"
+        "signature over a valid key had nothing to be checked against. That gap"
+        "is closed: a Domain.SpendContext travels with the run, and when it"
+        "carries a spend the message is built from it and handed to"
+        "Domain.Ecdsa."
+        "So there are now two undecided answers here and the difference"
+        "matters. Needing the Transaction means the caller ran a Script on its"
+        "own and there is nothing to check against. Needing secp256k1 means"
+        "everything is in hand except the arithmetic. The second is the one"
+        "a real spend gives, and it is the only thing left between this module"
+        "and an answer."
     exposes [step, isSignatureOpcode]
-    depends [Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
+    depends [Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
     effects []
 
 fn isSignatureOpcode(code: Int) -> Bool
@@ -39,41 +46,81 @@ verify isSignatureOpcode
     isSignatureOpcode(176) => false
     isSignatureOpcode(186) => false
 
-fn step(code: Int, state: State) -> Step
+fn step(code: Int, state: State, context: Context) -> Step
     ? "One signature opcode against the machine."
     match code
-        172 -> single(code, state)
-        173 -> single(code, state)
-        _ -> multiple(code, state)
+        172 -> single(code, state, context)
+        173 -> single(code, state, context)
+        _ -> multiple(code, state, context)
 
 verify step
-    step(172, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    step(172, Domain.ScriptState.holding([[2, 3], [4, 5]])) => Step.Continue(Domain.ScriptState.holding([[]]))
-    step(174, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
+    step(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
+    step(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
+    step(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
 
-fn single(code: Int, state: State) -> Step
+fn single(code: Int, state: State, context: Context) -> Step
     ? "OP_CHECKSIG and OP_CHECKSIGVERIFY: one signature, one public key."
       "The public key is on top and the signature under it, which is the order"
       "a P2PK or P2PKH Script leaves them in."
     match Domain.ScriptState.topTwo(state.stack, Domain.Opcode.nameOf(code))
         Result.Err(message) -> Step.Stop(Outcome.Decided(Ending.Failed(message)))
-        Result.Ok(two) -> singleOn(code, two, state)
+        Result.Ok(two) -> singleOn(code, two, state, context)
 
 verify single
-    single(172, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    single(172, Domain.ScriptState.holding([[2, 3], [4, 5]])) => Step.Continue(Domain.ScriptState.holding([[]]))
-    single(172, Domain.ScriptState.holding([[2, 3], []])) => Step.Continue(Domain.ScriptState.holding([[]]))
+    single(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
+    single(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
+    single(172, Domain.ScriptState.holding([[2, 3], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
 
-fn singleOn(code: Int, two: Two, state: State) -> Step
+fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
     ? "Decide it if it can be decided, and say what is missing if not."
+      "A signature that fails for a reason needing no curve is refused first"
+      "and never reaches the message, which is the order the reference client"
+      "uses and also the only order that works: an empty signature has no hash"
+      "type byte to build a message with."
     match refusal(two.second, two.first)
         Option.Some(why) -> answered(code, false, two.rest, state)
-        Option.None -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
+        Option.None -> againstMessage(code, two, state, context)
 
 verify singleOn
-    singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]])) => Step.Continue(Domain.ScriptState.holding([[]]))
-    singleOn(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]])) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
-    singleOn(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
+    singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
+    singleOn(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
+    singleOn(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
+
+fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
+    ? "The signature, the key and the message it should have been taken over."
+      "Two things can be missing and they are different. Without a spend there"
+      "is no message at all, and the answer names the Transaction. With one,"
+      "the message is built and handed to Domain.Ecdsa, which still has no"
+      "curve -- so the answer names the curve instead. Watching that reason"
+      "change is how you can tell this plumbing works before the curve lands."
+    match Domain.Ecdsa.hashTypeOf(two.second)
+        Result.Err(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} {why}"))
+        Result.Ok(hashType) -> overMessage(code, two, state, Domain.SpendContext.messageFor(context, hashType))
+
+verify againstMessage
+    againstMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
+
+fn overMessage(code: Int, two: Two, state: State, message: Option<String>) -> Step
+    ? "What the curve would be asked, once there is a curve to ask."
+    match message
+        Option.None -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
+        Option.Some(hex) -> ruled(code, two, state, Domain.Ecdsa.decideShape(two.second, two.first))
+
+verify overMessage
+    overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.None) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
+    overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00")) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
+
+fn ruled(code: Int, two: Two, state: State, ruling: Ruling) -> Step
+    ? "The Ruling turned back into a Step. Undecidable stays undecided and"
+      "says so in this module's words rather than Domain.Ecdsa's, because the"
+      "caller is counting opcodes and not curves."
+    match ruling
+        Domain.Ecdsa.Ruling.Invalid(why) -> answered(code, false, two.rest, state)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs secp256k1"))
+
+verify ruled
+    ruled(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.Ecdsa.Ruling.Undecidable("no")) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
+    ruled(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.Ecdsa.Ruling.Invalid("no")) => Step.Continue(Domain.ScriptState.holding([[]]))
 
 fn validKey() -> List<Int>
     ? "A public key of the right shape, for the cases above."
@@ -130,7 +177,7 @@ fn maxKeys() -> Int
 verify maxKeys
     maxKeys() => 20
 
-fn multiple(code: Int, state: State) -> Step
+fn multiple(code: Int, state: State, context: Context) -> Step
     ? "OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY."
       "The stack, from the top down: the key count, that many keys, the"
       "signature count, that many signatures, and one item nobody uses."
@@ -139,9 +186,9 @@ fn multiple(code: Int, state: State) -> Step
         [head, ..tail] -> withKeyCount(code, Domain.StackItem.asNumber(head), tail, state)
 
 verify multiple
-    multiple(174, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
-    multiple(174, Domain.ScriptState.holding([[], [], []])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    multiple(174, Domain.ScriptState.holding([[21]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))
+    multiple(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
+    multiple(174, Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    multiple(174, Domain.ScriptState.holding([[21]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))
 
 fn withKeyCount(code: Int, keys: Int, rest: List<List<Int>>, state: State) -> Step
     ? "Between nought and twenty keys, and they count against the opcode limit."

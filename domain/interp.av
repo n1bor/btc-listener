@@ -8,7 +8,8 @@ module Interp
         "without also running a Script, and the file was half again as long."
         "Undecided is not failure. Four opcodes want RIPEMD160 or SHA1, three"
         "want a Transaction this has not got, and the four that check"
-        "signatures want both a Transaction and a curve. Saying so rather than"
+        "signatures want a curve once a spend has supplied the Transaction."
+        "Saying so rather than"
         "guessing is the whole reason an engine can be written before any of"
         "them exist."
         "The signature opcodes are not entirely undecidable, which is why they"
@@ -23,7 +24,7 @@ module Interp
         "accepted. They wait for a flags argument, which waits for the test"
         "corpus that needs one."
     exposes [run, evaluate, reach]
-    depends [Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState]
+    depends [Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
 fn run(scriptHex: String) -> Outcome
@@ -45,9 +46,12 @@ verify run
 
 fn parsed(scriptHex: String) -> Outcome
     ? "Parse it, then walk it."
+      "Bare, because this is the entry for a Script on its own. A signature"
+      "in it has no Transaction to have committed to, and saying so is what"
+      "Domain.SpendContext.bare is for."
     match Domain.ScriptParse.opsIn(scriptHex)
         Result.Err(message) -> Outcome.Decided(Ending.Failed(message))
-        Result.Ok(ops) -> evaluate(ops, Domain.ScriptState.empty())
+        Result.Ok(ops) -> evaluate(ops, Domain.ScriptState.empty(), Domain.SpendContext.bare())
 
 verify parsed
     parsed("51") => Outcome.Decided(Ending.Passed)
@@ -80,20 +84,20 @@ verify parsed
     parsed("5193") => Outcome.Decided(Ending.Failed("OP_ADD needs two items"))
     parsed("515255a5") => Outcome.Decided(Ending.Failed("script left a false value on top"))
 
-fn evaluate(ops: List<Op>, state: State) -> Outcome
+fn evaluate(ops: List<Op>, state: State, context: Context) -> Outcome
     ? "Run the Ops and say how it went."
-    match reach(ops, state)
+    match reach(ops, state, context)
         Step.Continue(final) -> Outcome.Decided(Domain.ScriptState.settled(final))
         Step.Stop(outcome) -> outcome
 
 verify evaluate
-    evaluate([], Domain.ScriptState.holding([[1]])) => Outcome.Decided(Ending.Passed)
-    evaluate([], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
-    evaluate([Op.Code(172)], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
-    evaluate([Op.Code(169)], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
-    evaluate([Op.Push(1, [1])], Domain.ScriptState.empty()) => Outcome.Decided(Ending.Passed)
+    evaluate([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    evaluate([], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    evaluate([Op.Code(172)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
+    evaluate([Op.Code(169)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
+    evaluate([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
 
-fn reach(ops: List<Op>, state: State) -> Step
+fn reach(ops: List<Op>, state: State, context: Context) -> Step
     ? "The same walk, handing back the stack instead of settling it."
       "A spend runs two Scripts and the second starts on what the first left,"
       "so something has to be able to stop short of asking whether the top is"
@@ -101,20 +105,20 @@ fn reach(ops: List<Op>, state: State) -> Step
       "on a public key, which is most of them."
     match ops
         [] -> Step.Continue(state)
-        [head, ..tail] -> stepped(head, tail, state)
+        [head, ..tail] -> stepped(head, tail, state, context)
 
 verify reach
-    reach([], Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    reach([Op.Push(1, [1])], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    reach([Op.Code(106)], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    reach([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    reach([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    reach([Op.Code(106)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
-fn stepped(op: Op, rest: List<Op>, state: State) -> Step
+fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
     ? "Take the Step the Op asks for, then carry on or stop as it says."
-    match Domain.ScriptOps.step(op, state)
-        Step.Continue(next) -> reach(rest, next)
+    match Domain.ScriptOps.step(op, state, context)
+        Step.Continue(next) -> reach(rest, next, context)
         Step.Stop(outcome) -> Step.Stop(outcome)
 
 verify stepped
-    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    stepped(Op.Code(106), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
-    stepped(Op.Code(169), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
