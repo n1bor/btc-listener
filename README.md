@@ -51,9 +51,11 @@ which is an answer rather than an error.
 Everything but the listener takes a `<dir>`, where the Index and the Segments
 live. Point them all at the same one.
 
-All of them run under `aver run`. The examples below use a compiled binary for
-everything but the listener, because anything that opens the Index is several
-times faster that way; [see why](#downloading-the-chain).
+**All of them need the compiled binary.** Since RIPEMD-160 and secp256k1 moved
+behind a capability provider, `aver run` cannot start this program at all — it
+fails preflight before any code runs, including on `--help`. See
+[Providers](#providers). Build once with `aver compile` and `cargo build`, and
+use the binary for everything.
 
 ## Requirements
 
@@ -68,16 +70,18 @@ times faster that way; [see why](#downloading-the-chain).
 
 ```bash
 cd btc-listener
-aver run main.av --module-root . -- [peer-address] [port]
+aver compile main.av --module-root . -o ../btc-listener-build
+cd ../btc-listener-build && cargo build --release
+./target/release/main [peer-address] [port]
 ```
 
 With no address, the listener asks one of Bitcoin's DNS seeds for reachable
 peers and connects to one of them at random. The port defaults to 8333.
 
 ```bash
-aver run main.av --module-root .                        # find a peer via DNS
-aver run main.av --module-root . -- 192.168.1.10        # named peer
-aver run main.av --module-root . -- 192.168.1.10 8333   # explicit port
+./target/release/main                        # find a peer via DNS
+./target/release/main 192.168.1.10           # named peer
+./target/release/main 192.168.1.10 8333      # explicit port
 ```
 
 ```
@@ -103,22 +107,23 @@ seconds ([jasisz/aver#782](https://github.com/jasisz/aver/issues/782)), so a
 peer that says nothing for that long ends the session — unlikely on mainnet,
 where announcements arrive constantly, but worth knowing.
 
-`aver run` prints **45 warnings** before it starts, one per dependency module,
-each saying that module's verify blocks are not sampled and suggesting you move
-them to the entry module. Ignore the suggestion — it would mean collapsing 3,699
-cases into a `main.av` that is deliberately thin. The blocks are checked, by
-`aver verify --deps`; it is `aver run` that does not sample them.
+`aver compile` prints one warning per dependency module — 45 of them — each
+saying that module's verify blocks are not sampled and suggesting you move them
+to the entry module. Ignore the suggestion: it would mean collapsing 3,777 cases
+into a `main.av` that is deliberately thin. The blocks are checked, by
+`aver verify --deps`.
 
 There is no flag to quiet it
 ([jasisz/aver#857](https://github.com/jasisz/aver/issues/857)), so filter that
 one line off stderr and leave the rest alone:
 
 ```bash
-aver run main.av --module-root . -- 2> >(grep -v "non-law verify block" >&2)
+aver compile main.av --module-root . -o ../btc-listener-build \
+  2> >(grep -v "non-law verify block" >&2)
 ```
 
-Real errors still come through: an unparseable address still says
-`error: octet 999 is out of range (0-255)`.
+Real errors still come through, and the compiled binary itself is quiet: an
+unparseable address still says `error: octet 999 is out of range (0-255)`.
 
 ### Running under WSL
 
@@ -126,7 +131,7 @@ If the node is on the Windows host, `127.0.0.1` inside WSL will not reach it —
 WSL2 has its own network namespace. Use the gateway address:
 
 ```bash
-aver run main.av --module-root . -- $(ip route show default | awk '{print $3}')
+./target/release/main $(ip route show default | awk '{print $3}')
 ```
 
 That address is reassigned when Windows reboots, so resolve it rather than
@@ -623,5 +628,21 @@ the curve behind the same contract, so there is one boundary rather than two.
 - That check moved to where the implementation is: the provider's own Rust
   tests, against the eight published vectors and against the first spend Bitcoin
   ever made.
-- `aver run` cannot reach a provider either, so an interpreted audit stops at the
-  first hash. **The audit commands need the compiled binary.**
+- **`aver run` cannot start this program at all.** It is not that an audit stops
+  at the first hash: the required-operation preflight runs before any Aver code,
+  so every command fails, including printing the usage banner. Measured:
+
+  ```
+  $ aver run main.av --module-root . --
+  Runtime error: error[capability-provider-missing]:
+  capability provider missing for 'Primitives.ripemd160'
+  ```
+
+  That is the safe failure. An interpreter that ran the audit with no crypto
+  would report passes it had not earned, which is the one wrong answer this
+  project has refused throughout. But it does mean the compiled binary is now
+  the only way to run anything, and `aver run` is no longer part of the loop.
+
+`aver check`, `aver verify`, `aver audit`, `aver format` and `aver capabilities`
+are all unaffected — none of them needs a provider, and the verify suite runs on
+stubs.
