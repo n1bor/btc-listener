@@ -81,6 +81,32 @@ verify scriptCounts
 
 fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
     ? "What the Output at this position of this Transaction is worth."
+      "The o: keyspace holds the Output itself, so it is asked first and the"
+      "answer costs one lookup. Everything below this is the route taken when"
+      "it has nothing: a t: lookup, a b: lookup, and the whole Block read and"
+      "decoded for one Output."
+      "Falling through rather than reporting Unknown matters. o: covers the"
+      "Heights someone ran the outputs command over, and an Input naming a"
+      "position past the end of a Transaction we do hold is Invalid rather"
+      "than absent -- a distinction only the longer route can draw."
+    ! [Disk.readText, Infra.Kv.get]
+    direct = Infra.Store.get(store, Domain.Index.outputKey(previousTxid, position))?
+    match direct
+        Option.Some(text) -> spent(text)
+        Option.None -> throughTransaction(store, blocks, previousTxid, position)
+
+fn spent(text: String) -> Result<Spend, String>
+    ? "An Output read straight out of the o: keyspace."
+    output = Domain.Index.decodeSpentOutput(text)?
+    Result.Ok(Spend.Resolved(output.value, output.script))
+
+verify spent
+    spent("5000:51") => Result.Ok(Spend.Resolved(5000, "51"))
+    spent("5000:") => Result.Ok(Spend.Resolved(5000, ""))
+    spent("nope") => Result.Err("Output record has no separator: 'nope'")
+
+fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
+    ? "The longer route: find the parent Transaction, then the Block holding it."
       "Not indexed is Unknown rather than Invalid: the t: keyspace covers the"
       "Heights someone chose to index, and everything else in the chain is"
       "simply absent from it."

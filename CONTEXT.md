@@ -118,8 +118,9 @@ uses is decided by what is in it, not by a flag.
 _Avoid_: database, cache, map, persistence
 
 **Index**:
-What we keep in a Store: Block Ids to Locations, Heights to Block Ids. Content,
-where a Store is mechanism, and unchanged by which backend holds it.
+What we keep in a Store: Block Ids to Locations, Heights to Block Ids,
+Transaction Ids to sites, and Outputs to what they are worth. Content, where a
+Store is mechanism, and unchanged by which backend holds it.
 _Avoid_: db, catalogue, lookup, registry
 
 **Segment**:

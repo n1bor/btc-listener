@@ -21,7 +21,7 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Eleven of them. Only the first three need a Peer; everything else reads what
+Twelve of them. Only the first three need a Peer; everything else reads what
 those wrote and works offline.
 
 | command | what it does | Peer |
@@ -30,6 +30,7 @@ those wrote and works offline.
 | `headers <peer> <dir>` | [fetch](#downloading-the-chain) every Block Header, in Height order | yes |
 | `bodies <peer> <dir> <a> <b>` | [fetch](#downloading-the-chain) the Blocks for Heights a..b | yes |
 | `txindex <dir> <a> <b>` | [record](#finding-a-transaction) where each Transaction in a..b sits | no |
+| `outputs <dir> <a> <b>` | [record](#resolving-a-spend-in-one-lookup) the Outputs in a..b, so spends resolve | no |
 | `show <dir> <height> [summary]` | [read](#looking-at-one-block) one Block back off disk and check it four ways | no |
 | `tx <dir> <txid>` | [find](#finding-a-transaction) one Transaction by its Id | no |
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
@@ -305,6 +306,46 @@ Transactions. On the file backends the Store keeps every entry in memory, so a
 whole-chain Transaction index is exactly what `infra/store.av` says it cannot
 back. On the database backend the ceiling is the disk instead, and the keyspace
 was always the one a database would be given.
+
+## Resolving a spend in one lookup
+
+An Input names its parent by Transaction Id and position. Answering that used
+to mean a `t:` lookup for the Transaction, a `b:` lookup for its Block, and the
+whole Block read and decoded to take one Output out of it — so it only worked
+where someone had run `txindex`, and the parents of a modern Transaction are
+scattered over the entire chain. Over Blocks 170000–172000:
+
+```
+spends resolved 13  unresolved 81888
+```
+
+`outputs` writes the Output down under the name the Input calls it by,
+`o:<txid>:<index>`, so following an Input back is one lookup. It is one entry
+per Output rather than one per Transaction, which is why it waits for a Store
+that keeps its keys on disk.
+
+```bash
+./target/release/main outputs ~/chain 1 172000
+6196698 Outputs recorded from 172000 Blocks
+```
+
+11 minutes, 149 MB peak, and the database grew from 121 MB to 773 MB. Over the
+same 105 Blocks, with and without it:
+
+| | resolved | unresolved | scripts run |
+|---|---|---|---|
+| without | 2839 | 1970 | 4627 |
+| with | 4809 | **0** | 11201 |
+
+Two and a half times as many Scripts actually run, and nothing is left
+unresolved. That is the point of the whole LevelDB move.
+
+It also made a defect visible that had been there all along: about 1% of those
+Scripts **fail**, on real mainnet spends that must be valid. That is not the
+keyspace — the two columns above fail at the same rate, 0.73% and 0.96%, and
+the left-hand one never touches it. The engine could not have been wrong
+noticeably before, because it was only ever asked 115 questions.
+[#18](https://github.com/n1bor/btc-listener/issues/18) tracks it.
 
 ## Checking a spend
 

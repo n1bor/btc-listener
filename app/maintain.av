@@ -10,8 +10,8 @@ module Maintain
         "Store. It takes the directory claim like any writer, because a peer"
         "still appending to the log while it copies would leave what it copied"
         "short of what the log holds."
-    exposes [prune, txIndex, audit, migrate]
-    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Prune, Infra.Store, Infra.TxIndex]
+    exposes [prune, txIndex, outputs, audit, migrate]
+    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
@@ -142,6 +142,48 @@ fn txIndexDone(dir: String, span: Span) -> Result<String, String>
     blocks = Infra.Blocks.open("{dir}/blocks")?
     built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
     Result.Ok("{built.transactions} Transactions recorded from {built.blocks} Blocks")
+
+fn outputs(rest: List<String>) -> Unit
+    ? "Indexing Outputs is local: a directory and a range of Heights."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir> <a> <b>")
+        [dir, ..more] -> outputsRange(dir, more)
+
+fn outputsRange(dir: String, more: List<String>) -> Unit
+    ? "Both Heights must be given."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match heights(more)
+        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.Some(span) -> said(outputsRun(dir, span))
+
+fn outputsRun(dir: String, span: Span) -> Result<String, String>
+    ? "Record every Output in the range against the name an Input calls it by."
+    ! [
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    _claimed = Infra.Lock.claim(dir, "outputs")?
+    Infra.Lock.releasingAfter(dir, outputsDone(dir, span))
+
+fn outputsDone(dir: String, span: Span) -> Result<String, String>
+    ? "Record the Outputs, with the claim already taken."
+    ! [
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open("{dir}/blocks")?
+    built = Infra.Outputs.build(store, blocks, span.from, span.to)?
+    Result.Ok("{built.outputs} Outputs recorded from {built.blocks} Blocks")
 
 fn audit(rest: List<String>) -> Unit
     ? "Checking a range needs no claim: it only reads."

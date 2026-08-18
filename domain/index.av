@@ -10,7 +10,7 @@ module Index
         "Everything here is a pure transformation over text, so the whole"
         "encoding is covered by verify blocks rather than by a Store."
     depends [Domain.Text]
-    exposes [BodyState, Location, TxSite, txKey, encodeTxSite, decodeTxSite, blockKey, heightKey, prunedBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    exposes [BodyState, Location, TxSite, SpentOutput, txKey, outputKey, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, blockKey, heightKey, prunedBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
     effects []
 
 record Location
@@ -114,6 +114,88 @@ fn siteFrom(text: String, blockId: String, position: String) -> Result<TxSite, S
 verify siteFrom
     siteFrom("aa:0", "aa", "0") => Result.Ok(TxSite(blockId = "aa", position = 0))
     siteFrom("aa:x", "aa", "x") => Result.Err("Transaction position must be a whole number, got 'aa:x'")
+
+record SpentOutput
+    value: Int
+    script: String
+
+fn outputKey(txid: String, index: Int) -> String
+    ? "Where one Output of one Transaction lives, by the name an Input calls it."
+      "An Input names its parent by Transaction Id and position, so this is the"
+      "question an Input asks, keyed exactly as it is asked. Without it the"
+      "answer costs a t: lookup, a b: lookup and a whole Block decoded, for one"
+      "Output out of however many that Block holds."
+    "o:{txid}:{padIndex(index)}"
+
+verify outputKey
+    outputKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0) => "o:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:00000"
+    outputKey("aa", 1) => "o:aa:00001"
+    outputKey("aa", 12345) => "o:aa:12345"
+
+fn padIndex(index: Int) -> String
+    ? "Zero-padded, for the reason padHeight gives: a Store that keeps its keys"
+      "in order should keep one Transaction's Outputs in Output order, and"
+      "rekeying a populated Store later costs far more than the digits do now."
+      "Five digits holds every Output a Block can contain."
+    Domain.Text.padLeft(String.fromInt(index), 5)
+
+verify padIndex
+    padIndex(0) => "00000"
+    padIndex(7) => "00007"
+    padIndex(12345) => "12345"
+    padIndex(123456) => "123456"
+
+fn encodeSpentOutput(output: SpentOutput) -> String
+    ? "What an Output is worth and what has to be satisfied to spend it."
+      "The whole Output rather than a pointer at one. A pointer would still cost"
+      "the Block decode this keyspace exists to avoid; what is saved by holding"
+      "less is spent again on every read."
+    "{output.value}:{output.script}"
+
+verify encodeSpentOutput
+    encodeSpentOutput(SpentOutput(value = 5000000000, script = "")) => "5000000000:"
+    encodeSpentOutput(SpentOutput(value = 5000, script = "76a914")) => "5000:76a914"
+
+fn decodeSpentOutput(text: String) -> Result<SpentOutput, String>
+    ? "Read an Output back."
+    spentParts(text, String.split(text, ":"))
+
+verify decodeSpentOutput
+    decodeSpentOutput("5000:76a914") => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
+    decodeSpentOutput("5000:") => Result.Ok(SpentOutput(value = 5000, script = ""))
+    decodeSpentOutput("5000") => Result.Err("Output record has no separator: '5000'")
+    decodeSpentOutput("x:76a914") => Result.Err("Output value must be a whole number, got 'x:76a914'")
+
+fn spentParts(text: String, pieces: List<String>) -> Result<SpentOutput, String>
+    ? "A value and a Script, separated once."
+    match pieces
+        [] -> Result.Err("Output record has no separator: '{text}'")
+        [value, ..rest] -> spentFrom(text, value, rest)
+
+verify spentParts
+    spentParts("5000:76a914", ["5000", "76a914"]) => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
+    spentParts("5000", ["5000"]) => Result.Err("Output record has no separator: '5000'")
+    spentParts("", []) => Result.Err("Output record has no separator: ''")
+
+fn spentFrom(text: String, value: String, rest: List<String>) -> Result<SpentOutput, String>
+    ? "The value has to be a whole number; everything after it is the Script."
+    match rest
+        [] -> Result.Err("Output record has no separator: '{text}'")
+        [script, ..extra] -> spentValued(text, whole(value), script)
+
+verify spentFrom
+    spentFrom("5000:76a914", "5000", ["76a914"]) => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
+    spentFrom("5000", "5000", []) => Result.Err("Output record has no separator: '5000'")
+
+fn spentValued(text: String, value: Option<Int>, script: String) -> Result<SpentOutput, String>
+    ? "Refuse a value that is not a whole number."
+    match value
+        Option.None -> Result.Err("Output value must be a whole number, got '{text}'")
+        Option.Some(satoshis) -> Result.Ok(SpentOutput(value = satoshis, script = script))
+
+verify spentValued
+    spentValued("5000:a", Option.Some(5000), "a") => Result.Ok(SpentOutput(value = 5000, script = "a"))
+    spentValued("x:a", Option.None, "a") => Result.Err("Output value must be a whole number, got 'x:a'")
 
 fn heightKey(height: Int) -> String
     ? "Where a Height's Block Id lives. Rewritten if a reorganisation reassigns the Height."

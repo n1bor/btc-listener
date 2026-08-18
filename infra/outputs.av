@@ -1,0 +1,172 @@
+module Outputs
+    intent =
+        "Recording every Output against the name an Input calls it by, so a"
+        "spend resolves with one lookup."
+        "Infra.Spends already answers the question, and answers it expensively:"
+        "a t: lookup for the parent Transaction, a b: lookup for its Block, and"
+        "then the whole Block read and decoded to take one Output out of it."
+        "Over Blocks 170000 to 172000 that resolved 13 Inputs out of 81901,"
+        "because the t: keyspace only covers Heights someone chose to index and"
+        "the parents of a modern Transaction are scattered over the whole chain."
+        "This keyspace is the same fact, written down where the question is"
+        "asked. o:<txid>:<index> holds the Output itself, so following an Input"
+        "back stops being a Block decode."
+        "It is far larger than the t: keyspace -- one entry per Output rather"
+        "than one per Transaction -- which is why it waits for a Store that"
+        "keeps its keys on disk. On the file backends it would be added to a log"
+        "that is replayed into memory at every startup."
+        "Built over a range of Heights, like Infra.TxIndex and for the same"
+        "reason, and by its own command, because indexing Transactions and"
+        "indexing Outputs are separately useful and separately expensive."
+        "Infra.StoreLog is a dependency this module has no use for. Entry is"
+        "declared there and re-exposed by Infra.Store, and a re-exposed type"
+        "resolves for the module being checked and not for one reached as a"
+        "dependency. That is jasisz/aver#992; when it closes this line goes."
+    exposes [Built, build]
+    depends [Domain.Block, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Store, Infra.StoreLog]
+    effects [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+
+record Built
+    blocks: Int
+    outputs: Int
+
+record Walk
+    store: Store
+    blocks: BlockStore
+    loaded: Option<Loaded>
+    pending: List<Entry>
+    waiting: Int
+    counted: Built
+
+fn batchSize() -> Int
+    ? "How many entries to hold before writing them."
+      "Large enough that the Store is copied rarely, small enough that what is"
+      "held is bounded whatever a Block turns out to contain."
+    20000
+
+verify batchSize
+    batchSize() => 20000
+
+fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, String>
+    ? "Record every Output of every Transaction in a range of Heights."
+      "A Height whose body is absent is stepped over rather than refused: the"
+      "range is what the caller asked for, and what is held inside it is what"
+      "there is to index."
+    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0)), from, to)?
+    _flushed = flushed(walked)?
+    Result.Ok(walked.counted)
+
+fn flushed(state: Walk) -> Result<Store, String>
+    ? "Write whatever is still held back."
+      "The accumulator is built by prepending, so it is turned round here rather"
+      "than concatenated on every Block, which would cost the batch twice over."
+    ! [Disk.appendText, Infra.Kv.putAll]
+    Infra.Store.putAll(state.store, List.reverse(state.pending))
+
+fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "Each Height in turn."
+    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    match height > to
+        true -> Result.Ok(state)
+        false -> atHeight(state, height, to)
+
+fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "A Height the Index does not name ends the range early."
+    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(state)
+        Option.Some(blockId) -> atBlock(state, height, to, blockId)
+
+fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
+    ? "A Block whose body is not held has no Transactions to record."
+    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> walk(state, height + 1, to)
+        Option.Some(text) -> indexBody(state, height, to, blockId, text)
+
+fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+    ? "Read the Block and write one entry per Transaction it holds."
+    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    location = Domain.Index.decodeLocation(text)?
+    got = Infra.Blocks.fetch(state.blocks, state.loaded, location)?
+    transactions = Domain.Block.transactionsOf(got.payload)?
+    entries = outputsFor(Domain.Block.txidsOf(transactions), transactions, state.pending)
+    added = List.len(entries) - List.len(state.pending)
+    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = Built(blocks = state.counted.blocks + 1, outputs = state.counted.outputs + added))
+    recorded = maybeWrite(carried)?
+    walk(recorded, height + 1, to)
+
+fn maybeWrite(state: Walk) -> Result<Walk, String>
+    ? "Write the batch once it is big enough, and start a new one."
+    ! [Disk.appendText, Infra.Kv.putAll]
+    match state.waiting >= batchSize()
+        false -> Result.Ok(state)
+        true -> written(state)
+
+fn written(state: Walk) -> Result<Walk, String>
+    ? "One putAll for everything held back."
+    ! [Disk.appendText, Infra.Kv.putAll]
+    grown = flushed(state)?
+    Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted))
+
+fn outputsFor(txids: List<String>, transactions: List<Transaction>, acc: List<Entry>) -> List<Entry>
+    ? "One entry per Output, walking the Ids and the Transactions together."
+      "Two lists rather than one because a Transaction does not carry its own"
+      "Id: it is the hash of its bytes, and Domain.Block computes them once for"
+      "the whole Block."
+    match txids
+        [] -> acc
+        [head, ..tail] -> nextTransaction(head, tail, transactions, acc)
+
+verify outputsFor
+    outputsFor([], [], []) => []
+    List.len(outputsFor(["aa"], [sampleTx()], [])) => 1
+
+fn nextTransaction(txid: String, rest: List<String>, transactions: List<Transaction>, acc: List<Entry>) -> List<Entry>
+    ? "The Ids and the Transactions are the same list in the same order, so one"
+      "running out before the other cannot happen and stops the walk if it does."
+    match transactions
+        [] -> acc
+        [head, ..tail] -> outputsFor(rest, tail, entriesFor(txid, Domain.Transaction.outputsOf(head), 0, acc))
+
+verify nextTransaction
+    nextTransaction("aa", [], [], []) => []
+    List.len(nextTransaction("aa", [], [sampleTx()], [])) => 1
+
+fn entriesFor(txid: String, outputs: List<Output>, index: Int, acc: List<Entry>) -> List<Entry>
+    ? "One entry per Output of one Transaction, in Output order."
+      "Prepends onto whatever is already waiting and does not turn the result"
+      "round; the batch is reversed once, when it is written."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> entriesFor(txid, tail, index + 1, List.prepend(entryFor(txid, index, head), acc))
+
+verify entriesFor
+    entriesFor("aa", [], 0, []) => []
+    List.len(entriesFor("aa", [sampleOutput()], 0, [])) => 1
+    List.len(entriesFor("aa", [sampleOutput(), sampleOutput()], 0, [])) => 2
+
+fn entryFor(txid: String, index: Int, output: Output) -> Entry
+    ? "This Output, under the name an Input will call it by."
+    Entry(key = Domain.Index.outputKey(txid, index), value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = Domain.Transaction.valueOf(output), script = Domain.Transaction.outputScriptOf(output))))
+
+verify entryFor
+    entryFor("aa", 0, sampleOutput()) => Entry(key = "o:aa:00000", value = "5000:51")
+    entryFor("aa", 3, sampleOutput()) => Entry(key = "o:aa:00003", value = "5000:51")
+
+fn sampleOutput() -> Output
+    ? "One Output, for the blocks above."
+    Output(value = 5000, script = "51")
+
+verify sampleOutput
+    Domain.Transaction.valueOf(sampleOutput()) => 5000
+
+fn sampleTx() -> Transaction
+    ? "A Transaction with one Output, for the blocks above."
+    Transaction(version = 1, inputs = [], outputs = [sampleOutput()], lockTime = 0, txid = "aa", size = 0, isSegWit = false)
+
+verify sampleTx
+    List.len(Domain.Transaction.outputsOf(sampleTx())) => 1
