@@ -338,9 +338,15 @@ script 0 passed, 0 failed, 1 undecided
 ```
 
 **undecided** is by far the most common, and it is the honest answer rather than
-a missing feature. Aver has no RIPEMD-160 and no secp256k1, so `OP_HASH160` and
-all four signature opcodes stop instead of guessing. On the early chain that is
-most Inputs; on a modern Block it is every one of them.
+a missing feature. Aver has no secp256k1, so all four signature opcodes stop
+instead of guessing, and `OP_SHA1` stops for want of SHA-1. On the early chain
+that is most Inputs; on a modern Block it is every one of them.
+
+The hash opcodes used to be in that list. `OP_RIPEMD160`, `OP_HASH160` and
+`OP_HASH256` are decided now — RIPEMD-160 is written in Aver in
+[`domain/ripemd160.av`](domain/ripemd160.av) and checked against all eight
+vectors published with the specification — and P2SH spends are re-run against
+their redeem script rather than stopping at the hash.
 
 Counting it apart from **failed** is the whole discipline. An engine that called
 "cannot tell" invalid would be worthless over a chain held in part — and one that
@@ -548,9 +554,9 @@ P2SH through Base58Check, P2WPKH and P2WSH through Bech32, Taproot through
 Bech32m. `OP_RETURN` is named, and anything unrecognised keeps its hex rather
 than being guessed at.
 
-Deriving an address needs no RIPEMD-160, which Aver does not have: a script
-already contains the hash, so the work is pattern-matching plus an encoding, not
-hashing a public key.
+Deriving an address needs no hashing at all: a script already contains the hash,
+so the work is pattern-matching plus an encoding, not hashing a public key. That
+was true before this project had RIPEMD-160 and is still true now.
 
 Fees are deliberately not reported. A Transaction states its output amounts but
 not its input amounts, and a peer will not serve the confirmed transactions
@@ -559,14 +565,16 @@ those inputs spend — measured on mainnet, 29 of 29 such requests came back
 Getting fees means asking the node over RPC instead, which is a different
 program; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md).
 
-Three things are out of reach, and each is waiting on something outside this
-repository rather than on work here:
+Three things are out of reach. RIPEMD-160 used to head this list; it turned out
+not to need anything outside this repository once Aver gained the `Bits`
+namespace, so it was written here instead — see
+[`domain/ripemd160.av`](domain/ripemd160.av). What is left is:
 
 | | needs | what it would unlock |
 |---|---|---|
-| `OP_HASH160`, `OP_RIPEMD160` | RIPEMD-160 in Aver | P2PKH and P2SH — most of the early chain |
 | `OP_CHECKSIG` and friends | secp256k1 in Aver | the actual entitlement to spend |
-| witness and Taproot Scripts | both, plus Schnorr | 90% of a modern Block |
+| `OP_SHA1` | SHA-1 in Aver | one opcode nothing in practice uses |
+| witness and Taproot Scripts | secp256k1, plus Schnorr | 90% of a modern Block |
 
 The signing messages both Scripts would need are already written and checked
 against Core's vectors, legacy and BIP143 alike. What is missing is the

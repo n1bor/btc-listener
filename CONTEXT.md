@@ -7,7 +7,7 @@ range — keeping the bytes in Segments on disk and their whereabouts in an Inde
 
 What it holds it then checks: each Block against its Header, its parent and its
 target, each Transaction against the Outputs its Inputs claim to spend, and each
-Input's pair of Scripts as far as they run without RIPEMD-160 or a curve.
+Input's pair of Scripts as far as they run without a curve.
 
 ## Language
 

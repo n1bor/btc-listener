@@ -16,7 +16,7 @@ module ScriptOps
         "fail a Script wherever they appear, so none of them may wait behind a"
         "branch that is not being taken."
     exposes [step]
-    depends [Bytes, Crypto.Digest32, Domain.Checksig, Domain.Opcode, Domain.ScriptStep, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.StackItem]
+    depends [Bytes, Crypto.Digest32, Domain.Checksig, Domain.Hash, Domain.Opcode, Domain.ScriptStep, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.Ripemd160, Domain.StackItem]
     effects []
 
 fn step(op: Op, state: State) -> Step
@@ -174,7 +174,10 @@ fn operated(code: Int, state: State) -> Step
         135 -> equality(code, state)
         136 -> equality(code, state)
         165 -> within(state)
-        168 -> hashed(state)
+        166 -> hashed(code, state)
+        168 -> hashed(code, state)
+        169 -> hashed(code, state)
+        170 -> hashed(code, state)
         _ -> signedOrGrouped(code, state)
 
 verify operated
@@ -194,7 +197,7 @@ fn signedOrGrouped(code: Int, state: State) -> Step
 verify signedOrGrouped
     signedOrGrouped(81, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     signedOrGrouped(172, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    signedOrGrouped(169, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_HASH160 needs ripemd160"))
+    signedOrGrouped(169, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 makes any script that runs it invalid")))
 
 fn byGroup(code: Int, state: State) -> Step
     ? "By family, once the ones handled by number are out of the way."
@@ -210,7 +213,7 @@ fn byGroup(code: Int, state: State) -> Step
 verify byGroup
     byGroup(81, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     byGroup(97, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
-    byGroup(166, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_RIPEMD160 needs ripemd160"))
+    byGroup(167, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_SHA1 needs sha1"))
     byGroup(80, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid")))
     byGroup(118, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
     byGroup(139, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[2]]))
@@ -281,27 +284,47 @@ verify sized
     sized(Domain.ScriptState.holding([[7, 8]])) => Step.Continue(Domain.ScriptState.holding([[2], [7, 8]]))
     sized(Domain.ScriptState.holding([[]])) => Step.Continue(Domain.ScriptState.holding([[], []]))
 
-fn hashed(state: State) -> Step
-    ? "OP_SHA256, the one hash opcode Aver can answer."
+fn hashed(code: Int, state: State) -> Step
+    ? "The four hash opcodes this engine can answer: OP_RIPEMD160, OP_SHA256,"
+      "OP_HASH160 and OP_HASH256. OP_SHA1 is not among them and stays"
+      "undecidable, because SHA-1 is a primitive nothing here has."
     match state.stack
-        [] -> Step.Stop(Outcome.Decided(Ending.Failed("OP_SHA256 needs an item")))
-        [head, ..tail] -> hashedTop(head, tail, state)
+        [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs an item")))
+        [head, ..tail] -> hashedTop(code, head, tail, state)
 
 verify hashed
-    hashed(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_SHA256 needs an item")))
-    hashed(Domain.ScriptState.holding([[97]])) => Step.Continue(Domain.ScriptState.holding([Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([97]))))]))
+    hashed(168, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_SHA256 needs an item")))
+    hashed(169, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+    hashed(168, Domain.ScriptState.holding([[97]])) => Step.Continue(Domain.ScriptState.holding([Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([97]))))]))
 
-fn hashedTop(top: List<Int>, tail: List<List<Int>>, state: State) -> Step
+fn hashedTop(code: Int, top: List<Int>, tail: List<List<Int>>, state: State) -> Step
     ? "The bytes have to be bytes first. Nothing on a stack built by this"
       "module can fail that, but the stack is a list of Ints and the type does"
       "not know it."
     match Bytes.fromList(top)
         Result.Err(message) -> Step.Stop(Outcome.Decided(Ending.Failed(message)))
-        Result.Ok(raw) -> Domain.ScriptStep.landed(List.prepend(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw))), tail), state)
+        Result.Ok(raw) -> Domain.ScriptStep.landed(List.prepend(digestFor(code, raw), tail), state)
 
 verify hashedTop
-    hashedTop([256], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("byte 256 at index 0 is outside 0..=255")))
-    hashedTop([97], [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([97]))))]))
+    hashedTop(168, [256], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("byte 256 at index 0 is outside 0..=255")))
+    hashedTop(168, [97], [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([97]))))]))
+
+fn digestFor(code: Int, raw: Bytes) -> List<Int>
+    ? "Which digest each opcode names. OP_HASH160 and OP_HASH256 are the two"
+      "composites Bitcoin defines, and they are composed here rather than in"
+      "the hash modules, because the composition is Bitcoin's and neither"
+      "RIPEMD-160 nor SHA-256 knows anything about it."
+    match code
+        166 -> Domain.Ripemd160.digestOf(Bytes.toList(raw))
+        169 -> Domain.Ripemd160.digestOf(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw))))
+        170 -> Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(raw)))
+        _ -> Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw)))
+
+verify digestFor
+    digestFor(166, Bytes.fromList([])) => Bytes.toList(Domain.Ripemd160.hash(Bytes.fromList([])))
+    digestFor(169, Bytes.fromList([])) => Bytes.toList(Domain.Ripemd160.hash(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([])))))
+    digestFor(170, Bytes.fromList([])) => Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(Bytes.fromList([]))))
+    digestFor(168, Bytes.fromList([])) => Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([]))))
 
 fn shuffled(code: Int, state: State) -> Step
     ? "The thirteen opcodes that only move items about, done as a permutation"
