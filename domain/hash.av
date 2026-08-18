@@ -7,8 +7,14 @@ module Hash
         "The reversal is a display concern only. Bytes on the wire are never"
         "reversed, so a value that has been through identifierOf is for reading"
         "and never for hashing again."
-    exposes [doubleSha, identifierOf, reversedHex]
-    depends [Bytes, Crypto.Digest32]
+        "The third convention is hash160 -- RIPEMD-160 of SHA-256 -- which is"
+        "what every address and every P2SH commitment is built from. It is"
+        "composed here rather than by the provider because the composition is"
+        "Bitcoin's: RIPEMD-160 knows nothing about SHA-256 and should not have"
+        "to. The provider supplies the one primitive Aver has not got and this"
+        "module puts it together with the one Aver has."
+    exposes [doubleSha, identifierOf, reversedHex, ripemd160, hash160]
+    depends [Bytes, Crypto.Digest32, Primitives, Domain.PrimitiveStub]
     effects []
 
 fn doubleSha(payload: Bytes) -> Digest32
@@ -49,3 +55,24 @@ verify hexOfReversed
     hexOfReversed([1, 2]) => Result.Ok("0201")
     hexOfReversed([]) => Result.Ok("")
     hexOfReversed([256]) => Result.Err("byte 256 at index 0 is outside 0..=255")
+
+fn ripemd160(values: List<Int>) -> List<Int>
+    ? "RIPEMD-160 across the provider boundary, in the carrier the contract"
+      "owns and out again."
+      "There is no verify case here that checks the digest, and there cannot"
+      "be: aver verify has no provider, so a case reaching this runs whatever"
+      "stub the caller bound. What the digest is, is the provider's business"
+      "and is tested where the implementation is."
+    Primitives.ripemd160(Primitives.Octets(values = values)).values
+
+verify ripemd160
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    List.len(ripemd160([])) => List.len(Primitives.ripemd160(Primitives.Octets(values = [])).values)
+
+fn hash160(values: List<Int>) -> List<Int>
+    ? "RIPEMD-160 of SHA-256, which is what OP_HASH160 and every address want."
+    ripemd160(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Result.withDefault(Bytes.fromList(values), Bytes.fromList([]))))))
+
+verify hash160
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    List.len(hash160([])) => List.len(ripemd160(Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([]))))))

@@ -24,7 +24,7 @@ module SpendScript
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
     exposes [check, Outcomes, noOutcomes, count, merged]
-    depends [Bytes, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Bytes, Primitives, Domain.PrimitiveStub, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
 fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -40,9 +40,11 @@ fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> O
         false -> notWitness(inputScriptHex, outputScriptHex, context)
 
 verify check
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     check("51", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
     check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.SpendContext.bare()) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
-    check(signedInput(), Domain.SpendContext.signedScriptCode(), spendOfCorpusVector()) => Outcome.Undecided("OP_CHECKSIG needs secp256k1")
+    check(signedInput(), Domain.SpendContext.signedScriptCode(), spendOfCorpusVector()) => Outcome.Decided(Ending.Passed)
     check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
@@ -58,11 +60,11 @@ verify signedInput
 fn spendOfCorpusVector() -> Context
     ? "That Transaction's only Input, against the Output it spends."
       "It is here to hold the two cases above apart, and they are the whole"
-      "evidence that the Transaction now reaches the opcode that needs it."
-      "Bare, the engine says it needs a Transaction. Committed, it builds the"
-      "message, hands it to Domain.Ecdsa and reports what is actually missing,"
-      "which is the curve. Nothing else in this module can tell those two"
-      "apart, because both are undecided and both count the same."
+      "evidence that a spend now runs end to end. Bare, the engine says it"
+      "needs a Transaction and stays undecided. Committed, it builds the"
+      "message, hands it to the curve and comes back passed -- which is the"
+      "right answer, because this is the first spend Bitcoin ever made and it"
+      "is a good one."
     Domain.SpendContext.committed(Domain.SpendContext.signedTransaction(), 0, 0, Domain.SpendContext.signedScriptCode())
 
 verify spendOfCorpusVector
@@ -105,6 +107,8 @@ fn parsed(inputScriptHex: String, outputScriptHex: String, context: Context) -> 
         Result.Ok(ops) -> afterInput(ops, outputScriptHex, context)
 
 verify parsed
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     parsed("51", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
     parsed("51", "00", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left a false value on top"))
     parsed("", "", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))

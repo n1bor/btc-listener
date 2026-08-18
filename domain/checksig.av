@@ -32,7 +32,7 @@ module Checksig
         "a real spend gives, and it is the only thing left between this module"
         "and an answer."
     exposes [step, isSignatureOpcode]
-    depends [Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
+    depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.PrimitiveStub, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Primitives]
     effects []
 
 fn isSignatureOpcode(code: Int) -> Bool
@@ -54,6 +54,8 @@ fn step(code: Int, state: State, context: Context) -> Step
         _ -> multiple(code, state, context)
 
 verify step
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     step(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
     step(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     step(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
@@ -67,6 +69,8 @@ fn single(code: Int, state: State, context: Context) -> Step
         Result.Ok(two) -> singleOn(code, two, state, context)
 
 verify single
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     single(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
     single(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     single(172, Domain.ScriptState.holding([[2, 3], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
@@ -82,6 +86,8 @@ fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
         Option.None -> againstMessage(code, two, state, context)
 
 verify singleOn
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
     singleOn(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
     singleOn(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
@@ -98,23 +104,53 @@ fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
         Result.Ok(hashType) -> overMessage(code, two, state, Domain.SpendContext.messageFor(context, hashType))
 
 verify againstMessage
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     againstMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
 
 fn overMessage(code: Int, two: Two, state: State, message: Option<String>) -> Step
-    ? "What the curve would be asked, once there is a curve to ask."
+    ? "The curve, asked."
+      "Without a message there is nothing to ask about and the answer names"
+      "the Transaction. With one, the signature, the key and the message go to"
+      "Domain.Ecdsa and come back decided."
     match message
         Option.None -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
-        Option.Some(hex) -> ruled(code, two, state, Domain.Ecdsa.decideShape(two.second, two.first))
+        Option.Some(hex) -> ruled(code, two, state, decided(two, hex))
 
 verify overMessage
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.None) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
-    overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00")) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
+    overMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00")) => Step.Continue(Domain.ScriptState.holding([[]]))
+
+fn decided(two: Two, messageHex: String) -> Ruling
+    ? "The three values a signature check needs, as Bytes."
+      "A message that is not hexadecimal cannot happen -- it came from"
+      "Domain.Sighash -- so the failure branch answers undecidable rather than"
+      "guessing."
+    match Bytes.fromHex(messageHex)
+        Result.Err(why) -> Domain.Ecdsa.Ruling.Undecidable(why)
+        Result.Ok(message) -> Domain.Ecdsa.decide(bytesOf(two.first), bytesOf(two.second), message)
+
+verify decided
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
+    decided(Two(first = validKey(), second = [4, 5], rest = []), "zz") => Domain.Ecdsa.Ruling.Undecidable("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn bytesOf(values: List<Int>) -> Bytes
+    ? "A stack item as Bytes. Everything on a stack this module sees is bytes"
+      "already, so the failure branch is unreachable."
+    Result.withDefault(Bytes.fromList(values), Bytes.fromList([]))
+
+verify bytesOf
+    Bytes.toList(bytesOf([1, 2])) => [1, 2]
 
 fn ruled(code: Int, two: Two, state: State, ruling: Ruling) -> Step
     ? "The Ruling turned back into a Step. Undecidable stays undecided and"
       "says so in this module's words rather than Domain.Ecdsa's, because the"
       "caller is counting opcodes and not curves."
     match ruling
+        Domain.Ecdsa.Ruling.Valid -> answered(code, true, two.rest, state)
         Domain.Ecdsa.Ruling.Invalid(why) -> answered(code, false, two.rest, state)
         Domain.Ecdsa.Ruling.Undecidable(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs secp256k1"))
 
@@ -134,9 +170,12 @@ verify validKey
 
 fn refusal(signature: List<Int>, publicKey: List<Int>) -> Option<String>
     ? "Whether this pair fails for a reason that needs no curve."
-      "Some means it definitely fails; None means we cannot tell. It is never"
-      "None-meaning-fine, which is the whole shape of this module."
+      "Some means it definitely fails; None means not on this evidence. The"
+      "Valid arm is unreachable -- decideShape has no message and no curve, so"
+      "it cannot say a signature is good -- but the type admits it and a"
+      "refusal is exactly what Valid is not."
     match Domain.Ecdsa.decideShape(signature, publicKey)
+        Domain.Ecdsa.Ruling.Valid -> Option.None
         Domain.Ecdsa.Ruling.Invalid(why) -> Option.Some(why)
         Domain.Ecdsa.Ruling.Undecidable(why) -> Option.None
 
@@ -186,6 +225,8 @@ fn multiple(code: Int, state: State, context: Context) -> Step
         [head, ..tail] -> withKeyCount(code, Domain.StackItem.asNumber(head), tail, state)
 
 verify multiple
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     multiple(174, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
     multiple(174, Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     multiple(174, Domain.ScriptState.holding([[21]]), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))

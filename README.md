@@ -337,16 +337,13 @@ answer per Input, and again there are three of them rather than two:
 script 0 passed, 0 failed, 1 undecided
 ```
 
-**undecided** is by far the most common, and it is the honest answer rather than
-a missing feature. Aver has no secp256k1, so all four signature opcodes stop
-instead of guessing, and `OP_SHA1` stops for want of SHA-1. On the early chain
-that is most Inputs; on a modern Block it is every one of them.
+**undecided** used to be by far the most common answer. It is now rare on the
+scripts this project can reach: over Blocks 1–4000, **247 passed, 0 failed, 0
+undecided**, where before the curve arrived it was 0 / 0 / 247.
 
-The hash opcodes used to be in that list. `OP_RIPEMD160`, `OP_HASH160` and
-`OP_HASH256` are decided now — RIPEMD-160 is written in Aver in
-[`domain/ripemd160.av`](domain/ripemd160.av) and checked against all eight
-vectors published with the specification — and P2SH spends are re-run against
-their redeem script rather than stopping at the hash.
+What remains undecided is `OP_SHA1`, for want of SHA-1, and every witness or
+Taproot Script, which is refused before it runs rather than after. On a modern
+Block that is still most Inputs.
 
 Counting it apart from **failed** is the whole discipline. An engine that called
 "cannot tell" invalid would be worthless over a chain held in part — and one that
@@ -565,16 +562,14 @@ those inputs spend — measured on mainnet, 29 of 29 such requests came back
 Getting fees means asking the node over RPC instead, which is a different
 program; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md).
 
-Three things are out of reach. RIPEMD-160 used to head this list; it turned out
-not to need anything outside this repository once Aver gained the `Bits`
-namespace, so it was written here instead — see
-[`domain/ripemd160.av`](domain/ripemd160.av). What is left is:
+RIPEMD-160 and secp256k1 used to head this list. Both are supplied now by a
+**capability provider** — see [Providers](#providers) below. What is left is:
 
 | | needs | what it would unlock |
 |---|---|---|
-| `OP_CHECKSIG` and friends | secp256k1 in Aver | the actual entitlement to spend |
-| `OP_SHA1` | SHA-1 in Aver | one opcode nothing in practice uses |
-| witness and Taproot Scripts | secp256k1, plus Schnorr | 90% of a modern Block |
+| `OP_SHA1` | SHA-1 | one opcode nothing in practice uses |
+| witness and Taproot Scripts | Schnorr, and a witness evaluator | 90% of a modern Block |
+| most modern spends | an output index, so parents resolve | see the `unresolved` count |
 
 The signing messages both Scripts would need are already written and checked
 against Core's vectors, legacy and BIP143 alike. What is missing is the
@@ -585,3 +580,48 @@ that has to change.
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+## Providers
+
+Two primitives are not written here and not written in Aver: RIPEMD-160 and
+secp256k1 signature verification. They are declared in
+[`primitives.av`](primitives.av) as a **capability contract** — operations with
+no body — and supplied at run time by a Rust provider in
+[`providers/primitives`](providers/primitives), which is named in
+[`aver.toml`](aver.toml).
+
+```toml
+[[providers.bindings]]
+capability = "Primitives"
+crate = "btc_listener_primitives"
+path = "providers/primitives"
+factory = "primitives_binding"
+```
+
+`aver compile` emits the Cargo dependency and a bootstrap that installs the
+binding and preflights the complete operation set before any Aver code runs, so
+the ordinary generated binary is the host — `aver compile` then `cargo build`, as
+before. A provider declaring the wrong `contract_hash` is refused at startup
+rather than called.
+
+The curve is a provider on purpose. RIPEMD-160 was written in Aver first and
+passed all eight published vectors, but a curve is not a hash: 256 bits of field
+arithmetic whose edge cases *are* consensus rules, where a wrong answer is a
+false audit rather than a slow one. The provider hands the question to
+`libsecp256k1`, which is what Bitcoin Core itself runs. RIPEMD-160 then followed
+the curve behind the same contract, so there is one boundary rather than two.
+
+### What this costs
+
+`aver verify` has no provider — by design, since Aver never loads Rust into
+`aver verify` or `aver run`. So:
+
+- Verify cases that reach an operation bind an Aver stub through `given`
+  ([`domain/primitivestub.av`](domain/primitivestub.av)). They test what this
+  project wrote — that the engine pushes, hashes, compares and settles — and no
+  longer test whether RIPEMD-160 is RIPEMD-160.
+- That check moved to where the implementation is: the provider's own Rust
+  tests, against the eight published vectors and against the first spend Bitcoin
+  ever made.
+- `aver run` cannot reach a provider either, so an interpreted audit stops at the
+  first hash. **The audit commands need the compiled binary.**

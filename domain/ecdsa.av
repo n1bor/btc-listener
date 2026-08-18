@@ -38,63 +38,31 @@ module Ecdsa
         "The function is decide rather than verify, which ADR 0005 called it."
         "Aver keeps verify for its own use, and a seam whose name will not"
         "compile is not much of a seam."
-        "Aver has since built the mechanism this binds through, and over five"
-        "days in August 2026 it arrived: a capability module, a contract with"
-        "no body, which is what this is -- and a pure one is exactly the right"
-        "shape for a curve."
-        "jasisz/aver#962 gave the contract. #965 gave the VM typed providers."
-        "#968 made every target say where it stands. #970 opened a wasip2 route"
-        "carrying Unit, Bool, Float and String, which was never going to carry"
-        "a hash. #973 is the one that matters here: one Rust provider binding"
-        "now serves both the VM and generated Rust, so aver compile succeeds on"
-        "a program that calls a capability and the generated crate exposes"
-        "install_provider_bindings for a host to fill."
-        "Measured rather than assumed. A compiled binary built that way"
-        "answered b472a266d0bd89c13706a4132ccfb16f7c3b9fcb for the RIPEMD-160"
-        "of the SHA-256 of the empty input, from a Rust provider, through a"
-        "contract shaped like this one. So the waiting is over and what is"
-        "left is ours to pay."
-        "Two things it will cost. A contract cannot take Bytes: contract v1"
-        "requires every boundary type to be declared in the capability module"
-        "so that contract_hash pins its layout, and a type borrowed from the"
-        "stdlib is not owned. The contract declares its own carrier and this"
-        "module converts at the edge, so decide keeps the signature it has and"
-        "gains a private neighbour that does not; callers are untouched, which"
-        "is the part that matters. The provider itself is an ordinary Cargo"
-        "package named in aver.toml, which #977 taught aver compile to wire"
-        "into the generated project, so the stock binary installs the binding"
-        "and preflights it and the build stays aver compile then cargo build."
-        "A provider declaring the wrong contract_hash is refused at startup"
-        "rather than called."
-        "What stopped it has largely gone. #975 made a borrowed boundary type"
-        "a check-time error rather than a first-call one, #976 made verify fail"
-        "per dispatch rather than per module, and #977 let aver.toml name the"
-        "provider package so the stock binary is the host."
-        "One thing is left. A verify case that actually reaches the operation"
-        "cannot pass, because providers are installed by a Rust host and aver"
-        "verify has no way to bind one -- jasisz/aver#978. Sixteen cases here"
-        "and downstream assert an outcome that exists only because secp256k1"
-        "is missing, and those are precisely the cases that become interesting"
-        "once a provider exists: whether a signature on a real Input is one"
-        "Bitcoin Core would accept. That assertion is the point of binding the"
-        "seam and is the one aver verify cannot yet make."
-        "RIPEMD-160 went the other way, and it is worth recording here as the"
-        "counterexample. It was going to be a capability too, until the Bits"
-        "namespace made it ordinary Aver that verify can run: Domain.Ripemd160"
-        "is written in this project and checked against the eight vectors"
-        "published with the specification. A curve is not that. Eighty rounds"
-        "of thirty-two-bit mixing is arithmetic anyone can write; a group law"
-        "over a two hundred and fifty-six bit prime field, fast enough for"
-        "thirty thousand Blocks, is not."
-        "So this stays as it is. Undecidable is still an answer a caller can"
-        "count and report; an abort is not, and an audit that stopped at the"
-        "first P2PKH Input would tell us nothing about the other thirty"
-        "thousand Blocks."
+        "The curve arrived on 18 August 2026, as a provider. Aver built the"
+        "mechanism over five days -- jasisz/aver#962 the contract, #965 the VM"
+        "providers, #968 the target manifest, #973 one Rust binding for both"
+        "the VM and generated Rust, #977 the aver.toml composition that makes"
+        "the stock binary the host, and #981 the given stub that lets a plain"
+        "verify case reach an operation at all."
+        "It is a provider rather than Aver on purpose. RIPEMD-160 was written"
+        "in Aver first and worked, but a curve is not a hash: two hundred and"
+        "fifty-six bits of field arithmetic with edge cases that are consensus"
+        "rules, and a wrong answer here is not a slow audit but a false one."
+        "libsecp256k1 is what Bitcoin Core itself runs, and the provider hands"
+        "the question to it. RIPEMD-160 followed the curve behind the same"
+        "contract afterwards, so there is one boundary rather than two."
+        "What that costs is written down where it is paid. aver verify has no"
+        "provider, so the cases here bind an Aver stub through given and test"
+        "what this module does with an answer rather than whether the answer"
+        "is right. Whether it is right is checked in the provider's own"
+        "language, against the published vectors and against the first spend"
+        "Bitcoin ever made."
     exposes [Ruling, decide, decideShape, isValidEncoding, isLowS, isValidPublicKey, hashTypeOf, signatureBody, order, halfOrder]
-    depends [Bytes]
+    depends [Bytes, Primitives, Domain.PrimitiveStub]
     effects []
 
 type Ruling
+    Valid
     Invalid(String)
     Undecidable(String)
 
@@ -106,12 +74,65 @@ fn decide(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
       "The message is unused and that is deliberate: it is here so that callers"
       "are written against the real shape, and so that the day this gets a body"
       "nothing above it changes."
-    decideShape(Bytes.toList(signature), Bytes.toList(publicKey))
+    ruled(decideShape(Bytes.toList(signature), Bytes.toList(publicKey)), publicKey, signature, message)
 
 verify decide
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
     decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("")?, Bytes.fromHex("00")?) => Ruling.Invalid("empty signature")
     decide(Bytes.fromHex("aabb")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("public key is 2 bytes, which is not a public key")
-    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Undecidable("no secp256k1")
+    decide(Bytes.fromHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")?, Bytes.fromHex("3006020101020101")?, Bytes.fromHex("00")?) => Ruling.Invalid("signature does not verify")
+
+fn ruled(shape: Ruling, publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
+    ? "What the shape said, unless the shape had nothing to say -- in which"
+      "case the curve is asked."
+      "Only Undecidable reaches the provider. A signature the reference client"
+      "refuses before any arithmetic is refused here too, for the same reason"
+      "and in the same order, and never crosses the boundary."
+    match shape
+        Ruling.Valid -> Ruling.Valid
+        Ruling.Invalid(why) -> Ruling.Invalid(why)
+        Ruling.Undecidable(why) -> overCurve(publicKey, signature, message)
+
+verify ruled
+    ruled(Ruling.Invalid("no"), Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => Ruling.Invalid("no")
+    ruled(Ruling.Valid, Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => Ruling.Valid
+
+fn overCurve(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
+    ? "The provider's answer, turned back into a Ruling."
+      "The hash type byte is dropped before the signature crosses: it is not"
+      "part of the DER and the curve has no use for it."
+    verdict(Primitives.verifySignature(octets(publicKey), listOctets(signatureBody(Bytes.toList(signature))), octets(message)))
+
+verify overCurve
+    given hash: Primitives.ripemd160 = [Domain.PrimitiveStub.ripemd160]
+    given sig: Primitives.verifySignature = [Domain.PrimitiveStub.verifySignature]
+    overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Primitives.verifySignature(octets(Bytes.fromList([])), listOctets(signatureBody(Bytes.toList(Bytes.fromList([])))), octets(Bytes.fromList([]))))
+
+fn verdict(valid: Bool) -> Ruling
+    ? "True is Valid and false is Invalid. There is no third answer once the"
+      "curve has run, which is the whole point of having one."
+    match valid
+        true -> Ruling.Valid
+        false -> Ruling.Invalid("signature does not verify")
+
+verify verdict
+    verdict(true) => Ruling.Valid
+    verdict(false) => Ruling.Invalid("signature does not verify")
+
+fn octets(bytes: Bytes) -> Octets
+    ? "Bytes in the carrier the contract owns."
+    listOctets(Bytes.toList(bytes))
+
+verify octets
+    octets(Bytes.fromList([1, 2])).values => [1, 2]
+
+fn listOctets(values: List<Int>) -> Octets
+    ? "The same, from the list form the shape checks already work in."
+    Primitives.Octets(values = values)
+
+verify listOctets
+    listOctets([1, 2]).values => [1, 2]
 
 fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Ruling
     ? "The same question without the message, for a caller that has not got one."

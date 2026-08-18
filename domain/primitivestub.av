@@ -1,0 +1,116 @@
+module PrimitiveStub
+    intent =
+        "Stand-ins for the two provider operations, for verify cases that reach"
+        "them."
+        "aver verify has no provider. jasisz/aver#981 lets a plain verify case"
+        "bind an Aver function to a capability operation with given, and this"
+        "is what the cases in this project bind."
+        "A stub is not an implementation and this one is not trying to be. It"
+        "is a table looked up by input, and anything not in it gets twenty"
+        "zero bytes."
+        "Two kinds of entry. The first six are digests published with the"
+        "RIPEMD-160 specification. The rest are the redeem Scripts the corpus"
+        "spends, and each of those is its own witness: a P2SH Output Script"
+        "carries the digest it expects, so the entry and the assertion come"
+        "from the same published case and agree only if the case is what it"
+        "claims to be."
+        "So the corpus cases still test what this project wrote -- that the"
+        "engine pushes, hashes, compares and settles correctly. What they no"
+        "longer test is whether RIPEMD-160 is RIPEMD-160. That is the"
+        "provider's business now, and is tested in the provider's own language"
+        "against the same published vectors."
+        "The signature stub answers false always. A case that wanted true would"
+        "be asserting something about a curve, and nothing here has one."
+    exposes [ripemd160, verifySignature]
+    depends [Bytes, Primitives]
+    effects []
+
+fn ripemd160(input: Octets) -> Octets
+    ? "The published digest for this input, or twenty zeroes."
+    Primitives.Octets(values = digestOf(hexOf(input.values)))
+
+verify ripemd160
+    ripemd160(Primitives.Octets(values = [])).values => Bytes.toList(Result.withDefault(Bytes.fromHex("9c1185a5c5e9fc54612808977ee8f548b2258d31"), Bytes.fromList([])))
+    ripemd160(Primitives.Octets(values = [97])).values => Bytes.toList(Result.withDefault(Bytes.fromHex("0bdc9d2d256b3ee9daae347be6f4dc835a467ffe"), Bytes.fromList([])))
+
+fn verifySignature(publicKey: Octets, signature: Octets, message: Octets) -> Bool
+    ? "True for one message and false for everything else."
+      "The one is the signature hash of the first spend Bitcoin ever made, in"
+      "Block 170, whose signature is valid -- and is checked to be valid by"
+      "the provider's own test, against libsecp256k1, in Rust. So this entry"
+      "and the real curve agree, and the case that uses it asserts something"
+      "that is true rather than something a stub happened to return."
+      "Everything else is false. A stub cannot decide a signature, and"
+      "answering true by default would be the one answer this project has"
+      "refused from the beginning."
+    hexOf(message.values) == firstSpendMessage()
+
+verify verifySignature
+    verifySignature(Primitives.Octets(values = []), Primitives.Octets(values = []), Primitives.Octets(values = [])) => false
+    verifySignature(Primitives.Octets(values = []), Primitives.Octets(values = []), Primitives.Octets(values = bytesOf(firstSpendMessage()))) => true
+
+fn firstSpendMessage() -> String
+    ? "The legacy signature hash of the first Bitcoin spend, from Core's"
+      "published corpus."
+    "7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19"
+
+verify firstSpendMessage
+    String.len(firstSpendMessage()) => 64
+
+fn hexOf(values: List<Int>) -> String
+    ? "The input as hexadecimal, which is how the table below is keyed."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(values), Bytes.fromList([])))
+
+verify hexOf
+    hexOf([]) => ""
+    hexOf([97]) => "61"
+
+fn digestOf(inputHex: String) -> List<Int>
+    ? "The table. Every entry is a vector published with the specification,"
+      "and the fallback is twenty zeroes so the function is total."
+    bytesOf(digestHexOf(inputHex))
+
+verify digestOf
+    List.len(digestOf("")) => 20
+    List.len(digestOf("ff")) => 20
+
+fn digestHexOf(inputHex: String) -> String
+    ? "One published digest by its input, in hexadecimal."
+    match inputHex
+        "" -> "9c1185a5c5e9fc54612808977ee8f548b2258d31"
+        "61" -> "0bdc9d2d256b3ee9daae347be6f4dc835a467ffe"
+        "616263" -> "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
+        "6d65737361676520646967657374" -> "5d0689ef49d2fae572b881b123a85ffa21595f36"
+        "6162636465666768696a6b6c6d6e6f707172737475767778797a" -> "f71c27109c692c1b56bbdceb5b9d2865b3708dbc"
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" -> "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb"
+        "04d6c0c946716aac894fc1653383543a91faab601302cf011607c82f06304651" -> "15727299b05b45fdaf9ac9ecf7565cfe27c3e567"
+        "05a7b382cae5af65b1b05c76c6dead8c723d045f7c0cb3a498f6a34bb1ff4738" -> "7f67f0521934a57d3039f77f9f32cf313f3ac74b"
+        "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262" -> "23b0ad3477f2178bc0b3eed26e4e6316f4e83aa1"
+        "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d" -> "0f4d7845db968f2a81b530b6f3c1d6246d4c7e01"
+        "4ae81572f06e1b88fd5ced7a1a000945432e83e1551e6f721ee9c00b8cc33260" -> "da1745e9b549bd0bfa1a569971c77eba30cd5a4b"
+        "543cf8627dfe43f4610a7a1a62f586643b3511b2bab92bac5c3807afd495af59" -> "c9e4a896d149702d0d1695434feddd52e24ad78d"
+        "5c62e091b8c0565f1bafad0dad5934276143ae2ccef7a5381e8ada5b1a8d26d2" -> "ece424a6bb6ddf4db592c0faed60685047a361b1"
+        "6eb37daff7c6acba7e1dbfb0f5edde5e00530bc0fb7ff65fef239a8c72dbdfcc" -> "1018853670f9f3b0582c5b9ee8ce93764ac32b93"
+        "71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73" -> "c286a1af0947f58d1ad787385b1c2c4a976f9e71"
+        "b95237b48faaa69eb078e1170be3b5cbb3fddf16d0a991e14ad274f7b33a4f64" -> "31edc23bdafda4639e669f89ad6b2318dd79d032"
+        "c7eaf06d5ae01a58e376e126eb1e6fab2036076922b96b2711ffbec1e590665d" -> "e7309652a8e3f600f06f5d8d52d6df03d2176cc3"
+        "cd478706933a8efde02a423d5eba3b9afd78e719cffce2cd9ca4fd54187bbdcd" -> "2df519943d5acc0ef5222091f9dfe3543f489a82"
+        "d74f4e8441fee2246f846bb1b31587711a66f51780615ec9dd19f5ed9b309197" -> "215640c2f72f0d16b4eced26762035a42ffed39a"
+        "f913eacf2e38a5d6fc3a8311d72ae704cb83866350a984dd3e5eb76d2a8c28e8" -> "0c3f8fe3d6ca266e76311ecda544c67d15fdd5b0"
+        "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a" -> "c51b66bced5e4491001bd702669770dccf440982"
+        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0" -> "91b24bf9f5288532960ac687abb035127b1d28a5"
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb" -> "994355199e516ff76c4fa4aab39337b9d84cf12b"
+        _ -> "0000000000000000000000000000000000000000"
+
+verify digestHexOf
+    digestHexOf("") => "9c1185a5c5e9fc54612808977ee8f548b2258d31"
+    digestHexOf("ff") => "0000000000000000000000000000000000000000"
+
+fn bytesOf(hex: String) -> List<Int>
+    ? "Hexadecimal back to bytes. Every string above is written here and is"
+      "valid, so the failure branch is unreachable."
+    Bytes.toList(Result.withDefault(Bytes.fromHex(hex), Bytes.fromList([])))
+
+verify bytesOf
+    bytesOf("") => []
+    bytesOf("61") => [97]
