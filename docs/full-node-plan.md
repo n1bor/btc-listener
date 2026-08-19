@@ -14,7 +14,7 @@ compact Blocks, and finally inbound Peers.
 | # | decision |
 |---|---|
 | D1 | The finish line is a node other nodes sync from — inbound Peers, serving Blocks — but every stage before the last ships outbound-only. |
-| D2 | **Open.** Real concurrency in Aver is preferred, a poll-shaped event loop is the fallback; asked upstream as [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) before deciding. |
+| D2 | **Closed 19 August 2026** by the answer on [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007): the node is one poll-shaped event loop, fan-out within a tick uses Aver's independent products (threaded when compiled, sequential under `verify`), and branches never write — the loop is the single writer. [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md). |
 | D3 | Two keyspaces: the UTXO Set shrinks on spend; the `o:` audit index of [#21](https://github.com/n1bor/btc-listener/issues/21) keeps growing history. Where both are wanted, both are written. |
 | D4, D5 | The glossary names: **UTXO Set** (the universal term over house purity) and **Undo Data**. In CONTEXT.md. |
 | D6 | Two claims, two tools: the node follows the chain with an **Assume-valid Height**; `audit` fully verifies ranges behind it. [ADR 0007](adr/0007-two-claims-two-tools.md). |
@@ -45,8 +45,8 @@ not yet made.
 | 8 | inbound Peers, and serving the chain | [#30](https://github.com/n1bor/btc-listener/issues/30) |
 
 Stages 3 and 4 are independent of each other; both need Stage 2. Stage 5 is
-where [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) becomes
-blocking. Stage 8 is the finish line and is last on purpose.
+where the readiness poll becomes blocking. Stage 8 is the finish line and is
+last on purpose.
 
 ## The parallel track
 
@@ -66,10 +66,11 @@ continues that on purpose: each stage names what it needs before it needs it.
 
 | ask | upstream | gates |
 |---|---|---|
-| a concurrency direction — threading, or poll primitives | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) | Stage 5 onward |
-| a configurable TCP read deadline | [jasisz/aver#782](https://github.com/jasisz/aver/issues/782) | Stage 4 in practice, every path eventually |
+| a concurrency direction | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) — **answered**: independent products plus poll-shaped effects; see [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md) | nothing any more |
+| a configurable TCP read deadline | [jasisz/aver#782](https://github.com/jasisz/aver/issues/782), scoped upstream as the first piece | Stage 4 in practice, every path eventually |
+| a readiness poll over connections | [jasisz/aver#1013](https://github.com/jasisz/aver/issues/1013) | Stage 5 |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
-| `Tcp.listen` / `Tcp.accept` | to be filed when the #1007 answer shapes it | Stage 8 |
+| `Tcp.listen` / `Tcp.accept` | to be filed; same family as the poll | Stage 8 |
 
 ## The disciplines that carry over
 
