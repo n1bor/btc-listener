@@ -23,7 +23,7 @@ module SpendScript
         "false pass -- because OP_HASH160 and OP_EQUAL only prove that the"
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
-    exposes [check, Outcomes, noOutcomes, count, merged]
+    exposes [check, Outcomes, noOutcomes, count, merged, noteOf]
     depends [Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
@@ -312,13 +312,28 @@ record Outcomes
     passed: Int
     failed: Int
     undecided: Int
+    note: Option<String>
 
 fn noOutcomes() -> Outcomes
     ? "Nothing run yet."
-    Outcomes(passed = 0, failed = 0, undecided = 0)
+    Outcomes(passed = 0, failed = 0, undecided = 0, note = Option.None)
 
 verify noOutcomes
-    noOutcomes() => Outcomes(passed = 0, failed = 0, undecided = 0)
+    noOutcomes() => Outcomes(passed = 0, failed = 0, undecided = 0, note = Option.None)
+
+fn firstNote(held: Option<String>, why: String) -> Option<String>
+    ? "The reason the first Script that did not pass gave."
+      "First rather than last, because a count says how many and a reader"
+      "wants to know what kind. Keeping every one would mean carrying a list"
+      "through a fold that is otherwise four Ints, and the second reason is"
+      "rarely a different reason."
+    match held
+        Option.Some(first) -> Option.Some(first)
+        Option.None -> Option.Some(why)
+
+verify firstNote
+    firstNote(Option.None, "a") => Option.Some("a")
+    firstNote(Option.Some("a"), "b") => Option.Some("a")
 
 fn count(counts: Outcomes, outcome: Outcome) -> Outcomes
     ? "Fold one spend's answer into a running total."
@@ -327,28 +342,47 @@ fn count(counts: Outcomes, outcome: Outcome) -> Outcomes
       "Over real Blocks almost everything is Undecided, and a count that hid"
       "that would look like a passing check and be nothing of the sort."
     match outcome
-        Outcome.Undecided(why) -> Outcomes(passed = counts.passed, failed = counts.failed, undecided = counts.undecided + 1)
+        Outcome.Undecided(why) -> Outcomes(passed = counts.passed, failed = counts.failed, undecided = counts.undecided + 1, note = firstNote(counts.note, why))
         Outcome.Decided(ending) -> settled(counts, ending)
 
 verify count
-    count(noOutcomes(), Outcome.Undecided("x")) => Outcomes(passed = 0, failed = 0, undecided = 1)
-    count(noOutcomes(), Outcome.Decided(Ending.Passed)) => Outcomes(passed = 1, failed = 0, undecided = 0)
-    count(noOutcomes(), Outcome.Decided(Ending.Failed("x"))) => Outcomes(passed = 0, failed = 1, undecided = 0)
+    count(noOutcomes(), Outcome.Undecided("x")) => Outcomes(passed = 0, failed = 0, undecided = 1, note = Option.Some("x"))
+    count(noOutcomes(), Outcome.Decided(Ending.Passed)) => Outcomes(passed = 1, failed = 0, undecided = 0, note = Option.None)
+    count(noOutcomes(), Outcome.Decided(Ending.Failed("x"))) => Outcomes(passed = 0, failed = 1, undecided = 0, note = Option.Some("x"))
 
 fn settled(counts: Outcomes, ending: Ending) -> Outcomes
     ? "Nested constructor patterns do not parse, so the Ending is matched apart."
     match ending
-        Ending.Passed -> Outcomes(passed = counts.passed + 1, failed = counts.failed, undecided = counts.undecided)
-        Ending.Failed(why) -> Outcomes(passed = counts.passed, failed = counts.failed + 1, undecided = counts.undecided)
+        Ending.Passed -> Outcomes(passed = counts.passed + 1, failed = counts.failed, undecided = counts.undecided, note = counts.note)
+        Ending.Failed(why) -> Outcomes(passed = counts.passed, failed = counts.failed + 1, undecided = counts.undecided, note = firstNote(counts.note, why))
 
 verify settled
-    settled(noOutcomes(), Ending.Passed) => Outcomes(passed = 1, failed = 0, undecided = 0)
-    settled(noOutcomes(), Ending.Failed("x")) => Outcomes(passed = 0, failed = 1, undecided = 0)
+    settled(noOutcomes(), Ending.Passed) => Outcomes(passed = 1, failed = 0, undecided = 0, note = Option.None)
+    settled(noOutcomes(), Ending.Failed("x")) => Outcomes(passed = 0, failed = 1, undecided = 0, note = Option.Some("x"))
 
 fn merged(left: Outcomes, right: Outcomes) -> Outcomes
     ? "Two totals added together, for rolling a Transaction into a Block."
-    Outcomes(passed = left.passed + right.passed, failed = left.failed + right.failed, undecided = left.undecided + right.undecided)
+    Outcomes(passed = left.passed + right.passed, failed = left.failed + right.failed, undecided = left.undecided + right.undecided, note = mergedNote(left.note, right.note))
 
 verify merged
     merged(noOutcomes(), noOutcomes()) => noOutcomes()
-    merged(Outcomes(passed = 1, failed = 2, undecided = 3), Outcomes(passed = 10, failed = 20, undecided = 30)) => Outcomes(passed = 11, failed = 22, undecided = 33)
+    merged(Outcomes(passed = 1, failed = 2, undecided = 3, note = Option.None), Outcomes(passed = 10, failed = 20, undecided = 30, note = Option.None)) => Outcomes(passed = 11, failed = 22, undecided = 33, note = Option.None)
+
+fn mergedNote(left: Option<String>, right: Option<String>) -> Option<String>
+    ? "The earlier of two reasons, since the left total came first."
+    match left
+        Option.Some(first) -> Option.Some(first)
+        Option.None -> right
+
+verify mergedNote
+    mergedNote(Option.None, Option.None) => Option.None
+    mergedNote(Option.Some("a"), Option.Some("b")) => Option.Some("a")
+    mergedNote(Option.None, Option.Some("b")) => Option.Some("b")
+
+fn noteOf(counts: Outcomes) -> String
+    ? "The first reason a Script did not pass, for a reader."
+    Option.withDefault(counts.note, "no reason recorded")
+
+verify noteOf
+    noteOf(noOutcomes()) => "no reason recorded"
+    noteOf(count(noOutcomes(), Outcome.Undecided("x"))) => "x"

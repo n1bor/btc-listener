@@ -233,7 +233,7 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     faults = faultsIn(findings, [])
     _said = reportFaults(height, faults)
     stepped = maybeReport(height, counts, pace)?
-    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions, stepped)
+    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions, stepped, blockId)
 
 fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
     ? "Say where the walk has got to, every so often, and how fast."
@@ -268,22 +268,37 @@ fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace,
     _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {perSecond(counts.transactions - pace.lastTransactions, nowMs - pace.lastMs)} tx/s, overall {perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = counts.blocks, lastTransactions = counts.transactions))
 
-fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace) -> Result<Counts, String>
+fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace, blockId: String) -> Result<Counts, String>
     ? "Check what each Transaction spends."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match transactions
         [] -> walk(store, blocks, loaded, height + 1, to, counts, pace)
-        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail, pace)
+        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail, pace, blockId)
 
-fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>, pace: Pace) -> Result<Counts, String>
+fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>, pace: Pace, blockId: String) -> Result<Counts, String>
     ? "Resolve its Inputs and judge the sums."
       "Resolving reads parent Blocks and does not share the Segment held here,"
       "since a parent may sit anywhere below."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     held = Infra.Spends.checked(store, blocks, transaction, Domain.Rules.at(height))?
+    _noted = reportUnsettled(height, blockId, transaction, held.scripts)
     paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
     grown = judged(height, withScripts(counts, held.scripts), transaction, Domain.Spend.verdictOf(held.tally, paid))
-    overTransactions(store, blocks, loaded, height, to, grown, tail, pace)
+    overTransactions(store, blocks, loaded, height, to, grown, tail, pace, blockId)
+
+fn reportUnsettled(height: Int, blockId: String, transaction: Transaction, scripts: Outcomes) -> Unit
+    ? "Name any Transaction whose Scripts did not all pass, as it goes by."
+      "A count at the end of a run says how many and nothing else, and finding"
+      "which Block held them meant bisecting the range by hand, a hundred"
+      "Blocks at a time, then twenty-five, then one. This is that work done"
+      "once, by the program, at the moment it knows the answer."
+      "Both failed and undecided, because both are worth looking at: failed is"
+      "a Script this engine decided against, undecided is one it would not"
+      "judge, and the reason tells them apart."
+    ! [Console.print]
+    match scripts.failed + scripts.undecided > 0
+        false -> Unit
+        true -> Console.print("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(transaction)}: {scripts.passed} passed, {scripts.failed} failed, {scripts.undecided} undecided -- {Domain.SpendScript.noteOf(scripts)}")
 
 fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
     ? "Roll one Transaction's Script outcomes into the running total."
@@ -291,7 +306,7 @@ fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
 
 verify withScripts
     withScripts(zero(), Domain.SpendScript.noOutcomes()) => zero()
-    withScripts(zero(), Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3)).scripts => Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3)
+    withScripts(zero(), Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3, note = Option.None)).scripts => Domain.SpendScript.Outcomes(passed = 1, failed = 2, undecided = 3, note = Option.None)
 
 fn paidBy(outputs: List<Output>, acc: Int) -> Int
     ? "Total the Output values."
