@@ -24,10 +24,10 @@ module SpendScript
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
     exposes [check, Outcomes, noOutcomes, count, merged]
-    depends [Bytes, Domain.Primitives, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
-fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+fn check(inputScriptHex: String, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "Whether this Input is allowed to spend this Output."
       "Undecided is the honest answer for almost every real spend today, and"
       "the count of them is the measure of how much of consensus this checks."
@@ -37,15 +37,37 @@ fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> O
       "oversized Output Script that this accepted until the limit was put back."
     match Bool.or(tooLong(inputScriptHex), tooLong(outputScriptHex))
         true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
-        false -> notWitness(inputScriptHex, outputScriptHex, context)
+        false -> notWitness(inputScriptHex, outputScriptHex, rules, context)
 
 verify check
-    check("51", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.SpendContext.bare()) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
-    check(signedInput(), Domain.SpendContext.signedScriptCode(), spendOfCorpusVector()) => Outcome.Decided(Ending.Passed)
-    check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
-    check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
-    check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    check("51", "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.Rules.latest(), spendOfCorpusVector()) => Outcome.Decided(Ending.Passed)
+    check(Domain.ScriptState.longScript(), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("51", Domain.ScriptState.longScript(), Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    check(beforeBip16Input(), beforeBip16Output(), Domain.Rules.at(170060), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    check(beforeBip16Input(), beforeBip16Output(), Domain.Rules.at(173805), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
+
+fn beforeBip16Input() -> String
+    ? "One push of a 1-of-1 redeem Script and nothing else, from Block 170060."
+      "Transaction 6a26d2ecb67f27d1fa5524763b49029d7106e91e3cc05743073461a719776192,"
+      "which is n1bor/btc-listener#19."
+    "255121029b6d2c97b8b7c718c325d7be3ac30f7c9d67651bce0c929f55ee77ce58efcf8451ae"
+
+verify beforeBip16Input
+    String.len(beforeBip16Input()) => 76
+
+fn beforeBip16Output() -> String
+    ? "The Output it spends, which is P2SH-shaped but was mined before BIP16."
+      "Below 173805 this is an ordinary Script: hash the top item, compare,"
+      "leave true. The redeem Script is data and is never run, which is exactly"
+      "the hole BIP16 closed. Above it the same pair fails, because the redeem"
+      "Script wants a signature the Input never had to supply."
+    "a91419a7d869032368fd1f1e26e5e73a4ad0e474960e87"
+
+verify beforeBip16Output
+    String.len(beforeBip16Output()) => 46
 
 fn signedInput() -> String
     ? "The Input Script of the first Transaction in Bitcoin Core's legacy"
@@ -68,7 +90,7 @@ fn spendOfCorpusVector() -> Context
 verify spendOfCorpusVector
     Domain.SpendContext.scriptCodeOf(spendOfCorpusVector()) => Domain.SpendContext.signedScriptCode()
 
-fn notWitness(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+fn notWitness(inputScriptHex: String, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "A witness program cannot be answered by running it, and running it"
       "anyway does not fail -- it passes, which is worse."
       "Segwit was deployed as a soft fork, which means a witness program had to"
@@ -82,13 +104,13 @@ fn notWitness(inputScriptHex: String, outputScriptHex: String, context: Context)
       "was real and meant nothing."
     match Domain.Script.isAnyWitnessProgram(outputScriptHex)
         true -> Outcome.Undecided("output is a witness program and needs the witness evaluated")
-        false -> parsed(inputScriptHex, outputScriptHex, context)
+        false -> parsed(inputScriptHex, outputScriptHex, rules, context)
 
 verify notWitness
-    notWitness("51", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
-    notWitness("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
-    notWitness("51", "00", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    notWitness("51", "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    notWitness("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    notWitness("51", "00", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left a false value on top"))
 
 fn tooLong(scriptHex: String) -> Bool
     ? "Two hexadecimal characters to the byte."
@@ -98,88 +120,97 @@ verify tooLong
     tooLong("51") => false
     tooLong(Domain.ScriptState.longScript()) => true
 
-fn parsed(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+fn parsed(inputScriptHex: String, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "Parse the Input's Script and run the pair."
     match Domain.ScriptParse.opsIn(inputScriptHex)
         Result.Err(message) -> Outcome.Decided(Ending.Failed("input script: {message}"))
-        Result.Ok(ops) -> afterInput(ops, outputScriptHex, context)
+        Result.Ok(ops) -> afterInput(ops, outputScriptHex, rules, context)
 
 verify parsed
-    parsed("51", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    parsed("51", "00", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left a false value on top"))
-    parsed("", "", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
-    parsed("5152", "935387", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    parsed("02aa", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script: push of 2 bytes runs past the end of the script"))
-    parsed("51", "02aa", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
-    parsed("6a", "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
-    parsed("51", "a9", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    parsed("5163", "68", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+    parsed("51", "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    parsed("51", "00", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    parsed("", "", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    parsed("5152", "935387", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    parsed("02aa", "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script: push of 2 bytes runs past the end of the script"))
+    parsed("51", "02aa", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
+    parsed("6a", "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    parsed("51", "a9", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    parsed("5163", "68", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
 
-fn afterInput(ops: List<Op>, outputScriptHex: String, context: Context) -> Outcome
+fn afterInput(ops: List<Op>, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "The Input's Script, run for the stack it leaves rather than for a"
       "verdict. The Ops travel on as well as the stack, because P2SH needs to"
       "know whether this half was push-only."
     match Domain.Interp.reach(ops, Domain.ScriptState.empty(), context)
         Step.Stop(outcome) -> outcome
-        Step.Continue(state) -> closedOrNot(ops, state, outputScriptHex, context)
+        Step.Continue(state) -> closedOrNot(ops, state, outputScriptHex, rules, context)
 
 verify afterInput
-    afterInput([Op.Code(81)], "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    afterInput([Op.Code(106)], "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
-    afterInput([Op.Code(169)], "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
+    afterInput([Op.Code(81)], "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    afterInput([Op.Code(106)], "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_RETURN"))
+    afterInput([Op.Code(169)], "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
 
-fn closedOrNot(ops: List<Op>, state: State, outputScriptHex: String, context: Context) -> Outcome
+fn closedOrNot(ops: List<Op>, state: State, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "A branch opened in the Input's Script cannot be closed by the Output's."
       "Each Script is its own run and the condition stack does not survive it,"
       "which is a rule people are surprised by until they think about who"
       "supplies each half."
     match state.conditions
-        [] -> withOutput(ops, state, outputScriptHex, context)
+        [] -> withOutput(ops, state, outputScriptHex, rules, context)
         [head, ..tail] -> Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
 
 verify closedOrNot
-    closedOrNot([], Domain.ScriptState.empty(), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    closedOrNot([], State(stack = [], alt = [], conditions = [true], opCount = 0), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
-    closedOrNot([], Domain.ScriptState.empty(), "a9", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
+    closedOrNot([], Domain.ScriptState.empty(), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    closedOrNot([], State(stack = [], alt = [], conditions = [true], opCount = 0), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("input script ended inside an unclosed OP_IF"))
+    closedOrNot([], Domain.ScriptState.empty(), "a9", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
 
-fn withOutput(ops: List<Op>, state: State, outputScriptHex: String, context: Context) -> Outcome
+fn withOutput(ops: List<Op>, state: State, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "The Output's Script, on the stack the Input's Script left."
       "Only the stack carries over. holding gives a fresh opcode count and no"
       "open branch, which is what starting a new Script means."
     match Domain.ScriptParse.opsIn(outputScriptHex)
         Result.Err(message) -> Outcome.Decided(Ending.Failed("output script: {message}"))
-        Result.Ok(outputOps) -> orRedeemed(Domain.Interp.evaluate(outputOps, Domain.ScriptState.holding(state.stack), context), ops, state, outputScriptHex, context)
+        Result.Ok(outputOps) -> orRedeemed(Domain.Interp.evaluate(outputOps, Domain.ScriptState.holding(state.stack), context), ops, state, outputScriptHex, rules, context)
 
 verify withOutput
-    withOutput([], Domain.ScriptState.empty(), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    withOutput([], Domain.ScriptState.empty(), "02aa", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
-    withOutput([], Domain.ScriptState.empty(), "a9", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
-    withOutput([], Domain.ScriptState.holding([[1], [1]]), "87", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    withOutput([], Domain.ScriptState.empty(), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    withOutput([], Domain.ScriptState.empty(), "02aa", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("output script: push of 2 bytes runs past the end of the script"))
+    withOutput([], Domain.ScriptState.empty(), "a9", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
+    withOutput([], Domain.ScriptState.holding([[1], [1]]), "87", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
 
-fn orRedeemed(outcome: Outcome, ops: List<Op>, state: State, outputScriptHex: String, context: Context) -> Outcome
+fn orRedeemed(outcome: Outcome, ops: List<Op>, state: State, outputScriptHex: String, rules: Rules, context: Context) -> Outcome
     ? "A P2SH Output Script that passed has proved one thing only: that the"
       "last item the Input Script pushed hashes to the value the Output"
       "committed to. Whether that item is a Script that runs is a separate"
       "question and this is where it gets asked."
-    match redeemable(outcome, ops, outputScriptHex)
+    match redeemable(outcome, ops, outputScriptHex, rules)
         false -> outcome
         true -> redeemed(state, context)
 
 verify orRedeemed
-    orRedeemed(Outcome.Decided(Ending.Passed), [Op.Code(81)], Domain.ScriptState.empty(), "51", Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    orRedeemed(Outcome.Undecided("no"), [Op.Code(81)], Domain.ScriptState.empty(), "51", Domain.SpendContext.bare()) => Outcome.Undecided("no")
+    orRedeemed(Outcome.Decided(Ending.Passed), [Op.Code(81)], Domain.ScriptState.empty(), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    orRedeemed(Outcome.Undecided("no"), [Op.Code(81)], Domain.ScriptState.empty(), "51", Domain.Rules.latest(), Domain.SpendContext.bare()) => Outcome.Undecided("no")
 
-fn redeemable(outcome: Outcome, ops: List<Op>, outputScriptHex: String) -> Bool
+fn redeemable(outcome: Outcome, ops: List<Op>, outputScriptHex: String, rules: Rules) -> Bool
     ? "Only a passing run of a P2SH Output Script is re-run, and only when the"
       "Input Script was push-only, which BIP16 requires and which is what stops"
       "the Input Script from arranging the stack the redeem script sees."
-    Bool.and(passed(outcome), Bool.and(Domain.Script.isPayToScriptHash(Domain.Script.bytesOf(outputScriptHex)), pushOnly(ops)))
+      "And only when BIP16 was in force. Below Height 173805 an Output of this"
+      "shape is an ordinary Script -- hash the top item, compare, leave true --"
+      "and the redeem Script is never run. Re-running it there refuses spends"
+      "the network accepted. See Domain.Rules."
+    match rules.payToScriptHash
+        false -> false
+        true -> Bool.and(passed(outcome), Bool.and(Domain.Script.isPayToScriptHash(Domain.Script.bytesOf(outputScriptHex)), pushOnly(ops)))
 
 verify redeemable
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "51") => false
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087") => true
-    redeemable(Outcome.Decided(Ending.Failed("no")), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087") => false
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(118)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087") => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "51", Domain.Rules.latest()) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.latest()) => true
+    redeemable(Outcome.Decided(Ending.Failed("no")), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.latest()) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(118)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.latest()) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.at(173805)) => true
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.at(173804)) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.Rules.at(170060)) => false
 
 fn passed(outcome: Outcome) -> Bool
     ? "Whether a run came out passed, as a Bool for a caller that wants to ask"

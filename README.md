@@ -352,17 +352,44 @@ not *refuse* them — it reported success and silently returned a zeroed `s`,
 which never verifies. Over the four 51-Block slices that showed it, **210
 failures became 1**:
 
-| Blocks | before | after |
-|---|---|---|
-| 170000–170050 | 56 failed | 0 |
-| 170050–170100 | 41 failed | 1 |
-| 170100–170150 | 47 failed | 0 |
-| 170150–170200 | 66 failed | 0 |
+| Blocks | strict DER | lax DER | rules by Height |
+|---|---|---|---|
+| 170000–170050 | 56 failed | 0 | 0 |
+| 170050–170100 | 41 failed | 1 | 0 |
+| 170100–170150 | 47 failed | 0 | 0 |
+| 170150–170200 | 66 failed | 0 | 0 |
 
-The one that remains is a different bug and has its own issue: a P2SH-shaped
-Output in Block 170060, which is 3,745 Blocks before BIP16 came into force. The
-engine runs the redeem Script anyway, and the redeem Script wants a signature
-the Input never had to supply.
+The one that survived the parser fix was a different bug, and the more
+interesting one: a P2SH-shaped Output in Block 170060, 3,745 Blocks before BIP16
+came into force. See below.
+
+## Which rules were in force
+
+A soft fork is not a correction to Bitcoin. It changes the rules from one Block
+onwards, and the Blocks below it are still valid under the rules they were mined
+under. An engine that applies today's rules to the whole chain rejects spends
+the network accepted — not a stricter check, a wrong one.
+
+`domain/rules.av` answers one question: which rules was a Block at this Height
+mined under. `Infra.Audit` asks it once per Height and carries the answer down
+to the Script engine, so `check` decides by the rules of the day rather than by
+today's.
+
+```aver
+check(input, output, Domain.Rules.at(170060), context) => Decided(Passed)
+check(input, output, Domain.Rules.at(173805), context) => Decided(Failed(…))
+```
+
+Both of those are real: the same spend, from Block 170060, on either side of the
+BIP16 activation Height. Below it, `a914<hash>87` is an ordinary Script — hash
+the top item, compare, leave true — and the redeem Script is data that never
+runs. That is exactly the hole BIP16 closed, and those coins really were
+spendable by anyone who knew the preimage.
+
+Only P2SH is carried today, because it is the only rule this engine both
+implements and can check against Blocks it holds. `Domain.Ecdsa.isValidEncoding`
+is already written for BIP66 at Height 363,725, but the chain here stops below
+that, so wiring it in would ship consensus code no measurement could reach.
 
 ## Checking a spend
 

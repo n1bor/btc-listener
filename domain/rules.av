@@ -1,0 +1,67 @@
+module Rules
+    intent =
+        "Which consensus rules were in force at a Height."
+        "A soft fork is not a correction to Bitcoin; it is a change of the rules"
+        "from one Block onwards, and the Blocks below it are still valid under"
+        "the rules they were mined under. An engine that applies today's rules"
+        "to the whole chain rejects spends the network accepted, which is not a"
+        "stricter check but a wrong one."
+        "That is not hypothetical here. n1bor/btc-listener#19: a P2SH-shaped"
+        "Output in Block 170060, three thousand seven hundred and forty-five"
+        "Blocks before BIP16 came into force, was refused because the engine"
+        "ran the redeem Script anyway and wanted a signature the Input never"
+        "had to supply. Under the rules of the day that pair simply passes, and"
+        "the coins really were spendable by anyone who knew the preimage. That"
+        "is the hole BIP16 closed, and it is a fact about the chain rather than"
+        "a bug in it."
+        "One record rather than a Height passed around, because a caller that"
+        "holds a Height can be tempted to compare it, and every such comparison"
+        "is a place the table can be got wrong. Ask once, carry the answer."
+        "The timeline this engine will eventually need, mainnet:"
+        "BIP16 pay-to-script-hash at 173805, 1 April 2012."
+        "BIP34 coinbase Height at 227931. BIP66 strict DER at 363725."
+        "BIP65 OP_CHECKLOCKTIMEVERIFY at 388381. BIP68, BIP112 and BIP113 at"
+        "419328. SegWit and BIP147 null dummy at 481824. Taproot at 709632."
+        "Only P2SH is carried, because only P2SH is a rule this engine both"
+        "implements and can be checked against Blocks it holds. BIP66 is the"
+        "next one and Domain.Ecdsa.isValidEncoding is already written for it,"
+        "but the chain here stops well below 363725, so wiring it in would ship"
+        "consensus code no measurement could reach. It goes in when there are"
+        "Blocks to check it against, and it costs one field and one line."
+    exposes [Rules, at, latest, payToScriptHashHeight]
+    depends []
+    effects []
+
+record Rules
+    payToScriptHash: Bool
+
+fn at(height: Int) -> Rules
+    ? "The rules a Block at this Height was mined under."
+    Rules(payToScriptHash = height >= payToScriptHashHeight())
+
+verify at
+    at(0).payToScriptHash => false
+    at(170060).payToScriptHash => false
+    at(173804).payToScriptHash => false
+    at(173805).payToScriptHash => true
+    at(900000).payToScriptHash => true
+
+fn latest() -> Rules
+    ? "Every rule this engine knows, in force."
+      "What a Script corpus written today means, and what a caller checking a"
+      "Script with no Block behind it should get. Core's own vectors are"
+      "written against the current rules and are read that way."
+    Rules(payToScriptHash = true)
+
+verify latest
+    latest().payToScriptHash => true
+    latest() => at(payToScriptHashHeight())
+
+fn payToScriptHashHeight() -> Int
+    ? "BIP16 became a consensus rule at this Height, on 1 April 2012."
+      "The Height is what Bitcoin Core records and what every implementation"
+      "compares against, so it is the form the fact is kept in here."
+    173805
+
+verify payToScriptHashHeight
+    payToScriptHashHeight() => 173805
