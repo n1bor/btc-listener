@@ -113,6 +113,19 @@ impl CapabilityProvider for Kv {
                 let dir = string_in(dir, "dir")?;
                 let mut options = Options::default();
                 options.create_if_missing = true;
+                // rusty-leveldb's table cache is an intrusive LRU built on raw
+                // pointers, and evicting from it can panic in `reinsert_front`
+                // with an unwrap on a None `prev` (cache.rs:108). It killed a
+                // whole-chain audit at Height 163642 roughly one run in three.
+                // The default holds 1014 tables and this database already has
+                // 3879, so eviction is constant. Sizing the cache past the
+                // table count keeps it from evicting at all. The file
+                // descriptor ceiling here is 1048576, so this is affordable.
+                //
+                // This is a mitigation, not a fix: the bug is reachable
+                // whenever eviction happens, and the honest answer is either a
+                // patched crate or RocksDB. See n1bor/btc-listener#33.
+                options.max_open_files = 1 << 17;
                 Ok(match DB::open(&dir, options) {
                     Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(
                         Mutex::new(db),

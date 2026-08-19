@@ -36,6 +36,8 @@ record Built
     outputs: Int
 
 record Walk
+    reached: Int
+    advancing: Bool
     store: Store
     blocks: BlockStore
     loaded: Option<Loaded>
@@ -84,16 +86,61 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
         Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0), pace = Infra.Pace.pacedFrom(Time.unixMs())), from, to)?
+    below = watermark(store)?
+    walked = walk(Walk(reached = from, advancing = from <= below, store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0), pace = Infra.Pace.pacedFrom(Time.unixMs())), resumeFrom(from, below), to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
+
+fn watermark(store: Store) -> Result<Int, String>
+    ? "How far the Output keyspace has been built, or zero if never."
+    ! [Infra.Kv.get]
+    held = Infra.Store.get(store, Domain.Index.outputsBelowKey())?
+    Domain.Index.prunedBelowOf(held)
+
+verify watermark
+    watermark(Infra.Store.fixture([])) => Result.Ok(0)
+    watermark(Infra.Store.fixture([("meta:outputsBelow", "1234")])) => Result.Ok(1234)
+
+fn resumeFrom(from: Int, below: Int) -> Int
+    ? "Where to actually start, given what has been built already."
+      "A build that begins at or below the watermark carries straight on from"
+      "it: those Heights are done and rewriting them would produce the same"
+      "keys with the same values for no reason."
+      "A build that begins above it leaves a gap and starts where it was asked"
+      "to, because the watermark is a claim about every Height below it and a"
+      "gap would make that claim false."
+    match from <= below
+        true -> below
+        false -> from
+
+verify resumeFrom
+    resumeFrom(1, 0) => 1
+    resumeFrom(1, 500) => 500
+    resumeFrom(500, 500) => 500
+    resumeFrom(900, 500) => 900
+
+fn marked(pending: List<Entry>, reached: Int, advancing: Bool) -> List<Entry>
+    ? "The batch, with the watermark on the end when it may be advanced."
+      "In the same putAll as the Outputs it accounts for, so the two land"
+      "together or not at all: one Kv.putAll is one LevelDB WriteBatch. A"
+      "watermark written separately could survive a batch that did not, and"
+      "then claim Heights nobody had indexed."
+    match advancing
+        false -> List.reverse(pending)
+        true -> List.concat(List.reverse(pending), [Entry(key = Domain.Index.outputsBelowKey(), value = Domain.Index.encodeHeight(reached))])
+
+verify marked
+    marked([], 7, false) => []
+    marked([], 7, true) => [Entry(key = "meta:outputsBelow", value = "7")]
+    marked([Entry(key = "o:aa:00000", value = "5:51")], 7, false) => [Entry(key = "o:aa:00000", value = "5:51")]
+    marked([Entry(key = "o:aa:00000", value = "5:51")], 400000, true) => [Entry(key = "o:aa:00000", value = "5:51"), Entry(key = "meta:outputsBelow", value = "400000")]
 
 fn flushed(state: Walk) -> Result<Store, String>
     ? "Write whatever is still held back."
       "The accumulator is built by prepending, so it is turned round here rather"
       "than concatenated on every Block, which would cost the batch twice over."
     ! [Disk.appendText, Infra.Kv.putAll]
-    Infra.Store.putAll(state.store, List.reverse(state.pending))
+    Infra.Store.putAll(state.store, marked(state.pending, state.reached, state.advancing))
 
 fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn."
@@ -148,7 +195,7 @@ fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -
     added = List.len(entries) - List.len(state.pending)
     counted = Built(blocks = state.counted.blocks + 1, outputs = state.counted.outputs + added)
     stepped = maybeReport(height, counted, state.pace)?
-    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = counted, pace = stepped)
+    carried = Walk(reached = height + 1, advancing = state.advancing, store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = counted, pace = stepped)
     recorded = maybeWrite(carried)?
     walk(recorded, height + 1, to)
 
@@ -163,7 +210,7 @@ fn written(state: Walk) -> Result<Walk, String>
     ? "One putAll for everything held back."
     ! [Disk.appendText, Infra.Kv.putAll]
     grown = flushed(state)?
-    Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted, pace = state.pace))
+    Result.Ok(Walk(reached = state.reached, advancing = state.advancing, store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted, pace = state.pace))
 
 fn outputsFor(txids: List<String>, transactions: List<Transaction>, acc: List<Entry>) -> List<Entry>
     ? "One entry per Output, walking the Ids and the Transactions together."

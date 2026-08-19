@@ -6,7 +6,7 @@ module Lookup
         "to get there, so they are one path with a choice at the end rather than"
         "two paths that happen to agree."
     exposes [byTxid]
-    depends [App.Show, Domain.Index, Domain.Rules, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Domain.SpendScript, App.Show, Domain.Index, Domain.Rules, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -58,8 +58,28 @@ fn spendReport(store: Store, blocks: BlockStore, transaction: Transaction, heigh
       "it is the Height of the Block holding this Transaction rather than the"
       "tip: a spend is judged by the rules it was mined under."
     ! [Disk.readText, Infra.Kv.get]
-    held = Infra.Spends.checked(store, blocks, transaction, Domain.Rules.at(height))?
-    Result.Ok(List.concat(App.Show.describeSpend(transaction, held.tally), App.Show.describeScripts(held.scripts)))
+    work = Infra.Spends.resolved(store, blocks, transaction, Domain.Rules.at(height))?
+    answered = Infra.Spends.scriptsAcross([work], Domain.Rules.at(height))?
+    Result.Ok(List.concat(App.Show.describeSpend(transaction, work.tally), App.Show.describeScripts(onlyOutcomes(answered))))
+
+fn onlyOutcomes(answered: Tuple<List<Work>, List<Outcomes>>) -> Outcomes
+    ? "One Transaction was asked about, so one answer came back."
+    match answered
+        (work, scripts) -> firstOutcome(scripts)
+
+verify onlyOutcomes
+    onlyOutcomes(([], [])) => Domain.SpendScript.noOutcomes()
+    onlyOutcomes(([], [Domain.SpendScript.noOutcomes()])) => Domain.SpendScript.noOutcomes()
+
+fn firstOutcome(scripts: List<Outcomes>) -> Outcomes
+    ? "The one answer, or nothing run at all."
+    match scripts
+        [] -> Domain.SpendScript.noOutcomes()
+        [head, ..tail] -> head
+
+verify firstOutcome
+    firstOutcome([]) => Domain.SpendScript.noOutcomes()
+    firstOutcome([Domain.SpendScript.noOutcomes()]) => Domain.SpendScript.noOutcomes()
 
 fn said(outcome: Result<List<String>, String>) -> Unit
     ? "Print the lines, or the reason there are none."

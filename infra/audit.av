@@ -187,7 +187,60 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     faults = faultsIn(findings, [])
     _said = reportFaults(height, faults)
     stepped = maybeReport(height, counts, pace)?
-    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions, stepped, blockId)
+    counted = Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts)
+    work = resolvedAll(store, blocks, transactions, Domain.Rules.at(height), [])?
+    answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(height))?
+    settled = foldedPair(height, blockId, answered, counted)
+    walk(store, blocks, loaded, height + 1, to, settled, stepped)
+
+fn resolvedAll(store: Store, blocks: BlockStore, transactions: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
+    ? "Resolve every Input of every Transaction in the Block, in order."
+      "One pass, sequential, and the only place a spend touches the disk or"
+      "the database. What it leaves is pure work the Block can then fan out."
+    ! [Disk.readText, Infra.Kv.get]
+    match transactions
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> nextResolved(store, blocks, head, tail, rules, acc)
+
+fn nextResolved(store: Store, blocks: BlockStore, transaction: Transaction, tail: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
+    ? "One Transaction resolved, then the rest."
+    ! [Disk.readText, Infra.Kv.get]
+    one = Infra.Spends.resolved(store, blocks, transaction, rules)?
+    resolvedAll(store, blocks, tail, rules, List.prepend(one, acc))
+
+fn foldedPair(height: Int, blockId: String, answered: Tuple<List<Work>, List<Outcomes>>, counts: Counts) -> Counts
+    ? "The Transactions and their answers arrive together, in the order the"
+      "scheduler used rather than the order the Block holds them."
+    ! [Console.print]
+    match answered
+        (work, outcomes) -> folded(height, blockId, work, outcomes, counts)
+
+fn folded(height: Int, blockId: String, work: List<Work>, outcomes: List<Outcomes>, counts: Counts) -> Counts
+    ? "Pair each Transaction back against its Script answers and total them."
+      "The two lists are in the same order as each other, which is the order"
+      "the Scripts were scheduled in -- longest Transaction first -- and not"
+      "the order the Block holds them. That is why Infra.Spends hands both"
+      "back rather than only the answers: pairing them by position is only"
+      "safe when the positions came from the same list."
+    ! [Console.print]
+    match work
+        [] -> counts
+        [head, ..tail] -> foldedOne(height, blockId, head, tail, outcomes, counts)
+
+fn foldedOne(height: Int, blockId: String, one: Work, rest: List<Work>, outcomes: List<Outcomes>, counts: Counts) -> Counts
+    ? "One Transaction, its answers, and the rest of the Block."
+    ! [Console.print]
+    match outcomes
+        [] -> counts
+        [scripts, ..others] -> foldedWith(height, blockId, one, rest, scripts, others, counts)
+
+fn foldedWith(height: Int, blockId: String, one: Work, rest: List<Work>, scripts: Outcomes, others: List<Outcomes>, counts: Counts) -> Counts
+    ? "Report it if it did not settle, judge its sums, and carry on."
+    ! [Console.print]
+    _noted = reportUnsettled(height, blockId, one.transaction, scripts)
+    paid = paidBy(Domain.Transaction.outputsOf(one.transaction), 0)
+    grown = judged(height, withScripts(counts, scripts), one.transaction, Domain.Spend.verdictOf(one.tally, paid))
+    folded(height, blockId, rest, others, grown)
 
 fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
     ? "Say where the walk has got to, every so often, and how fast."
@@ -221,24 +274,6 @@ fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace,
     ! [Console.print, Time.now]
     _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
-
-fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace, blockId: String) -> Result<Counts, String>
-    ? "Check what each Transaction spends."
-    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
-    match transactions
-        [] -> walk(store, blocks, loaded, height + 1, to, counts, pace)
-        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail, pace, blockId)
-
-fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>, pace: Pace, blockId: String) -> Result<Counts, String>
-    ? "Resolve its Inputs and judge the sums."
-      "Resolving reads parent Blocks and does not share the Segment held here,"
-      "since a parent may sit anywhere below."
-    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
-    held = Infra.Spends.checked(store, blocks, transaction, Domain.Rules.at(height))?
-    _noted = reportUnsettled(height, blockId, transaction, held.scripts)
-    paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
-    grown = judged(height, withScripts(counts, held.scripts), transaction, Domain.Spend.verdictOf(held.tally, paid))
-    overTransactions(store, blocks, loaded, height, to, grown, tail, pace, blockId)
 
 fn reportUnsettled(height: Int, blockId: String, transaction: Transaction, scripts: Outcomes) -> Unit
     ? "Name any Transaction whose Scripts did not all pass, as it goes by."
