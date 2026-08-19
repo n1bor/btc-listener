@@ -21,7 +21,7 @@ module Audit
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
     exposes [Counts, run]
-    depends [Bytes, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Bytes, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -190,7 +190,7 @@ fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height
     counted = Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts)
     work = resolvedAll(store, blocks, transactions, Domain.Rules.at(height), [])?
     answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(height))?
-    settled = foldedPair(height, blockId, answered, counted)
+    settled = tallied(work, counted, answered, height, blockId)
     walk(store, blocks, loaded, height + 1, to, settled, stepped)
 
 fn resolvedAll(store: Store, blocks: BlockStore, transactions: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
@@ -207,40 +207,6 @@ fn nextResolved(store: Store, blocks: BlockStore, transaction: Transaction, tail
     ! [Disk.readText, Infra.Kv.get]
     one = Infra.Spends.resolved(store, blocks, transaction, rules)?
     resolvedAll(store, blocks, tail, rules, List.prepend(one, acc))
-
-fn foldedPair(height: Int, blockId: String, answered: Tuple<List<Work>, List<Outcomes>>, counts: Counts) -> Counts
-    ? "The Transactions and their answers arrive together, in the order the"
-      "scheduler used rather than the order the Block holds them."
-    ! [Console.print]
-    match answered
-        (work, outcomes) -> folded(height, blockId, work, outcomes, counts)
-
-fn folded(height: Int, blockId: String, work: List<Work>, outcomes: List<Outcomes>, counts: Counts) -> Counts
-    ? "Pair each Transaction back against its Script answers and total them."
-      "The two lists are in the same order as each other, which is the order"
-      "the Scripts were scheduled in -- longest Transaction first -- and not"
-      "the order the Block holds them. That is why Infra.Spends hands both"
-      "back rather than only the answers: pairing them by position is only"
-      "safe when the positions came from the same list."
-    ! [Console.print]
-    match work
-        [] -> counts
-        [head, ..tail] -> foldedOne(height, blockId, head, tail, outcomes, counts)
-
-fn foldedOne(height: Int, blockId: String, one: Work, rest: List<Work>, outcomes: List<Outcomes>, counts: Counts) -> Counts
-    ? "One Transaction, its answers, and the rest of the Block."
-    ! [Console.print]
-    match outcomes
-        [] -> counts
-        [scripts, ..others] -> foldedWith(height, blockId, one, rest, scripts, others, counts)
-
-fn foldedWith(height: Int, blockId: String, one: Work, rest: List<Work>, scripts: Outcomes, others: List<Outcomes>, counts: Counts) -> Counts
-    ? "Report it if it did not settle, judge its sums, and carry on."
-    ! [Console.print]
-    _noted = reportUnsettled(height, blockId, one.transaction, scripts)
-    paid = paidBy(Domain.Transaction.outputsOf(one.transaction), 0)
-    grown = judged(height, withScripts(counts, scripts), one.transaction, Domain.Spend.verdictOf(one.tally, paid))
-    folded(height, blockId, rest, others, grown)
 
 fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
     ? "Say where the walk has got to, every so often, and how fast."
@@ -275,19 +241,61 @@ fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace,
     _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
 
-fn reportUnsettled(height: Int, blockId: String, transaction: Transaction, scripts: Outcomes) -> Unit
-    ? "Name any Transaction whose Scripts did not all pass, as it goes by."
-      "A count at the end of a run says how many and nothing else, and finding"
-      "which Block held them meant bisecting the range by hand, a hundred"
-      "Blocks at a time, then twenty-five, then one. This is that work done"
-      "once, by the program, at the moment it knows the answer."
-      "Both failed and undecided, because both are worth looking at: failed is"
-      "a Script this engine decided against, undecided is one it would not"
-      "judge, and the reason tells them apart."
+fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>, height: Int, blockId: String) -> Counts
+    ? "Add the Block's Script answers in, say what did not settle, then judge"
+      "each Transaction's sums."
+      "Scripts and sums are counted apart because the division only reorders"
+      "the Scripts. The sums walk the Transactions in Block order as they"
+      "always did, and need nothing from the branches."
     ! [Console.print]
-    match scripts.failed + scripts.undecided > 0
+    match answered
+        (scripts, lines) -> afterScripts(work, withScripts(counts, scripts), lines, height, blockId)
+
+verify tallied
+    tallied([], zero(), (Domain.SpendScript.noOutcomes(), []), 0, "aa") => zero()
+
+fn afterScripts(work: List<Work>, counts: Counts, lines: List<String>, height: Int, blockId: String) -> Counts
+    ? "Print what did not settle, then judge the sums."
+    ! [Console.print]
+    _said = printLines(prefixed(lines, height, blockId, []))
+    judgedAll(work, counts)
+
+verify afterScripts
+    afterScripts([], zero(), [], 0, "aa") => zero()
+
+fn prefixed(lines: List<String>, height: Int, blockId: String, acc: List<String>) -> List<String>
+    ? "Put the Height and the Block on the front of each line."
+      "Here rather than in the branch that found it, because a value captured"
+      "by both halves of an independent product does not compile -- see"
+      "Infra.Spends.notedFrom and jasisz/aver#1010."
+    match lines
+        [] -> List.reverse(acc)
+        [head, ..tail] -> prefixed(tail, height, blockId, List.prepend("  !! height {height} block {blockId} {head}", acc))
+
+verify prefixed
+    prefixed([], 0, "aa", []) => []
+    prefixed(["tx bb input 0: no"], 7, "aa", []) => ["  !! height 7 block aa tx bb input 0: no"]
+
+fn printLines(lines: List<String>) -> Unit
+    ? "Everything the Block found that did not settle, in one write."
+      "One Console.print rather than one per line, because the alternative is"
+      "a recursive effectful function and Oracle v1 cannot trace one."
+    ! [Console.print]
+    match List.len(lines) > 0
         false -> Unit
-        true -> Console.print("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(transaction)}: {scripts.passed} passed, {scripts.failed} failed, {scripts.undecided} undecided -- {Domain.SpendScript.noteOf(scripts)}")
+        true -> Console.print(String.join(lines, "\n"))
+
+verify printLines trace
+    printLines([]) => Unit
+
+fn judgedAll(work: List<Work>, counts: Counts) -> Counts
+    ? "Every Transaction's sums, in Block order."
+    match work
+        [] -> counts
+        [head, ..tail] -> judgedAll(tail, judged(0, counts, head.transaction, Domain.Spend.verdictOf(head.tally, paidBy(Domain.Transaction.outputsOf(head.transaction), 0))))
+
+verify judgedAll
+    judgedAll([], zero()) => zero()
 
 fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
     ? "Roll one Transaction's Script outcomes into the running total."

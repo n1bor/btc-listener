@@ -19,7 +19,7 @@ module Spends
         "lookups was tried and made an audit of two thousand Blocks go from two"
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Work, Pending, resolved, scriptsAcross, resolve]
-    depends [Domain.Block, Domain.Rules, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
+    depends [Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
     effects [Disk.readText, Infra.Kv.get]
 
 record Checked
@@ -38,221 +38,105 @@ fn resolved(store: Store, blocks: BlockStore, transaction: Transaction, rules: R
     gathered = over(store, blocks, transaction, 0, Domain.Transaction.inputsOf(transaction), Gathered(tally = Domain.Spend.started(), pending = []), rules)?
     Result.Ok(Work(transaction = transaction, tally = gathered.tally, spent = List.reverse(gathered.pending)))
 
-record Pending
-    index: Int
-    input: Input
-    spend: Spend
-
-record Work
-    transaction: Transaction
-    tally: Tally
-    spent: List<Pending>
-
 record Gathered
     tally: Tally
     pending: List<Pending>
 
-fn chunkSize() -> Int
-    ? "How many Transactions one branch checks before another is started."
-      "The unit is a Transaction rather than an Input, which is the whole"
-      "point. A Transaction in Blocks 170000-170200 has two Inputs on average,"
-      "so fanning within one bought a ceiling of two-way parallelism however"
-      "many cores were free -- measured at 11% for 33% more CPU. A Block near"
-      "the tip holds hundreds or thousands of Transactions, and those are what"
-      "there are enough of to fill the machine."
-      "Sixteen keeps the branch count proportional to the Block: a 30"
-      "Transaction Block starts two branches, a 2000 Transaction Block starts"
-      "125. A branch is a thread, and a thread that checks sixteen"
-      "Transactions is worth starting where one that checks two is not."
-    16
-
-verify chunkSize
-    chunkSize() > 0 => true
-
-fn chunked(work: List<Work>, acc: List<List<Work>>) -> List<List<Work>>
-    ? "The Block's Transactions in runs of chunkSize, so a branch is worth starting."
-    match work
-        [] -> List.reverse(acc)
-        [head, ..tail] -> chunked(List.drop(work, chunkSize()), List.prepend(List.take(work, chunkSize()), acc))
-
-verify chunked
-    chunked([], []) => []
-    List.len(chunked(manyWork(1, []), [])) => 1
-    List.len(chunked(manyWork(16, []), [])) => 1
-    List.len(chunked(manyWork(17, []), [])) => 2
-    List.len(chunked(manyWork(200, []), [])) => 13
-
-fn manyWork(count: Int, acc: List<Work>) -> List<Work>
-    ? "That many copies of the same resolved Transaction, for the cases here."
-    match count <= 0
-        true -> acc
-        false -> manyWork(count - 1, List.prepend(sampleWork(), acc))
-
-verify manyWork
-    List.len(manyWork(0, [])) => 0
-    List.len(manyWork(5, [])) => 5
-
-fn scriptsAcross(work: List<Work>, rules: Rules) -> Result<Tuple<List<Work>, List<Outcomes>>, String>
-    ? "The Script pairs of every Transaction in a Block, one answer each."
-      "Longest first. A branch takes as long as the Transactions in it, and a"
-      "Block's Transactions are wildly uneven -- one with 168 Inputs beside"
-      "five hundred with one. Left in Block order, a late chunk holding the"
-      "big one finishes long after the rest and every other core waits on it."
-      "Started longest first, the big ones are underway while the short ones"
-      "fill in around them, which is the oldest scheduling heuristic there is."
-      "The Work comes back with the answers because the order is no longer the"
-      "Block's, and the caller pairs them to name a Transaction that did not"
-      "settle. Handing back both is what keeps that honest rather than"
-      "assuming an order that sorting has just changed."
-    ordered = longestFirst(work)
-    answers = fanned(chunked(ordered, []), rules)?
-    Result.Ok((ordered, answers))
+fn scriptsAcross(work: List<Work>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "Every Script pair in a Block, run across branches, with the totals and"
+      "anything that did not settle."
+      "Branches return their own report lines rather than the walk pairing"
+      "answers back to Transactions by position. The division is by Input and"
+      "reorders them, so position means nothing outside the branch that made"
+      "it -- and a line built where the answer is has the Transaction and the"
+      "Input in hand anyway."
+    fanned(Domain.ScriptWork.divided(Domain.ScriptWork.piecesOf(work, 0, [])), rules)
 
 verify scriptsAcross
-    scriptsAcross([], Domain.Rules.latest()) => Result.Ok(([], []))
-    scriptsAcross([sampleWork()], Domain.Rules.latest()) => Result.Ok(([sampleWork()], [Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())))]))
+    scriptsAcross([], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn longestFirst(work: List<Work>) -> List<Work>
-    ? "The Block's Transactions, most Inputs first."
-      "Insertion into a sorted list rather than a merge sort, because the list"
-      "is already nearly uniform -- almost every Transaction has one or two"
-      "Inputs -- so the few long ones travel a short way and the rest do not"
-      "move at all."
-    inserted(work, [])
-
-verify longestFirst
-    longestFirst([]) => []
-    List.len(longestFirst(manyWork(4, []))) => 4
-    List.len(List.take(longestFirst(List.concat(manyWork(2, []), [wideWork()])), 1)) => 1
-    inputsIn(List.take(longestFirst(List.concat(manyWork(2, []), [wideWork()])), 1)) => 3
-
-fn inserted(work: List<Work>, acc: List<Work>) -> List<Work>
-    ? "Each Transaction put where it belongs in what is sorted so far."
-    match work
-        [] -> acc
-        [head, ..tail] -> inserted(tail, placed(head, acc, []))
-
-verify inserted
-    inserted([], []) => []
-    List.len(inserted(manyWork(3, []), [])) => 3
-
-fn placed(one: Work, sorted: List<Work>, seen: List<Work>) -> List<Work>
-    ? "In front of the first Transaction with fewer Inputs than this one."
-    match sorted
-        [] -> List.concat(List.reverse(seen), [one])
-        [head, ..tail] -> placedAgainst(one, head, tail, seen)
-
-verify placed
-    placed(sampleWork(), [], []) => [sampleWork()]
-    inputsIn(placed(wideWork(), [sampleWork()], [])) => 4
-
-fn placedAgainst(one: Work, head: Work, tail: List<Work>, seen: List<Work>) -> List<Work>
-    ? "Compare against the next one along."
-    match List.len(one.spent) > List.len(head.spent)
-        true -> List.concat(List.reverse(seen), List.prepend(one, List.prepend(head, tail)))
-        false -> placed(one, tail, List.prepend(head, seen))
-
-verify placedAgainst
-    inputsIn(placedAgainst(wideWork(), sampleWork(), [], [])) => 4
-    inputsIn(placedAgainst(sampleWork(), wideWork(), [], [])) => 4
-
-fn inputsIn(work: List<Work>) -> Int
-    ? "How many Inputs the Transactions in this list hold, for the cases here."
-    match work
-        [] -> 0
-        [head, ..tail] -> List.len(head.spent) + inputsIn(tail)
-
-verify inputsIn
-    inputsIn([]) => 0
-    inputsIn([sampleWork()]) => 1
-    inputsIn([wideWork()]) => 3
-
-fn wideWork() -> Work
-    ? "A resolved Transaction with three Inputs, for the sorting cases."
-    Work(transaction = Domain.SpendContext.emptyTransaction(), tally = Domain.Spend.started(), spent = [samplePending(), samplePending(), samplePending()])
-
-verify wideWork
-    List.len(wideWork().spent) => 3
-
-fn fanned(chunks: List<List<Work>>, rules: Rules) -> Result<List<Outcomes>, String>
-    ? "Every chunk of Transactions, declared independent of every other."
-      "The VM runs the branches one after another, so verify and the corpus see"
-      "exactly what they always saw. Compiled Rust runs a thread per branch."
-    match chunks
-        [] -> Result.Ok([])
+fn fanned(branches: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "Every branch, declared independent of every other."
+      "The VM runs them one after another, so verify and the corpus see what"
+      "they always saw. Compiled Rust runs a thread per branch."
+    match branches
+        [] -> Result.Ok((Domain.SpendScript.noOutcomes(), []))
         [head, ..tail] -> fannedStep(head, tail, rules)
 
 verify fanned
-    fanned([], Domain.Rules.latest()) => Result.Ok([])
-    List.len(fanned([manyWork(2, [])], Domain.Rules.latest())?) => 2
+    fanned([], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn fannedStep(chunk: List<Work>, rest: List<List<Work>>, rules: Rules) -> Result<List<Outcomes>, String>
-    ? "This chunk, and the rest of them if there are any."
-      "A lone chunk is run where it stands rather than declared independent of"
-      "nothing, which is every Block with sixteen Transactions or fewer."
+fn fannedStep(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "This branch, and the rest of them if there are any."
+      "A lone branch is run where it stands rather than declared independent"
+      "of nothing."
     match rest
-        [] -> eachInChunk(chunk, [], rules)
-        [head, ..tail] -> paired(chunk, rest, rules)
+        [] -> eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules)
+        [head, ..tail] -> paired(branch, rest, rules)
 
 verify fannedStep
-    fannedStep([], [], Domain.Rules.latest()) => Result.Ok([])
-    List.len(fannedStep(manyWork(2, []), [], Domain.Rules.latest())?) => 2
-    List.len(fannedStep(manyWork(2, []), [manyWork(3, [])], Domain.Rules.latest())?) => 5
+    fannedStep([], [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn paired(chunk: List<Work>, rest: List<List<Work>>, rules: Rules) -> Result<List<Outcomes>, String>
-    ? "This chunk and the rest of them, as an independent product."
-      "Left before right, so the answers come back in Block order whichever"
-      "branch finished first."
-    data = (eachInChunk(chunk, [], rules), fanned(rest, rules))?!
+fn paired(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "This branch and the rest of them, as an independent product."
+    data = (eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules), fanned(rest, rules))?!
     match data
-        (mine, others) -> Result.Ok(List.concat(mine, others))
+        (mine, others) -> Result.Ok(joined(mine, others))
 
 verify paired
-    paired([], [[]], Domain.Rules.latest()) => Result.Ok([])
-    List.len(paired(manyWork(2, []), [manyWork(3, [])], Domain.Rules.latest())?) => 5
+    paired([], [[]], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn eachInChunk(chunk: List<Work>, acc: List<Outcomes>, rules: Rules) -> Result<List<Outcomes>, String>
-    ? "One chunk of Transactions, in order, inside a single branch."
+fn joined(mine: Tuple<Outcomes, List<String>>, others: Tuple<Outcomes, List<String>>) -> Tuple<Outcomes, List<String>>
+    ? "Two branches' answers added together."
+    match mine
+        (counts, lines) -> withOthers(counts, lines, others)
+
+verify joined
+    joined((Domain.SpendScript.noOutcomes(), []), (Domain.SpendScript.noOutcomes(), [])) => (Domain.SpendScript.noOutcomes(), [])
+
+fn withOthers(counts: Outcomes, lines: List<String>, others: Tuple<Outcomes, List<String>>) -> Tuple<Outcomes, List<String>>
+    ? "The second half of the join, matched apart."
+    match others
+        (theirs, theirLines) -> (Domain.SpendScript.merged(counts, theirs), List.concat(lines, theirLines))
+
+verify withOthers
+    withOthers(Domain.SpendScript.noOutcomes(), [], (Domain.SpendScript.noOutcomes(), [])) => (Domain.SpendScript.noOutcomes(), [])
+
+fn eachInBranch(branch: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "One branch's Inputs, in order, inside a single thread."
       "A Result although nothing here can fail, because an independent product"
-      "unwraps Results and both branches have to agree on the error type."
-    match chunk
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> eachInChunk(tail, List.prepend(outcomesOf(head, rules), acc), rules)
+      "unwraps Results and both branches must agree on the error type."
+    match branch
+        [] -> Result.Ok((counts, List.reverse(lines)))
+        [head, ..tail] -> stepOne(head, tail, counts, lines, rules)
 
-verify eachInChunk
-    eachInChunk([], [], Domain.Rules.latest()) => Result.Ok([])
-    List.len(eachInChunk(manyWork(3, []), [], Domain.Rules.latest())?) => 3
+verify eachInBranch
+    eachInBranch([], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn outcomesOf(work: Work, rules: Rules) -> Outcomes
-    ? "Every Script pair of one Transaction, run in order."
-    sequentially(work.transaction, work.spent, Domain.SpendScript.noOutcomes(), rules)
+fn stepOne(piece: Piece, tail: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+    ? "One Input's Script pair, run once and both counted and reported from."
+    one = scriptCounts(piece.transaction, piece.spent.index, piece.spent.input, piece.spent.spend, Domain.SpendScript.noOutcomes(), rules)
+    eachInBranch(tail, Domain.SpendScript.merged(counts, one), notedFrom(piece, one, lines), rules)
 
-verify outcomesOf
-    outcomesOf(sampleWork(), Domain.Rules.latest()).passed => 1
+verify stepOne
+    stepOne(Domain.ScriptWork.samplePiece(), [], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest()))), []))
 
-fn sequentially(transaction: Transaction, held: List<Pending>, counts: Outcomes, rules: Rules) -> Outcomes
-    ? "One Transaction's Inputs, in order."
-    match held
-        [] -> counts
-        [head, ..tail] -> sequentially(transaction, tail, scriptCounts(transaction, head.index, head.input, head.spend, counts, rules), rules)
+fn notedFrom(piece: Piece, one: Outcomes, lines: List<String>) -> List<String>
+    ? "A line naming this Input, when its Script did not pass."
+      "By Input rather than by Transaction, which is finer than it was: the"
+      "division works in Inputs now, so the Input is what is in hand."
+      "The Height and the Block are not named here and not passed in. A value"
+      "captured by both halves of an independent product is cloned for the"
+      "first and moved for the second, and the generated Rust then will not"
+      "build -- jasisz/aver#1010. The walk knows both and puts them on the"
+      "front of the line, which is where they were going to be printed anyway."
+    match one.failed + one.undecided > 0
+        false -> lines
+        true -> List.prepend("tx {Domain.Transaction.txidOf(piece.transaction)} input {piece.spent.index}: {Domain.SpendScript.noteOf(one)}", lines)
 
-verify sequentially
-    sequentially(Domain.SpendContext.emptyTransaction(), [], Domain.SpendScript.noOutcomes(), Domain.Rules.latest()) => Domain.SpendScript.noOutcomes()
-    sequentially(Domain.SpendContext.emptyTransaction(), [samplePending()], Domain.SpendScript.noOutcomes(), Domain.Rules.latest()).passed => 1
-
-fn samplePending() -> Pending
-    ? "One resolved Input whose Script pair passes, for the blocks above."
-    Pending(index = 0, input = Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), spend = Spend.Resolved(5, "51"))
-
-verify samplePending
-    samplePending().index => 0
-
-fn sampleWork() -> Work
-    ? "One resolved Transaction with one passing Input, for the blocks above."
-    Work(transaction = Domain.SpendContext.emptyTransaction(), tally = Domain.Spend.started(), spent = [samplePending()])
-
-verify sampleWork
-    List.len(sampleWork().spent) => 1
+verify notedFrom
+    notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.noOutcomes(), []) => []
+    List.len(notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("", "", Domain.SpendContext.bare(Domain.Rules.latest()))), [])) => 1
 
 fn over(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, inputs: List<Input>, held: Gathered, rules: Rules) -> Result<Gathered, String>
     ? "Each Input in turn, carrying the Transaction they belong to and which"

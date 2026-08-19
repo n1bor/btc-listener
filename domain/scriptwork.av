@@ -1,0 +1,323 @@
+module ScriptWork
+    intent =
+        "A Block's Script pairs, and how they are divided between branches."
+        "Pure, all of it. Resolving an Input is where a spend touches the disk"
+        "and the database; once that is done what is left is an Input, the"
+        "Output it spends, the Rules and the Context, and none of it needs"
+        "anything outside the branch it runs in. That is what makes it work an"
+        "independent product can carry."
+        "Apart from Infra.Spends because the two are different jobs -- finding"
+        "out what an Input spends, and deciding how to divide what follows --"
+        "and because the pair of them do not fit in one file."
+        "The division is greedy longest-processing-time: sort the Transactions"
+        "by Input count, then put each on the branch carrying the least so far."
+        "A Block of 274 Transactions has a median of one Input and a tail"
+        "reaching 468, so any division that ignores the sizes leaves one branch"
+        "holding a Transaction every other branch waits on."
+        "Measured on Blocks 250000-250050, three interleaved runs each:"
+        "  sequential                 54.2 s   99% cpu"
+        "  sorted, cut into runs      45.7 s  127% cpu"
+        "  sorted, dealt round-robin  38.4 s  180% cpu"
+        "Cutting a sorted list into contiguous runs is the worst of the three,"
+        "because it hands one branch the widest Transactions in the Block."
+    exposes [Work, Pending, Piece, Bin, piecesOf, divided, branchCount, sampleWork, manyWork, samplePending, samplePiece, manyPiece]
+    depends [Domain.Spend, Domain.SpendContext, Domain.Transaction]
+    effects []
+
+record Pending
+    index: Int
+    input: Input
+    spend: Spend
+
+record Work
+    transaction: Transaction
+    tally: Tally
+    spent: List<Pending>
+
+record Piece
+    transaction: Transaction
+    position: Int
+    spent: Pending
+    weight: Int
+
+record Bin
+    load: Int
+    work: List<Piece>
+
+fn branchCount() -> Int
+    ? "How many branches a Block is divided into."
+      "Near the core count and a little under it, because the sequential part"
+      "of the walk is still running and the machine is not otherwise idle."
+    16
+
+verify branchCount
+    branchCount() > 0 => true
+
+fn binCount(units: Int) -> Int
+    ? "Never more branches than there are Transactions to fill them."
+    match units < branchCount()
+        true -> units
+        false -> branchCount()
+
+verify binCount
+    binCount(0) => 0
+    binCount(5) => 5
+    binCount(953) => branchCount()
+
+fn piecesOf(work: List<Work>, position: Int, acc: List<Piece>) -> List<Piece>
+    ? "One unit of work per Input, not per Transaction."
+      "A Transaction cannot be split across branches and some of them are very"
+      "wide: Block 250000 has one with 58 Inputs beside a hundred with one, and"
+      "binning by Transaction left that one alone in a branch for 145 ms while"
+      "fourteen other branches finished in 26 ms and waited."
+      "The weight is the Input count of the Transaction the Input belongs to,"
+      "not one. A legacy signature hash re-serialises the whole Transaction for"
+      "every Input it signs, so an Input of a wide Transaction costs more than"
+      "an Input of a narrow one -- measured at 2.50 ms against 0.68 ms in that"
+      "same Block. Weighting by one would balance the count and not the time."
+    match work
+        [] -> List.reverse(acc)
+        [head, ..tail] -> piecesOf(tail, position + 1, spread(head, position, head.spent, acc))
+
+verify piecesOf
+    piecesOf([], 0, []) => []
+    List.len(piecesOf([sampleWork()], 0, [])) => 1
+    List.len(piecesOf([wideWork()], 0, [])) => 3
+
+fn spread(owner: Work, position: Int, spent: List<Pending>, acc: List<Piece>) -> List<Piece>
+    ? "Each Input of one Transaction as its own piece of work."
+    match spent
+        [] -> acc
+        [head, ..tail] -> spread(owner, position, tail, List.prepend(pieceFor(owner, position, head), acc))
+
+verify spread
+    spread(sampleWork(), 0, [], []) => []
+    List.len(spread(wideWork(), 0, wideWork().spent, [])) => 3
+
+fn pieceFor(owner: Work, position: Int, spent: Pending) -> Piece
+    ? "One Input of one Transaction, weighted by how wide that Transaction is."
+    Piece(transaction = owner.transaction, position = position, spent = spent, weight = List.len(owner.spent))
+
+verify pieceFor
+    pieceFor(sampleWork(), 0, samplePending()).weight => 1
+    pieceFor(wideWork(), 2, samplePending()).weight => 3
+    pieceFor(wideWork(), 2, samplePending()).position => 2
+
+fn divided(units: List<Piece>) -> List<List<Piece>>
+    ? "The Block's Inputs split between branches, heaviest first."
+    loads(packed(heaviestFirst(units), emptyBins(binCount(List.len(units)), [])), [])
+
+verify divided
+    divided([]) => []
+    List.len(divided([samplePiece()])) => 1
+    List.len(divided(manyPiece(40, []))) => branchCount()
+
+fn emptyBins(count: Int, acc: List<Bin>) -> List<Bin>
+    ? "That many branches with nothing in them yet."
+    match count <= 0
+        true -> acc
+        false -> emptyBins(count - 1, List.prepend(Bin(load = 0, work = []), acc))
+
+verify emptyBins
+    emptyBins(0, []) => []
+    List.len(emptyBins(18, [])) => 18
+
+fn packed(work: List<Piece>, bins: List<Bin>) -> List<Bin>
+    ? "Each Transaction onto the branch carrying the least work so far."
+      "Longest first, then greedily onto the lightest: the classic way to"
+      "divide uneven work between a fixed number of workers, and within a"
+      "third of the best possible division however the sizes fall."
+      "The weight is the Input count, because an Input is one Script pair and"
+      "a Script pair is what a branch spends its time on."
+    match work
+        [] -> bins
+        [head, ..tail] -> packed(tail, intoLightest(head, bins))
+
+verify packed
+    packed([], []) => []
+    List.len(packed(manyPiece(5, []), emptyBins(2, []))) => 2
+    loadOf(packed(manyPiece(3, []), emptyBins(2, []))) => 3
+
+fn loadOf(bins: List<Bin>) -> Int
+    ? "How much work all the branches hold between them."
+    match bins
+        [] -> 0
+        [head, ..tail] -> head.load + loadOf(tail)
+
+verify loadOf
+    loadOf([]) => 0
+    loadOf(emptyBins(3, [])) => 0
+
+fn intoLightest(one: Piece, bins: List<Bin>) -> List<Bin>
+    ? "Put it in the first branch carrying the least."
+    added(one, lightest(bins, 0 - 1), bins, [], false)
+
+verify intoLightest
+    List.len(intoLightest(samplePiece(), emptyBins(2, []))) => 2
+    loadOf(intoLightest(samplePiece(), emptyBins(2, []))) => 1
+
+fn lightest(bins: List<Bin>, best: Int) -> Int
+    ? "The smallest load any branch is carrying."
+    match bins
+        [] -> best
+        [head, ..tail] -> lightest(tail, lower(head.load, best))
+
+verify lightest
+    lightest([], 0 - 1) => 0 - 1
+    lightest(emptyBins(3, []), 0 - 1) => 0
+
+fn lower(load: Int, best: Int) -> Int
+    ? "The smaller of the two, treating no answer yet as no limit."
+    match Bool.or(best < 0, load < best)
+        true -> load
+        false -> best
+
+verify lower
+    lower(5, 0 - 1) => 5
+    lower(5, 3) => 3
+    lower(3, 5) => 3
+
+fn added(one: Piece, target: Int, bins: List<Bin>, seen: List<Bin>, done: Bool) -> List<Bin>
+    ? "Walk the branches and drop it into the first carrying the target load."
+    match bins
+        [] -> List.reverse(seen)
+        [head, ..tail] -> addedHere(one, target, head, tail, seen, done)
+
+verify added
+    added(samplePiece(), 0, [], [], false) => []
+    loadOf(added(samplePiece(), 0, emptyBins(2, []), [], false)) => 1
+
+fn addedHere(one: Piece, target: Int, head: Bin, tail: List<Bin>, seen: List<Bin>, done: Bool) -> List<Bin>
+    ? "This branch, if it is the one and nothing has taken it yet."
+      "Prepended, not appended. List.concat(head.work, [one]) copies the whole"
+      "branch every time something joins it, so filling a 328 Transaction"
+      "Block cost a hundred thousand copies and made this packing slower than"
+      "the round-robin it was meant to beat. The order within a branch does"
+      "not matter -- every Transaction in it is checked either way -- so the"
+      "reversal the prepend implies is never undone."
+    match Bool.and(done == false, head.load == target)
+        true -> added(one, target, tail, List.prepend(Bin(load = head.load + one.weight, work = List.prepend(one, head.work)), seen), true)
+        false -> added(one, target, tail, List.prepend(head, seen), done)
+
+verify addedHere
+    loadOf(addedHere(samplePiece(), 0, Bin(load = 0, work = []), [], [], false)) => 1
+    loadOf(addedHere(samplePiece(), 0, Bin(load = 0, work = []), [], [], true)) => 0
+
+fn loads(bins: List<Bin>, acc: List<List<Piece>>) -> List<List<Piece>>
+    ? "What each branch is to check."
+    match bins
+        [] -> List.reverse(acc)
+        [head, ..tail] -> loads(tail, List.prepend(head.work, acc))
+
+verify loads
+    loads([], []) => []
+    List.len(loads(emptyBins(3, []), [])) => 3
+
+fn samplePiece() -> Piece
+    ? "One Input of a one-Input Transaction, for the cases here."
+    pieceFor(sampleWork(), 0, samplePending())
+
+verify samplePiece
+    samplePiece().weight => 1
+
+fn manyPiece(count: Int, acc: List<Piece>) -> List<Piece>
+    ? "That many of them."
+    match count <= 0
+        true -> acc
+        false -> manyPiece(count - 1, List.prepend(samplePiece(), acc))
+
+verify manyPiece
+    List.len(manyPiece(0, [])) => 0
+    List.len(manyPiece(5, [])) => 5
+
+fn heaviestFirst(work: List<Piece>) -> List<Piece>
+    ? "The Block's Transactions, most Inputs first."
+      "Insertion into a sorted list rather than a merge sort, because the list"
+      "is already nearly uniform -- almost every Transaction has one or two"
+      "Inputs -- so the few long ones travel a short way and the rest do not"
+      "move at all."
+    inserted(work, [])
+
+verify heaviestFirst
+    heaviestFirst([]) => []
+    List.len(heaviestFirst(manyPiece(4, []))) => 4
+    inputsIn(List.take(heaviestFirst(List.concat(manyPiece(2, []), [widePiece()])), 1)) => 3
+
+fn widePiece() -> Piece
+    ? "One Input of a three-Input Transaction, so it outweighs the others."
+    pieceFor(wideWork(), 0, samplePending())
+
+verify widePiece
+    widePiece().weight => 3
+
+fn inserted(work: List<Piece>, acc: List<Piece>) -> List<Piece>
+    ? "Each Transaction put where it belongs in what is sorted so far."
+    match work
+        [] -> acc
+        [head, ..tail] -> inserted(tail, placed(head, acc, []))
+
+verify inserted
+    inserted([], []) => []
+    List.len(inserted(manyPiece(3, []), [])) => 3
+
+fn placed(one: Piece, sorted: List<Piece>, seen: List<Piece>) -> List<Piece>
+    ? "In front of the first Transaction with fewer Inputs than this one."
+    match sorted
+        [] -> List.concat(List.reverse(seen), [one])
+        [head, ..tail] -> placedAgainst(one, head, tail, seen)
+
+verify placed
+    placed(samplePiece(), [], []) => [samplePiece()]
+    inputsIn(placed(widePiece(), [samplePiece()], [])) => 4
+
+fn placedAgainst(one: Piece, head: Piece, tail: List<Piece>, seen: List<Piece>) -> List<Piece>
+    ? "Compare against the next one along."
+    match one.weight > head.weight
+        true -> List.concat(List.reverse(seen), List.prepend(one, List.prepend(head, tail)))
+        false -> placed(one, tail, List.prepend(head, seen))
+
+verify placedAgainst
+    inputsIn(placedAgainst(widePiece(), samplePiece(), [], [])) => 4
+    inputsIn(placedAgainst(samplePiece(), widePiece(), [], [])) => 4
+
+fn inputsIn(work: List<Piece>) -> Int
+    ? "How many Inputs the Transactions in this list hold, for the cases here."
+    match work
+        [] -> 0
+        [head, ..tail] -> head.weight + inputsIn(tail)
+
+verify inputsIn
+    inputsIn([]) => 0
+    inputsIn([samplePiece()]) => 1
+    inputsIn([widePiece()]) => 3
+
+fn wideWork() -> Work
+    ? "A resolved Transaction with three Inputs, for the sorting cases."
+    Work(transaction = Domain.SpendContext.emptyTransaction(), tally = Domain.Spend.started(), spent = [samplePending(), samplePending(), samplePending()])
+
+verify wideWork
+    List.len(wideWork().spent) => 3
+
+fn manyWork(count: Int, acc: List<Work>) -> List<Work>
+    ? "That many copies of the same resolved Transaction, for the cases here."
+    match count <= 0
+        true -> acc
+        false -> manyWork(count - 1, List.prepend(sampleWork(), acc))
+
+verify manyWork
+    List.len(manyWork(0, [])) => 0
+    List.len(manyWork(5, [])) => 5
+
+fn samplePending() -> Pending
+    ? "One resolved Input whose Script pair passes, for the blocks above."
+    Pending(index = 0, input = Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), spend = Spend.Resolved(5, "51"))
+
+verify samplePending
+    samplePending().index => 0
+
+fn sampleWork() -> Work
+    ? "One resolved Transaction with one passing Input, for the blocks above."
+    Work(transaction = Domain.SpendContext.emptyTransaction(), tally = Domain.Spend.started(), spent = [samplePending()])
+
+verify sampleWork
+    List.len(sampleWork().spent) => 1
