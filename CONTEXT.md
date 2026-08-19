@@ -108,6 +108,21 @@ The descending list of Block Ids sent with `getheaders` to tell a Peer how far w
 have got. Sparse by design — recent Ids in full, then exponentially thinning.
 _Avoid_: checkpoint, cursor, bookmark
 
+### What we hold unconfirmed
+
+**Mempool**:
+The Transactions this node has validated against the UTXO Set and holds while
+no Block contains them. Admission is bounded by Policy as well as by
+consensus, and by a size cap: what is evicted first is what pays least.
+_Avoid_: memory pool, tx pool, unconfirmed set, queue
+
+**Policy**:
+Rules this node applies to what it will hold and relay, over and above what
+the chain enforces. A Transaction refused by Policy may still be valid; one
+refused by consensus never is. Peers enforce Policy on each other socially —
+by dropping and banning — which is why a node cannot opt out alone.
+_Avoid_: standardness (that is one Policy, not the boundary), relay rules
+
 ### What we store
 
 **Store**:
@@ -132,6 +147,26 @@ _Avoid_: blk file, shard, partition, volume
 Where a Block's bytes are: a Segment, and the line within it. Meaningless without
 the Segment, so the two travel together.
 _Avoid_: offset, pointer, position, address
+
+**UTXO Set**:
+The Outputs no Transaction has yet spent — what a validating node checks each
+Input against. Grows as Blocks create Outputs, shrinks as they spend them, and
+is rolled back by Undo Data when the chain reorganises. Distinct from the
+Index's record of Outputs, which only ever grows.
+_Avoid_: chainstate, coins, coin database, unspent set
+
+**Undo Data**:
+The Outputs a Block removed from the UTXO Set, kept so the removal can be
+reversed if that Block leaves the chain. Without it the UTXO Set cannot go
+backwards, and a reorganisation would mean rebuilding it from the start.
+_Avoid_: rev data, rollback log, spent journal
+
+**Assume-valid Height**:
+The Height below which a syncing node takes Scripts as settled and does not run
+them; merkle, parent, work and value accounting are still checked. Above it,
+everything is verified. What was skipped is exactly what `audit` exists to
+revisit — a claim deferred, never a claim made.
+_Avoid_: checkpoint, assumevalid, trusted height
 
 **Prune Watermark**:
 The Height below which Blocks were deliberately deleted. What separates a Block
