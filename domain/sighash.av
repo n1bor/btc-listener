@@ -224,10 +224,32 @@ verify droppedIfSeparator
     droppedIfSeparator(171, Op.Code(171), [], []) => []
     droppedIfSeparator(81, Op.Code(81), [], []) => [Op.Code(81)]
 
+fn ontoReversed(part: List<Int>, acc: List<Int>) -> List<Int>
+    ? "Put a part on the accumulator, back to front, so the caller reverses once."
+      "List.concat(acc, part) copies the accumulator every time, and the"
+      "accumulator here is the whole serialised Transaction. Over 168 Inputs of"
+      "a 19569 byte Transaction that is quadratic in the size of the"
+      "Transaction, and the legacy signature hash already builds one preimage"
+      "per Input, so the whole thing was cubic in the number of Inputs. Block"
+      "28507 took 26 seconds for its one real Transaction; every neighbouring"
+      "Block took a fifth of a second."
+      "Prepending is constant and one reverse at the end is linear, which is"
+      "the same shape Infra.StoreLog.recordsFor uses for the same reason and"
+      "which this should have used from the start."
+    match part
+        [] -> acc
+        [head, ..tail] -> ontoReversed(tail, List.prepend(head, acc))
+
+verify ontoReversed
+    ontoReversed([], []) => []
+    ontoReversed([1, 2], []) => [2, 1]
+    ontoReversed([3, 4], [2, 1]) => [4, 3, 2, 1]
+    List.reverse(ontoReversed([3, 4], ontoReversed([1, 2], []))) => [1, 2, 3, 4]
+
 fn inputsPart(inputs: List<Input>, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool) -> Result<List<Int>, String>
     ? "The Input count and the Inputs, as this hash type wants them."
     body = eachInput(inputs, 0, inputIndex, code, base, anyoneCanPay, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(inputCount(List.len(inputs), anyoneCanPay)), body))
+    Result.Ok(List.concat(Domain.CompactSize.encode(inputCount(List.len(inputs), anyoneCanPay)), List.reverse(body)))
 
 verify inputsPart
     List.take(inputsPart([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0, [81], Base.SignAll, false)?, 3) => [1, 170, 0]
@@ -258,7 +280,7 @@ fn maybeInput(input: Input, rest: List<Input>, position: Int, inputIndex: Int, c
     next = position + 1
     match Bool.and(anyoneCanPay, position != inputIndex)
         true -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, acc)
-        false -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, List.concat(acc, oneInput(input, position == inputIndex, code, base)?))
+        false -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, ontoReversed(oneInput(input, position == inputIndex, code, base)?, acc))
 
 verify maybeInput
     maybeInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 1, 0, [81], Base.SignAll, true, [9]) => Result.Ok([9])
@@ -330,7 +352,7 @@ verify outputsPart
 fn allOutputs(outputs: List<Output>) -> Result<List<Int>, String>
     ? "Every Output, behind its count."
     body = eachOutput(outputs, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(List.len(outputs)), body))
+    Result.Ok(List.concat(Domain.CompactSize.encode(List.len(outputs)), List.reverse(body)))
 
 verify allOutputs
     allOutputs([]) => Result.Ok([0])
@@ -341,7 +363,7 @@ fn eachOutput(outputs: List<Output>, acc: List<Int>) -> Result<List<Int>, String
     ? "Each Output in turn."
     match outputs
         [] -> Result.Ok(acc)
-        [head, ..tail] -> eachOutput(tail, List.concat(acc, oneOutput(head)?))
+        [head, ..tail] -> eachOutput(tail, ontoReversed(oneOutput(head)?, acc))
 
 verify eachOutput
     eachOutput([], [9]) => Result.Ok([9])
@@ -364,7 +386,7 @@ fn singleOutputs(outputs: List<Output>, inputIndex: Int) -> Result<List<Int>, St
       "contents are not."
     kept = inputIndex + 1
     body = eachSingle(List.take(outputs, kept), 0, inputIndex, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(kept), body))
+    Result.Ok(List.concat(Domain.CompactSize.encode(kept), List.reverse(body)))
 
 verify singleOutputs
     singleOutputs([Output(value = 1000, script = "53")], 0) => Result.Ok([1, 232, 3, 0, 0, 0, 0, 0, 0, 1, 83])
@@ -375,7 +397,7 @@ fn eachSingle(outputs: List<Output>, position: Int, inputIndex: Int, acc: List<I
     ? "Each of them, the placeholder or the real thing."
     match outputs
         [] -> Result.Ok(acc)
-        [head, ..tail] -> eachSingle(tail, position + 1, inputIndex, List.concat(acc, singleOne(head, position == inputIndex)?))
+        [head, ..tail] -> eachSingle(tail, position + 1, inputIndex, ontoReversed(singleOne(head, position == inputIndex)?, acc))
 
 verify eachSingle
     eachSingle([], 0, 0, [9]) => Result.Ok([9])
