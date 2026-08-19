@@ -613,7 +613,7 @@ Fifty-four files. Grouped by what they are for rather than listed:
 
 ```
 CONTEXT.md          glossary — the vocabulary this project commits to
-aver.toml           three lint suppressions, each with its reasoning
+aver.toml           the provider bindings — see Providers
 docs/adr/           architecture decisions
 tools/              the generator that turns Core's test vectors into cases
 main.av             argv entrypoint, deliberately thin
