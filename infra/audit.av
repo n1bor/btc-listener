@@ -42,13 +42,14 @@ record Pace
     startedMs: Int
     lastMs: Int
     lastBlocks: Int
+    lastTransactions: Int
 
 fn pacedFrom(nowMs: Int) -> Pace
     ? "A Pace that has just started and reported nothing."
-    Pace(startedMs = nowMs, lastMs = nowMs, lastBlocks = 0)
+    Pace(startedMs = nowMs, lastMs = nowMs, lastBlocks = 0, lastTransactions = 0)
 
 verify pacedFrom
-    pacedFrom(1000) => Pace(startedMs = 1000, lastMs = 1000, lastBlocks = 0)
+    pacedFrom(1000) => Pace(startedMs = 1000, lastMs = 1000, lastBlocks = 0, lastTransactions = 0)
 
 fn perSecond(blocks: Int, ms: Int) -> String
     ? "Blocks per second over a span, to one decimal place."
@@ -238,10 +239,15 @@ fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
     ? "Say where the walk has got to, every so often, and how fast."
       "Reported before this Block is counted, so the numbers are what was true"
       "at the Height named rather than one ahead of it."
-      "Two rates, because they answer different questions. The recent one is"
-      "over the Blocks since the last line and is what shows a Block costing"
-      "seconds where its neighbours cost milliseconds; the overall one is what"
-      "an estimate of the time left should be built on."
+      "Two spans, because they answer different questions. Recent is since the"
+      "last line and is what shows a Block costing seconds where its"
+      "neighbours cost milliseconds; overall is what an estimate of the time"
+      "left should be built on."
+      "Both in Blocks and in Transactions, because a Block is not a unit of"
+      "work and a Transaction is nearer to one. Blocks a second falls by two"
+      "orders of magnitude across this chain as Blocks fill up; Transactions a"
+      "second should hold far steadier, and where it does not, the reason is"
+      "something other than the Blocks having got bigger."
       "The clock is read once per Block, and that was measured rather than"
       "assumed. Reading it only every 64th Block was tried and made no"
       "difference: three runs of 20000 Blocks gave 6.12, 5.48 and 5.81"
@@ -259,8 +265,8 @@ fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
 fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace, String>
     ? "One progress line, and the Pace the next one measures from."
     ! [Console.print, Time.now]
-    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, {perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s recent, {perSecond(counts.blocks, nowMs - pace.startedMs)} overall")
-    Result.Ok(Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = counts.blocks))
+    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {perSecond(counts.transactions - pace.lastTransactions, nowMs - pace.lastMs)} tx/s, overall {perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
+    Result.Ok(Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = counts.blocks, lastTransactions = counts.transactions))
 
 fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace) -> Result<Counts, String>
     ? "Check what each Transaction spends."
