@@ -24,7 +24,7 @@ module Interp
         "accepted. They wait for a flags argument, which waits for the test"
         "corpus that needs one."
     exposes [run, evaluate, reach]
-    depends [Domain.Primitives, Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Bytes, Domain.Primitives, Domain.ScriptParse, Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
 fn run(scriptHex: String) -> Outcome
@@ -103,22 +103,71 @@ fn reach(ops: List<Op>, state: State, context: Context) -> Step
       "so something has to be able to stop short of asking whether the top is"
       "true. Settling in the middle would refuse every Input Script that ends"
       "on a public key, which is most of them."
-    match ops
-        [] -> Step.Continue(state)
-        [head, ..tail] -> stepped(head, tail, state, context)
+      "The Script code a signature in here is taken over is this Script, and"
+      "this is where that is known. It was the Output Script for every run"
+      "before, which is right for the Output Script and wrong for the other"
+      "two: an Input Script that checks a signature itself takes it over its"
+      "own bytes, and so does a redeem Script."
+    walked(ops, state, Domain.SpendContext.overScript(context, bytesHex(ops)))
 
 verify reach
     reach([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     reach([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     reach([Op.Code(106)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
+fn walked(ops: List<Op>, state: State, context: Context) -> Step
+    ? "Each Op in turn, with the Script code already set for this Script."
+    match ops
+        [] -> Step.Continue(state)
+        [head, ..tail] -> stepped(head, tail, state, context)
+
+verify walked
+    walked([], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.empty())
+
+fn bytesHex(ops: List<Op>) -> String
+    ? "These Ops back as the bytes a signature commits to."
+      "Ops rather than the original bytes because the walk holds Ops, and the"
+      "two agree: Domain.ScriptParse.bytesOf is the inverse of the parse that"
+      "produced them."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(Domain.ScriptParse.bytesOf(ops)), Bytes.fromList([])))
+
+verify bytesHex
+    bytesHex([]) => ""
+    bytesHex([Op.Code(81)]) => "51"
+    bytesHex([Op.Push(2, [170, 187])]) => "02aabb"
+
+fn separates(op: Op) -> Bool
+    ? "Whether this Op is OP_CODESEPARATOR."
+    match op
+        Op.Code(code) -> code == 171
+        Op.Push(code, data) -> false
+
+verify separates
+    separates(Op.Code(171)) => true
+    separates(Op.Code(172)) => false
+    separates(Op.Push(2, [170, 187])) => false
+
 fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
     ? "Take the Step the Op asks for, then carry on or stop as it says."
-    match Domain.ScriptOps.step(op, state, context)
-        Step.Continue(next) -> reach(rest, next, context)
-        Step.Stop(outcome) -> Step.Stop(outcome)
+      "OP_CODESEPARATOR is handled here rather than in Domain.ScriptOps because"
+      "this is the only place that holds the rest of the Script, which is"
+      "exactly what it names: from here on, a signature is taken over what"
+      "follows the separator. It still costs an Op against the limit."
+    match separates(op)
+        true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.overScript(context, bytesHex(rest)))
+        false -> ordinary(op, rest, state, context)
 
 verify stepped
     stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
     stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+
+fn ordinary(op: Op, rest: List<Op>, state: State, context: Context) -> Step
+    ? "Every other Op, against the machine."
+    match Domain.ScriptOps.step(op, state, context)
+        Step.Continue(next) -> walked(rest, next, context)
+        Step.Stop(outcome) -> Step.Stop(outcome)
+
+verify ordinary
+    ordinary(Op.Code(81), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    ordinary(Op.Code(105), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))
