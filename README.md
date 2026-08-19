@@ -341,11 +341,28 @@ Two and a half times as many Scripts actually run, and nothing is left
 unresolved. That is the point of the whole LevelDB move.
 
 It also made a defect visible that had been there all along: about 1% of those
-Scripts **fail**, on real mainnet spends that must be valid. That is not the
-keyspace — the two columns above fail at the same rate, 0.73% and 0.96%, and
-the left-hand one never touches it. The engine could not have been wrong
-noticeably before, because it was only ever asked 115 questions.
-[#18](https://github.com/n1bor/btc-listener/issues/18) tracks it.
+Scripts **failed**, on real mainnet spends that must be valid. The engine could
+not have been noticeably wrong before, because it was only ever asked 115
+questions.
+
+That turned out to be the signature parser, not the keyspace
+([#18](https://github.com/n1bor/btc-listener/issues/18)). Before BIP66, Bitcoin
+accepted DER encodings a strict parser will not, and the strict parser here did
+not *refuse* them — it reported success and silently returned a zeroed `s`,
+which never verifies. Over the four 51-Block slices that showed it, **210
+failures became 1**:
+
+| Blocks | before | after |
+|---|---|---|
+| 170000–170050 | 56 failed | 0 |
+| 170050–170100 | 41 failed | 1 |
+| 170100–170150 | 47 failed | 0 |
+| 170150–170200 | 66 failed | 0 |
+
+The one that remains is a different bug and has its own issue: a P2SH-shaped
+Output in Block 170060, which is 3,745 Blocks before BIP16 came into force. The
+engine runs the redeem Script anyway, and the redeem Script wants a signature
+the Input never had to supply.
 
 ## Checking a spend
 

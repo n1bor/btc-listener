@@ -77,7 +77,17 @@ fn verify(public_key: &[u8], signature: &[u8], message: &[u8]) -> bool {
     let Ok(key) = PublicKey::from_slice(public_key) else {
         return false;
     };
-    let Ok(mut sig) = Signature::from_der(signature) else {
+    // Lax DER, not strict. Before BIP66 activated at height 363725 in July
+    // 2015, Bitcoin parsed signatures with OpenSSL, which accepted encodings
+    // strict DER forbids -- most commonly an `s` whose leading byte has the
+    // high bit set and no 0x00 padding, which strict DER would read as a
+    // negative integer. Those transactions are on the chain and must still
+    // validate, so this is the same lax parser Bitcoin Core keeps for exactly
+    // this reason (`ecdsa_signature_parse_der_lax`, used by CPubKey::Verify).
+    //
+    // BIP66 itself is a rule about a height, not about arithmetic. Enforcing
+    // it belongs to Domain.Ecdsa alongside the other policy checks, not here.
+    let Ok(mut sig) = Signature::from_der_lax(signature) else {
         return false;
     };
     // Bitcoin accepts high-S signatures in old blocks; libsecp256k1 will not
@@ -193,6 +203,43 @@ mod tests {
             hex(&ripemd160(&sha)),
             "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb"
         );
+    }
+
+    /// A real mainnet signature whose `s` is not canonical DER: 32 bytes with
+    /// the high bit set and no 0x00 padding. Legal in 2012, refused by strict
+    /// DER, and on the chain — block 170004, transaction
+    /// 4020efeaed3a4a8eeb32876624a6f3ce1de6c8d3c53ed4f7b44f24e277bfa16c.
+    ///
+    /// This is what n1bor/btc-listener#18 turned out to be: about 1% of real
+    /// spends of that era, failing because the parser was stricter than the
+    /// consensus rule of the day.
+    #[test]
+    fn verifies_a_signature_that_is_not_canonical_der() {
+        let key = hex_bytes("04a44b41f64ffd78919a05c980df85e93cb2c9fa0d245d3e582bd8adcdce7c75572b58d55b128d8d337cd6b567c43ac6d8af2e2d7957beee34631a8c038e128088");
+        let sig = hex_bytes("30440220638f5d3b899b257fa5caa54f5968363f40fd99ae837d507b18e6d8e067dd75870220a80a4b50980a61f5369524ec7cd425cae68740936bf385b6518275318fae42e6");
+        let msg = hex_bytes("54917b4bc20a330b58cb9d12006b57623e64d1a9cb0dc1af1f17849075d84f6d");
+        assert_eq!(sig[38], 0xa8, "the s value must still have its high bit set");
+
+        // The failure mode is worse than a refusal. `from_der` does not reject
+        // this; it reports success and hands back a signature whose s is zero,
+        // which then never verifies. A parse error would at least have been
+        // visible.
+        let strict = secp256k1::ecdsa::Signature::from_der(&sig)
+            .expect("strict parsing reports success on this input");
+        assert_eq!(
+            &hex(&strict.serialize_compact())[64..],
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "strict parsing is expected to zero the s value here"
+        );
+
+        let lax = secp256k1::ecdsa::Signature::from_der_lax(&sig).expect("lax parses");
+        assert_eq!(
+            &hex(&lax.serialize_compact())[64..],
+            "a80a4b50980a61f5369524ec7cd425cae68740936bf385b6518275318fae42e6",
+            "lax parsing keeps the s value the signer meant"
+        );
+
+        assert!(verify(&key, &sig, &msg), "a pre-BIP66 signature must verify");
     }
 
     /// A real mainnet signature: the first Bitcoin spend ever made, block 170.
