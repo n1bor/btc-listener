@@ -58,6 +58,9 @@ Independent of the stages, proceeding as upstream and appetite allow:
   the audit side's mainnet-scale work
 - **BIP66 into Rules** — [#22](https://github.com/n1bor/btc-listener/issues/22),
   once the held chain reaches its activation
+- **Parallel Script checking in audit** — [#32](https://github.com/n1bor/btc-listener/issues/32),
+  the first independent product; measured to be where audit's time goes once
+  spends resolve
 
 ## What the plan asks of Aver
 
