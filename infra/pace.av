@@ -1,0 +1,81 @@
+module Pace
+    intent =
+        "How fast a long walk is going, and when to say so."
+        "Shared because two commands walk the chain for minutes or hours --"
+        "Infra.Audit and Infra.Outputs -- and a reader watching either of them"
+        "wants the same three things: the time, how fast it is going now, and"
+        "how fast it has gone overall."
+        "Time rather than a count of Blocks decides when to report. A Block is"
+        "not a unit of work: the early chain walks at thousands a second and"
+        "the dense part at under one, so a line every two thousand Blocks"
+        "arrived twice a second at one end of a range and once every seven"
+        "minutes at the other."
+        "Blocks and items, where items are whatever the caller counts --"
+        "Transactions for an audit, Outputs for an index build. Blocks a second"
+        "falls by orders of magnitude across the chain as Blocks fill up, and"
+        "the item rate is the one that says whether the work itself changed."
+        "Nothing here reads the clock. The caller does, because reading it is"
+        "an effect and this is arithmetic."
+    exposes [Pace, pacedFrom, reportEveryMs, due, advanced, perSecond]
+    depends []
+    effects []
+
+record Pace
+    startedMs: Int
+    lastMs: Int
+    lastBlocks: Int
+    lastItems: Int
+
+fn pacedFrom(nowMs: Int) -> Pace
+    ? "A Pace that has just started and reported nothing."
+    Pace(startedMs = nowMs, lastMs = nowMs, lastBlocks = 0, lastItems = 0)
+
+verify pacedFrom
+    pacedFrom(1000) => Pace(startedMs = 1000, lastMs = 1000, lastBlocks = 0, lastItems = 0)
+
+fn reportEveryMs() -> Int
+    ? "How long between progress lines."
+    60000
+
+verify reportEveryMs
+    reportEveryMs() => 60000
+
+fn due(pace: Pace, nowMs: Int, blocks: Int) -> Bool
+    ? "Whether a line is owed."
+      "The first one goes out immediately rather than after a minute, so a long"
+      "run says it has started."
+    Bool.or(blocks == 0, nowMs - pace.lastMs >= reportEveryMs())
+
+verify due
+    due(pacedFrom(1000), 1000, 0) => true
+    due(pacedFrom(1000), 1000, 5) => false
+    due(pacedFrom(1000), 60999, 5) => false
+    due(pacedFrom(1000), 61000, 5) => true
+
+fn advanced(pace: Pace, nowMs: Int, blocks: Int, items: Int) -> Pace
+    ? "The Pace the next line measures from, keeping the start it began at."
+    Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = blocks, lastItems = items)
+
+verify advanced
+    advanced(pacedFrom(1000), 5000, 7, 9) => Pace(startedMs = 1000, lastMs = 5000, lastBlocks = 7, lastItems = 9)
+
+fn perSecond(count: Int, ms: Int) -> String
+    ? "A rate over a span, to one decimal place."
+      "Integer arithmetic throughout: the tenths are worked out separately"
+      "rather than through a Float, because a rate printed for a reader does"
+      "not want the trailing noise a Float would bring. Int.mod against a"
+      "literal ten is an Int rather than a Result, which is the literal"
+      "refinement, so only the division by a computed span needs a default."
+      "A span of no time at all has no rate, which is what a first report or a"
+      "clock that has not moved gives, and it says so rather than dividing."
+    match ms <= 0
+        true -> "-"
+        false -> "{Result.withDefault(Int.div(count * 1000, ms), 0)}.{Int.mod(Result.withDefault(Int.div(count * 10000, ms), 0), 10)}"
+
+verify perSecond
+    perSecond(1000, 1000) => "1000.0"
+    perSecond(500, 1000) => "500.0"
+    perSecond(3, 2000) => "1.5"
+    perSecond(0, 1000) => "0.0"
+    perSecond(100, 0) => "-"
+    perSecond(100, 0 - 5) => "-"

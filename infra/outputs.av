@@ -23,8 +23,13 @@ module Outputs
         "resolves for the module being checked and not for one reached as a"
         "dependency. That is jasisz/aver#992; when it closes this line goes."
     exposes [Built, build]
-    depends [Domain.Block, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Store, Infra.StoreLog]
-    effects [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    depends [Domain.Block, Infra.Pace, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Store, Infra.StoreLog]
+    effects [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
 
 record Built
     blocks: Int
@@ -37,6 +42,27 @@ record Walk
     pending: List<Entry>
     waiting: Int
     counted: Built
+    pace: Pace
+
+fn maybeReport(height: Int, counted: Built, pace: Pace) -> Result<Pace, String>
+    ? "Say where the build has got to, about once a minute."
+      "This ran for three hours over Blocks 200001 to 400000 and said nothing"
+      "until it was done, which meant reading /proc to find out where it was."
+      "Outputs a second rather than Blocks a second is the number that means"
+      "something here: a Block near 400000 holds a hundred times the Outputs"
+      "of one near 20000, and the Block rate falls accordingly while the work"
+      "per Output does not."
+    ! [Console.print, Time.now, Time.unixMs]
+    nowMs = Time.unixMs()
+    match Infra.Pace.due(pace, nowMs, counted.blocks)
+        false -> Result.Ok(pace)
+        true -> reported(height, counted, pace, nowMs)
+
+fn reported(height: Int, counted: Built, pace: Pace, nowMs: Int) -> Result<Pace, String>
+    ? "One progress line, and the Pace the next one measures from."
+    ! [Console.print, Time.now]
+    _said = Console.print("  {Time.now()}  height {height}: {counted.blocks} blocks, {counted.outputs} outputs, recent {Infra.Pace.perSecond(counted.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counted.outputs - pace.lastItems, nowMs - pace.lastMs)} outputs/s, overall {Infra.Pace.perSecond(counted.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counted.outputs, nowMs - pace.startedMs)} outputs/s")
+    Result.Ok(Infra.Pace.advanced(pace, nowMs, counted.blocks, counted.outputs))
 
 fn batchSize() -> Int
     ? "How many entries to hold before writing them."
@@ -52,8 +78,13 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
       "A Height whose body is absent is stepped over rather than refused: the"
       "range is what the caller asked for, and what is held inside it is what"
       "there is to index."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
-    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0)), from, to)?
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0), pace = Infra.Pace.pacedFrom(Time.unixMs())), from, to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
 
@@ -66,14 +97,24 @@ fn flushed(state: Walk) -> Result<Store, String>
 
 fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
     match height > to
         true -> Result.Ok(state)
         false -> atHeight(state, height, to)
 
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
     named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
     match named
         Option.None -> Result.Ok(state)
@@ -81,7 +122,12 @@ fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 
 fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
     ? "A Block whose body is not held has no Transactions to record."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
     located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> walk(state, height + 1, to)
@@ -89,13 +135,20 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
 
 fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
     location = Domain.Index.decodeLocation(text)?
     got = Infra.Blocks.fetch(state.blocks, state.loaded, location)?
     transactions = Domain.Block.transactionsOf(got.payload)?
     entries = outputsFor(Domain.Block.txidsOf(transactions), transactions, state.pending)
     added = List.len(entries) - List.len(state.pending)
-    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = Built(blocks = state.counted.blocks + 1, outputs = state.counted.outputs + added))
+    counted = Built(blocks = state.counted.blocks + 1, outputs = state.counted.outputs + added)
+    stepped = maybeReport(height, counted, state.pace)?
+    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = counted, pace = stepped)
     recorded = maybeWrite(carried)?
     walk(recorded, height + 1, to)
 
@@ -110,7 +163,7 @@ fn written(state: Walk) -> Result<Walk, String>
     ? "One putAll for everything held back."
     ! [Disk.appendText, Infra.Kv.putAll]
     grown = flushed(state)?
-    Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted))
+    Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted, pace = state.pace))
 
 fn outputsFor(txids: List<String>, transactions: List<Transaction>, acc: List<Entry>) -> List<Entry>
     ? "One entry per Output, walking the Ids and the Transactions together."

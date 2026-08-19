@@ -21,7 +21,7 @@ module Audit
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
     exposes [Counts, run]
-    depends [Bytes, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Bytes, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -38,52 +38,6 @@ record Counts
     faults: Int
     scripts: Outcomes
 
-record Pace
-    startedMs: Int
-    lastMs: Int
-    lastBlocks: Int
-    lastTransactions: Int
-
-fn pacedFrom(nowMs: Int) -> Pace
-    ? "A Pace that has just started and reported nothing."
-    Pace(startedMs = nowMs, lastMs = nowMs, lastBlocks = 0, lastTransactions = 0)
-
-verify pacedFrom
-    pacedFrom(1000) => Pace(startedMs = 1000, lastMs = 1000, lastBlocks = 0, lastTransactions = 0)
-
-fn perSecond(blocks: Int, ms: Int) -> String
-    ? "Blocks per second over a span, to one decimal place."
-      "Integer arithmetic throughout: the tenths are worked out separately"
-      "rather than through a Float, because a rate printed for a reader does"
-      "not want the trailing noise a Float would bring. Int.mod against a"
-      "literal ten is an Int rather than a Result, which is the literal"
-      "refinement, so only the division by a computed span needs a default."
-      "A span of no time at all has no rate, which is what a first report or a"
-      "clock that has not moved gives, and it says so rather than dividing."
-    match ms <= 0
-        true -> "-"
-        false -> "{Result.withDefault(Int.div(blocks * 1000, ms), 0)}.{Int.mod(Result.withDefault(Int.div(blocks * 10000, ms), 0), 10)}"
-
-verify perSecond
-    perSecond(1000, 1000) => "1000.0"
-    perSecond(500, 1000) => "500.0"
-    perSecond(3, 2000) => "1.5"
-    perSecond(0, 1000) => "0.0"
-    perSecond(100, 0) => "-"
-    perSecond(100, 0 - 5) => "-"
-
-fn reportEveryMs() -> Int
-    ? "How long between progress lines."
-      "Time rather than a count of Blocks. A Block is not a unit of work: the"
-      "early chain runs at four thousand a second and the dense part at five,"
-      "so a line every two thousand Blocks arrived every half second at one"
-      "end of the range and every seven minutes at the other. A line a minute"
-      "is the same line wherever the walk has got to."
-    60000
-
-verify reportEveryMs
-    reportEveryMs() => 60000
-
 fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ? "Walk the range, checking every Block and every Transaction in it."
     ! [
@@ -94,7 +48,7 @@ fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), pacedFrom(Time.unixMs()))
+    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), Infra.Pace.pacedFrom(Time.unixMs()))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -258,15 +212,15 @@ fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
       "long run says it has started."
     ! [Console.print, Time.now, Time.unixMs]
     nowMs = Time.unixMs()
-    match Bool.or(counts.blocks == 0, nowMs - pace.lastMs >= reportEveryMs())
+    match Infra.Pace.due(pace, nowMs, counts.blocks)
         false -> Result.Ok(pace)
         true -> reported(height, counts, pace, nowMs)
 
 fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace, String>
     ? "One progress line, and the Pace the next one measures from."
     ! [Console.print, Time.now]
-    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {perSecond(counts.transactions - pace.lastTransactions, nowMs - pace.lastMs)} tx/s, overall {perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
-    Result.Ok(Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = counts.blocks, lastTransactions = counts.transactions))
+    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
+    Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
 
 fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace, blockId: String) -> Result<Counts, String>
     ? "Check what each Transaction spends."
