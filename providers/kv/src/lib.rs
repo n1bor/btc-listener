@@ -6,102 +6,38 @@
 //! contract does not depend on it: swapping the crate changes this file and
 //! nothing in Aver.
 //!
-//! An open database should be a capability resource, and is not.
-//! jasisz/aver#994: an opaque resource can be passed and returned, but a user
-//! record or sum holding one fails to compile on the Rust target, and
-//! `Infra.Store` is a sum whose database arm has to hold the open database.
-//! So `open` hands back `Handle { id }` and the databases live here, in a
-//! registry keyed by that id.
+//! An open database is a capability resource. `open` hands back a
+//! `ProviderResource` holding it, and every other operation takes one back.
+//! Aver sees an opaque `Handle` it cannot construct, name, or serialise.
 //!
-//! The id is therefore forgeable from Aver. That is why every operation looks
-//! it up and returns an ordinary `Err` for one this process did not issue: a
-//! made-up handle is a bad argument, never undefined behaviour. When #994
-//! closes, `Handle` becomes opaque again, the registry goes, and no Aver
-//! changes.
+//! It was a record holding an `Int`, with the databases kept here in a
+//! registry, for as long as jasisz/aver#994 was open. jasisz/aver#997 fixed
+//! it and both are gone.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use aver_rt::provider::{
-    CapabilityProvider, ProviderBinding, ProviderContext, ProviderFault, ProviderValue,
+    CapabilityProvider, ProviderBinding, ProviderContext, ProviderFault, ProviderResource,
+    ProviderValue,
 };
 use rusty_leveldb::{LdbIterator, Options, WriteBatch, DB};
 
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
 /// than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:d71f2dc311d4ead14a8b7e9e58b533ad874b9f6b8799568311422bdb11437022";
+    "sha256:2db56b8a36569a8d1349567237012b0ae6eaf74f08336474b8c23ba7c2d46004";
 
-/// The type name the contract gives the handle record.
-const HANDLE: &str = "Infra.Kv.Handle";
+/// The open database, behind a lock because a `ProviderResource` payload is
+/// shared and the LevelDB handle wants `&mut` for every call, reads included.
+struct Open(Mutex<DB>);
 
-/// The open databases, by the id handed to Aver, and which directory each
-/// came from. Each is behind its own lock because the LevelDB handle wants
-/// `&mut` for every call, reads included.
-#[derive(Default)]
-struct Registry {
-    open: HashMap<i64, Arc<Mutex<DB>>>,
-    by_directory: HashMap<String, i64>,
-}
-
-fn registry() -> &'static Mutex<Registry> {
-    static OPEN: OnceLock<Mutex<Registry>> = OnceLock::new();
-    OPEN.get_or_init(|| Mutex::new(Registry::default()))
-}
-
-/// The id for a directory, opening it only if it is not already open here.
-///
-/// LevelDB takes an exclusive lock on its directory, so a second live handle
-/// on one directory in one process could not exist anyway. Handing back the
-/// id already issued is the only answer that is not an error.
-fn opened_at(dir: &str) -> Result<i64, rusty_leveldb::Status> {
-    static NEXT: AtomicI64 = AtomicI64::new(1);
-    let mut registry = registry().lock().expect("the Kv registry is poisoned");
-    if let Some(id) = registry.by_directory.get(dir) {
-        return Ok(*id);
-    }
-    let mut options = Options::default();
-    options.create_if_missing = true;
-    let db = DB::open(dir, options)?;
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    registry.open.insert(id, Arc::new(Mutex::new(db)));
-    registry.by_directory.insert(dir.to_string(), id);
-    Ok(id)
-}
-
-/// The database an Aver `Handle` names, or an Err if it names none.
-///
-/// An id this process did not issue is a bad argument rather than a fault:
-/// `Handle` is a record until jasisz/aver#994 closes, so Aver can write one.
-fn recall(value: &ProviderValue, what: &str) -> Result<Result<Arc<Mutex<DB>>, String>, ProviderFault> {
-    #[allow(clippy::type_complexity)]
-    let ProviderValue::Record { fields, .. } = value else {
+fn open_in<'a>(value: &'a ProviderValue, what: &str) -> Result<&'a Open, ProviderFault> {
+    let ProviderValue::Resource(resource) = value else {
         return Err(ProviderFault::new("bad_shape", format!("{what} is not a Handle")));
     };
-    let Some((_, ProviderValue::Int(id))) = fields.iter().find(|(name, _)| name == "id") else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} has no id")));
-    };
-    let Some(id) = id.to_i64() else {
-        return Ok(Err("this handle names no open database".to_string()));
-    };
-    Ok(registry()
-        .lock()
-        .expect("the Kv registry is poisoned")
-        .open
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| "this handle names no open database".to_string()))
-}
-
-/// Turn a recalled database into either the database or an early `Result.Err`.
-macro_rules! database {
-    ($value:expr, $what:expr) => {
-        match recall($value, $what)? {
-            Ok(db) => db,
-            Err(why) => return Ok(ProviderValue::ResultErr(Box::new(ProviderValue::String(why)))),
-        }
-    };
+    resource
+        .downcast_ref::<Open>()
+        .ok_or_else(|| ProviderFault::new("bad_shape", format!("{what} is not a Kv Handle")))
 }
 
 struct Kv;
@@ -175,11 +111,12 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "open takes one String"));
                 };
                 let dir = string_in(dir, "dir")?;
-                Ok(match opened_at(&dir) {
-                    Ok(id) => ok(ProviderValue::Record {
-                        type_name: HANDLE.to_string(),
-                        fields: vec![("id".to_string(), ProviderValue::Int(id.into()))],
-                    }),
+                let mut options = Options::default();
+                options.create_if_missing = true;
+                Ok(match DB::open(&dir, options) {
+                    Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(
+                        Mutex::new(db),
+                    )))),
                     Err(why) => failed(&format!("cannot open the database at '{dir}'"), why),
                 })
             }
@@ -188,8 +125,8 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "get takes a Handle and a String"));
                 };
                 let key = string_in(key, "key")?;
-                let open = database!(handle, "handle");
-                let mut db = open.lock().expect("Kv handle poisoned");
+                let open = open_in(handle, "handle")?;
+                let mut db = open.0.lock().expect("Kv handle poisoned");
                 Ok(match db.get(key.as_bytes()) {
                     None => ok(ProviderValue::OptionNone),
                     Some(bytes) => match text(bytes.to_vec(), &format!("the value under '{key}'")) {
@@ -203,12 +140,12 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "putAll takes a Handle and a List"));
                 };
                 let entries = pairs_in(entries, "entries")?;
-                let open = database!(handle, "handle");
+                let open = open_in(handle, "handle")?;
                 let mut batch = WriteBatch::default();
                 for (key, value) in &entries {
                     batch.put(key.as_bytes(), value.as_bytes());
                 }
-                let mut db = open.lock().expect("Kv handle poisoned");
+                let mut db = open.0.lock().expect("Kv handle poisoned");
                 Ok(match db.write(batch, true) {
                     Ok(()) => ok(ProviderValue::Unit),
                     Err(why) => failed("cannot write the batch", why),
@@ -219,12 +156,12 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "deleteAll takes a Handle and a List"));
                 };
                 let keys = keys_in(keys, "keys")?;
-                let open = database!(handle, "handle");
+                let open = open_in(handle, "handle")?;
                 let mut batch = WriteBatch::default();
                 for key in &keys {
                     batch.delete(key.as_bytes());
                 }
-                let mut db = open.lock().expect("Kv handle poisoned");
+                let mut db = open.0.lock().expect("Kv handle poisoned");
                 Ok(match db.write(batch, true) {
                     Ok(()) => ok(ProviderValue::Unit),
                     Err(why) => failed("cannot delete the batch", why),
@@ -234,8 +171,8 @@ impl CapabilityProvider for Kv {
                 let [handle] = args else {
                     return Err(ProviderFault::new("bad_arity", "count takes a Handle"));
                 };
-                let open = database!(handle, "handle");
-                let mut db = open.lock().expect("Kv handle poisoned");
+                let open = open_in(handle, "handle")?;
+                let mut db = open.0.lock().expect("Kv handle poisoned");
                 let mut iterator = match db.new_iter() {
                     Ok(iterator) => iterator,
                     Err(why) => return Ok(failed("cannot walk the keyspace", why)),
@@ -251,8 +188,8 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "prefixed takes a Handle and a String"));
                 };
                 let prefix = string_in(prefix, "prefix")?;
-                let open = database!(handle, "handle");
-                let mut db = open.lock().expect("Kv handle poisoned");
+                let open = open_in(handle, "handle")?;
+                let mut db = open.0.lock().expect("Kv handle poisoned");
                 let mut iterator = match db.new_iter() {
                     Ok(iterator) => iterator,
                     Err(why) => return Ok(failed("cannot walk the keyspace", why)),
@@ -357,22 +294,6 @@ mod tests {
         okayed(call("open", &[text(&dir.to_string_lossy())]))
     }
 
-    /// Stand in for the process ending: drop the open database so the next
-    /// `open` of the directory reads it back off the disk.
-    ///
-    /// There is no `close` in the contract. Nothing in Aver could be relied on
-    /// to call one — the language has no destructors — so durability is not
-    /// allowed to depend on it: every batch is written with `sync`, which
-    /// pushes it out of this process's buffers. This helper exists so the
-    /// tests below can show that, rather than assert it.
-    fn ended(dir: &Path) {
-        let mut registry = registry().lock().expect("the Kv registry is poisoned");
-        let key = dir.to_string_lossy().to_string();
-        if let Some(id) = registry.by_directory.remove(&key) {
-            registry.open.remove(&id);
-        }
-    }
-
     fn put(handle: &ProviderValue, pairs: &[(&str, &str)]) {
         let entries = ProviderValue::List(
             pairs
@@ -461,7 +382,6 @@ mod tests {
             let handle = opened(dir.path());
             put(&handle, &[("b:aa", "1"), ("b:bb", "2"), ("h:0", "aa")]);
         }
-        ended(dir.path());
         let handle = opened(dir.path());
         assert_eq!(got(&handle, "b:aa"), Some("1".to_string()));
         assert_eq!(got(&handle, "h:0"), Some("aa".to_string()));
@@ -485,13 +405,11 @@ mod tests {
         {
             let handle = opened(dir.path());
             put(&handle, &[("first", "1")]);
-            ended(dir.path());
-        }
+            }
         {
             let handle = opened(dir.path());
             put(&handle, &[("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")]);
-            ended(dir.path());
-        }
+            }
         let log = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -582,7 +500,6 @@ mod tests {
             db.put(b"b:aa", &[0xff, 0xfe]).unwrap();
             db.flush().unwrap();
         }
-        ended(dir.path());
         let handle = opened(dir.path());
         let why = erred(call("get", &[handle.clone(), text("b:aa")]));
         assert_eq!(why, "the value under 'b:aa' is not UTF-8");
@@ -629,30 +546,20 @@ mod tests {
         assert_eq!(Kv.invoke(&unknown, &[]).unwrap_err().code, "bad_operation");
     }
 
-    /// Opening one directory twice in one process gives the same database.
-    /// LevelDB holds an exclusive lock on it, so no other answer is available.
+    /// LevelDB holds an exclusive lock on its directory, so a second open
+    /// while the first Handle is alive is an Err the caller can read rather
+    /// than a fault. Nothing in this program does it — one command opens one
+    /// database once — but the failure should be legible if it ever does.
     #[test]
-    fn opening_the_same_directory_twice_gives_the_same_database() {
+    fn a_second_open_while_the_first_is_alive_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let first = opened(dir.path());
         put(&first, &[("b:aa", "1")]);
+        let why = erred(call("open", &[text(&dir.path().to_string_lossy())]));
+        assert!(why.starts_with("cannot open the database at "), "unexpected: {why}");
+        drop(first);
         let again = opened(dir.path());
         assert_eq!(got(&again, "b:aa"), Some("1".to_string()));
-    }
-
-    /// A handle this process never issued is an Err the caller can read, not a
-    /// fault and not a crash. `Handle` is an ordinary record until
-    /// jasisz/aver#994 closes, so Aver can write one.
-    #[test]
-    fn a_handle_that_was_never_issued_is_refused() {
-        let invented = ProviderValue::Record {
-            type_name: HANDLE.to_string(),
-            fields: vec![("id".to_string(), ProviderValue::Int(999_999i64.into()))],
-        };
-        assert_eq!(
-            erred(call("get", &[invented, text("b:aa")])),
-            "this handle names no open database"
-        );
     }
 
     #[test]

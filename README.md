@@ -768,13 +768,13 @@ Oracle dimension and what a replay does with it. The provider is
 choice is provisional: swapping the crate changes one Rust file and no Aver at
 all.
 
-`Handle` should be an opaque capability resource and is a record holding an
-`Int` instead. That is
-[jasisz/aver#994](https://github.com/jasisz/aver/issues/994): an opaque resource
-can be passed and returned, but a user record or sum holding one checks,
-verifies, and then fails to compile on the Rust target — and the Store is a sum
-whose database arm has to hold the open database. So the provider keeps the
-databases and hands out ids, and refuses an id it did not issue.
+`Handle` is an opaque capability resource: only `open` produces one, only the
+contract's operations consume one, and Aver cannot construct, name or serialise
+it. It was a record holding an `Int` for a day, while
+[jasisz/aver#994](https://github.com/jasisz/aver/issues/994) was open — an
+opaque resource could be passed and returned but not held as a field of a user
+record or sum, and the Store is a sum whose database arm has to hold the open
+database. That is fixed and the workaround is gone.
 
 ### What this costs
 

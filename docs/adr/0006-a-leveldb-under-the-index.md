@@ -93,11 +93,12 @@ siblings. That ripple was mechanical and the checker named every site, but it is
 permanent: a Store read is an effect now, and ten modules say so. `size` became
 a `Result` for the same reason.
 
-Two Aver defects came out of it and are worked around here:
-[#994](https://github.com/jasisz/aver/issues/994), which is why `Kv.Handle` is a
-record holding an `Int` rather than an opaque resource, and
-[#995](https://github.com/jasisz/aver/issues/995), which is why `aver audit` now
-carries 50 warnings telling it that tests which cannot flap will flap.
+Two Aver defects came out of it and both were fixed within a day of being
+filed: [#994](https://github.com/jasisz/aver/issues/994), which had forced
+`Kv.Handle` to be a record holding an `Int` rather than an opaque resource, and
+[#995](https://github.com/jasisz/aver/issues/995), which had `aver audit`
+carrying 50 warnings that tests which cannot flap would flap. Both workarounds
+are gone and the warning count is back to its long-standing 26.
 
 The next thing this makes possible is the one it was for: an output keyspace, at
 two hundred million entries, which no arrangement of the log could have held.
