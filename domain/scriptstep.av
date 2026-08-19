@@ -9,8 +9,8 @@ module ScriptStep
         "The stack limit lives here rather than in each caller because it is"
         "checked on the way out of every opcode that grows the stack, and one"
         "place is easier to be sure of than fifteen."
-    exposes [landed, pushing, stoppedUnless]
-    depends [Domain.Opcode, Domain.ScriptState]
+    exposes [landed, pushing, stoppedUnless, undecidedUnlessNop]
+    depends [Domain.Opcode, Domain.Rules, Domain.ScriptState]
     effects []
 
 fn landed(stack: List<List<Int>>, state: State) -> Step
@@ -43,3 +43,17 @@ fn stoppedUnless(ok: Bool, why: String, tail: List<List<Int>>, state: State) -> 
 verify stoppedUnless
     stoppedUnless(false, "no", [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
     stoppedUnless(true, "no", [[1]], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+
+fn undecidedUnlessNop(code: Int, state: State, rules: Rules) -> Step
+    ? "An opcode this engine cannot decide, unless the rules of the day had"
+      "not given it a meaning yet, in which case it was a NOP and did nothing."
+      "It is charged against the opcode limit either way, because the caller"
+      "charged it before dispatching and Bitcoin counts a NOP like any other."
+    match Domain.Rules.stillNop(rules, code)
+        true -> Step.Continue(state)
+        false -> Step.Stop(Outcome.Undecided(Domain.ScriptState.missing(code)))
+
+verify undecidedUnlessNop
+    undecidedUnlessNop(177, Domain.ScriptState.empty(), Domain.Rules.at(163685)) => Step.Continue(Domain.ScriptState.empty())
+    undecidedUnlessNop(177, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Undecided("OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"))
+    undecidedUnlessNop(167, Domain.ScriptState.empty(), Domain.Rules.at(0)) => Step.Stop(Outcome.Undecided("OP_SHA1 needs sha1"))

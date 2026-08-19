@@ -22,22 +22,27 @@ module Rules
         "BIP34 coinbase Height at 227931. BIP66 strict DER at 363725."
         "BIP65 OP_CHECKLOCKTIMEVERIFY at 388381. BIP68, BIP112 and BIP113 at"
         "419328. SegWit and BIP147 null dummy at 481824. Taproot at 709632."
-        "Only P2SH is carried, because only P2SH is a rule this engine both"
-        "implements and can be checked against Blocks it holds. BIP66 is the"
-        "next one and Domain.Ecdsa.isValidEncoding is already written for it,"
-        "but the chain here stops well below 363725, so wiring it in would ship"
-        "consensus code no measurement could reach. It goes in when there are"
-        "Blocks to check it against, and it costs one field and one line."
-    exposes [Rules, at, latest, payToScriptHashHeight]
+        "Three are carried. P2SH, because a P2SH-shaped Output below 173805 is"
+        "an ordinary Script. BIP65 and BIP112, because below their Heights the"
+        "two opcodes are OP_NOP2 and OP_NOP3 and do nothing, and Outputs shaped"
+        "like a timelock exist in 2012 that were never one."
+        "BIP66 is the next and Domain.Ecdsa.isValidEncoding is already written"
+        "for it, but the chain here stops below 363725, so wiring it in would"
+        "ship consensus code no measurement could reach. It goes in when there"
+        "are Blocks to check it against, and it costs one field and one line --"
+        "which is the whole point of the record being here."
+    exposes [Rules, at, latest, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight]
     depends []
     effects []
 
 record Rules
     payToScriptHash: Bool
+    checkLockTimeVerify: Bool
+    checkSequenceVerify: Bool
 
 fn at(height: Int) -> Rules
     ? "The rules a Block at this Height was mined under."
-    Rules(payToScriptHash = height >= payToScriptHashHeight())
+    Rules(payToScriptHash = height >= payToScriptHashHeight(), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(), checkSequenceVerify = height >= checkSequenceVerifyHeight())
 
 verify at
     at(0).payToScriptHash => false
@@ -45,17 +50,62 @@ verify at
     at(173804).payToScriptHash => false
     at(173805).payToScriptHash => true
     at(900000).payToScriptHash => true
+    at(163685).checkLockTimeVerify => false
+    at(388380).checkLockTimeVerify => false
+    at(388381).checkLockTimeVerify => true
+    at(419327).checkSequenceVerify => false
+    at(419328).checkSequenceVerify => true
+
+fn stillNop(rules: Rules, code: Int) -> Bool
+    ? "Whether this opcode had no meaning yet and was simply a NOP."
+      "A soft fork gives a spare NOP a meaning. Below the Height it did so,"
+      "running it did nothing, and a Script that uses it there passes straight"
+      "over it. Refusing such a Script, or declining to judge it, is reading"
+      "the chain by today's rules."
+    match code
+        177 -> rules.checkLockTimeVerify == false
+        178 -> rules.checkSequenceVerify == false
+        _ -> false
+
+verify stillNop
+    stillNop(at(163685), 177) => true
+    stillNop(at(388381), 177) => false
+    stillNop(latest(), 177) => false
+    stillNop(at(163685), 178) => true
+    stillNop(at(419328), 178) => false
+    stillNop(at(163685), 172) => false
+    stillNop(latest(), 186) => false
+
+fn checkLockTimeVerifyHeight() -> Int
+    ? "BIP65 redefined OP_NOP2 as OP_CHECKLOCKTIMEVERIFY at this Height."
+      "Below it the opcode is OP_NOP2 and does nothing at all, so a Script"
+      "using it simply carries on. There are Blocks in 2012 whose Outputs are"
+      "shaped like a timelock and were never one."
+    388381
+
+verify checkLockTimeVerifyHeight
+    checkLockTimeVerifyHeight() => 388381
+
+fn checkSequenceVerifyHeight() -> Int
+    ? "BIP112 redefined OP_NOP3 as OP_CHECKSEQUENCEVERIFY at this Height."
+      "The same story as BIP65 one opcode along, and BIP68 and BIP113 came"
+      "into force with it."
+    419328
+
+verify checkSequenceVerifyHeight
+    checkSequenceVerifyHeight() => 419328
 
 fn latest() -> Rules
     ? "Every rule this engine knows, in force."
       "What a Script corpus written today means, and what a caller checking a"
       "Script with no Block behind it should get. Core's own vectors are"
       "written against the current rules and are read that way."
-    Rules(payToScriptHash = true)
+    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true)
 
 verify latest
     latest().payToScriptHash => true
-    latest() => at(payToScriptHashHeight())
+    latest().checkLockTimeVerify => true
+    latest() => at(checkSequenceVerifyHeight())
 
 fn payToScriptHashHeight() -> Int
     ? "BIP16 became a consensus rule at this Height, on 1 April 2012."

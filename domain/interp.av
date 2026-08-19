@@ -24,7 +24,7 @@ module Interp
         "accepted. They wait for a flags argument, which waits for the test"
         "corpus that needs one."
     exposes [run, evaluate, reach]
-    depends [Bytes, Domain.Primitives, Domain.ScriptParse, Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Domain.Rules, Bytes, Domain.Primitives, Domain.ScriptParse, Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
 fn run(scriptHex: String) -> Outcome
@@ -51,7 +51,7 @@ fn parsed(scriptHex: String) -> Outcome
       "Domain.SpendContext.bare is for."
     match Domain.ScriptParse.opsIn(scriptHex)
         Result.Err(message) -> Outcome.Decided(Ending.Failed(message))
-        Result.Ok(ops) -> evaluate(ops, Domain.ScriptState.empty(), Domain.SpendContext.bare())
+        Result.Ok(ops) -> evaluate(ops, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()))
 
 verify parsed
     parsed("51") => Outcome.Decided(Ending.Passed)
@@ -91,11 +91,11 @@ fn evaluate(ops: List<Op>, state: State, context: Context) -> Outcome
         Step.Stop(outcome) -> outcome
 
 verify evaluate
-    evaluate([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
-    evaluate([], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
-    evaluate([Op.Code(172)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
-    evaluate([Op.Code(169)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
-    evaluate([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Outcome.Decided(Ending.Passed)
+    evaluate([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    evaluate([], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left nothing on the stack"))
+    evaluate([Op.Code(172)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items"))
+    evaluate([Op.Code(169)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("OP_HASH160 needs an item"))
+    evaluate([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
 
 fn reach(ops: List<Op>, state: State, context: Context) -> Step
     ? "The same walk, handing back the stack instead of settling it."
@@ -111,9 +111,9 @@ fn reach(ops: List<Op>, state: State, context: Context) -> Step
     walked(ops, state, Domain.SpendContext.overScript(context, bytesHex(ops)))
 
 verify reach
-    reach([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    reach([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    reach([Op.Code(106)], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    reach([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    reach([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    reach([Op.Code(106)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
 fn walked(ops: List<Op>, state: State, context: Context) -> Step
     ? "Each Op in turn, with the Script code already set for this Script."
@@ -122,7 +122,7 @@ fn walked(ops: List<Op>, state: State, context: Context) -> Step
         [head, ..tail] -> stepped(head, tail, state, context)
 
 verify walked
-    walked([], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.empty())
+    walked([], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
 
 fn bytesHex(ops: List<Op>) -> String
     ? "These Ops back as the bytes a signature commits to."
@@ -158,9 +158,9 @@ fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
         false -> ordinary(op, rest, state, context)
 
 verify stepped
-    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
-    stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
 
 fn ordinary(op: Op, rest: List<Op>, state: State, context: Context) -> Step
     ? "Every other Op, against the machine."
@@ -169,5 +169,5 @@ fn ordinary(op: Op, rest: List<Op>, state: State, context: Context) -> Step
         Step.Stop(outcome) -> Step.Stop(outcome)
 
 verify ordinary
-    ordinary(Op.Code(81), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    ordinary(Op.Code(105), [], Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))
+    ordinary(Op.Code(81), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    ordinary(Op.Code(105), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))

@@ -16,7 +16,7 @@ module ScriptOps
         "fail a Script wherever they appear, so none of them may wait behind a"
         "branch that is not being taken."
     exposes [step]
-    depends [Bytes, Crypto.Digest32, Domain.Checksig, Domain.Primitives, Domain.Hash, Domain.Opcode, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
+    depends [Domain.Rules, Bytes, Crypto.Digest32, Domain.Checksig, Domain.Primitives, Domain.Hash, Domain.Opcode, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
     effects []
 
 fn step(op: Op, state: State, context: Context) -> Step
@@ -26,8 +26,8 @@ fn step(op: Op, state: State, context: Context) -> Step
         Op.Code(code) -> coded(code, state, context)
 
 verify step
-    step(Op.Push(1, [1]), Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    step(Op.Code(106), Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    step(Op.Push(1, [1]), Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    step(Op.Code(106), Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
 fn pushed(data: List<Int>, state: State) -> Step
     ? "An oversized push fails a Script even in a branch that is not being"
@@ -65,8 +65,8 @@ fn coded(code: Int, state: State, context: Context) -> Step
         false -> disabled(code, Domain.ScriptState.spent(state, code), context)
 
 verify coded
-    coded(97, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(State(stack = [], alt = [], conditions = [], opCount = 1))
-    coded(97, State(stack = [], alt = [], conditions = [], opCount = 201), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("script uses more than 201 opcodes")))
+    coded(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [], opCount = 1))
+    coded(97, State(stack = [], alt = [], conditions = [], opCount = 201), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("script uses more than 201 opcodes")))
 
 fn disabled(code: Int, state: State, context: Context) -> Step
     ? "A disabled opcode fails a Script wherever it appears, including in a"
@@ -76,8 +76,8 @@ fn disabled(code: Int, state: State, context: Context) -> Step
         false -> refused(code, state, context)
 
 verify disabled
-    disabled(126, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CAT is disabled")))
-    disabled(97, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.empty())
+    disabled(126, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CAT is disabled")))
+    disabled(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
 
 fn refused(code: Int, state: State, context: Context) -> Step
     ? "And so do OP_VERIF and OP_VERNOTIF, for a different reason."
@@ -86,8 +86,8 @@ fn refused(code: Int, state: State, context: Context) -> Step
         false -> flowOrRest(code, state, context)
 
 verify refused
-    refused(101, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIF is not allowed anywhere in a script")))
-    refused(97, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.empty())
+    refused(101, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIF is not allowed anywhere in a script")))
+    refused(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
 
 fn flowOrRest(code: Int, state: State, context: Context) -> Step
     ? "Flow control runs even inside a branch that is not being taken, because"
@@ -100,8 +100,8 @@ fn flowOrRest(code: Int, state: State, context: Context) -> Step
         _ -> whenExecuting(code, state, context)
 
 verify flowOrRest
-    flowOrRest(97, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.empty())
-    flowOrRest(104, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ENDIF outside an OP_IF")))
+    flowOrRest(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
+    flowOrRest(104, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ENDIF outside an OP_IF")))
 
 fn opened(code: Int, state: State) -> Step
     ? "OP_IF and OP_NOTIF open a branch."
@@ -154,8 +154,8 @@ fn whenExecuting(code: Int, state: State, context: Context) -> Step
         true -> operated(code, state, context)
 
 verify whenExecuting
-    whenExecuting(106, State(stack = [], alt = [], conditions = [false], opCount = 0), Domain.SpendContext.bare()) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
-    whenExecuting(106, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    whenExecuting(106, State(stack = [], alt = [], conditions = [false], opCount = 0), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    whenExecuting(106, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
 fn operated(code: Int, state: State, context: Context) -> Step
     ? "The opcodes worth naming by number; the rest go by kind."
@@ -181,10 +181,10 @@ fn operated(code: Int, state: State, context: Context) -> Step
         _ -> signedOrGrouped(code, state, context)
 
 verify operated
-    operated(0, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[]]))
-    operated(79, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[129]]))
-    operated(106, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
-    operated(116, Domain.ScriptState.holding([[1], [2]]), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[2], [1], [2]]))
+    operated(0, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    operated(79, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[129]]))
+    operated(106, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    operated(116, Domain.ScriptState.holding([[1], [2]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[2], [1], [2]]))
 
 fn signedOrGrouped(code: Int, state: State, context: Context) -> Step
     ? "The signature opcodes have their own module: they are the only ones that"
@@ -192,14 +192,14 @@ fn signedOrGrouped(code: Int, state: State, context: Context) -> Step
       "and there was no room left in this file for them."
     match Domain.Checksig.isSignatureOpcode(code)
         true -> Domain.Checksig.step(code, state, context)
-        false -> byGroup(code, state)
+        false -> byGroup(code, state, Domain.SpendContext.rulesOf(context))
 
 verify signedOrGrouped
-    signedOrGrouped(81, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    signedOrGrouped(172, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    signedOrGrouped(169, Domain.ScriptState.empty(), Domain.SpendContext.bare()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 makes any script that runs it invalid")))
+    signedOrGrouped(81, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    signedOrGrouped(172, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
+    signedOrGrouped(169, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 makes any script that runs it invalid")))
 
-fn byGroup(code: Int, state: State) -> Step
+fn byGroup(code: Int, state: State, rules: Rules) -> Step
     ? "By family, once the ones handled by number are out of the way."
     match Domain.Opcode.kindOf(code)
         Domain.Opcode.Kind.SmallNumber -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.Opcode.smallNumberValue(code)), state)
@@ -207,17 +207,17 @@ fn byGroup(code: Int, state: State) -> Step
         Domain.Opcode.Kind.UnaryArithmetic -> unaryArith(code, state)
         Domain.Opcode.Kind.BinaryArithmetic -> binaryArith(code, state)
         Domain.Opcode.Kind.Nop -> Step.Continue(state)
-        Domain.Opcode.Kind.Undecidable -> Step.Stop(Outcome.Undecided(Domain.ScriptState.missing(code)))
+        Domain.Opcode.Kind.Undecidable -> Domain.ScriptStep.undecidedUnlessNop(code, state, rules)
         Domain.Opcode.Kind.Invalid -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} makes any script that runs it invalid")))
 
 verify byGroup
-    byGroup(81, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    byGroup(97, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
-    byGroup(167, Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_SHA1 needs sha1"))
-    byGroup(80, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid")))
-    byGroup(118, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
-    byGroup(139, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[2]]))
-    byGroup(147, Domain.ScriptState.holding([[2], [3]])) => Step.Continue(Domain.ScriptState.holding([[5]]))
+    byGroup(81, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    byGroup(97, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.empty())
+    byGroup(167, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Undecided("OP_SHA1 needs sha1"))
+    byGroup(80, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid")))
+    byGroup(118, Domain.ScriptState.holding([[1]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
+    byGroup(139, Domain.ScriptState.holding([[1]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[2]]))
+    byGroup(147, Domain.ScriptState.holding([[2], [3]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[5]]))
 
 fn verified(state: State) -> Step
     ? "OP_VERIFY takes the top item and stops if it was false."

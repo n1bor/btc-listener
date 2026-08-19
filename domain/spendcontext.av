@@ -9,19 +9,21 @@ module SpendContext
         "That was why Domain.Checksig answered undecided even for a well formed"
         "signature over a valid key: not for want of a curve, but for want of"
         "anything to check it against."
-        "So there are two kinds of run. A Bare one is a pair of Scripts with no"
-        "spend behind them, which is what the corpus cases are and what they"
-        "should stay: a case that asserts what OP_CHECKSIG does to a stack"
-        "should not need a Transaction invented for it. A Committed one comes"
-        "from a real Input and carries the four things a legacy signature"
-        "hash needs."
+        "So a Context is the rules the run is judged under, and a spend if there"
+        "is one. No spend is what the corpus cases are and what they should"
+        "stay: a case that asserts what OP_CHECKSIG does to a stack should not"
+        "need a Transaction invented for it. A spend comes from a real Input"
+        "and carries the four things a legacy signature hash needs."
+        "The rules travel here rather than beside, because the Context already"
+        "reaches every opcode and which soft forks were in force is as much"
+        "part of what a Script is run against as the Transaction is."
         "Only legacy is here. A witness spend is refused before the engine runs"
         "-- Domain.SpendScript stops on any witness program -- so BIP143 is not"
         "reachable from this path and pretending otherwise would be writing a"
         "branch nothing enters. Domain.Bip143 is written and checked; it joins"
         "this when witness evaluation does."
-    exposes [Commitment, Context, bare, committed, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
-    depends [Bytes, Domain.Sighash, Domain.Transaction]
+    exposes [Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
+    depends [Bytes, Domain.Rules, Domain.Sighash, Domain.Transaction]
     effects []
 
 record Commitment
@@ -30,26 +32,41 @@ record Commitment
     amount: Int
     scriptCode: String
 
-type Context
-    Bare
-    Committed(Commitment)
+record Context
+    rules: Rules
+    spend: Option<Commitment>
 
-fn bare() -> Context
-    ? "A run with no spend behind it."
-    Context.Bare
+fn bare(rules: Rules) -> Context
+    ? "A run with no spend behind it, under these rules."
+    Context(rules = rules, spend = Option.None)
 
 verify bare
-    bare() => Context.Bare
+    bare(Domain.Rules.latest()).spend => Option.None
+    bare(Domain.Rules.latest()).rules => Domain.Rules.latest()
 
-fn committed(transaction: Transaction, inputIndex: Int, amount: Int, scriptCode: String) -> Context
+fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: Int, scriptCode: String) -> Context
     ? "A run of one Input of a real Transaction against the Output it claims."
       "The amount is carried even though a legacy signature hash does not use"
       "it, because BIP143 does and the Input knows it here rather than three"
       "modules further down."
-    Context.Committed(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode))
+    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode)))
 
 verify committed
-    committed(emptyTransaction(), 0, 5, "51") => Context.Committed(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 5, scriptCode = "51"))
+    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => "51"
+    rulesOf(committed(Domain.Rules.at(1), emptyTransaction(), 0, 5, "51")) => Domain.Rules.at(1)
+
+fn rulesOf(context: Context) -> Rules
+    ? "Which consensus rules this run is judged under."
+      "The rules travel with the Context because the Context is already carried"
+      "to the opcode that needs them, and because which rules were in force is"
+      "as much a part of what a Script is being run against as the Transaction"
+      "is. An engine that had to be handed them separately would have to be"
+      "handed them everywhere the Context already goes."
+    context.rules
+
+verify rulesOf
+    rulesOf(bare(Domain.Rules.latest())) => Domain.Rules.latest()
+    rulesOf(bare(Domain.Rules.at(0))) => Domain.Rules.at(0)
 
 fn emptyTransaction() -> Transaction
     ? "A Transaction with nothing in it, for the cases here."
@@ -91,38 +108,39 @@ fn overScript(context: Context, scriptCode: String) -> Context
       "afterwards. The signature in each is taken over the Script it appears"
       "in, so the Script code is set where it is known -- by the engine, as it"
       "starts each one -- rather than guessed at by the caller."
-    match context
-        Context.Bare -> Context.Bare
-        Context.Committed(commitment) -> Context.Committed(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode))
+    match context.spend
+        Option.None -> context
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode)))
 
 verify overScript
-    overScript(bare(), "51") => Context.Bare
-    scriptCodeOf(overScript(committed(emptyTransaction(), 0, 5, "51"), "52")) => "52"
+    scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
+    scriptCodeOf(overScript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51"), "52")) => "52"
+    rulesOf(overScript(committed(Domain.Rules.at(0), emptyTransaction(), 0, 5, "51"), "52")) => Domain.Rules.at(0)
 
 fn scriptCodeOf(context: Context) -> String
     ? "The Script the signature is taken over, which is the one being run:"
       "the Output Script, or the redeem Script when a P2SH spend is re-run."
       "Empty for a Bare run, which has none."
-    match context
-        Context.Bare -> ""
-        Context.Committed(commitment) -> commitment.scriptCode
+    match context.spend
+        Option.None -> ""
+        Option.Some(commitment) -> commitment.scriptCode
 
 verify scriptCodeOf
-    scriptCodeOf(bare()) => ""
-    scriptCodeOf(committed(emptyTransaction(), 0, 5, "51")) => "51"
+    scriptCodeOf(bare(Domain.Rules.latest())) => ""
+    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => "51"
 
 fn messageFor(context: Context, hashType: Int) -> Option<String>
     ? "The thirty-two byte message this signature should have been taken over,"
       "as hexadecimal, or None when there is no spend to take it over."
       "None is not failure. It is the honest answer for a Script run on its"
       "own, and the caller reports it as undecided rather than invalid."
-    match context
-        Context.Bare -> Option.None
-        Context.Committed(commitment) -> messageOf(commitment, hashType)
+    match context.spend
+        Option.None -> Option.None
+        Option.Some(commitment) -> messageOf(commitment, hashType)
 
 verify messageFor
-    messageFor(bare(), 1) => Option.None
-    messageFor(committed(signedTransaction(), 0, 0, signedScriptCode()), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageFor(bare(Domain.Rules.latest()), 1) => Option.None
+    messageFor(committed(Domain.Rules.latest(), signedTransaction(), 0, 0, signedScriptCode()), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
 
 fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The signature hash for one Input, or None when it cannot be built."
