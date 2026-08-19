@@ -26,6 +26,7 @@ module Audit
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
         Infra.Kv.get, Infra.Kv.open,
+        Time.now, Time.unixMs,
     ]
 
 record Counts
@@ -36,6 +37,39 @@ record Counts
     unresolved: Int
     faults: Int
     scripts: Outcomes
+
+record Pace
+    startedMs: Int
+    lastMs: Int
+    lastBlocks: Int
+
+fn pacedFrom(nowMs: Int) -> Pace
+    ? "A Pace that has just started and reported nothing."
+    Pace(startedMs = nowMs, lastMs = nowMs, lastBlocks = 0)
+
+verify pacedFrom
+    pacedFrom(1000) => Pace(startedMs = 1000, lastMs = 1000, lastBlocks = 0)
+
+fn perSecond(blocks: Int, ms: Int) -> String
+    ? "Blocks per second over a span, to one decimal place."
+      "Integer arithmetic throughout: the tenths are worked out separately"
+      "rather than through a Float, because a rate printed for a reader does"
+      "not want the trailing noise a Float would bring. Int.mod against a"
+      "literal ten is an Int rather than a Result, which is the literal"
+      "refinement, so only the division by a computed span needs a default."
+      "A span of no time at all has no rate, which is what a first report or a"
+      "clock that has not moved gives, and it says so rather than dividing."
+    match ms <= 0
+        true -> "-"
+        false -> "{Result.withDefault(Int.div(blocks * 1000, ms), 0)}.{Int.mod(Result.withDefault(Int.div(blocks * 10000, ms), 0), 10)}"
+
+verify perSecond
+    perSecond(1000, 1000) => "1000.0"
+    perSecond(500, 1000) => "500.0"
+    perSecond(3, 2000) => "1.5"
+    perSecond(0, 1000) => "0.0"
+    perSecond(100, 0) => "-"
+    perSecond(100, 0 - 5) => "-"
 
 fn reportEvery() -> Int
     ? "How many Blocks between progress lines."
@@ -50,10 +84,11 @@ fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
         Infra.Kv.get, Infra.Kv.open,
+        Time.now, Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()))
+    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), pacedFrom(Time.unixMs()))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -154,73 +189,84 @@ verify faultText
     faultText(Finding.ParentUnrecorded) => "no parent recorded"
     faultText(Finding.WorkMet) => "work met"
 
-fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
+fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "Each Height in turn, keeping the Segment in hand between them."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match height > to
         true -> Result.Ok(counts)
-        false -> atHeight(store, blocks, loaded, height, to, counts)
+        false -> atHeight(store, blocks, loaded, height, to, counts, pace)
 
-fn atHeight(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts) -> Result<Counts, String>
+fn atHeight(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "A Height the Index does not name ends the range."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     holding = Infra.Store.get(store, Domain.Index.heightKey(height))?
     match holding
         Option.None -> Result.Ok(counts)
-        Option.Some(blockId) -> atBlock(store, blocks, loaded, height, to, counts, blockId)
+        Option.Some(blockId) -> atBlock(store, blocks, loaded, height, to, counts, blockId, pace)
 
-fn atBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String) -> Result<Counts, String>
+fn atBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, pace: Pace) -> Result<Counts, String>
     ? "A Block whose body is not held is stepped over."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
     match located
-        Option.None -> walk(store, blocks, loaded, height + 1, to, counts)
-        Option.Some(text) -> readBlock(store, blocks, loaded, height, to, counts, blockId, text)
+        Option.None -> walk(store, blocks, loaded, height + 1, to, counts, pace)
+        Option.Some(text) -> readBlock(store, blocks, loaded, height, to, counts, blockId, text, pace)
 
-fn readBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, text: String) -> Result<Counts, String>
+fn readBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, text: String, pace: Pace) -> Result<Counts, String>
     ? "Read it through fetch, so a Segment is read once and not once per Block."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     location = Domain.Index.decodeLocation(text)?
     got = Infra.Blocks.fetch(blocks, loaded, location)?
-    checkedBlock(store, blocks, Option.Some(got.loaded), height, to, counts, blockId, got.payload)
+    checkedBlock(store, blocks, Option.Some(got.loaded), height, to, counts, blockId, got.payload, pace)
 
-fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, payload: Bytes) -> Result<Counts, String>
+fn checkedBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, blockId: String, payload: Bytes, pace: Pace) -> Result<Counts, String>
     ? "The Block's own checks, then every Transaction it holds."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     transactions = Domain.Block.transactionsOf(payload)?
     findings = Domain.Checks.findingsFor(payload, blockId, parentOf(store, height)?)?
     faults = faultsIn(findings, [])
     _said = reportFaults(height, faults)
-    _progress = maybeReport(height, counts)
-    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions)
+    stepped = maybeReport(height, counts, pace)?
+    overTransactions(store, blocks, loaded, height, to, Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts), transactions, stepped)
 
-fn maybeReport(height: Int, counts: Counts) -> Unit
-    ? "Say where the walk has got to, every so often."
+fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
+    ? "Say where the walk has got to, every so often, and how fast."
       "Reported before this Block is counted, so the numbers are what was true"
       "at the Height named rather than one ahead of it."
+      "Two rates, because they answer different questions. The recent one is"
+      "over the Blocks since the last line and is what shows a Block costing"
+      "seconds where its neighbours cost milliseconds; the overall one is what"
+      "an estimate of the time left should be built on."
       "Total: reportEvery is two thousand and the checker cannot see that a"
       "constant divisor is not zero, so the default is unreachable."
-    ! [Console.print]
+    ! [Console.print, Time.now, Time.unixMs]
     match Result.withDefault(Int.mod(counts.blocks, reportEvery()), 1) == 0
-        false -> Unit
-        true -> Console.print("  ... height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults")
+        false -> Result.Ok(pace)
+        true -> reported(height, counts, pace)
 
-fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>) -> Result<Counts, String>
+fn reported(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
+    ? "One progress line, and the Pace the next one measures from."
+    ! [Console.print, Time.now, Time.unixMs]
+    nowMs = Time.unixMs()
+    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, {perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s recent, {perSecond(counts.blocks, nowMs - pace.startedMs)} overall")
+    Result.Ok(Pace(startedMs = pace.startedMs, lastMs = nowMs, lastBlocks = counts.blocks))
+
+fn overTransactions(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transactions: List<Transaction>, pace: Pace) -> Result<Counts, String>
     ? "Check what each Transaction spends."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match transactions
-        [] -> walk(store, blocks, loaded, height + 1, to, counts)
-        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail)
+        [] -> walk(store, blocks, loaded, height + 1, to, counts, pace)
+        [head, ..tail] -> oneTransaction(store, blocks, loaded, height, to, counts, head, tail, pace)
 
-fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>) -> Result<Counts, String>
+fn oneTransaction(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, transaction: Transaction, tail: List<Transaction>, pace: Pace) -> Result<Counts, String>
     ? "Resolve its Inputs and judge the sums."
       "Resolving reads parent Blocks and does not share the Segment held here,"
       "since a parent may sit anywhere below."
-    ! [Console.print, Disk.readText, Infra.Kv.get]
+    ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     held = Infra.Spends.checked(store, blocks, transaction, Domain.Rules.at(height))?
     paid = paidBy(Domain.Transaction.outputsOf(transaction), 0)
     grown = judged(height, withScripts(counts, held.scripts), transaction, Domain.Spend.verdictOf(held.tally, paid))
-    overTransactions(store, blocks, loaded, height, to, grown, tail)
+    overTransactions(store, blocks, loaded, height, to, grown, tail, pace)
 
 fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
     ? "Roll one Transaction's Script outcomes into the running total."
