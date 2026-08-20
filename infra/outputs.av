@@ -87,7 +87,7 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
         Time.now, Time.unixMs,
     ]
     below = watermark(store)?
-    walked = walk(Walk(reached = from, advancing = from <= below, store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0), pace = Infra.Pace.pacedFrom(Time.unixMs())), resumeFrom(from, below), to)?
+    walked = walk(Walk(reached = from, advancing = advances(from, below, to), store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, outputs = 0), pace = Infra.Pace.pacedFrom(Time.unixMs())), resumeFrom(from, below, to), to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
 
@@ -101,23 +101,56 @@ verify watermark
     watermark(Infra.Store.fixture([])) => Result.Ok(0)
     watermark(Infra.Store.fixture([("meta:outputsBelow", "1234")])) => Result.Ok(1234)
 
-fn resumeFrom(from: Int, below: Int) -> Int
+fn resumeFrom(from: Int, below: Int, to: Int) -> Int
     ? "Where to actually start, given what has been built already."
-      "A build that begins at or below the watermark carries straight on from"
-      "it: those Heights are done and rewriting them would produce the same"
-      "keys with the same values for no reason."
-      "A build that begins above it leaves a gap and starts where it was asked"
-      "to, because the watermark is a claim about every Height below it and a"
-      "gap would make that claim false."
+      "Three cases, and the third is a repair."
+      "A build that begins at or below the watermark and runs past it carries"
+      "straight on from the watermark: those Heights are done and rewriting"
+      "them would produce the same keys with the same values for no reason."
+      "A build that begins above it starts where it was asked to, because the"
+      "watermark is a claim about every Height below it and a gap would make"
+      "that claim false."
+      "A build that ends below it is a repair: the caller is saying the claim"
+      "is already false and naming the Heights that make it so. It runs"
+      "exactly the range it was given. The keys are the Transaction Id and the"
+      "Output position, so writing one twice writes the same value, and a"
+      "repair over Heights that were fine costs time and changes nothing."
+    match to < below
+        true -> from
+        false -> continuing(from, below)
+
+verify resumeFrom
+    resumeFrom(1, 0, 100) => 1
+    resumeFrom(1, 500, 900) => 500
+    resumeFrom(500, 500, 900) => 500
+    resumeFrom(900, 500, 1000) => 900
+    resumeFrom(262074, 363724, 262076) => 262074
+
+fn continuing(from: Int, below: Int) -> Int
+    ? "The two cases that are not a repair."
     match from <= below
         true -> below
         false -> from
 
-verify resumeFrom
-    resumeFrom(1, 0) => 1
-    resumeFrom(1, 500) => 500
-    resumeFrom(500, 500) => 500
-    resumeFrom(900, 500) => 900
+verify continuing
+    continuing(1, 0) => 1
+    continuing(1, 500) => 500
+    continuing(900, 500) => 900
+
+fn advances(from: Int, below: Int, to: Int) -> Bool
+    ? "Whether this build may move the watermark."
+      "Only a build that starts at or below it and reaches past it. A repair"
+      "wholly below the watermark must not move it -- the watermark would go"
+      "backwards and claim less than is true, and the next ordinary build"
+      "would redo everything above the repair for nothing."
+    Bool.and(from <= below, to >= below)
+
+verify advances
+    advances(0, 0, 100) => true
+    advances(1, 0, 100) => false
+    advances(1, 500, 900) => true
+    advances(900, 500, 1000) => false
+    advances(262074, 363724, 262076) => false
 
 fn marked(pending: List<Entry>, reached: Int, advancing: Bool) -> List<Entry>
     ? "The batch, with the watermark on the end when it may be advanced."
