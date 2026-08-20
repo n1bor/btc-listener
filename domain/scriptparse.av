@@ -12,7 +12,7 @@ module ScriptParse
         "can push the same data with different opcodes, only one of which is the"
         "minimal encoding, and the rule against the others needs to know which"
         "was used."
-    exposes [Op, parse, opsIn, bytesOf]
+    exposes [Op, parse, opsIn, bytesOf, minimalPush, withoutPushes]
     depends [Bytes, Domain.Message, Domain.Opcode]
     effects []
 
@@ -169,3 +169,106 @@ fn prependReversed(bytes: List<Int>, acc: List<Int>) -> List<Int>
 verify prependReversed
     prependReversed([], [9]) => [9]
     prependReversed([1, 2], [9]) => [2, 1, 9]
+
+fn minimalPush(data: List<Int>) -> List<Int>
+    ? "These bytes as the push Bitcoin would write for them."
+      "CScript() << vch, which is the minimal encoding: a length byte below"
+      "seventy-six, OP_PUSHDATA1 up to a byte, OP_PUSHDATA2 beyond. It has to"
+      "be the minimal one and not merely an equivalent one, because what"
+      "FindAndDelete matches on is these exact bytes -- the same data pushed"
+      "with a wider opcode is a different push and is left where it is."
+      "Empty data gives a single zero byte, which is OP_0. That is not a"
+      "special case dressed up: an empty signature really does delete OP_0"
+      "from the script code, and Bitcoin really does that."
+    bytesOf([canonical(data)])
+
+verify minimalPush
+    minimalPush([]) => [0]
+    minimalPush([170]) => [1, 170]
+    minimalPush([170, 187]) => [2, 170, 187]
+    List.len(minimalPush(zeroes(80, []))) => 82
+    List.take(minimalPush(zeroes(80, [])), 2) => [76, 80]
+
+fn canonical(data: List<Int>) -> Op
+    ? "The opcode that pushes this many bytes minimally."
+    match List.len(data) < 76
+        true -> Op.Push(List.len(data), data)
+        false -> wider(data)
+
+verify canonical
+    canonical([170]) => Op.Push(1, [170])
+    canonical([]) => Op.Push(0, [])
+
+fn wider(data: List<Int>) -> Op
+    ? "Past seventy-five bytes the length needs a byte of its own, or two."
+    match List.len(data) <= 255
+        true -> Op.Push(76, data)
+        false -> Op.Push(77, data)
+
+verify wider
+    wider(zeroes(80, [])) => Op.Push(76, zeroes(80, []))
+
+fn zeroes(count: Int, acc: List<Int>) -> List<Int>
+    ? "A run of zero bytes, for the cases above."
+    match count < 1
+        true -> acc
+        false -> zeroes(count - 1, List.prepend(0, acc))
+
+verify zeroes
+    zeroes(0, []) => []
+    List.len(zeroes(80, [])) => 80
+
+fn withoutPushes(scriptHex: String, items: List<List<Int>>) -> Result<String, String>
+    ? "The Script with every push of each of these items taken out."
+      "Bitcoin's FindAndDelete, which OP_CHECKSIG applies to its signature and"
+      "OP_CHECKMULTISIG applies to all of its signatures before it checks any"
+      "of them. It matters when a signature appears inside the Script it is"
+      "signing, which is close to unheard of and is on the chain: Height"
+      "290329 spends a P2SH redeem Script that carries one of its own"
+      "signatures where a public key should be, and the other signature only"
+      "verifies once that push is gone. See n1bor/btc-listener#49."
+      "Opcode by opcode, because a match only counts at an opcode boundary --"
+      "bytes inside a push are data and deleting them would change what was"
+      "pushed."
+      "Legacy only. BIP143 dropped FindAndDelete, so the SegWit path must not"
+      "come through here."
+    ops = opsIn(scriptHex)?
+    Result.Ok(Bytes.toHex(Bytes.fromList(bytesOf(withoutEach(ops, items)))?))
+
+verify withoutPushes
+    withoutPushes("", []) => Result.Ok("")
+    withoutPushes("5101ab52", []) => Result.Ok("5101ab52")
+    withoutPushes("5101ab52", [[171]]) => Result.Ok("5152")
+    withoutPushes("5101ab01ab52", [[171]]) => Result.Ok("5152")
+    withoutPushes("5101ab52", [[187]]) => Result.Ok("5101ab52")
+    withoutPushes("zz", []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn withoutEach(ops: List<Op>, items: List<List<Int>>) -> List<Op>
+    ? "One item deleted, then the next, over what the last one left."
+    match items
+        [] -> ops
+        [head, ..tail] -> withoutEach(without(ops, minimalPush(head), []), tail)
+
+verify withoutEach
+    withoutEach([], []) => []
+    withoutEach([Op.Code(81), Op.Push(1, [171])], [[171]]) => [Op.Code(81)]
+
+fn without(ops: List<Op>, target: List<Int>, acc: List<Op>) -> List<Op>
+    ? "Every Op whose own bytes are not the target, in order."
+    match ops
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keptUnlessMatched(head, tail, target, acc)
+
+verify without
+    without([], [1, 171], []) => []
+    without([Op.Push(1, [171])], [1, 171], []) => []
+
+fn keptUnlessMatched(op: Op, rest: List<Op>, target: List<Int>, acc: List<Op>) -> List<Op>
+    ? "A push written some other way is a different push and stays."
+    match bytesOf([op]) == target
+        true -> without(rest, target, acc)
+        false -> without(rest, target, List.prepend(op, acc))
+
+verify keptUnlessMatched
+    keptUnlessMatched(Op.Push(1, [171]), [], [1, 171], []) => []
+    keptUnlessMatched(Op.Push(76, [171]), [], [1, 171], []) => [Op.Push(76, [171])]

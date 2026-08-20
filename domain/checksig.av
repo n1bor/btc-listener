@@ -88,6 +88,8 @@ verify singleOn
 
 fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
     ? "The signature, the key and the message it should have been taken over."
+      "The signature is deleted from the Script code first -- Bitcoin's"
+      "FindAndDelete -- so that what it commits to never includes itself."
       "Two things can be missing and they are different. Without a spend there"
       "is no message at all, and the answer names the Transaction. With one,"
       "the message is built and handed to Domain.Ecdsa, which still has no"
@@ -95,7 +97,7 @@ fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
       "change is how you can tell this plumbing works before the curve lands."
     match Domain.Ecdsa.hashTypeOf(two.second)
         Result.Err(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} {why}"))
-        Result.Ok(hashType) -> overMessage(code, two, state, Domain.SpendContext.messageFor(context, hashType))
+        Result.Ok(hashType) -> overMessage(code, two, state, Domain.SpendContext.messageFor(Domain.SpendContext.withoutSignatures(context, [two.second]), hashType))
 
 verify againstMessage
     againstMessage(172, Two(first = validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
@@ -284,10 +286,13 @@ verify withDummy
 
 fn decidedMultiple(code: Int, keyItems: List<List<Int>>, sigItems: List<List<Int>>, below: List<List<Int>>, state: State, context: Context) -> Step
     ? "No signatures at all succeeds, because there is nothing to check."
-      "Anything else goes through the matching below."
+      "Anything else goes through the matching below, over a Script code with"
+      "every one of the signatures deleted from it. All of them, before any of"
+      "them is checked, which is what Bitcoin does and is not the same as"
+      "deleting each one as its turn comes -- see n1bor/btc-listener#49."
     match sigItems
         [] -> answered(code, true, below, state)
-        [head, ..tail] -> multiAnswered(code, multiRuling(sigItems, keyItems, context), below, state)
+        [head, ..tail] -> multiAnswered(code, multiRuling(sigItems, keyItems, Domain.SpendContext.withoutSignatures(context, sigItems)), below, state)
 
 verify decidedMultiple
     decidedMultiple(174, [], [], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))

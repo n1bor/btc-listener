@@ -22,8 +22,8 @@ module SpendContext
         "reachable from this path and pretending otherwise would be writing a"
         "branch nothing enters. Domain.Bip143 is written and checked; it joins"
         "this when witness evaluation does."
-    exposes [Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
-    depends [Bytes, Domain.Rules, Domain.Sighash, Domain.Transaction]
+    exposes [withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
+    depends [Bytes, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
 record Commitment
@@ -116,6 +116,27 @@ verify overScript
     scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
     scriptCodeOf(overScript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51"), "52")) => "52"
     rulesOf(overScript(committed(Domain.Rules.at(0), emptyTransaction(), 0, 5, "51"), "52")) => Domain.Rules.at(0)
+
+fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
+    ? "The same spend, over a Script code with these signatures deleted."
+      "Bitcoin's FindAndDelete. OP_CHECKSIG applies it to its one signature and"
+      "OP_CHECKMULTISIG to all of its signatures before it checks any of them,"
+      "so what a signature commits to never includes itself."
+      "It matters only when a signature appears inside the Script it is"
+      "signing, which is on the chain exactly once in the first 290329 Blocks:"
+      "a P2SH redeem Script carrying one of its own signatures where a public"
+      "key should be. See n1bor/btc-listener#49."
+      "Total: a Script code that is already in hand parsed once to get here, so"
+      "withoutPushes cannot refuse it and the other arm leaves the Context as"
+      "it was -- which is what the engine did before this existed."
+    match Domain.ScriptParse.withoutPushes(scriptCodeOf(context), signatures)
+        Result.Err(why) -> context
+        Result.Ok(stripped) -> overScript(context, stripped)
+
+verify withoutSignatures
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52"), [[171]])) => "5152"
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52"), [])) => "5101ab52"
+    scriptCodeOf(withoutSignatures(bare(Domain.Rules.latest()), [[171]])) => ""
 
 fn scriptCodeOf(context: Context) -> String
     ? "The Script the signature is taken over, which is the one being run:"
