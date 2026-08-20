@@ -11,8 +11,8 @@ module Checks
         "that only wants a count does not have to parse a sentence to get it."
         "Nothing here needs the chain, only the Block and what the Index recorded"
         "about it, which is what lets it be pure."
-    exposes [Finding, findingsFor, isFault, genesisHexFor]
-    depends [Bytes, Domain.Block]
+    exposes [Finding, findingsFor, findingsOver, isFault, genesisHexFor]
+    depends [Bytes, Domain.Block, Domain.Transaction]
     effects []
 
 type Finding
@@ -38,8 +38,7 @@ fn findingsFor(payload: Bytes, blockId: String, parentBlockId: Option<String>) -
       "a finding of its own and the other three are still made -- a Block with a"
       "damaged body still has a Header that either hashes to its recorded Id or"
       "does not, and that is worth knowing at the same time."
-    header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
-    Result.Ok([idFinding(blockId, header), merkleFinding(payload, header), parentFinding(parentBlockId, header), workFinding(blockId, header)])
+    findingsOver(payload, blockId, parentBlockId, Domain.Block.transactionsOf(payload))
 
 verify findingsFor
     List.len(findingsFor(Bytes.fromHex(genesisHexFor())?, genesisId(), Option.None)?) => 4
@@ -47,25 +46,52 @@ verify findingsFor
     findingsFor(Bytes.fromHex(genesisHexFor())?, "wrong", Option.None)? => [Finding.IdDiffers(genesisId()), Finding.MerkleAgrees, Finding.ParentUnrecorded, Finding.WorkUncheckable("Bytes.fromHex: invalid hexadecimal character 'w'")]
     findingsFor(Bytes.fromHex("00")?, genesisId(), Option.None) => Result.Err("Block Header must be 80 bytes, got 1")
 
-fn rootOf(payload: Bytes) -> Result<String, String>
-    ? "The Merkle Root the Transactions in this body produce."
-    transactions = Domain.Block.transactionsOf(payload)?
+fn findingsOver(payload: Bytes, blockId: String, parentBlockId: Option<String>, transactions: Result<List<Transaction>, String>) -> Result<List<Finding>, String>
+    ? "The same, for a caller that has already decoded the Transactions."
+      "A Block's body decodes once per audit rather than twice. The Merkle"
+      "Root is the only finding that needs the Transactions, and the caller"
+      "that asks for findings has almost always just decoded them for its own"
+      "reasons; decoding them again here cost 433 ms of the 985 ms a Block of"
+      "824 Transactions spent before any Script ran."
+      "The Transactions arrive as a Result rather than a list because a body"
+      "that will not decode is a finding and not a failure: a Block with a"
+      "damaged body still has a Header that either hashes to its recorded Id"
+      "or does not."
+    header = Domain.Block.decodeHeader(List.take(Bytes.toList(payload), Domain.Block.headerLength()))?
+    Result.Ok([idFinding(blockId, header), merkleFinding(transactions, header), parentFinding(parentBlockId, header), workFinding(blockId, header)])
+
+verify findingsOver
+    findingsOver(Bytes.fromHex(genesisHexFor())?, genesisId(), Option.None, Domain.Block.transactionsOf(Bytes.fromHex(genesisHexFor())?))? => [Finding.IdAgrees, Finding.MerkleAgrees, Finding.ParentUnrecorded, Finding.WorkMet]
+    findingsOver(Bytes.fromHex(genesisHexFor())?, genesisId(), Option.None, Result.Err("nothing decoded"))? => [Finding.IdAgrees, Finding.MerkleUncomputable("nothing decoded"), Finding.ParentUnrecorded, Finding.WorkMet]
+
+fn rootOf(transactions: List<Transaction>) -> Result<String, String>
+    ? "The Merkle Root these Transactions produce."
     Domain.Block.merkleRootOf(Domain.Block.txidsOf(transactions))
 
 verify rootOf
-    rootOf(Bytes.fromHex(genesisHexFor())?) => Result.Ok("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
-    rootOf(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?) => Result.Err("Transaction ends before its lock time")
+    rootOf(Domain.Block.transactionsOf(Bytes.fromHex(genesisHexFor())?)?) => Result.Ok("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    rootOf([]) => Result.Err("a Block with no Transactions has no Merkle Root")
 
-fn merkleFinding(payload: Bytes, header: BlockHeader) -> Finding
+fn merkleFinding(transactions: Result<List<Transaction>, String>, header: BlockHeader) -> Finding
     ? "Whether the Transactions build the Root the Header committed to."
-    match rootOf(payload)
-        Result.Err(message) -> Finding.MerkleUncomputable(message)
-        Result.Ok(root) -> merkleAgreement(root, header)
+    match transactions
+        Result.Err(undecoded) -> Finding.MerkleUncomputable(undecoded)
+        Result.Ok(decoded) -> overRoot(rootOf(decoded), header)
 
 verify merkleFinding
-    merkleFinding(Bytes.fromHex(genesisHexFor())?, headerWith("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "cc", "bb")) => Finding.MerkleAgrees
-    merkleFinding(Bytes.fromHex(genesisHexFor())?, headerWith("zz", "cc", "bb")) => Finding.MerkleDiffers("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
-    merkleFinding(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?, headerWith("aa", "cc", "bb")) => Finding.MerkleUncomputable("a Block with no Transactions has no Merkle Root")
+    merkleFinding(Domain.Block.transactionsOf(Bytes.fromHex(genesisHexFor())?), headerWith("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "cc", "bb")) => Finding.MerkleAgrees
+    merkleFinding(Domain.Block.transactionsOf(Bytes.fromHex(genesisHexFor())?), headerWith("zz", "cc", "bb")) => Finding.MerkleDiffers("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    merkleFinding(Result.Ok([]), headerWith("aa", "cc", "bb")) => Finding.MerkleUncomputable("a Block with no Transactions has no Merkle Root")
+
+fn overRoot(root: Result<String, String>, header: BlockHeader) -> Finding
+    ? "A Root that cannot be built is as much a finding as one that disagrees."
+    match root
+        Result.Err(why) -> Finding.MerkleUncomputable(why)
+        Result.Ok(built) -> merkleAgreement(built, header)
+
+verify overRoot
+    overRoot(Result.Err("no Transactions"), headerWith("aa", "cc", "bb")) => Finding.MerkleUncomputable("no Transactions")
+    overRoot(Result.Ok("aa"), headerWith("aa", "cc", "bb")) => Finding.MerkleAgrees
 
 fn merkleAgreement(root: String, header: BlockHeader) -> Finding
     ? "The Root computed, against the Root claimed."
