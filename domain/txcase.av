@@ -1,0 +1,141 @@
+module TxCase
+    intent =
+        "One whole Transaction run against the Outputs it spends."
+        "Bitcoin Core keeps two corpora and they test different things."
+        "script_tests.json is pairs of Scripts, and its harness builds the"
+        "crediting Transaction out of the Output Script -- so the Transaction"
+        "Id, and therefore the signature hash, depends on the Script. A"
+        "signature embedded in that Script would have to sign a digest that"
+        "depends on itself, and there is no fixed point to find. Everything"
+        "that depends on the Transaction rather than the Script therefore"
+        "lives in tx_valid.json and tx_invalid.json instead: FindAndDelete,"
+        "the SIGHASH_SINGLE bug, hash types, sequence and lock time."
+        "This is what runs one of those. It takes the Outputs inline rather"
+        "than from a Store, because a case carries its own prevouts and"
+        "building a Store around them would put a database in the way of a"
+        "pure question."
+    exposes [Prevout, verdict]
+    depends [Bytes, Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
+    effects []
+
+record Prevout
+    txid: String
+    index: Int
+    script: String
+    amount: Int
+
+fn verdict(rawHex: String, prevouts: List<Prevout>) -> Outcome
+    ? "Every Input of this Transaction, against the Output it names."
+      "One answer for the whole Transaction: a failure anywhere fails it, and"
+      "anything this engine cannot decide leaves it undecided, because a"
+      "Transaction is valid only if every one of its Inputs is."
+    match Bytes.fromHex(rawHex)
+        Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
+        Result.Ok(raw) -> decoded(Domain.Transaction.decode(Bytes.toList(raw)), prevouts)
+
+verify verdict
+    verdict("zz", []) => Outcome.Decided(Ending.Failed("Bytes.fromHex: invalid hexadecimal character 'z'"))
+    verdict("", []) => Outcome.Decided(Ending.Failed("Transaction ends before its lock time"))
+
+fn decoded(transaction: Result<Transaction, String>, prevouts: List<Prevout>) -> Outcome
+    ? "A Transaction that will not decode fails before any Script runs."
+    match transaction
+        Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
+        Result.Ok(whole) -> eachInput(whole, Domain.Transaction.inputsOf(whole), 0, prevouts, Outcome.Decided(Ending.Passed))
+
+verify decoded
+    decoded(Result.Err("no"), []) => Outcome.Decided(Ending.Failed("no"))
+
+fn eachInput(transaction: Transaction, inputs: List<Input>, position: Int, prevouts: List<Prevout>, sofar: Outcome) -> Outcome
+    ? "In order, carrying the worst answer so far."
+    match inputs
+        [] -> sofar
+        [head, ..tail] -> stepInput(transaction, head, tail, position, prevouts, sofar)
+
+verify eachInput
+    eachInput(Domain.SpendContext.emptyTransaction(), [], 0, [], Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Passed)
+
+fn stepInput(transaction: Transaction, input: Input, rest: List<Input>, position: Int, prevouts: List<Prevout>, sofar: Outcome) -> Outcome
+    ? "An Input whose Output the case did not supply is the case's own fault"
+      "and is said so, rather than being counted as a Script that failed."
+    match matching(prevouts, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))
+        Option.None -> Outcome.Decided(Ending.Failed("no prevout supplied for input {position}"))
+        Option.Some(prevout) -> eachInput(transaction, rest, position + 1, prevouts, worse(sofar, oneInput(transaction, input, position, prevout)))
+
+verify stepInput
+    stepInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], 0, [], Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Failed("no prevout supplied for input 0"))
+
+fn oneInput(transaction: Transaction, input: Input, position: Int, prevout: Prevout) -> Outcome
+    ? "The Input Script and the Output Script, run the way a spend runs them,"
+      "over a Context that names the Transaction so a signature has something"
+      "to have committed to."
+    Domain.SpendScript.check(Domain.Transaction.scriptOf(input), prevout.script, Domain.SpendContext.committed(Domain.Rules.latest(), transaction, position, prevout.amount, prevout.script))
+
+verify oneInput
+    oneInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), 0, Prevout(txid = "aa", index = 0, script = "51", amount = 0)) => Outcome.Decided(Ending.Passed)
+
+fn matching(prevouts: List<Prevout>, txid: String, index: Int) -> Option<Prevout>
+    ? "The Output an Input names, out of the ones the case supplied."
+    match prevouts
+        [] -> Option.None
+        [head, ..tail] -> thisOrNext(head, tail, txid, index)
+
+verify matching
+    matching([], "aa", 0) => Option.None
+    matching([Prevout(txid = "aa", index = 0, script = "51", amount = 5)], "aa", 0) => Option.Some(Prevout(txid = "aa", index = 0, script = "51", amount = 5))
+    matching([Prevout(txid = "aa", index = 0, script = "51", amount = 5)], "aa", 1) => Option.None
+
+fn thisOrNext(head: Prevout, tail: List<Prevout>, txid: String, index: Int) -> Option<Prevout>
+    ? "Matched on both halves of the name, because an Input names a position."
+    match Bool.and(head.txid == txid, head.index == index)
+        true -> Option.Some(head)
+        false -> matching(tail, txid, index)
+
+verify thisOrNext
+    thisOrNext(Prevout(txid = "aa", index = 0, script = "51", amount = 5), [], "aa", 0) => Option.Some(Prevout(txid = "aa", index = 0, script = "51", amount = 5))
+    thisOrNext(Prevout(txid = "aa", index = 0, script = "51", amount = 5), [], "bb", 0) => Option.None
+
+fn worse(sofar: Outcome, next: Outcome) -> Outcome
+    ? "A failure anywhere beats an undecided anywhere beats a pass."
+      "Order matters for the message: the first failure is the one reported,"
+      "so a reader is sent to the earliest Input that went wrong rather than"
+      "the last."
+    match sofar
+        Outcome.Undecided(why) -> stillUndecided(why, next)
+        Outcome.Decided(ending) -> afterDecided(ending, next)
+
+verify worse
+    worse(Outcome.Decided(Ending.Passed), Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Passed)
+    worse(Outcome.Decided(Ending.Passed), Outcome.Undecided("x")) => Outcome.Undecided("x")
+    worse(Outcome.Undecided("x"), Outcome.Decided(Ending.Failed("y"))) => Outcome.Decided(Ending.Failed("y"))
+    worse(Outcome.Decided(Ending.Failed("y")), Outcome.Decided(Ending.Failed("z"))) => Outcome.Decided(Ending.Failed("y"))
+
+fn stillUndecided(why: String, next: Outcome) -> Outcome
+    ? "Only a failure displaces an undecided."
+    match next
+        Outcome.Undecided(other) -> Outcome.Undecided(why)
+        Outcome.Decided(ending) -> keptUnlessFailed(why, ending)
+
+verify stillUndecided
+    stillUndecided("x", Outcome.Decided(Ending.Passed)) => Outcome.Undecided("x")
+    stillUndecided("x", Outcome.Decided(Ending.Failed("y"))) => Outcome.Decided(Ending.Failed("y"))
+
+fn keptUnlessFailed(why: String, ending: Ending) -> Outcome
+    ? "The undecided stands unless the next Input actually failed."
+    match ending
+        Ending.Failed(reason) -> Outcome.Decided(Ending.Failed(reason))
+        Ending.Passed -> Outcome.Undecided(why)
+
+verify keptUnlessFailed
+    keptUnlessFailed("x", Ending.Passed) => Outcome.Undecided("x")
+    keptUnlessFailed("x", Ending.Failed("y")) => Outcome.Decided(Ending.Failed("y"))
+
+fn afterDecided(ending: Ending, next: Outcome) -> Outcome
+    ? "A failure already found is kept; a pass gives way to anything worse."
+    match ending
+        Ending.Failed(why) -> Outcome.Decided(Ending.Failed(why))
+        Ending.Passed -> next
+
+verify afterDecided
+    afterDecided(Ending.Failed("y"), Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Failed("y"))
+    afterDecided(Ending.Passed, Outcome.Undecided("x")) => Outcome.Undecided("x")
