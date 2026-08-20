@@ -17,46 +17,23 @@ use ripemd::{Digest, Ripemd160};
 /// Pinned to the contract in `primitives.av`. A mismatch fails at startup
 /// rather than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:a4ada0e3b33296aadc557423913af5e456be0c8395bf7b89e6bae8298c8991ec";
-
-const CARRIER: &str = "Domain.Primitives.Octets";
+    "sha256:e79d25528cf81c31cc7078791951643ed691d04804febe82dd4f7643b832010f";
 
 struct Primitives;
 
-fn octets_in(value: &ProviderValue, what: &str) -> Result<Vec<u8>, ProviderFault> {
-    let ProviderValue::Record { fields, .. } = value else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} is not Octets")));
-    };
-    let Some((_, ProviderValue::List(items))) = fields.iter().find(|(n, _)| n == "values") else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} has no values list")));
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let ProviderValue::Int(n) = item else {
-            return Err(ProviderFault::new("bad_shape", format!("{what} holds a non-Int")));
-        };
-        let n = n
-            .to_i64()
-            .ok_or_else(|| ProviderFault::new("out_of_range", format!("{what} byte is huge")))?;
-        out.push(u8::try_from(n).map_err(|_| {
-            ProviderFault::new("out_of_range", format!("{what} byte {n} is not 0-255"))
-        })?);
-    }
-    Ok(out)
-}
-
-fn octets_out(bytes: &[u8]) -> ProviderValue {
-    ProviderValue::Record {
-        type_name: CARRIER.to_string(),
-        fields: vec![(
-            "values".to_string(),
-            ProviderValue::List(
-                bytes
-                    .iter()
-                    .map(|b| ProviderValue::Int(i64::from(*b).into()))
-                    .collect(),
-            ),
-        )],
+/// The bytes of a `Bytes`. The contract takes the standard type now, so this
+/// is a match rather than a walk: jasisz/aver#1022 gave `Bytes` a
+/// compiler-owned capability ABI carried as `ProviderValue::Bytes(Vec<u8>)`.
+/// What stood here before unwrapped a capability-owned `Octets` record and
+/// range-checked every element of it, on every call, for data that had come
+/// out of a `Bytes` and was octets by construction.
+fn bytes_in<'a>(value: &'a ProviderValue, what: &str) -> Result<&'a [u8], ProviderFault> {
+    match value {
+        ProviderValue::Bytes(bytes) => Ok(bytes),
+        _ => Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not Bytes"),
+        )),
     }
 }
 
@@ -66,12 +43,6 @@ fn ripemd160(input: &[u8]) -> [u8; 20] {
     hasher.finalize().into()
 }
 
-/// Whether `signature` is a valid ECDSA signature by `public_key` over
-/// `message`.
-///
-/// Returns `false` rather than faulting on malformed input: the caller refuses
-/// what it can before it gets here, and anything still malformed at this point
-/// is a signature that does not verify, not a broken provider.
 fn verify(public_key: &[u8], signature: &[u8], message: &[u8]) -> bool {
     use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
     let Ok(key) = PublicKey::from_slice(public_key) else {
@@ -120,21 +91,23 @@ impl CapabilityProvider for Primitives {
         match context.operation.as_str() {
             "Domain.Primitives.ripemd160" => {
                 let [input] = args else {
-                    return Err(ProviderFault::new("bad_arity", "ripemd160 takes one Octets"));
+                    return Err(ProviderFault::new("bad_arity", "ripemd160 takes one Bytes"));
                 };
-                Ok(octets_out(&ripemd160(&octets_in(input, "input")?)))
+                Ok(ProviderValue::Bytes(
+                    ripemd160(bytes_in(input, "input")?).to_vec(),
+                ))
             }
             "Domain.Primitives.verifySignature" => {
                 let [key, sig, msg] = args else {
                     return Err(ProviderFault::new(
                         "bad_arity",
-                        "verifySignature takes three Octets",
+                        "verifySignature takes three Bytes",
                     ));
                 };
                 Ok(ProviderValue::Bool(verify(
-                    &octets_in(key, "publicKey")?,
-                    &octets_in(sig, "signature")?,
-                    &octets_in(msg, "message")?,
+                    bytes_in(key, "publicKey")?,
+                    bytes_in(sig, "signature")?,
+                    bytes_in(msg, "message")?,
                 )))
             }
             other => Err(ProviderFault::new("bad_operation", other)),

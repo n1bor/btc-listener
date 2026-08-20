@@ -117,10 +117,10 @@ fn overCurve(publicKey: Bytes, signature: Bytes, message: Bytes) -> Ruling
     ? "The provider's answer, turned back into a Ruling."
       "The hash type byte is dropped before the signature crosses: it is not"
       "part of the DER and the curve has no use for it."
-    verdict(Domain.Primitives.verifySignature(octets(publicKey), listOctets(signatureBody(Bytes.toList(signature))), octets(message)))
+    verdict(Domain.Primitives.verifySignature(publicKey, bodyOf(signature), message))
 
 verify overCurve
-    overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Domain.Primitives.verifySignature(octets(Bytes.fromList([])), listOctets(signatureBody(Bytes.toList(Bytes.fromList([])))), octets(Bytes.fromList([]))))
+    overCurve(Bytes.fromList([]), Bytes.fromList([]), Bytes.fromList([])) => verdict(Domain.Primitives.verifySignature(Bytes.fromList([]), bodyOf(Bytes.fromList([])), Bytes.fromList([])))
 
 fn verdict(valid: Bool) -> Ruling
     ? "True is Valid and false is Invalid. There is no third answer once the"
@@ -133,19 +133,22 @@ verify verdict
     verdict(true) => Ruling.Valid
     verdict(false) => Ruling.Invalid("signature does not verify")
 
-fn octets(bytes: Bytes) -> Octets
-    ? "Bytes in the carrier the contract owns."
-    listOctets(Bytes.toList(bytes))
+fn bodyOf(signature: Bytes) -> Bytes
+    ? "The DER the curve sees, without the hash type byte on the end."
+      "The key and the message cross as they are. They were Bytes before this"
+      "and the contract takes Bytes now, so there is nothing to convert --"
+      "jasisz/aver#1022 gave Bytes a capability ABI of its own. Only the"
+      "signature changes on the way through, and only because a byte comes off"
+      "the end of it."
+      "Total: the bytes came out of a Bytes and are octets by construction, so"
+      "Bytes.fromList cannot refuse them and the other arm is unreachable."
+    match Bytes.fromList(signatureBody(Bytes.toList(signature)))
+        Result.Err(why) -> Bytes.fromList([])
+        Result.Ok(body) -> body
 
-verify octets
-    octets(Bytes.fromList([1, 2])).values => [1, 2]
-
-fn listOctets(values: List<Int>) -> Octets
-    ? "The same, from the list form the shape checks already work in."
-    Domain.Primitives.Octets(values = values)
-
-verify listOctets
-    listOctets([1, 2]).values => [1, 2]
+verify bodyOf
+    Bytes.toList(bodyOf(Bytes.fromHex("300602010102010101")?)) => [48, 6, 2, 1, 1, 2, 1, 1]
+    Bytes.toList(bodyOf(Bytes.fromList([]))) => []
 
 fn decideShape(signature: List<Int>, publicKey: List<Int>) -> Ruling
     ? "The same question without the message, for a caller that has not got one."
