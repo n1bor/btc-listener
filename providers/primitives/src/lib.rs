@@ -17,7 +17,7 @@ use ripemd::{Digest, Ripemd160};
 /// Pinned to the contract in `primitives.av`. A mismatch fails at startup
 /// rather than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:e79d25528cf81c31cc7078791951643ed691d04804febe82dd4f7643b832010f";
+    "sha256:0a2f10104afed6c1bcf83c9b2beb622735144892067f5f1aa19099ce3cebd0ee";
 
 struct Primitives;
 
@@ -35,6 +35,13 @@ fn bytes_in<'a>(value: &'a ProviderValue, what: &str) -> Result<&'a [u8], Provid
             format!("{what} is not Bytes"),
         )),
     }
+}
+
+fn sha1(input: &[u8]) -> [u8; 20] {
+    use sha1::Sha1;
+    let mut hasher = Sha1::new();
+    hasher.update(input);
+    hasher.finalize().into()
 }
 
 fn ripemd160(input: &[u8]) -> [u8; 20] {
@@ -97,6 +104,12 @@ impl CapabilityProvider for Primitives {
                     ripemd160(bytes_in(input, "input")?).to_vec(),
                 ))
             }
+            "Domain.Primitives.sha1" => {
+                let [input] = args else {
+                    return Err(ProviderFault::new("bad_arity", "sha1 takes one Bytes"));
+                };
+                Ok(ProviderValue::Bytes(sha1(bytes_in(input, "input")?).to_vec()))
+            }
             "Domain.Primitives.verifySignature" => {
                 let [key, sig, msg] = args else {
                     return Err(ProviderFault::new(
@@ -122,6 +135,7 @@ pub fn primitives_binding() -> ProviderBinding {
         CONTRACT_HASH,
         [
             "Domain.Primitives.ripemd160",
+            "Domain.Primitives.sha1",
             "Domain.Primitives.verifySignature",
         ],
         Arc::new(Primitives),

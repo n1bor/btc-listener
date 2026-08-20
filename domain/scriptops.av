@@ -175,6 +175,7 @@ fn operated(code: Int, state: State, context: Context) -> Step
         136 -> equality(code, state)
         165 -> within(state)
         166 -> hashed(code, state)
+        167 -> hashed(code, state)
         168 -> hashed(code, state)
         169 -> hashed(code, state)
         170 -> hashed(code, state)
@@ -182,6 +183,7 @@ fn operated(code: Int, state: State, context: Context) -> Step
 
 verify operated
     operated(0, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    operated(167, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_SHA1 needs an item")))
     operated(79, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[129]]))
     operated(106, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
     operated(116, Domain.ScriptState.holding([[1], [2]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[2], [1], [2]]))
@@ -213,7 +215,6 @@ fn byGroup(code: Int, state: State, rules: Rules) -> Step
 verify byGroup
     byGroup(81, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     byGroup(97, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.empty())
-    byGroup(167, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Undecided("OP_SHA1 needs sha1"))
     byGroup(80, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RESERVED makes any script that runs it invalid")))
     byGroup(118, Domain.ScriptState.holding([[1]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[1], [1]]))
     byGroup(139, Domain.ScriptState.holding([[1]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[2]]))
@@ -285,9 +286,8 @@ verify sized
     sized(Domain.ScriptState.holding([[]])) => Step.Continue(Domain.ScriptState.holding([[], []]))
 
 fn hashed(code: Int, state: State) -> Step
-    ? "The four hash opcodes this engine can answer: OP_RIPEMD160, OP_SHA256,"
-      "OP_HASH160 and OP_HASH256. OP_SHA1 is not among them and stays"
-      "undecidable, because SHA-1 is a primitive nothing here has."
+    ? "All five hash opcodes: OP_RIPEMD160, OP_SHA1, OP_SHA256, OP_HASH160"
+      "and OP_HASH256."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs an item")))
         [head, ..tail] -> hashedTop(code, head, tail, state)
@@ -318,6 +318,7 @@ fn digestFor(code: Int, raw: Bytes) -> List<Int>
       "why one of these is a conversion and the others are a call."
     match code
         166 -> Domain.Hash.ripemd160(Bytes.toList(raw))
+        167 -> Domain.Hash.sha1(Bytes.toList(raw))
         169 -> Domain.Hash.hash160(Bytes.toList(raw))
         170 -> Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(raw)))
         _ -> Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(raw)))
