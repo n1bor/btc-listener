@@ -11,7 +11,7 @@ blocks each one.
 | Core file | ours | cases | tool |
 |---|---|---|---|
 | `script_tests.json` | `domain/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` (middle step missing) |
-| `sighash.json` | `domain/sighashcases1..2.av` | 500 | **none — see below** |
+| `sighash.json` | `domain/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
 
 Between them, 1831 cases out of a corpus of 4327.
@@ -99,24 +99,39 @@ Two shapes in Core's Transaction data need care and the tool handles both:
 * A prevout may carry a fourth element, the amount, which SegWit needs. It
   defaults to zero.
 
-## `sighash.json` has no tool
+## `sighash.json` is the one conformance corpus
 
-The 500 cases in `domain/sighashcases1..2.av` came from `sighash.json`, and
-their own header says "Nothing here was written by hand and nothing should be:
-it is a corpus, and the only edits it should ever get are regenerated ones."
-There is nothing in `tools/` to regenerate them with.
+`tools/sighash_tests_to_aver.py` writes the 500 cases in
+`domain/sighashcases1..2.av`.
 
-Whatever writes it has to do what the existing corpus did, and the header
-records both transformations:
+It is the only one of the three that needs no middle step, because Core
+supplies the expected value: each row is a Transaction, the Script being
+signed, an Input index, a hash type and **the message the reference client
+produces**. So this corpus is a conformance test rather than a regression one,
+and a case that fails means this engine disagrees with Bitcoin Core about a
+signature hash.
+
+```
+python3 tools/sighash_tests_to_aver.py --fetch
+python3 tools/sighash_tests_to_aver.py --emit
+python3 tools/sighash_tests_to_aver.py --check   # regenerate and diff
+```
+
+Two things change on the way in, both lossless, and the corpus's own header
+records them:
 
 * Core writes the expected hash the way a Transaction Id is written, back to
   front. The corpus holds it in the order the bytes are hashed.
 * Core's hash types are signed integers and half of them are negative. The
-  corpus holds the four byte value that actually gets serialised, which is the
-  same bytes and the same answer.
+  corpus holds the four byte value that actually gets serialised.
 
-A case is `check(rawTxHex, inputIndex, scriptHex, hashType)` against
-`Domain.Sighash.legacyOfRaw`.
+Core's row order is `[raw, script, index, hashType, hash]` and `check` takes
+`(raw, index, script, hashType)`, so the middle two swap.
+
+`--check` regenerates in memory and diffs against what is on disk. That is how
+the tool was tested: the corpus already existed and passed, so a generator that
+reproduces it byte for byte is a generator that would have produced it. Both
+files match.
 
 ## Not read yet
 
