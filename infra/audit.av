@@ -247,7 +247,7 @@ fn oneBlock(store: Store, blocks: BlockStore, one: Prepared, rest: List<Prepared
     counted = Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts)
     work = resolvedAll(store, blocks, one.transactions, Domain.Rules.at(one.height), [])?
     answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(one.height), one.height, one.blockId)?
-    processed(store, blocks, rest, tallied(work, counted, answered), stepped)
+    processed(store, blocks, rest, tallied(work, counted, answered, one.height, one.blockId), stepped)
 
 fn resolvedAll(store: Store, blocks: BlockStore, transactions: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
     ? "Resolve every Input of every Transaction in the Block, in order."
@@ -297,7 +297,7 @@ fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace,
     _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
 
-fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>) -> Counts
+fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>, height: Int, blockId: String) -> Counts
     ? "Add the Block's Script answers in, say what did not settle, then judge"
       "each Transaction's sums."
       "Scripts and sums are counted apart because the division only reorders"
@@ -305,21 +305,32 @@ fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<Stri
       "always did, and need nothing from the branches."
     ! [Console.print]
     match answered
-        (scripts, lines) -> afterScripts(work, withScripts(counts, scripts), lines)
+        (scripts, lines) -> afterScripts(work, withScripts(counts, scripts), lines, height, blockId)
 
 verify tallied
-    tallied([], zero(), (Domain.SpendScript.noOutcomes(), [])) => zero()
+    tallied([], zero(), (Domain.SpendScript.noOutcomes(), []), 0, "aa") => zero()
 
-fn afterScripts(work: List<Work>, counts: Counts, lines: List<String>) -> Counts
-    ? "Print what did not settle, then judge the sums."
-      "The lines arrive whole. The branch that found the fault names the"
-      "Height and the Block Id itself now -- see Infra.Spends.notedFrom."
+fn afterScripts(work: List<Work>, counts: Counts, lines: List<String>, height: Int, blockId: String) -> Counts
+    ? "Judge the sums, then say everything the Block found that did not settle."
+      "The Script lines arrive whole -- the branch that ran the pair names the"
+      "Height and the Block Id itself, see Infra.Spends.notedFrom. The sums are"
+      "walked here rather than in a branch, so this is where their lines are"
+      "built and where the Height comes from."
     ! [Console.print]
-    _said = printLines(lines)
-    judgedAll(work, counts)
+    match judgedAll(work, counts, height, blockId, [])
+        (settled, sums) -> said(settled, List.concat(lines, sums))
 
 verify afterScripts
-    afterScripts([], zero(), []) => zero()
+    afterScripts([], zero(), [], 0, "aa") => zero()
+
+fn said(counts: Counts, lines: List<String>) -> Counts
+    ? "Print the lot in one write and hand the counts back."
+    ! [Console.print]
+    _printed = printLines(lines)
+    counts
+
+verify said trace
+    said(zero(), []) => zero()
 
 fn printLines(lines: List<String>) -> Unit
     ? "Everything the Block found that did not settle, in one write."
@@ -333,14 +344,48 @@ fn printLines(lines: List<String>) -> Unit
 verify printLines trace
     printLines([]) => Unit
 
-fn judgedAll(work: List<Work>, counts: Counts) -> Counts
-    ? "Every Transaction's sums, in Block order."
+fn judgedAll(work: List<Work>, counts: Counts, height: Int, blockId: String, lines: List<String>) -> Tuple<Counts, List<String>>
+    ? "Every Transaction's sums, in Block order, and a line for each that did"
+      "not settle."
+      "Counting a thing without naming it leaves it unchaseable. Three Blocks"
+      "whose bodies were never fetched left 908 unresolved Inputs in one"
+      "segment, and finding which three took eleven audit runs bisecting a"
+      "range the program could have named in one line."
     match work
-        [] -> counts
-        [head, ..tail] -> judgedAll(tail, judged(0, counts, head.transaction, Domain.Spend.verdictOf(head.tally, paidBy(Domain.Transaction.outputsOf(head.transaction), 0))))
+        [] -> (counts, List.reverse(lines))
+        [head, ..tail] -> nextJudged(head, tail, counts, height, blockId, lines)
 
 verify judgedAll
-    judgedAll([], zero()) => zero()
+    judgedAll([], zero(), 0, "aa", []) => (zero(), [])
+
+fn nextJudged(one: Work, rest: List<Work>, counts: Counts, height: Int, blockId: String, lines: List<String>) -> Tuple<Counts, List<String>>
+    ? "One Transaction judged and, if it did not settle, named."
+    verdict = Domain.Spend.verdictOf(one.tally, paidBy(Domain.Transaction.outputsOf(one.transaction), 0))
+    judgedAll(rest, judged(counts, one.transaction, verdict), height, blockId, notedVerdict(one.transaction, verdict, height, blockId, lines))
+
+verify nextJudged
+    nextJudged(Work(transaction = sampleTx(), tally = Domain.Spend.started(), spent = []), [], zero(), 0, "aa", []) => judgedAll([], judged(zero(), sampleTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(sampleTx()), 0))), 0, "aa", notedVerdict(sampleTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(sampleTx()), 0)), 0, "aa", []))
+
+fn notedVerdict(transaction: Transaction, verdict: Verdict, height: Int, blockId: String, lines: List<String>) -> List<String>
+    ? "A line for a Transaction whose sums did not settle."
+      "Incomplete is an Input whose parent Output is not held. It is not a"
+      "fault -- the parent may be perfectly good and simply absent, which is"
+      "why unresolved is counted apart -- but it is the thing a reader most"
+      "needs the Transaction Id for, because the answer is always somewhere"
+      "else in the chain."
+    match verdict
+        Verdict.Conserved -> lines
+        Verdict.Coinbase -> lines
+        Verdict.Incomplete(why) -> List.prepend("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(transaction)}: unresolved, {why}", lines)
+        Verdict.Created(excess) -> List.prepend("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(transaction)}: creates {excess} satoshis", lines)
+        Verdict.Broken(why) -> List.prepend("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(transaction)}: {why}", lines)
+
+verify notedVerdict
+    notedVerdict(sampleTx(), Verdict.Conserved, 7, "aa", []) => []
+    notedVerdict(sampleTx(), Verdict.Coinbase, 7, "aa", []) => []
+    List.len(notedVerdict(sampleTx(), Verdict.Incomplete("no record"), 7, "aa", [])) => 1
+    List.len(notedVerdict(sampleTx(), Verdict.Created(5), 7, "aa", [])) => 1
+    List.len(notedVerdict(sampleTx(), Verdict.Broken("x"), 7, "aa", [])) => 1
 
 fn withScripts(counts: Counts, scripts: Outcomes) -> Counts
     ? "Roll one Transaction's Script outcomes into the running total."
@@ -360,7 +405,7 @@ verify paidBy
     paidBy([], 0) => 0
     paidBy([Output(value = 5, script = "")], 0) => 5
 
-fn judged(height: Int, counts: Counts, transaction: Transaction, verdict: Verdict) -> Counts
+fn judged(counts: Counts, transaction: Transaction, verdict: Verdict) -> Counts
     ? "Count the verdict, and report anything that is not clean."
       "Over a prefix of the chain every Input has its parent held, so Incomplete"
       "is a fault here even though it is an honest answer elsewhere."
@@ -374,12 +419,12 @@ fn judged(height: Int, counts: Counts, transaction: Transaction, verdict: Verdic
         Verdict.Incomplete(why) -> Counts(blocks = counts.blocks, transactions = seen, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved + 1, faults = counts.faults, scripts = counts.scripts)
 
 verify judged
-    judged(1, zero(), sampleTx(), Verdict.Conserved).resolved => 1
-    judged(1, zero(), sampleTx(), Verdict.Coinbase).coinbase => 1
-    judged(1, zero(), sampleTx(), Verdict.Created(5)).faults => 1
-    judged(1, zero(), sampleTx(), Verdict.Broken("x")).faults => 1
-    judged(1, zero(), sampleTx(), Verdict.Incomplete("x")).unresolved => 1
-    judged(1, zero(), sampleTx(), Verdict.Incomplete("x")).faults => 0
+    judged(zero(), sampleTx(), Verdict.Conserved).resolved => 1
+    judged(zero(), sampleTx(), Verdict.Coinbase).coinbase => 1
+    judged(zero(), sampleTx(), Verdict.Created(5)).faults => 1
+    judged(zero(), sampleTx(), Verdict.Broken("x")).faults => 1
+    judged(zero(), sampleTx(), Verdict.Incomplete("x")).unresolved => 1
+    judged(zero(), sampleTx(), Verdict.Incomplete("x")).faults => 0
 
 fn zero() -> Counts
     ? "Nothing counted yet."
