@@ -22,7 +22,7 @@ module SpendContext
         "reachable from this path and pretending otherwise would be writing a"
         "branch nothing enters. Domain.Bip143 is written and checked; it joins"
         "this when witness evaluation does."
-    exposes [withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
+    exposes [Locking, lockingOf, withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Bytes, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
@@ -54,6 +54,56 @@ fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: In
 verify committed
     scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => "51"
     rulesOf(committed(Domain.Rules.at(1), emptyTransaction(), 0, 5, "51")) => Domain.Rules.at(1)
+
+record Locking
+    version: Int
+    lockTime: Int
+    sequence: Int
+
+fn lockingOf(context: Context) -> Option<Locking>
+    ? "What OP_CHECKLOCKTIMEVERIFY and OP_CHECKSEQUENCEVERIFY read."
+      "The three fields between them: the Transaction's version and lock time,"
+      "and the sequence of the Input being spent. They are not stored -- the"
+      "Commitment has the Transaction and which Input, so this reaches for"
+      "them, and there is no second copy to fall out of step."
+      "None when there is no spend behind the Context, which is what leaves"
+      "the two opcodes undecided in a bare run."
+    match context.spend
+        Option.None -> Option.None
+        Option.Some(commitment) -> lockingIn(commitment)
+
+verify lockingOf
+    lockingOf(bare(Domain.Rules.latest())) => Option.None
+    lockingOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => Option.None
+
+fn lockingIn(commitment: Commitment) -> Option<Locking>
+    ? "An Input index the Transaction does not have leaves this None rather"
+      "than inventing a sequence, which the caller then reports as undecided."
+    match inputAt(Domain.Transaction.inputsOf(commitment.transaction), commitment.inputIndex)
+        Option.None -> Option.None
+        Option.Some(input) -> Option.Some(Locking(version = Domain.Transaction.versionOf(commitment.transaction), lockTime = Domain.Transaction.lockTimeOf(commitment.transaction), sequence = Domain.Transaction.sequenceOf(input)))
+
+verify lockingIn
+    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "")) => Option.None
+
+fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
+    ? "The Input at a position, counting down."
+    match inputs
+        [] -> Option.None
+        [head, ..tail] -> thisOrFurther(head, tail, index)
+
+verify inputAt
+    inputAt([], 0) => Option.None
+
+fn thisOrFurther(head: Input, tail: List<Input>, index: Int) -> Option<Input>
+    ? "Here when the count runs out, otherwise on."
+    match index < 1
+        true -> Option.Some(head)
+        false -> inputAt(tail, index - 1)
+
+verify thisOrFurther
+    thisOrFurther(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 0) => Option.Some(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []))
+    thisOrFurther(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 1) => Option.None
 
 fn rulesOf(context: Context) -> Rules
     ? "Which consensus rules this run is judged under."

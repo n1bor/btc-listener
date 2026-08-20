@@ -1,0 +1,202 @@
+module LockTime
+    intent =
+        "OP_CHECKLOCKTIMEVERIFY and OP_CHECKSEQUENCEVERIFY, which are the two"
+        "opcodes that ask about the Transaction rather than the stack."
+        "Both were NOPs before their soft fork and both must stay NOPs below"
+        "it: the chain under Height 388381 is full of Scripts that ran"
+        "OP_NOP2 and are valid because it did nothing. Domain.Rules decides"
+        "which side of the fork a Height is on and this asks it first."
+        "Neither pops. They are verify opcodes: they leave the number they"
+        "were given where it was and either carry on or stop the Script."
+        "A number here may be five bytes, not the four the arithmetic opcodes"
+        "take, because a lock time runs past what four bytes hold."
+    exposes [checked]
+    depends [Bytes, Domain.Opcode, Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.StackItem]
+    effects []
+
+fn checked(code: Int, state: State, context: Context) -> Step
+    ? "The opcode, under the rules in force where the spend sits."
+    match Domain.Rules.stillNop(Domain.SpendContext.rulesOf(context), code)
+        true -> Step.Continue(state)
+        false -> enforced(code, state, context)
+
+verify checked
+    checked(177, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.at(0))) => Step.Continue(Domain.ScriptState.empty())
+    checked(178, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.at(0))) => Step.Continue(Domain.ScriptState.empty())
+
+fn enforced(code: Int, state: State, context: Context) -> Step
+    ? "An empty stack fails before the Transaction is looked at, which is the"
+      "order the reference client checks in and the reason a Script with no"
+      "argument is invalid rather than undecided."
+    match state.stack
+        [] -> refused(code, "needs an item")
+        [head, ..tail] -> withTop(code, head, state, context)
+
+verify enforced
+    enforced(177, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs an item")))
+
+fn withTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
+    ? "Five bytes, not four."
+    match List.len(top) <= 5
+        false -> refused(code, "needs a number of five bytes or fewer")
+        true -> withValue(code, Domain.StackItem.asNumber(top), state, context)
+
+verify withTop
+    withTop(177, [1, 2, 3, 4, 5, 6], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs a number of five bytes or fewer")))
+
+fn withValue(code: Int, value: Int, state: State, context: Context) -> Step
+    ? "A negative lock is meaningless and fails rather than being ignored."
+    match value < 0
+        true -> refused(code, "refuses a negative")
+        false -> against(code, value, state, context)
+
+verify withValue
+    withValue(177, 0 - 1, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY refuses a negative")))
+
+fn against(code: Int, value: Int, state: State, context: Context) -> Step
+    ? "Without a spend there is no Transaction to lock, and the answer is"
+      "undecided rather than either way -- the same shape a signature check"
+      "takes when it has no Transaction to have committed to."
+    match Domain.SpendContext.lockingOf(context)
+        Option.None -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction it locks"))
+        Option.Some(locking) -> byCode(code, value, locking, state)
+
+verify against
+    against(177, 0, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"))
+
+fn byCode(code: Int, value: Int, locking: Locking, state: State) -> Step
+    ? "Which of the two this is."
+    match code == 177
+        true -> lockTimeChecked(value, locking, state)
+        false -> sequenceChecked(value, locking, state)
+
+verify byCode
+    byCode(177, 0, Domain.SpendContext.Locking(version = 1, lockTime = 0, sequence = 0), Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn threshold() -> Int
+    ? "Below this a lock time is a Block Height; at or above it, a Unix time."
+      "Five hundred million, which as a Height is far beyond any chain and as"
+      "a time is November 1985 -- the gap is what makes one field carry two"
+      "meanings without ambiguity."
+    500000000
+
+verify threshold
+    threshold() => 500000000
+
+fn lockTimeChecked(value: Int, locking: Locking, state: State) -> Step
+    ? "BIP65. The two must mean the same kind of thing before they compare."
+    match sameKind(value, locking.lockTime)
+        false -> refused(177, "compares a Height with a time")
+        true -> reached(value, locking, state)
+
+verify lockTimeChecked
+    lockTimeChecked(500000001, Domain.SpendContext.Locking(version = 1, lockTime = 5, sequence = 0), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY compares a Height with a time")))
+
+fn sameKind(a: Int, b: Int) -> Bool
+    ? "Both Heights, or both times."
+    (a < threshold()) == (b < threshold())
+
+verify sameKind
+    sameKind(5, 7) => true
+    sameKind(5, 500000001) => false
+    sameKind(500000001, 500000002) => true
+
+fn reached(value: Int, locking: Locking, state: State) -> Step
+    ? "The Transaction has to be locked at least as far as the Script asks."
+    match value > locking.lockTime
+        true -> refused(177, "locks past the transaction's own lock time")
+        false -> notFinal(locking, state)
+
+verify reached
+    reached(9, Domain.SpendContext.Locking(version = 1, lockTime = 5, sequence = 0), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY locks past the transaction's own lock time")))
+
+fn notFinal(locking: Locking, state: State) -> Step
+    ? "A final sequence disables the lock time, so a Script that relies on one"
+      "must refuse an Input that has turned it off."
+    match locking.sequence == 4294967295
+        true -> refused(177, "on an input whose sequence is final")
+        false -> Step.Continue(state)
+
+verify notFinal
+    notFinal(Domain.SpendContext.Locking(version = 1, lockTime = 5, sequence = 4294967295), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY on an input whose sequence is final")))
+    notFinal(Domain.SpendContext.Locking(version = 1, lockTime = 5, sequence = 0), Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn disableFlag() -> Int
+    ? "Set on a sequence, this says the sequence is not a relative lock at all."
+    2147483648
+
+verify disableFlag
+    disableFlag() => 2147483648
+
+fn typeFlag() -> Int
+    ? "Set, the sequence counts five hundred and twelve second units; clear,"
+      "it counts Blocks."
+    4194304
+
+verify typeFlag
+    typeFlag() => 4194304
+
+fn compared() -> Int
+    ? "The bits a relative lock actually compares: the type flag and the"
+      "sixteen bit count under it. Everything else in the field is ignored,"
+      "which is what leaves room for the field to mean other things later."
+    4259839
+
+verify compared
+    compared() => 4259839
+
+fn sequenceChecked(value: Int, locking: Locking, state: State) -> Step
+    ? "BIP112. A stack value with the disable bit set is not a lock at all and"
+      "the opcode does nothing, which is how a Script asks for the check only"
+      "under some conditions."
+    match Bits.and(value, disableFlag()) != 0
+        true -> Step.Continue(state)
+        false -> versioned(value, locking, state)
+
+verify sequenceChecked
+    sequenceChecked(2147483648, Domain.SpendContext.Locking(version = 1, lockTime = 0, sequence = 0), Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn versioned(value: Int, locking: Locking, state: State) -> Step
+    ? "Relative lock times are a version two rule and a version one"
+      "Transaction cannot claim them."
+    match locking.version < 2
+        true -> refused(178, "needs a version two transaction")
+        false -> enabled(value, locking, state)
+
+verify versioned
+    versioned(0, Domain.SpendContext.Locking(version = 1, lockTime = 0, sequence = 0), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSEQUENCEVERIFY needs a version two transaction")))
+
+fn enabled(value: Int, locking: Locking, state: State) -> Step
+    ? "The Input has to be claiming a relative lock for one to be checked."
+    match Bits.and(locking.sequence, disableFlag()) != 0
+        true -> refused(178, "on an input that disables relative lock time")
+        false -> sameSpan(Bits.and(value, compared()), Bits.and(locking.sequence, compared()), state)
+
+verify enabled
+    enabled(0, Domain.SpendContext.Locking(version = 2, lockTime = 0, sequence = 2147483648), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSEQUENCEVERIFY on an input that disables relative lock time")))
+
+fn sameSpan(wanted: Int, held: Int, state: State) -> Step
+    ? "Both counting Blocks, or both counting time."
+    match (wanted < typeFlag()) == (held < typeFlag())
+        false -> refused(178, "compares blocks with time")
+        true -> longEnough(wanted, held, state)
+
+verify sameSpan
+    sameSpan(4194305, 5, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSEQUENCEVERIFY compares blocks with time")))
+
+fn longEnough(wanted: Int, held: Int, state: State) -> Step
+    ? "The Input has to have waited at least as long as the Script asks."
+    match wanted > held
+        true -> refused(178, "asks for longer than the input has waited")
+        false -> Step.Continue(state)
+
+verify longEnough
+    longEnough(9, 5, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSEQUENCEVERIFY asks for longer than the input has waited")))
+    longEnough(5, 9, Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn refused(code: Int, why: String) -> Step
+    ? "A verify opcode that fails stops the Script where it stands."
+    Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} {why}")))
+
+verify refused
+    refused(177, "no") => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY no")))
