@@ -4,7 +4,7 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [App.Lookup, App.Maintain, App.Show, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [App.Lookup, App.Maintain, App.Show, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
@@ -19,46 +19,6 @@ record Span
     from: Int
     to: Int
 
-fn usageLines() -> List<String>
-    ? "User-facing help for the argv CLI."
-    [
-        "Bitcoin peer listener, chain downloader and auditor",
-        "",
-        "  [peer-address] [port]                 listen for Transactions",
-        "  headers <peer-address> <dir>          fetch every Block Header",
-        "  bodies  <peer-address> <dir> <a> <b>  fetch Blocks for Heights a..b",
-        "  prune   <dir> <height>                delete Blocks below a Height",
-        "  show    <dir> <height> [summary]      read one Block back and check it",
-        "  txindex <dir> <a> <b>                 record where Transactions in a..b sit",
-        "  outputs <dir> <a> <b>                 record the Outputs in a..b, so spends resolve",
-        "  tx      <dir> <txid>                  find one Transaction by its Id",
-        "  spend   <dir> <txid>                  check what it spends against what it pays",
-        "  audit   <dir> <a> <b>                 check every Block and spend in a..b",
-        "  migrate <dir>                         move the Index from the log into a database",
-        "",
-        "  peer-address   IPv4 address of the Peer. Omit it, when listening,",
-        "                 to ask a Bitcoin DNS seed for one.",
-        "  port           optional, defaults to 8333",
-        "  signet         put before any command to speak signet instead of",
-        "                 mainnet: magic, port 38333, seeds and genesis follow.",
-        "  dir            where the Index and the Segments live",
-        "  summary        show, without listing the Block's Transactions",
-        "",
-        "  headers must run before bodies, and bodies before txindex: each needs",
-        "  what the one before it wrote. Only headers and bodies need a Peer.",
-        "",
-        "  prune deletes whole Segments only, so it frees nothing until a Segment",
-        "  holds no Block you are still keeping, and never deletes the one the",
-        "  next Block goes into.",
-        "",
-        "  migrate runs once. After it, every command reads the same keys from a",
-        "  LevelDB instead of a replayed log, and the log is left where it is so",
-        "  the move can be undone by renaming <dir>/kv.",
-    ]
-
-verify usageLines
-    List.len(usageLines()) => 32
-    List.contains(usageLines(), "Bitcoin peer listener, chain downloader and auditor") => true
 
 fn describe(address: PeerAddress) -> String
     ? "The line shown once an address has been accepted."
@@ -144,7 +104,7 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
         "tx" -> App.Lookup.byTxid(rest, false)
         "spend" -> App.Lookup.byTxid(rest, true)
         "show" -> needShow(rest)
-        "help" -> printLines(usageLines())
+        "help" -> App.Usage.print()
         _ -> runWithAddress(network, command, rest)
 
 fn needTwo(network: Network, rest: List<String>) -> Unit
@@ -158,7 +118,7 @@ fn needTwo(network: Network, rest: List<String>) -> Unit
         Time.unixMs,
     ]
     match rest
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [address, ..more] -> withDir(network, address, more)
 
 fn withDir(network: Network, address: String, more: List<String>) -> Unit
@@ -172,7 +132,7 @@ fn withDir(network: Network, address: String, more: List<String>) -> Unit
         Time.unixMs,
     ]
     match more
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [dir, ..extra] -> startHeaders(network, Domain.Address.fromStringOn(address, Domain.Network.portOf(network)), dir)
 
 fn startHeaders(network: Network, parsed: Result<PeerAddress, String>, dir: String) -> Unit
@@ -231,7 +191,7 @@ fn needFour(network: Network, rest: List<String>) -> Unit
         Time.unixMs,
     ]
     match rest
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [address, ..more] -> bodyDir(network, address, more)
 
 fn bodyDir(network: Network, address: String, more: List<String>) -> Unit
@@ -245,7 +205,7 @@ fn bodyDir(network: Network, address: String, more: List<String>) -> Unit
         Time.unixMs,
     ]
     match more
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [dir, ..range] -> bodyRange(network, address, dir, range)
 
 fn bodyRange(network: Network, address: String, dir: String, range: List<String>) -> Unit
@@ -259,7 +219,7 @@ fn bodyRange(network: Network, address: String, dir: String, range: List<String>
         Time.unixMs,
     ]
     match heights(range)
-        Option.None -> printLines(usageLines())
+        Option.None -> App.Usage.print()
         Option.Some(span) -> startBodies(network, Domain.Address.fromStringOn(address, Domain.Network.portOf(network)), dir, span)
 
 fn heights(range: List<String>) -> Option<Span>
@@ -354,7 +314,7 @@ fn needShow(rest: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open,
     ]
     match rest
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [dir, ..more] -> showHeight(dir, more)
 
 fn showHeight(dir: String, more: List<String>) -> Unit
@@ -365,7 +325,7 @@ fn showHeight(dir: String, more: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open,
     ]
     match more
-        [] -> printLines(usageLines())
+        [] -> App.Usage.print()
         [height, ..extra] -> showMode(dir, Int.fromString(height), extra)
 
 fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Unit
@@ -389,7 +349,7 @@ fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
     match mode
         "full" -> startShow(dir, parsed, true)
         "summary" -> startShow(dir, parsed, false)
-        _ -> printLines(usageLines())
+        _ -> App.Usage.print()
 
 fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -> Unit
     ? "Show, or the usage if the Height was not a whole number."
@@ -399,7 +359,7 @@ fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -
         Infra.Kv.get, Infra.Kv.open,
     ]
     match parsed
-        Result.Err(message) -> printLines(usageLines())
+        Result.Err(message) -> App.Usage.print()
         Result.Ok(height) -> shown(showRun(dir, height, withTransactions))
 
 fn showRun(dir: String, height: Int, withTransactions: Bool) -> Result<List<String>, String>
@@ -415,7 +375,7 @@ fn shown(outcome: Result<List<String>, String>) -> Unit
     ? "Print the lines, or the reason there are none."
     ! [Console.error, Console.print]
     match outcome
-        Result.Ok(lines) -> printLines(lines)
+        Result.Ok(lines) -> App.Usage.printLines(lines)
         Result.Err(message) -> Console.error("error: {message}")
 
 fn blocksPath(dir: String) -> String
@@ -465,7 +425,7 @@ fn runWithPort(network: Network, address: String, port: String, extra: List<Stri
     ]
     match extra
         [] -> report(network, Domain.Address.fromParts(address, port))
-        [_, ..surplus] -> printLines(usageLines())
+        [_, ..surplus] -> App.Usage.print()
 
 fn report(network: Network, parsed: Result<PeerAddress, String>) -> Unit
     ? "Connect to the accepted Peer, or say why the address was rejected."
@@ -497,15 +457,3 @@ fn announce(outcome: Result<Unit, String>) -> Unit
         Result.Ok(done) -> Console.print("peer closed the connection")
         Result.Err(message) -> Console.error("peer session failed: {message}")
 
-fn printLines(lines: List<String>) -> Unit
-    ? "Print each line in turn."
-    ! [Console.print]
-    match lines
-        [] -> Unit
-        [head, ..tail] -> printThen(head, tail)
-
-fn printThen(line: String, rest: List<String>) -> Unit
-    ? "Print one line, then continue with the rest."
-    ! [Console.print]
-    _printed = Console.print(line)
-    printLines(rest)
