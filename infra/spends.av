@@ -42,7 +42,7 @@ record Gathered
     tally: Tally
     pending: List<Pending>
 
-fn scriptsAcross(work: List<Work>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn scriptsAcross(work: List<Work>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "Every Script pair in a Block, run across branches, with the totals and"
       "anything that did not settle."
       "Branches return their own report lines rather than the walk pairing"
@@ -50,41 +50,45 @@ fn scriptsAcross(work: List<Work>, rules: Rules) -> Result<Tuple<Outcomes, List<
       "reorders them, so position means nothing outside the branch that made"
       "it -- and a line built where the answer is has the Transaction and the"
       "Input in hand anyway."
-    fanned(Domain.ScriptWork.divided(Domain.ScriptWork.piecesOf(work, 0, [])), rules)
+    fanned(Domain.ScriptWork.divided(Domain.ScriptWork.piecesOf(work, 0, [])), rules, height, blockId)
 
 verify scriptsAcross
-    scriptsAcross([], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
+    scriptsAcross([], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn fanned(branches: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn fanned(branches: List<List<Piece>>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "Every branch, declared independent of every other."
       "The VM runs them one after another, so verify and the corpus see what"
       "they always saw. Compiled Rust runs a thread per branch."
     match branches
         [] -> Result.Ok((Domain.SpendScript.noOutcomes(), []))
-        [head, ..tail] -> fannedStep(head, tail, rules)
+        [head, ..tail] -> fannedStep(head, tail, rules, height, blockId)
 
 verify fanned
-    fanned([], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
+    fanned([], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn fannedStep(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn fannedStep(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "This branch, and the rest of them if there are any."
       "A lone branch is run where it stands rather than declared independent"
       "of nothing."
     match rest
-        [] -> eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules)
-        [head, ..tail] -> paired(branch, rest, rules)
+        [] -> eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules, height, blockId)
+        [head, ..tail] -> paired(branch, rest, rules, height, blockId)
 
 verify fannedStep
-    fannedStep([], [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
+    fannedStep([], [], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn paired(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn paired(branch: List<Piece>, rest: List<List<Piece>>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "This branch and the rest of them, as an independent product."
-    data = (eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules), fanned(rest, rules))?!
+      "Both halves read the Height and the Block Id. Generated Rust gives each"
+      "branch its own owned captures now, so a value both halves read is no"
+      "longer cloned for the first and moved into the second -- that was"
+      "jasisz/aver#1019, fixed upstream by #1023."
+    data = (eachInBranch(branch, Domain.SpendScript.noOutcomes(), [], rules, height, blockId), fanned(rest, rules, height, blockId))?!
     match data
         (mine, others) -> Result.Ok(joined(mine, others))
 
 verify paired
-    paired([], [[]], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
+    paired([], [[]], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
 fn joined(mine: Tuple<Outcomes, List<String>>, others: Tuple<Outcomes, List<String>>) -> Tuple<Outcomes, List<String>>
     ? "Two branches' answers added together."
@@ -102,41 +106,42 @@ fn withOthers(counts: Outcomes, lines: List<String>, others: Tuple<Outcomes, Lis
 verify withOthers
     withOthers(Domain.SpendScript.noOutcomes(), [], (Domain.SpendScript.noOutcomes(), [])) => (Domain.SpendScript.noOutcomes(), [])
 
-fn eachInBranch(branch: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn eachInBranch(branch: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "One branch's Inputs, in order, inside a single thread."
       "A Result although nothing here can fail, because an independent product"
       "unwraps Results and both branches must agree on the error type."
     match branch
         [] -> Result.Ok((counts, List.reverse(lines)))
-        [head, ..tail] -> stepOne(head, tail, counts, lines, rules)
+        [head, ..tail] -> stepOne(head, tail, counts, lines, rules, height, blockId)
 
 verify eachInBranch
-    eachInBranch([], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.noOutcomes(), []))
+    eachInBranch([], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.noOutcomes(), []))
 
-fn stepOne(piece: Piece, tail: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules) -> Result<Tuple<Outcomes, List<String>>, String>
+fn stepOne(piece: Piece, tail: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "One Input's Script pair, run once and both counted and reported from."
     one = scriptCounts(piece.transaction, piece.spent.index, piece.spent.input, piece.spent.spend, Domain.SpendScript.noOutcomes(), rules)
-    eachInBranch(tail, Domain.SpendScript.merged(counts, one), notedFrom(piece, one, lines), rules)
+    eachInBranch(tail, Domain.SpendScript.merged(counts, one), notedFrom(piece, one, lines, height, blockId), rules, height, blockId)
 
 verify stepOne
-    stepOne(Domain.ScriptWork.samplePiece(), [], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest()) => Result.Ok((Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest()))), []))
+    stepOne(Domain.ScriptWork.samplePiece(), [], Domain.SpendScript.noOutcomes(), [], Domain.Rules.latest(), 0, "aa") => Result.Ok((Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest()))), []))
 
-fn notedFrom(piece: Piece, one: Outcomes, lines: List<String>) -> List<String>
+fn notedFrom(piece: Piece, one: Outcomes, lines: List<String>, height: Int, blockId: String) -> List<String>
     ? "A line naming this Input, when its Script did not pass."
       "By Input rather than by Transaction, which is finer than it was: the"
       "division works in Inputs now, so the Input is what is in hand."
-      "The Height and the Block are not named here and not passed in. A value"
-      "captured by both halves of an independent product is cloned for the"
-      "first and moved for the second, and the generated Rust then will not"
-      "build -- jasisz/aver#1019. The walk knows both and puts them on the"
-      "front of the line, which is where they were going to be printed anyway."
+      "The whole line is built here, Height and Block Id included. It used to"
+      "be built in two halves -- the branch naming the Transaction and the walk"
+      "putting the Height on the front -- because a value both halves of an"
+      "independent product read was cloned for the first and moved into the"
+      "second, and the generated Rust would not build. That was"
+      "jasisz/aver#1019 and it is fixed."
     match one.failed + one.undecided > 0
         false -> lines
-        true -> List.prepend("tx {Domain.Transaction.txidOf(piece.transaction)} input {piece.spent.index}: {Domain.SpendScript.noteOf(one)}", lines)
+        true -> List.prepend("  !! height {height} block {blockId} tx {Domain.Transaction.txidOf(piece.transaction)} input {piece.spent.index}: {Domain.SpendScript.noteOf(one)}", lines)
 
 verify notedFrom
-    notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.noOutcomes(), []) => []
-    List.len(notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("", "", Domain.SpendContext.bare(Domain.Rules.latest()))), [])) => 1
+    notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.noOutcomes(), [], 0, "aa") => []
+    List.len(notedFrom(Domain.ScriptWork.samplePiece(), Domain.SpendScript.count(Domain.SpendScript.noOutcomes(), Domain.SpendScript.check("", "", Domain.SpendContext.bare(Domain.Rules.latest()))), [], 7, "aa")) => 1
 
 fn over(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, inputs: List<Input>, held: Gathered, rules: Rules) -> Result<Gathered, String>
     ? "Each Input in turn, carrying the Transaction they belong to and which"

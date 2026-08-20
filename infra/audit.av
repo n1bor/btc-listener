@@ -246,8 +246,8 @@ fn oneBlock(store: Store, blocks: BlockStore, one: Prepared, rest: List<Prepared
     stepped = maybeReport(one.height, counts, pace)?
     counted = Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts)
     work = resolvedAll(store, blocks, one.transactions, Domain.Rules.at(one.height), [])?
-    answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(one.height))?
-    processed(store, blocks, rest, tallied(work, counted, answered, one.height, one.blockId), stepped)
+    answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(one.height), one.height, one.blockId)?
+    processed(store, blocks, rest, tallied(work, counted, answered), stepped)
 
 fn resolvedAll(store: Store, blocks: BlockStore, transactions: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
     ? "Resolve every Input of every Transaction in the Block, in order."
@@ -297,7 +297,7 @@ fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace,
     _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
 
-fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>, height: Int, blockId: String) -> Counts
+fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>) -> Counts
     ? "Add the Block's Script answers in, say what did not settle, then judge"
       "each Transaction's sums."
       "Scripts and sums are counted apart because the division only reorders"
@@ -305,32 +305,21 @@ fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<Stri
       "always did, and need nothing from the branches."
     ! [Console.print]
     match answered
-        (scripts, lines) -> afterScripts(work, withScripts(counts, scripts), lines, height, blockId)
+        (scripts, lines) -> afterScripts(work, withScripts(counts, scripts), lines)
 
 verify tallied
-    tallied([], zero(), (Domain.SpendScript.noOutcomes(), []), 0, "aa") => zero()
+    tallied([], zero(), (Domain.SpendScript.noOutcomes(), [])) => zero()
 
-fn afterScripts(work: List<Work>, counts: Counts, lines: List<String>, height: Int, blockId: String) -> Counts
+fn afterScripts(work: List<Work>, counts: Counts, lines: List<String>) -> Counts
     ? "Print what did not settle, then judge the sums."
+      "The lines arrive whole. The branch that found the fault names the"
+      "Height and the Block Id itself now -- see Infra.Spends.notedFrom."
     ! [Console.print]
-    _said = printLines(prefixed(lines, height, blockId, []))
+    _said = printLines(lines)
     judgedAll(work, counts)
 
 verify afterScripts
-    afterScripts([], zero(), [], 0, "aa") => zero()
-
-fn prefixed(lines: List<String>, height: Int, blockId: String, acc: List<String>) -> List<String>
-    ? "Put the Height and the Block on the front of each line."
-      "Here rather than in the branch that found it, because a value captured"
-      "by both halves of an independent product does not compile -- see"
-      "Infra.Spends.notedFrom and jasisz/aver#1019."
-    match lines
-        [] -> List.reverse(acc)
-        [head, ..tail] -> prefixed(tail, height, blockId, List.prepend("  !! height {height} block {blockId} {head}", acc))
-
-verify prefixed
-    prefixed([], 0, "aa", []) => []
-    prefixed(["tx bb input 0: no"], 7, "aa", []) => ["  !! height 7 block aa tx bb input 0: no"]
+    afterScripts([], zero(), []) => zero()
 
 fn printLines(lines: List<String>) -> Unit
     ? "Everything the Block found that did not settle, in one write."
