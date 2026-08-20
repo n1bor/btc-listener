@@ -160,32 +160,24 @@ verify legacyOfRaw
     legacyOfRaw("9ff618e60136f8e6bb7eabaaac7d6e2535f5fba95854be6d2726f986eaa9537cb283c701ff02000000026a65ffffffff012d1c0905000000000865ab00ac6a516a652f9ad240", 0, "51515253635351ac", 1571304387) => Result.Ok("795a698393937919802861b6c56f92a13178d7d7ad462667a8d4953020d39c65")
     legacyOfRaw("zz", 0, "51", 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn flattened(values: List<Int>) -> List<Int>
-    ? "The same values in one body rather than a tree of concatenations."
-      "List.concat builds a node and not a copy, so a serialised Transaction is"
-      "a tree of the parts it was assembled from. A tree costs a heap node per"
-      "element to walk by pattern match, and Bytes.fromList walks the whole"
-      "preimage by pattern match to check every value is an octet. Measured on"
-      "a 57400 byte preimage: 0.8 ms as one body against 8.7 ms as a tree, for"
-      "identical values. Filed upstream as jasisz/aver#1020."
-      "List.take of the whole list is the one operation that hands back a"
-      "single body, which is why it is here and why it is not a no-op."
-    List.take(values, List.len(values))
-
-verify flattened
-    flattened([]) => []
-    flattened([1, 2, 3]) => [1, 2, 3]
-    flattened(List.concat([1, 2], [3])) => [1, 2, 3]
-
 fn preimage(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, hashType: Int) -> Result<List<Int>, String>
     ? "The modified copy of the Transaction, as the bytes that get hashed."
       "Exposed because it is the thing worth looking at when a signature will"
       "not verify. The hash tells a reader nothing; the bytes tell them which"
       "field went in wrong."
+      "Handed back as the tree of parts it was assembled from. It used to be"
+      "copied into one body first, because walking a List.concat tree cost a"
+      "heap node per element and Bytes.fromList walks the whole preimage to"
+      "check every value is an octet -- 0.8 ms as one body against 8.7 ms as a"
+      "tree, which was jasisz/aver#1020. Upstream #1024 indexes a rope for"
+      "traversal and the gap is gone: ten interleaved pairs over Blocks"
+      "362900..362904 put the copy at 26.63 s of cpu against 26.23 s without"
+      "it, inside a within-arm spread of eight seconds. It buys nothing now,"
+      "so it is not done."
     code = scriptCodeOf(scriptCodeHex)?
     inputs = inputsPart(transaction.inputs, inputIndex, code, baseOf(hashType), isAnyoneCanPay(hashType))?
     outputs = outputsPart(transaction.outputs, inputIndex, baseOf(hashType))?
-    Result.Ok(flattened(List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(inputs, List.concat(outputs, List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), Domain.Message.littleEndian(hashType, 4)))))))
+    Result.Ok(List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(inputs, List.concat(outputs, List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), Domain.Message.littleEndian(hashType, 4))))))
 
 verify preimage
     List.take(preimage(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000")?))?, 0, "51", 1)?, 5) => [1, 0, 0, 0, 1]
@@ -249,7 +241,7 @@ fn joined(parts: List<List<Int>>, acc: List<Int>) -> List<Int>
       "the left edge of the tree, and walking that tree descends the whole"
       "edge for every element -- quadratic, and the reason Block 28507 once"
       "took 26 seconds for its one real Transaction. Building rightwards keeps"
-      "the descent short, and flattened makes it shorter still."
+      "the descent short."
     match parts
         [] -> acc
         [head, ..tail] -> joined(tail, List.concat(head, acc))
