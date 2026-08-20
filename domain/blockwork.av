@@ -1,0 +1,112 @@
+module BlockWork
+    intent =
+        "The part of auditing a Block that does not touch the chain, and the"
+        "division of a batch of Blocks between branches."
+        "Decoding a Block's body and checking its Header are pure: they need"
+        "the bytes and what the Index recorded, and nothing else. They are also"
+        "most of what an audit spends its time on outside the Scripts -- a"
+        "Block of 824 Transactions took 356 ms to decode against about 300 ms"
+        "for every Script in it, and the decode ran on one core while the other"
+        "seven waited."
+        "Blocks are independent of each other here in a way they are not once"
+        "spends have to resolve, so a batch of them is fanned out and the walk"
+        "picks the answers up in order afterwards. The batch is gathered by the"
+        "caller, which is where the disk and the database live; what arrives"
+        "here is bytes."
+    exposes [Unchecked, Prepared, preparedAcross]
+    depends [Bytes, Domain.Block, Domain.Checks, Domain.Transaction]
+    effects []
+
+record Unchecked
+    height: Int
+    blockId: String
+    parentBlockId: Option<String>
+    payload: Bytes
+
+record Prepared
+    height: Int
+    blockId: String
+    transactions: List<Transaction>
+    findings: List<Finding>
+
+fn preparedAcross(waiting: List<Unchecked>) -> Result<List<Prepared>, String>
+    ? "Every Block in the batch decoded and checked, in the order it came in."
+      "The VM runs the branches one after another, so verify and the corpus"
+      "see what they always saw. Compiled Rust runs a thread per branch."
+    match waiting
+        [] -> Result.Ok([])
+        [head, ..tail] -> acrossStep(head, tail)
+
+verify preparedAcross
+    preparedAcross([]) => Result.Ok([])
+    List.len(preparedAcross([genesisUnchecked(0)])?) => 1
+    List.len(preparedAcross([genesisUnchecked(0), genesisUnchecked(1), genesisUnchecked(2)])?) => 3
+
+fn acrossStep(one: Unchecked, rest: List<Unchecked>) -> Result<List<Prepared>, String>
+    ? "This Block, and the rest of the batch if there is any."
+      "A lone Block is prepared where it stands rather than declared"
+      "independent of nothing."
+    match rest
+        [] -> alone(prepareOne(one))
+        [head, ..tail] -> pairedWith(one, rest)
+
+verify acrossStep
+    List.len(acrossStep(genesisUnchecked(0), [])?) => 1
+    List.len(acrossStep(genesisUnchecked(0), [genesisUnchecked(1)])?) => 2
+
+fn alone(prepared: Result<Prepared, String>) -> Result<List<Prepared>, String>
+    ? "One Block's answer, as the list of answers the caller expects."
+    match prepared
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(only) -> Result.Ok([only])
+
+verify alone
+    alone(Result.Err("no")) => Result.Err("no")
+    List.len(alone(prepareOne(genesisUnchecked(0)))?) => 1
+
+fn pairedWith(one: Unchecked, rest: List<Unchecked>) -> Result<List<Prepared>, String>
+    ? "This Block and the rest of the batch, as an independent product."
+    data = (prepareOne(one), preparedAcross(rest))?!
+    match data
+        (mine, others) -> Result.Ok(List.prepend(mine, others))
+
+verify pairedWith
+    List.len(pairedWith(genesisUnchecked(0), [genesisUnchecked(1)])?) => 2
+    heightsOf(pairedWith(genesisUnchecked(0), [genesisUnchecked(1)])?, []) => [0, 1]
+
+fn prepareOne(waiting: Unchecked) -> Result<Prepared, String>
+    ? "One Block: the Transactions it holds, and everything checkable about it."
+      "A body that will not decode stops the audit, as it always has: the"
+      "count in the body says how many Transactions to expect, and a walk that"
+      "carried on would be counting phantoms."
+    transactions = Domain.Block.transactionsOf(waiting.payload)?
+    findings = Domain.Checks.findingsOver(waiting.payload, waiting.blockId, waiting.parentBlockId, Result.Ok(transactions))?
+    Result.Ok(Prepared(height = waiting.height, blockId = waiting.blockId, transactions = transactions, findings = findings))
+
+verify prepareOne
+    List.len(prepareOne(genesisUnchecked(7))?.transactions) => 1
+    List.len(prepareOne(genesisUnchecked(7))?.findings) => 4
+    prepareOne(genesisUnchecked(7))?.height => 7
+    prepareOne(Unchecked(height = 0, blockId = "aa", parentBlockId = Option.None, payload = Bytes.fromList([]))) => Result.Err("Block Header must be 80 bytes, got 0")
+
+fn heightsOf(prepared: List<Prepared>, acc: List<Int>) -> List<Int>
+    ? "The Heights the answers came back under, so order can be asserted."
+    match prepared
+        [] -> List.reverse(acc)
+        [head, ..tail] -> heightsOf(tail, List.prepend(head.height, acc))
+
+verify heightsOf
+    heightsOf([], []) => []
+    heightsOf([prepareOne(genesisUnchecked(3))?], []) => [3]
+
+fn genesisUnchecked(height: Int) -> Unchecked
+    ? "The genesis Block as a batch entry, for the cases above."
+      "Total: the hexadecimal is a literal in Domain.Checks and parses, so the"
+      "default is unreachable."
+    match Bytes.fromHex(Domain.Checks.genesisHexFor())
+        Result.Err(why) -> Unchecked(height = height, blockId = "", parentBlockId = Option.None, payload = Bytes.fromList([]))
+        Result.Ok(payload) -> Unchecked(height = height, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", parentBlockId = Option.None, payload = payload)
+
+verify genesisUnchecked
+    genesisUnchecked(4).height => 4
+    genesisUnchecked(4).blockId => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
