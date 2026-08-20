@@ -91,6 +91,21 @@ fn classify(script: List<Int>) -> String
         169 -> named(isPayToScriptHash(script), "P2SH")
         0 -> witnessKind(script)
         81 -> versionOneOrMultisig(script)
+        82 -> laterWitness(script)
+        83 -> laterWitness(script)
+        84 -> laterWitness(script)
+        85 -> laterWitness(script)
+        86 -> laterWitness(script)
+        87 -> laterWitness(script)
+        88 -> laterWitness(script)
+        89 -> laterWitness(script)
+        90 -> laterWitness(script)
+        91 -> laterWitness(script)
+        92 -> laterWitness(script)
+        93 -> laterWitness(script)
+        94 -> laterWitness(script)
+        95 -> laterWitness(script)
+        96 -> laterWitness(script)
         106 -> "OP_RETURN"
         33 -> named(isPayToPubKey(script, 33), "P2PK")
         65 -> named(isPayToPubKey(script, 65), "P2PK")
@@ -170,10 +185,68 @@ verify isSmallNumber
 
 fn witnessKind(script: List<Int>) -> String
     ? "A leading zero is a version-zero program; its length says which."
+      "Version zero defines exactly two lengths. A version zero program of any"
+      "other length is not a witness program at all and never becomes one --"
+      "that is the version that has already been spent."
     match List.len(script)
         22 -> named(isWitnessProgram(script, 0, 22), "P2WPKH")
         34 -> named(isWitnessProgram(script, 0, 34), "P2WSH")
         _ -> "nonstandard"
+
+fn witnessName() -> String
+    ? "What an Output is called when it is a witness program of a version"
+      "nothing has defined yet."
+      "Not nonstandard: it is a witness program, Bitcoin will not run it, and"
+      "it has a perfectly good address. Calling it nonstandard says the"
+      "opposite of all three."
+    "witness"
+
+verify witnessName
+    witnessName() => "witness"
+
+fn laterWitness(script: List<Int>) -> String
+    ? "OP_2 through OP_16 open a witness program of a version nobody has given"
+      "meaning to. They are anyone-can-spend today and a soft fork may claim"
+      "one later, which is exactly how version one arrived."
+    match looksLikeWitness(script)
+        true -> witnessName()
+        false -> multisigOrNot(script)
+
+verify laterWitness
+    laterWitness(bytesOf("520250ed")) => "witness"
+    laterWitness(bytesOf("5202dc96")) => "witness"
+    laterWitness(bytesOf("5200")) => "nonstandard"
+
+fn looksLikeWitness(script: List<Int>) -> Bool
+    ? "A version opcode, one push of two to forty bytes, and nothing else."
+      "BIP141's shape. The version byte is the caller's business; this is"
+      "about what follows it."
+    Bool.and(programWidth(script) >= 2, Bool.and(programWidth(script) <= 40, byteAt(script, 1) == programWidth(script)))
+
+verify looksLikeWitness
+    looksLikeWitness(bytesOf("520250ed")) => true
+    looksLikeWitness(bytesOf("5200")) => false
+    looksLikeWitness(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => true
+
+fn programWidth(script: List<Int>) -> Int
+    ? "How many bytes follow the version opcode and its length byte."
+    List.len(script) - 2
+
+verify programWidth
+    programWidth(bytesOf("520250ed")) => 2
+    programWidth(bytesOf("52")) => 0 - 1
+
+fn witnessVersionOf(script: List<Int>) -> Int
+    ? "The version a witness program's leading opcode names: OP_0 is nought,"
+      "OP_1 through OP_16 are one through sixteen."
+    match byteAt(script, 0)
+        0 -> 0
+        _ -> byteAt(script, 0) - 80
+
+verify witnessVersionOf
+    witnessVersionOf(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => 0
+    witnessVersionOf(bytesOf("520250ed")) => 2
+    witnessVersionOf(bytesOf("6002aabb")) => 16
 
 verify witnessKind
     witnessKind(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "P2WPKH"
@@ -244,7 +317,19 @@ fn addressOf(kind: String, script: List<Int>) -> Result<String, String>
         "P2WPKH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
         "P2WSH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
         "P2TR" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 1, program))
-        _ -> Result.Err("no address for {kind}")
+        _ -> laterWitnessAddress(kind, script)
+
+fn laterWitnessAddress(kind: String, script: List<Int>) -> Result<String, String>
+    ? "A witness program of an undefined version still has an address, and"
+      "Domain.Bech32.encode already picks Bech32m for every version above"
+      "nought, which is what BIP350 asks for."
+    match kind == witnessName()
+        true -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), witnessVersionOf(script), List.drop(script, 2)))
+        false -> Result.Err("no address for {kind}")
+
+verify laterWitnessAddress
+    laterWitnessAddress("witness", bytesOf("520250ed")) => Result.Ok("bc1z2rksukkjr8")
+    laterWitnessAddress("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
 
 verify addressOf
     addressOf("P2PKH", bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
