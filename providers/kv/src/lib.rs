@@ -25,7 +25,7 @@ use rusty_leveldb::{LdbIterator, Options, WriteBatch, DB};
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
 /// than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:2db56b8a36569a8d1349567237012b0ae6eaf74f08336474b8c23ba7c2d46004";
+    "sha256:a3ca919aeb2d1693376f626e4dfe727d5c486cb36c0594ff1a85a069f457bd01";
 
 /// The open database, behind a lock because a `ProviderResource` payload is
 /// shared and the LevelDB handle wants `&mut` for every call, reads included.
