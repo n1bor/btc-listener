@@ -110,10 +110,13 @@ until you stop it with Ctrl-C. The listen loop's recursive call is in tail
 position, so it runs indefinitely without growing the stack. On a busy mainnet
 peer expect a few transactions per second.
 
-It will also stop if a read fails. Aver's TCP read deadline is a hardcoded 30
-seconds ([jasisz/aver#782](https://github.com/jasisz/aver/issues/782)), so a
-peer that says nothing for that long ends the session — unlikely on mainnet,
-where announcements arrive constantly, but worth knowing.
+It will also stop if a read fails. A session read has no deadline at all:
+[jasisz/aver#782](https://github.com/jasisz/aver/issues/782) was answered by
+removing one rather than making it configurable, on the grounds that timing out
+part way through a frame leaves the stream silently desynchronised, which is
+worse than waiting. So a peer that says nothing does not end the session — it
+stops the session making progress, and `Tcp.poll` is the operation that would
+notice. See [#55](https://github.com/n1bor/btc-listener/issues/55).
 
 `aver compile` prints one warning per dependency module — 45 of them — each
 saying that module's verify blocks are not sampled and suggesting you move them

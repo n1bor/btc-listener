@@ -32,8 +32,11 @@ The specification, such as it is, is two example files rather than prose:
 poll-shaped primitives are ordinary effects — readiness is *data*, recorded
 and replayed like any other effect result — so an event loop over them is a
 first-class design, not an interim one.
-[jasisz/aver#782](https://github.com/jasisz/aver/issues/782) (the configurable
-read deadline) is already scoped as the first piece.
+[jasisz/aver#782](https://github.com/jasisz/aver/issues/782) was the first
+piece and has since landed — not as the configurable read deadline this asked
+for, but as `Tcp.poll` and `Tcp.readSome`, with session reads given no deadline
+at all. The prediction held; the shape it arrived in was better than the one
+requested.
 
 ## The decision
 
@@ -80,7 +83,9 @@ is the shape `infra/download.av` and `infra/txindex.av` already have.
   unchanged, because the node really is one writer.
 - Stage 5 of the full-node plan is gated on small primitives (a readiness
   poll, the #782 deadline), not on a language project. `Tcp.listen` /
-  `Tcp.accept` for Stage 8 are the same family.
+  `Tcp.accept` for Stage 8 are the same family. **Both of the first two have
+  since arrived** as `Tcp.poll` and `Tcp.readSome`; the listen/accept pair has
+  not.
 - Per-Input Script checking inside Block validation becomes the first natural
   product in the codebase — pure, embarrassingly parallel, and measurable
   against the sequential walk `audit` uses today.
