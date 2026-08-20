@@ -9,7 +9,7 @@ module Chain
         "on purpose look identical in the Index, and the Prune Watermark is what"
         "tells them apart. A caller that treats them alike either re-downloads"
         "what it discarded or reports a hole where there was a decision."
-    exposes [Body, Found, at, transactionAt, watermark]
+    exposes [withoutBodies, Body, Found, at, transactionAt, watermark]
     depends [Bytes, Domain.Index, Infra.Blocks, Infra.Store]
     effects [Disk.readText, Infra.Kv.get]
 
@@ -133,3 +133,45 @@ fn heldAt(blocks: BlockStore, blockId: String, where: String) -> Result<Found, S
     location = Domain.Index.decodeLocation(where)?
     payload = Infra.Blocks.read(blocks, location)?
     Result.Ok(Found(height = 0 - 1, blockId = blockId, parentBlockId = Option.None, body = Body.Held(location, payload)))
+
+fn withoutBodies(store: Store, from: Int, to: Int, acc: Int) -> Result<Int, String>
+    ? "How many Heights in a range the Index names but holds no body for."
+      "Asked after the phase says it is done, because the phase cannot see its"
+      "own gap: the walk either stores a Block or fails, so a Height that is"
+      "still empty afterwards was never walked -- a range boundary that moved,"
+      "or two runs over overlapping ranges. Three such Heights sat in this"
+      "chain from August 14th to August 20th, and what found them was an audit"
+      "108,000 Blocks later reporting 908 spends it could not resolve."
+      "A Height the Index does not name is not counted. That is the header"
+      "phase's business and the walk refuses it outright."
+    ! [Infra.Kv.get]
+    match from > to
+        true -> Result.Ok(acc)
+        false -> withoutBody(store, from, to, acc)
+
+verify withoutBodies
+    withoutBodies(Infra.Store.fixture([]), 5, 4, 0) => Result.Ok(0)
+    withoutBodies(Infra.Store.fixture([]), 1, 3, 0) => Result.Ok(0)
+
+fn withoutBody(store: Store, from: Int, to: Int, acc: Int) -> Result<Int, String>
+    ? "One Height: named and held, named and empty, or not named at all."
+    ! [Infra.Kv.get]
+    named = Infra.Store.get(store, Domain.Index.heightKey(from))?
+    match named
+        Option.None -> withoutBodies(store, from + 1, to, acc)
+        Option.Some(blockId) -> countedIfEmpty(store, from, to, acc, blockId)
+
+verify withoutBody
+    withoutBody(Infra.Store.fixture([]), 1, 1, 0) => Result.Ok(0)
+
+fn countedIfEmpty(store: Store, from: Int, to: Int, acc: Int, blockId: String) -> Result<Int, String>
+    ? "Count the Height when the Index names a Block it does not hold."
+    ! [Infra.Kv.get]
+    held = Infra.Store.has(store, Domain.Index.blockKey(blockId))?
+    match held
+        true -> withoutBodies(store, from + 1, to, acc)
+        false -> withoutBodies(store, from + 1, to, acc + 1)
+
+verify countedIfEmpty
+    countedIfEmpty(Infra.Store.fixture([]), 1, 1, 0, "aa") => Result.Ok(1)
+    countedIfEmpty(Infra.Store.fixture([("b:aa", "0:0")]), 1, 1, 0, "aa") => Result.Ok(0)

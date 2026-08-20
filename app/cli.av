@@ -304,7 +304,24 @@ fn bodiesDone(network: Network, address: PeerAddress, dir: String, span: Span) -
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
     progress = Infra.Download.bodies(network, address, store, blocks, span.from, span.to)?
-    Result.Ok("{progress.count} Blocks stored, last Segment {Infra.Blocks.currentSegment(progress.blocks)}")
+    bodiesReport(progress.count, Infra.Blocks.currentSegment(progress.blocks), Infra.Chain.withoutBodies(progress.store, span.from, span.to, 0)?)
+
+fn bodiesReport(stored: Int, segment: Int, empty: Int) -> Result<String, String>
+    ? "What the phase did, and whether it left the range whole."
+      "A count of Blocks stored says nothing about coverage: the phase skips a"
+      "Height whose Block it already holds, so a re-run stores none and is"
+      "right to. What matters is whether any Height the Index names still has"
+      "no body when the phase says it is done -- three such Heights sat in this"
+      "chain for six days, and what found them was an audit 108000 Blocks"
+      "later reporting 908 spends it could not resolve."
+    match empty
+        0 -> Result.Ok("{stored} Blocks stored, last Segment {segment}")
+        _ -> Result.Err("{stored} Blocks stored but {empty} Heights in the range still hold no body; run this phase again over them")
+
+verify bodiesReport
+    bodiesReport(7, 3, 0) => Result.Ok("7 Blocks stored, last Segment 3")
+    bodiesReport(0, 3, 0) => Result.Ok("0 Blocks stored, last Segment 3")
+    bodiesReport(7, 3, 3) => Result.Err("7 Blocks stored but 3 Heights in the range still hold no body; run this phase again over them")
 
 fn needShow(rest: List<String>) -> Unit
     ? "Showing a Block is local: a directory and a Height, no Peer."
