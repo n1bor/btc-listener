@@ -49,10 +49,6 @@ module Store
         "August 2026, 40000 entries: 52 milliseconds through one putAll against"
         "24404 one put at a time, so the ratio stands at about 470 and so does"
         "every batch in the callers."
-        "Where two arms of a match read the same thing they bind it under"
-        "different names. That is jasisz/aver#991: cse-duplicate counts across"
-        "mutually exclusive arms, and the binding it asks for cannot be extracted"
-        "because the arm pattern is what introduces it."
     exposes [Entry, open, openLogged, heldBy, databaseHere, databasePath, get, has, size, put, putAll, delete, deleteAll, fixture]
     exposes opaque [Store]
     depends [Domain.Text, Infra.Kv, Infra.StoreLog]
@@ -93,7 +89,7 @@ fn heldBy(store: Store) -> Result<List<Tuple<String, String>>, String>
       "which is reading a log by construction."
     match store
         Store.Memory(held) -> Result.Ok(Map.entries(held))
-        Store.Logged(path, logged) -> Result.Ok(Map.entries(logged))
+        Store.Logged(path, held) -> Result.Ok(Map.entries(held))
         Store.Database(handle) -> Result.Err("a database does not list itself")
 
 verify heldBy
@@ -198,7 +194,7 @@ fn looked(store: Store, key: String) -> Result<Option<String>, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.get(held, key))
-        Store.Logged(path, logged) -> Result.Ok(Map.get(logged, key))
+        Store.Logged(path, held) -> Result.Ok(Map.get(held, key))
         Store.Database(handle) -> Infra.Kv.get(handle, key)
 
 verify looked
@@ -223,7 +219,7 @@ fn present(store: Store, key: String) -> Result<Bool, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.has(held, key))
-        Store.Logged(path, logged) -> Result.Ok(Map.has(logged, key))
+        Store.Logged(path, held) -> Result.Ok(Map.has(held, key))
         Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
 
 verify present
@@ -263,7 +259,7 @@ fn size(store: Store) -> Result<Int, String>
     ! [Infra.Kv.count]
     match store
         Store.Memory(held) -> Result.Ok(Map.len(held))
-        Store.Logged(path, logged) -> Result.Ok(Map.len(logged))
+        Store.Logged(path, held) -> Result.Ok(Map.len(held))
         Store.Database(handle) -> Infra.Kv.count(handle)
 
 fn fixture(pairs: List<Tuple<String, String>>) -> Store
