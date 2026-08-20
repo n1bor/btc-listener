@@ -4,7 +4,7 @@ module Address
         "Parsing is the only way in, so an unvalidated address cannot reach the"
         "rest of the program. Octets are kept as numbers rather than as the"
         "original text, so rendering is canonical no matter how it was written."
-    exposes [fromString, fromParts, fromOctets, toString, hostOf, portOf, octetsOf]
+    exposes [fromString, fromStringOn, fromParts, fromOctets, fromOctetsOn, toString, hostOf, portOf, octetsOf]
     exposes opaque [PeerAddress]
     effects []
 
@@ -30,6 +30,17 @@ verify fromString
     fromString("999.1.1.1") => Result.Err("octet 999 is out of range (0-255)")
     fromString("") => Result.Err("expected four dot-separated octets, got 1")
 
+fn fromStringOn(text: String, port: Int) -> Result<PeerAddress, String>
+    ? "Parse a dotted-quad address onto an already-numeric port."
+      "The default port is a fact about a Network, so a caller that knows its"
+      "Network passes the port that Network answers."
+    fromOctetsAndPort(text, port)
+
+verify fromStringOn
+    fromStringOn("1.2.3.4", 38333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 38333))
+    portOf(fromStringOn("10.0.0.1", 18444)?) => 18444
+    fromStringOn("999.1.1.1", 38333) => Result.Err("octet 999 is out of range (0-255)")
+
 fn fromParts(text: String, portText: String) -> Result<PeerAddress, String>
     ? "Parse a dotted-quad address and an explicit port, both given as text."
     fromOctetsAndPort(text, parsePort(portText)?)
@@ -49,6 +60,14 @@ verify fromOctets
     fromOctets([192, 168, 1, 10]) => Result.Ok(PeerAddress(octets = [192, 168, 1, 10], portNumber = 8333))
     fromOctets([1, 2, 3]) => Result.Err("expected four octets, got 3")
     fromOctets([1, 2, 3, 300]) => Result.Err("octet 300 is out of range (0-255)")
+
+fn fromOctetsOn(octets: List<Int>, port: Int) -> Result<PeerAddress, String>
+    ? "Build an address from four already-numeric octets, on an explicit port."
+    checkOctetCount(octets, port)
+
+verify fromOctetsOn
+    fromOctetsOn([192, 168, 1, 10], 38333) => Result.Ok(PeerAddress(octets = [192, 168, 1, 10], portNumber = 38333))
+    fromOctetsOn([1, 2, 3], 38333) => Result.Err("expected four octets, got 3")
 
 fn checkOctetCount(octets: List<Int>, port: Int) -> Result<PeerAddress, String>
     ? "An address is exactly four octets, each of them in range."

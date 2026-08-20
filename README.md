@@ -133,6 +133,30 @@ aver compile main.av --module-root . -o ../btc-listener-build \
 Real errors still come through, and the compiled binary itself is quiet: an
 unparseable address still says `error: octet 999 is out of range (0-255)`.
 
+### Signet
+
+Everything here speaks mainnet unless told otherwise. Put `signet` in front of
+any command to change that:
+
+```bash
+./target/release/main signet                                   # find a signet peer via DNS
+./target/release/main signet headers 157.180.3.223 ~/signet
+./target/release/main signet bodies  157.180.3.223 ~/signet 1 200
+```
+
+One word changes four facts: the magic bytes on every Message, the default
+port (38333), the DNS seeds asked, and the genesis Block the Locator starts
+from. The offline commands — `show`, `audit`, `tx`, `spend` and the rest —
+take no `signet`: a directory answers from what it holds.
+
+Two honesty notes. The signet challenge — the block signature signet carries
+in its coinbase witness commitment — is not checked, the same way every rule
+this engine does not carry is not checked: the absence of a check is never
+reported as a pass. And addresses in a signet directory still render with
+mainnet prefixes (`bc1…` where signet spells `tb1…`), because the offline
+commands do not yet ask which Network filled the directory —
+[#34](https://github.com/n1bor/btc-listener/issues/34).
+
 ### Running under WSL
 
 If the node is on the Windows host, `127.0.0.1` inside WSL will not reach it —

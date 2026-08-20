@@ -7,8 +7,8 @@ module Resolver
         "DNS over TCP puts a two-byte length in front of the message, which"
         "makes the exchange exactly the shape exact-length reads are for: read"
         "two bytes to learn the size, then read precisely that many."
-    exposes [discover, seeds, resolverHost]
-    depends [Bytes, Domain.Dns, Domain.Address]
+    exposes [discover, seedsOf, resolverHost]
+    depends [Bytes, Domain.Dns, Domain.Address, Domain.Network]
     effects [Random.int, Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes]
 
 fn resolverHost() -> String
@@ -25,8 +25,22 @@ fn resolverPort() -> Int
 verify resolverPort
     resolverPort() => 53
 
-fn seeds() -> List<String>
-    ? "The seed hostnames Bitcoin Core ships with."
+fn seedsOf(network: Network) -> List<String>
+    ? "The seed hostnames Bitcoin Core ships with, for each Network that has any."
+    match network
+        Network.Mainnet -> mainnetSeeds()
+        Network.Testnet -> ["testnet-seed.bitcoin.jonasschnelli.ch", "seed.tbtc.petertodd.net", "seed.testnet.bitcoin.sprovoost.nl", "testnet-seed.bluematt.me"]
+        Network.Signet -> ["seed.signet.bitcoin.sprovoost.nl", "seed.signet.achownodes.xyz"]
+        Network.Regtest -> []
+
+verify seedsOf
+    List.len(seedsOf(Network.Mainnet)) => 8
+    List.contains(seedsOf(Network.Mainnet), "seed.bitcoin.sipa.be") => true
+    seedsOf(Network.Signet) => ["seed.signet.bitcoin.sprovoost.nl", "seed.signet.achownodes.xyz"]
+    seedsOf(Network.Regtest) => []
+
+fn mainnetSeeds() -> List<String>
+    ? "The mainnet list, in its own function only for length."
     [
         "seed.bitcoin.sipa.be",
         "dnsseed.bluematt.me",
@@ -38,15 +52,16 @@ fn seeds() -> List<String>
         "seed.bitcoin.wiz.biz",
     ]
 
-verify seeds
-    List.len(seeds()) => 8
-    List.contains(seeds(), "seed.bitcoin.sipa.be") => true
+verify mainnetSeeds
+    List.len(mainnetSeeds()) => 8
 
-fn discover() -> Result<PeerAddress, String>
+fn discover(network: Network) -> Result<PeerAddress, String>
     ? "Ask a randomly chosen seed for Peers, and pick one of its answers."
+      "A Network with no seeds is an answer, not a lookup that fails."
     ! [Random.int, Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes]
-    seed = pick(seeds(), "seed.bitcoin.sipa.be")
-    chooseAddress(lookup(seed)?)
+    match seedsOf(network)
+        [] -> Result.Err("the {Domain.Network.nameOf(network)} Network has no DNS seeds")
+        [head, ..rest] -> chooseAddress(lookup(pick(List.prepend(head, rest), head))?, Domain.Network.portOf(network))
 
 fn pick(candidates: List<String>, fallback: String) -> String
     ? "One of the candidates, chosen at random."
@@ -61,12 +76,12 @@ verify itemAt
     itemAt(["a", "b"], 1, "z") => "b"
     itemAt([], 0, "z") => "z"
 
-fn chooseAddress(addresses: List<List<Int>>) -> Result<PeerAddress, String>
-    ? "One of the returned addresses, chosen at random."
+fn chooseAddress(addresses: List<List<Int>>, port: Int) -> Result<PeerAddress, String>
+    ? "One of the returned addresses, chosen at random, on the Network's port."
     ! [Random.int]
     match addresses
         [] -> Result.Err("the seed returned no addresses")
-        [head, ..tail] -> Domain.Address.fromOctets(octetsAt(addresses, Random.int(0, List.len(addresses) - 1), head))
+        [head, ..tail] -> Domain.Address.fromOctetsOn(octetsAt(addresses, Random.int(0, List.len(addresses) - 1), head), port)
 
 fn octetsAt(addresses: List<List<Int>>, index: Int, fallback: List<Int>) -> List<Int>
     ? "The address at this position, or the first if there is none."
