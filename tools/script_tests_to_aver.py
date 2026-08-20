@@ -164,7 +164,7 @@ HEADER = '''module ScriptCases%(k)d
         "amounts to and why."
         "Nothing here was written by hand and nothing should be. Regenerate it."
     exposes [case]
-    depends [Domain.SpendScript]
+    depends [Domain.ScriptState, Domain.SpendScript]
     effects []
 
 fn case(inputScriptHex: String, outputScriptHex: String) -> Outcome
