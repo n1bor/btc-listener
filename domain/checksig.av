@@ -324,25 +324,78 @@ verify multiRuling
 
 fn multiAgainst(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Ruling
     ? "One signature, against the keys that are left."
+      "The message is taken once, here, rather than once for every key tried."
+      "It is fixed by the signature's hash type and by the Context, and this"
+      "loop changes neither: it spends keys. Taking it inside the loop built"
+      "the same signature hash once per key, and a signature hash is a whole"
+      "modified copy of the Transaction, so a three key check paid for three."
     match keyItems
         [] -> Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
-        [head, ..tail] -> multiAdvanced(oneRuling(signature, head, context), signature, rest, tail, context)
+        [head, ..tail] -> againstKeys(signature, rest, keyItems, context, messageOnce(signature, context))
 
 verify multiAgainst
     multiAgainst([], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
     multiAgainst([], [], [validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
 
-fn multiAdvanced(ruling: Ruling, signature: List<Int>, rest: List<List<Int>>, keyRest: List<List<Int>>, context: Context) -> Ruling
+fn messageOnce(signature: List<Int>, context: Context) -> Result<Option<String>, String>
+    ? "The message this signature's hash type names, kept for a whole key loop."
+      "Err is a hash type the signature does not carry, which refuses the pair"
+      "outright; Ok(None) is a Context with no Transaction behind it, which"
+      "leaves the pair undecided. The two have to stay apart, which is why"
+      "this is a Result of an Option and not either one alone."
+    match Domain.Ecdsa.hashTypeOf(signature)
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(hashType) -> Result.Ok(Domain.SpendContext.messageFor(context, hashType))
+
+verify messageOnce
+    messageOnce([], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Err("signature is empty and has no hash type")
+    messageOnce([4, 5], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Option.None)
+
+fn againstKeys(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Ruling
+    ? "The key loop proper, carrying the message it does not change."
+    match keyItems
+        [] -> Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+        [head, ..tail] -> multiAdvanced(ruledWith(signature, head, message), signature, rest, tail, context, message)
+
+verify againstKeys
+    againstKeys([], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+    againstKeys([], [], [validKey()], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+
+fn ruledWith(signature: List<Int>, publicKey: List<Int>, message: Result<Option<String>, String>) -> Ruling
+    ? "One pair, with the message already in hand."
+      "The shape is still asked first, so a signature the reference client"
+      "refuses before any arithmetic never reaches the curve."
+    match Domain.Ecdsa.decideShape(signature, publicKey)
+        Domain.Ecdsa.Ruling.Valid -> Domain.Ecdsa.Ruling.Valid
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> overMessageOrWhy(signature, publicKey, message)
+
+verify ruledWith
+    ruledWith([], validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("empty signature")
+    ruledWith([4, 5], validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+    ruledWith([4, 5], validKey(), Result.Err("signature is empty and has no hash type")) => Domain.Ecdsa.Ruling.Invalid("signature is empty and has no hash type")
+
+fn overMessageOrWhy(signature: List<Int>, publicKey: List<Int>, message: Result<Option<String>, String>) -> Ruling
+    ? "A hash type that was never there refuses the pair; anything else asks the curve."
+    match message
+        Result.Err(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Result.Ok(found) -> overOneMessage(signature, publicKey, found)
+
+verify overMessageOrWhy
+    overMessageOrWhy([4, 5], validKey(), Result.Err("no hash type")) => Domain.Ecdsa.Ruling.Invalid("no hash type")
+    overMessageOrWhy([4, 5], validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+
+fn multiAdvanced(ruling: Ruling, signature: List<Int>, rest: List<List<Int>>, keyRest: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Ruling
     ? "A key is spent either way. The signature is only spent when it matched."
     match ruling
         Domain.Ecdsa.Ruling.Valid -> multiRuling(rest, keyRest, context)
-        Domain.Ecdsa.Ruling.Invalid(why) -> multiAgainst(signature, rest, keyRest, context)
+        Domain.Ecdsa.Ruling.Invalid(why) -> againstKeys(signature, rest, keyRest, context, message)
         Domain.Ecdsa.Ruling.Undecidable(why) -> Domain.Ecdsa.Ruling.Undecidable(why)
 
 verify multiAdvanced
-    multiAdvanced(Domain.Ecdsa.Ruling.Valid, [], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Valid
-    multiAdvanced(Domain.Ecdsa.Ruling.Undecidable("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Undecidable("no")
-    multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+    multiAdvanced(Domain.Ecdsa.Ruling.Valid, [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Valid
+    multiAdvanced(Domain.Ecdsa.Ruling.Undecidable("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no")
+    multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
 
 fn oneRuling(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ruling
     ? "One pair. The shape is asked first, exactly as it is for OP_CHECKSIG,"

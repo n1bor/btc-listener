@@ -160,6 +160,23 @@ verify legacyOfRaw
     legacyOfRaw("9ff618e60136f8e6bb7eabaaac7d6e2535f5fba95854be6d2726f986eaa9537cb283c701ff02000000026a65ffffffff012d1c0905000000000865ab00ac6a516a652f9ad240", 0, "51515253635351ac", 1571304387) => Result.Ok("795a698393937919802861b6c56f92a13178d7d7ad462667a8d4953020d39c65")
     legacyOfRaw("zz", 0, "51", 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
+fn flattened(values: List<Int>) -> List<Int>
+    ? "The same values in one body rather than a tree of concatenations."
+      "List.concat builds a node and not a copy, so a serialised Transaction is"
+      "a tree of the parts it was assembled from. A tree costs a heap node per"
+      "element to walk by pattern match, and Bytes.fromList walks the whole"
+      "preimage by pattern match to check every value is an octet. Measured on"
+      "a 57400 byte preimage: 0.8 ms as one body against 8.7 ms as a tree, for"
+      "identical values. Filed upstream as jasisz/aver#1020."
+      "List.take of the whole list is the one operation that hands back a"
+      "single body, which is why it is here and why it is not a no-op."
+    List.take(values, List.len(values))
+
+verify flattened
+    flattened([]) => []
+    flattened([1, 2, 3]) => [1, 2, 3]
+    flattened(List.concat([1, 2], [3])) => [1, 2, 3]
+
 fn preimage(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, hashType: Int) -> Result<List<Int>, String>
     ? "The modified copy of the Transaction, as the bytes that get hashed."
       "Exposed because it is the thing worth looking at when a signature will"
@@ -168,7 +185,7 @@ fn preimage(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, ha
     code = scriptCodeOf(scriptCodeHex)?
     inputs = inputsPart(transaction.inputs, inputIndex, code, baseOf(hashType), isAnyoneCanPay(hashType))?
     outputs = outputsPart(transaction.outputs, inputIndex, baseOf(hashType))?
-    Result.Ok(List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(inputs, List.concat(outputs, List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), Domain.Message.littleEndian(hashType, 4))))))
+    Result.Ok(flattened(List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(inputs, List.concat(outputs, List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), Domain.Message.littleEndian(hashType, 4)))))))
 
 verify preimage
     List.take(preimage(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000")?))?, 0, "51", 1)?, 5) => [1, 0, 0, 0, 1]
@@ -224,32 +241,29 @@ verify droppedIfSeparator
     droppedIfSeparator(171, Op.Code(171), [], []) => []
     droppedIfSeparator(81, Op.Code(81), [], []) => [Op.Code(81)]
 
-fn ontoReversed(part: List<Int>, acc: List<Int>) -> List<Int>
-    ? "Put a part on the accumulator, back to front, so the caller reverses once."
-      "List.concat(acc, part) copies the accumulator every time, and the"
-      "accumulator here is the whole serialised Transaction. Over 168 Inputs of"
-      "a 19569 byte Transaction that is quadratic in the size of the"
-      "Transaction, and the legacy signature hash already builds one preimage"
-      "per Input, so the whole thing was cubic in the number of Inputs. Block"
-      "28507 took 26 seconds for its one real Transaction; every neighbouring"
-      "Block took a fifth of a second."
-      "Prepending is constant and one reverse at the end is linear, which is"
-      "the same shape Infra.StoreLog.recordsFor uses for the same reason and"
-      "which this should have used from the start."
-    match part
+fn joined(parts: List<List<Int>>, acc: List<Int>) -> List<Int>
+    ? "Parts collected back to front, put together front to back."
+      "List.concat builds a node rather than a copy, so putting the parts"
+      "together costs one node per part and not one per byte. It has to be"
+      "done from the right: List.concat(acc, part) leaves the accumulator down"
+      "the left edge of the tree, and walking that tree descends the whole"
+      "edge for every element -- quadratic, and the reason Block 28507 once"
+      "took 26 seconds for its one real Transaction. Building rightwards keeps"
+      "the descent short, and flattened makes it shorter still."
+    match parts
         [] -> acc
-        [head, ..tail] -> ontoReversed(tail, List.prepend(head, acc))
+        [head, ..tail] -> joined(tail, List.concat(head, acc))
 
-verify ontoReversed
-    ontoReversed([], []) => []
-    ontoReversed([1, 2], []) => [2, 1]
-    ontoReversed([3, 4], [2, 1]) => [4, 3, 2, 1]
-    List.reverse(ontoReversed([3, 4], ontoReversed([1, 2], []))) => [1, 2, 3, 4]
+verify joined
+    joined([], []) => []
+    joined([[1, 2]], []) => [1, 2]
+    joined([[3, 4], [1, 2]], []) => [1, 2, 3, 4]
+    joined([[3, 4]], [5]) => [3, 4, 5]
 
 fn inputsPart(inputs: List<Input>, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool) -> Result<List<Int>, String>
     ? "The Input count and the Inputs, as this hash type wants them."
-    body = eachInput(inputs, 0, inputIndex, code, base, anyoneCanPay, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(inputCount(List.len(inputs), anyoneCanPay)), List.reverse(body)))
+    parts = eachInput(inputs, 0, inputIndex, code, base, anyoneCanPay, [])?
+    Result.Ok(List.concat(Domain.CompactSize.encode(inputCount(List.len(inputs), anyoneCanPay)), joined(parts, [])))
 
 verify inputsPart
     List.take(inputsPart([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0, [81], Base.SignAll, false)?, 3) => [1, 170, 0]
@@ -265,25 +279,25 @@ verify inputCount
     inputCount(3, false) => 3
     inputCount(3, true) => 1
 
-fn eachInput(inputs: List<Input>, position: Int, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool, acc: List<Int>) -> Result<List<Int>, String>
+fn eachInput(inputs: List<Input>, position: Int, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Each Input in turn, skipping the ones ANYONECANPAY leaves out."
     match inputs
         [] -> Result.Ok(acc)
         [head, ..tail] -> maybeInput(head, tail, position, inputIndex, code, base, anyoneCanPay, acc)
 
 verify eachInput
-    eachInput([], 0, 0, [81], Base.SignAll, false, [9]) => Result.Ok([9])
+    eachInput([], 0, 0, [81], Base.SignAll, false, [[9]]) => Result.Ok([[9]])
     eachInput([Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 7, witness = [])], 0, 0, [81], Base.SignAll, false, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn maybeInput(input: Input, rest: List<Input>, position: Int, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool, acc: List<Int>) -> Result<List<Int>, String>
+fn maybeInput(input: Input, rest: List<Input>, position: Int, inputIndex: Int, code: List<Int>, base: Base, anyoneCanPay: Bool, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "With ANYONECANPAY every Input but the one being signed disappears."
     next = position + 1
     match Bool.and(anyoneCanPay, position != inputIndex)
         true -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, acc)
-        false -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, ontoReversed(oneInput(input, position == inputIndex, code, base)?, acc))
+        false -> eachInput(rest, next, inputIndex, code, base, anyoneCanPay, List.prepend(oneInput(input, position == inputIndex, code, base)?, acc))
 
 verify maybeInput
-    maybeInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 1, 0, [81], Base.SignAll, true, [9]) => Result.Ok([9])
+    maybeInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 1, 0, [81], Base.SignAll, true, [[9]]) => Result.Ok([[9]])
     maybeInput(Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 7, witness = []), [], 0, 0, [81], Base.SignAll, false, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn oneInput(input: Input, isTarget: Bool, code: List<Int>, base: Base) -> Result<List<Int>, String>
@@ -351,22 +365,22 @@ verify outputsPart
 
 fn allOutputs(outputs: List<Output>) -> Result<List<Int>, String>
     ? "Every Output, behind its count."
-    body = eachOutput(outputs, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(List.len(outputs)), List.reverse(body)))
+    parts = eachOutput(outputs, [])?
+    Result.Ok(List.concat(Domain.CompactSize.encode(List.len(outputs)), joined(parts, [])))
 
 verify allOutputs
     allOutputs([]) => Result.Ok([0])
     allOutputs([Output(value = 1000, script = "53")]) => Result.Ok([1, 232, 3, 0, 0, 0, 0, 0, 0, 1, 83])
     allOutputs([Output(value = 1000, script = "zz")]) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn eachOutput(outputs: List<Output>, acc: List<Int>) -> Result<List<Int>, String>
+fn eachOutput(outputs: List<Output>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Each Output in turn."
     match outputs
         [] -> Result.Ok(acc)
-        [head, ..tail] -> eachOutput(tail, ontoReversed(oneOutput(head)?, acc))
+        [head, ..tail] -> eachOutput(tail, List.prepend(oneOutput(head)?, acc))
 
 verify eachOutput
-    eachOutput([], [9]) => Result.Ok([9])
+    eachOutput([], [[9]]) => Result.Ok([[9]])
     eachOutput([Output(value = 1000, script = "zz")], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn oneOutput(output: Output) -> Result<List<Int>, String>
@@ -385,22 +399,22 @@ fn singleOutputs(outputs: List<Output>, inputIndex: Int) -> Result<List<Int>, St
       "of minus one, so their positions are committed to even though their"
       "contents are not."
     kept = inputIndex + 1
-    body = eachSingle(List.take(outputs, kept), 0, inputIndex, [])?
-    Result.Ok(List.concat(Domain.CompactSize.encode(kept), List.reverse(body)))
+    parts = eachSingle(List.take(outputs, kept), 0, inputIndex, [])?
+    Result.Ok(List.concat(Domain.CompactSize.encode(kept), joined(parts, [])))
 
 verify singleOutputs
     singleOutputs([Output(value = 1000, script = "53")], 0) => Result.Ok([1, 232, 3, 0, 0, 0, 0, 0, 0, 1, 83])
     singleOutputs([Output(value = 1000, script = "53"), Output(value = 5, script = "51")], 1) => Result.Ok([2, 255, 255, 255, 255, 255, 255, 255, 255, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 81])
     singleOutputs([Output(value = 1000, script = "zz")], 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn eachSingle(outputs: List<Output>, position: Int, inputIndex: Int, acc: List<Int>) -> Result<List<Int>, String>
+fn eachSingle(outputs: List<Output>, position: Int, inputIndex: Int, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Each of them, the placeholder or the real thing."
     match outputs
         [] -> Result.Ok(acc)
-        [head, ..tail] -> eachSingle(tail, position + 1, inputIndex, ontoReversed(singleOne(head, position == inputIndex)?, acc))
+        [head, ..tail] -> eachSingle(tail, position + 1, inputIndex, List.prepend(singleOne(head, position == inputIndex)?, acc))
 
 verify eachSingle
-    eachSingle([], 0, 0, [9]) => Result.Ok([9])
+    eachSingle([], 0, 0, [[9]]) => Result.Ok([[9]])
     eachSingle([Output(value = 1000, script = "zz")], 0, 0, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn singleOne(output: Output, isTarget: Bool) -> Result<List<Int>, String>
