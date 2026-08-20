@@ -153,7 +153,12 @@ fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
       "this is the only place that holds the rest of the Script, which is"
       "exactly what it names: from here on, a signature is taken over what"
       "follows the separator. It still costs an Op against the limit."
-    match separates(op)
+      "Only when it actually runs. Inside a branch that is not being taken it"
+      "is skipped like any other Op, and moving the Script code there would"
+      "sign the wrong bytes -- Core moves pbegincodehash under fExec and so"
+      "does this. Found by Core's tx_valid.json, on a prevout Script that"
+      "reads IF CODESEPARATOR ENDIF <key> CHECKSIGVERIFY CODESEPARATOR 1."
+    match Bool.and(separates(op), Domain.ScriptState.executing(state.conditions))
         true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.overScript(context, bytesHex(rest)))
         false -> ordinary(op, rest, state, context)
 
