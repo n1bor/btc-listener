@@ -1,0 +1,198 @@
+module TxCheck
+    intent =
+        "What is wrong with a Transaction before any Script runs."
+        "Bitcoin's CheckTransaction, which is consensus and is about the"
+        "Transaction's shape rather than about whether a spend is allowed: no"
+        "Inputs, no Outputs, an amount that cannot exist, the same Output"
+        "spent twice, a coinbase whose scriptSig is the wrong length, a null"
+        "prevout on something that is not a coinbase."
+        "Nothing here has ever had to reject a Transaction on this chain,"
+        "because the audit walks Blocks that were accepted years ago and every"
+        "Transaction in them passed these checks then. That changes for a node"
+        "that follows the tip and is handed Blocks by a Peer, which is no"
+        "longer being given only valid data -- and the auditor and that node"
+        "should not disagree about what a valid Transaction is."
+        "The first thing wrong is the thing reported. There is no ordering"
+        "claim in that beyond the one Bitcoin itself makes."
+    exposes [wrongWith, maxMoney]
+    depends [Domain.Transaction]
+    effects []
+
+fn maxMoney() -> Int
+    ? "Twenty-one million, in satoshis. No amount above this can exist, and an"
+      "Output claiming one is invalid however the arithmetic works out."
+    2100000000000000
+
+verify maxMoney
+    maxMoney() => 2100000000000000
+
+fn wrongWith(transaction: Transaction) -> Option<String>
+    ? "The first rule this Transaction breaks, or none."
+    match Domain.Transaction.inputsOf(transaction)
+        [] -> Option.Some("no inputs")
+        [head, ..tail] -> withOutputs(transaction, head, tail)
+
+verify wrongWith
+    wrongWith(sample([], [Output(value = 1, script = "51")])) => Option.Some("no inputs")
+    wrongWith(sample([spending("aa", 0, "")], [])) => Option.Some("no outputs")
+    wrongWith(sample([spending("aa", 0, "")], [Output(value = 1, script = "51")])) => Option.None
+
+fn withOutputs(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
+    ? "A Transaction that pays nowhere is invalid however well it spends."
+    match Domain.Transaction.outputsOf(transaction)
+        [] -> Option.Some("no outputs")
+        [head, ..tail] -> withAmounts(transaction, first, rest)
+
+verify withOutputs
+    withOutputs(sample([spending("aa", 0, "")], []), spending("aa", 0, ""), []) => Option.Some("no outputs")
+
+fn withAmounts(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
+    ? "Every amount, and their sum, inside what can exist."
+    match amountsWrong(Domain.Transaction.outputsOf(transaction), 0)
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> withInputs(transaction, first, rest)
+
+verify withAmounts
+    withAmounts(sample([spending("aa", 0, "")], [Output(value = 2100000000000001, script = "51")]), spending("aa", 0, ""), []) => Option.Some("output of 2100000000000001 is more than there is")
+
+fn amountsWrong(outputs: List<Output>, sofar: Int) -> Option<String>
+    ? "Each Output in turn, carrying the running total."
+    match outputs
+        [] -> Option.None
+        [head, ..tail] -> oneAmount(head, tail, sofar)
+
+verify amountsWrong
+    amountsWrong([], 0) => Option.None
+    amountsWrong([Output(value = 1, script = "")], 0) => Option.None
+
+fn oneAmount(output: Output, rest: List<Output>, sofar: Int) -> Option<String>
+    ? "An amount above the cap, or a total that climbs past it."
+      "A negative amount cannot arise here: the decoder reads eight bytes"
+      "little-endian and never produces one. What it can produce is a value"
+      "far above the cap, which is the same defect wearing the other sign in"
+      "the reference client."
+    match Domain.Transaction.valueOf(output) > maxMoney()
+        true -> Option.Some("output of {Domain.Transaction.valueOf(output)} is more than there is")
+        false -> runningTotal(Domain.Transaction.valueOf(output) + sofar, rest)
+
+verify oneAmount
+    oneAmount(Output(value = 2100000000000001, script = ""), [], 0) => Option.Some("output of 2100000000000001 is more than there is")
+    oneAmount(Output(value = 1, script = ""), [], 0) => Option.None
+
+fn runningTotal(total: Int, rest: List<Output>) -> Option<String>
+    ? "The sum is capped as well as each part, which is not the same rule."
+    match total > maxMoney()
+        true -> Option.Some("outputs total {total}, which is more than there is")
+        false -> amountsWrong(rest, total)
+
+verify runningTotal
+    runningTotal(2100000000000001, []) => Option.Some("outputs total 2100000000000001, which is more than there is")
+    runningTotal(5, []) => Option.None
+
+fn withInputs(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
+    ? "The same Output cannot be spent twice by one Transaction, and a null"
+      "prevout belongs only to a coinbase."
+    match duplicated(List.prepend(first, rest), [])
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> byCoinbase(first, rest)
+
+verify withInputs
+    withInputs(sample([spending("aa", 0, ""), spending("aa", 0, "")], [Output(value = 1, script = "")]), spending("aa", 0, ""), [spending("aa", 0, "")]) => Option.Some("spends aa:0 twice")
+
+fn duplicated(inputs: List<Input>, seen: List<String>) -> Option<String>
+    ? "Outpoints already met, by name."
+    match inputs
+        [] -> Option.None
+        [head, ..tail] -> firstOrSeen(head, tail, seen)
+
+verify duplicated
+    duplicated([], []) => Option.None
+
+fn firstOrSeen(input: Input, rest: List<Input>, seen: List<String>) -> Option<String>
+    ? "One outpoint, against the ones before it."
+    match List.contains(seen, named(input))
+        true -> Option.Some("spends {named(input)} twice")
+        false -> duplicated(rest, List.prepend(named(input), seen))
+
+verify firstOrSeen
+    firstOrSeen(spending("aa", 0, ""), [], ["aa:0"]) => Option.Some("spends aa:0 twice")
+    firstOrSeen(spending("aa", 0, ""), [], []) => Option.None
+
+fn named(input: Input) -> String
+    ? "An outpoint written the way an Input names it."
+    "{Domain.Transaction.previousTxidOf(input)}:{Domain.Transaction.previousIndexOf(input)}"
+
+verify named
+    named(spending("aa", 7, "")) => "aa:7"
+
+fn byCoinbase(first: Input, rest: List<Input>) -> Option<String>
+    ? "A coinbase is one Input spending nothing, and only a coinbase may."
+    match Bool.and(List.len(rest) == 0, isNull(first))
+        true -> coinbaseLength(first)
+        false -> noNullPrevout(List.prepend(first, rest))
+
+verify byCoinbase
+    byCoinbase(spending("aa", 0, ""), []) => Option.None
+
+fn isNull(input: Input) -> Bool
+    ? "The prevout a coinbase carries: no Transaction and the last index."
+    Bool.and(Domain.Transaction.previousIndexOf(input) == 4294967295, allZero(Domain.Transaction.previousTxidOf(input)))
+
+verify isNull
+    isNull(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")) => true
+    isNull(spending("aa", 4294967295, "")) => false
+
+fn allZero(txid: String) -> Bool
+    ? "Sixty-four characters of nought, which is how a coinbase says nothing."
+    txid == "0000000000000000000000000000000000000000000000000000000000000000"
+
+verify allZero
+    allZero("0000000000000000000000000000000000000000000000000000000000000000") => true
+    allZero("aa") => false
+
+fn coinbaseLength(input: Input) -> Option<String>
+    ? "Between two and a hundred bytes. The floor stops a coinbase colliding"
+      "with another at the same Height, which is what BIP34 later made"
+      "explicit; the ceiling is what stops it being free storage."
+      "Counted in characters and halved, because a Script is carried here as"
+      "hexadecimal and two characters are one byte."
+    match Bool.or(String.len(Domain.Transaction.scriptOf(input)) < 4, String.len(Domain.Transaction.scriptOf(input)) > 200)
+        true -> Option.Some("coinbase script is {Int.div(String.len(Domain.Transaction.scriptOf(input)), 2)} bytes, outside two to a hundred")
+        false -> Option.None
+
+verify coinbaseLength
+    coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "51")) => Option.Some("coinbase script is 1 bytes, outside two to a hundred")
+    coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151")) => Option.None
+
+fn noNullPrevout(inputs: List<Input>) -> Option<String>
+    ? "Outside a coinbase, an Input that spends nothing spends nothing."
+    match inputs
+        [] -> Option.None
+        [head, ..tail] -> nullOrNext(head, tail)
+
+verify noNullPrevout
+    noNullPrevout([]) => Option.None
+
+fn nullOrNext(input: Input, rest: List<Input>) -> Option<String>
+    ? "One Input, then the rest."
+    match isNull(input)
+        true -> Option.Some("spends a null prevout without being a coinbase")
+        false -> noNullPrevout(rest)
+
+verify nullOrNext
+    nullOrNext(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, ""), []) => Option.Some("spends a null prevout without being a coinbase")
+    nullOrNext(spending("aa", 0, ""), []) => Option.None
+
+fn spending(txid: String, index: Int, script: String) -> Input
+    ? "An Input, for the cases above."
+    Input(previousTxid = txid, previousIndex = index, script = script, sequence = 0, witness = [])
+
+verify spending
+    Domain.Transaction.previousIndexOf(spending("aa", 7, "")) => 7
+
+fn sample(inputs: List<Input>, outputs: List<Output>) -> Transaction
+    ? "A Transaction, for the cases above."
+    Transaction(version = 1, inputs = inputs, outputs = outputs, lockTime = 0, txid = "", size = 0, isSegWit = false)
+
+verify sample
+    Domain.Transaction.versionOf(sample([], [])) => 1

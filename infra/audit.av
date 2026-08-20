@@ -21,7 +21,7 @@ module Audit
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
     exposes [Counts, run]
-    depends [Bytes, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -360,11 +360,41 @@ verify judgedAll
 
 fn nextJudged(one: Work, rest: List<Work>, counts: Counts, height: Int, blockId: String, lines: List<String>) -> Tuple<Counts, List<String>>
     ? "One Transaction judged and, if it did not settle, named."
-    verdict = Domain.Spend.verdictOf(one.tally, paidBy(Domain.Transaction.outputsOf(one.transaction), 0))
+    verdict = shapeFirst(one.transaction, Domain.Spend.verdictOf(one.tally, paidBy(Domain.Transaction.outputsOf(one.transaction), 0)))
     judgedAll(rest, judged(counts, one.transaction, verdict), height, blockId, notedVerdict(one.transaction, verdict, height, blockId, lines))
 
 verify nextJudged
-    nextJudged(Work(transaction = sampleTx(), tally = Domain.Spend.started(), spent = []), [], zero(), 0, "aa", []) => judgedAll([], judged(zero(), sampleTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(sampleTx()), 0))), 0, "aa", notedVerdict(sampleTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(sampleTx()), 0)), 0, "aa", []))
+    nextJudged(Work(transaction = wholeTx(), tally = Domain.Spend.started(), spent = []), [], zero(), 0, "aa", []) => judgedAll([], judged(zero(), wholeTx(), shapeFirst(wholeTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(wholeTx()), 0)))), 0, "aa", notedVerdict(wholeTx(), shapeFirst(wholeTx(), Domain.Spend.verdictOf(Domain.Spend.started(), paidBy(Domain.Transaction.outputsOf(wholeTx()), 0))), 0, "aa", []))
+
+fn shapeFirst(transaction: Transaction, verdict: Verdict) -> Verdict
+    ? "Bitcoin checks a Transaction's shape before it checks anything else,"
+      "and a Transaction that fails there is invalid whatever its sums say:"
+      "no Inputs, an amount that cannot exist, the same Output spent twice."
+      "Broken rather than a fourth kind of answer, because it already counts"
+      "as a fault and is already named -- what is wrong is stated in the"
+      "message, which is where a reader looks anyway."
+      "Nothing on this chain should reach this. Every Transaction in a Block"
+      "that was accepted passed these checks when it was accepted, so a fault"
+      "here means either this check is wrong or the Block is not what it"
+      "claims -- and the first is far likelier."
+    match Domain.TxCheck.wrongWith(transaction)
+        Option.Some(why) -> Verdict.Broken(why)
+        Option.None -> verdict
+
+verify shapeFirst
+    shapeFirst(wholeTx(), Verdict.Conserved) => Verdict.Conserved
+    shapeFirst(wholeTx(), Verdict.Created(5)) => Verdict.Created(5)
+    shapeFirst(sampleTx(), Verdict.Conserved) => Verdict.Broken("no inputs")
+
+fn wholeTx() -> Transaction
+    ? "A Transaction whose shape is not the thing under test."
+      "sampleTx has neither Inputs nor Outputs, which is exactly what"
+      "CheckTransaction refuses, so it cannot stand in for a Transaction that"
+      "gets past it."
+    Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [Output(value = 1, script = "51")], lockTime = 0, txid = "dd", size = 9, isSegWit = false)
+
+verify wholeTx
+    Domain.TxCheck.wrongWith(wholeTx()) => Option.None
 
 fn notedVerdict(transaction: Transaction, verdict: Verdict, height: Int, blockId: String, lines: List<String>) -> List<String>
     ? "A line for a Transaction whose sums did not settle."

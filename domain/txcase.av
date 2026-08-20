@@ -15,7 +15,7 @@ module TxCase
         "building a Store around them would put a database in the way of a"
         "pure question."
     exposes [Prevout, verdict]
-    depends [Bytes, Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
+    depends [Bytes, Domain.Rules, Domain.TxCheck, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
     effects []
 
 record Prevout
@@ -41,10 +41,22 @@ fn decoded(transaction: Result<Transaction, String>, prevouts: List<Prevout>) ->
     ? "A Transaction that will not decode fails before any Script runs."
     match transaction
         Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
-        Result.Ok(whole) -> eachInput(whole, Domain.Transaction.inputsOf(whole), 0, prevouts, Outcome.Decided(Ending.Passed))
+        Result.Ok(whole) -> shaped(whole, prevouts)
 
 verify decoded
     decoded(Result.Err("no"), []) => Outcome.Decided(Ending.Failed("no"))
+
+fn shaped(transaction: Transaction, prevouts: List<Prevout>) -> Outcome
+    ? "Bitcoin's CheckTransaction runs before any Script does, and rejects a"
+      "Transaction on its shape alone: no Inputs, an amount that cannot"
+      "exist, the same Output spent twice. Core marks those cases BADTX and"
+      "they are as much consensus as anything a Script decides."
+    match Domain.TxCheck.wrongWith(transaction)
+        Option.Some(why) -> Outcome.Decided(Ending.Failed(why))
+        Option.None -> eachInput(transaction, Domain.Transaction.inputsOf(transaction), 0, prevouts, Outcome.Decided(Ending.Passed))
+
+verify shaped
+    shaped(Domain.SpendContext.emptyTransaction(), []) => Outcome.Decided(Ending.Failed("no inputs"))
 
 fn eachInput(transaction: Transaction, inputs: List<Input>, position: Int, prevouts: List<Prevout>, sofar: Outcome) -> Outcome
     ? "In order, carrying the worst answer so far."
