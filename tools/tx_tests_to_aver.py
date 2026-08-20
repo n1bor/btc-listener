@@ -15,9 +15,10 @@ expected values are written by --reconcile from what `aver verify` actually
 reported, never by this file.
 
     python3 tools/tx_tests_to_aver.py --fetch
-    python3 tools/tx_tests_to_aver.py --emit          # placeholders
-    aver verify domain/txcases1.av --module-root . --providers > out.txt
-    python3 tools/tx_tests_to_aver.py --reconcile out.txt
+    python3 tools/tx_tests_to_aver.py --emit                    # placeholders
+    python3 tools/tx_tests_to_aver.py --probe /tmp/p/main.av    # the middle step
+    aver run /tmp/p/main.av --module-root . --providers > answers.txt
+    python3 tools/tx_tests_to_aver.py --answers answers.txt
 """
 
 import argparse
@@ -265,31 +266,6 @@ def answers(answers_path):
     return 0
 
 
-def reconcile(report_path):
-    """Rewrite every expectation from what aver verify actually reported."""
-    text = open(report_path).read()
-    actual = {}
-    for m in re.finditer(r"case: (case\(.*?\)) == .*?\n\s+expected: .*?\n\s+actual: (.*?)\n", text):
-        actual[m.group(1)] = m.group(2)
-    print("verify reported %d mismatches" % len(actual))
-    changed = 0
-    for name in sorted(os.listdir(OUT)):
-        if not re.fullmatch(r"txcases\d+\.av", name):
-            continue
-        path = os.path.join(OUT, name)
-        out = []
-        for line in open(path).read().split("\n"):
-            m = re.match(r"    (case\(.*\)) => (.*)$", line)
-            if m and m.group(1) in actual:
-                out.append("    %s => %s" % (m.group(1), qualify(actual[m.group(1)])))
-                changed += 1
-            else:
-                out.append(line)
-        open(path, "w").write("\n".join(out))
-    print("rewrote %d expectations from the engine's answers" % changed)
-    return 0
-
-
 def qualify(shown):
     """aver prints Decided(Passed); the source form is Outcome.Decided(Ending.Passed)."""
     s = shown.strip()
@@ -303,7 +279,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true")
     ap.add_argument("--emit", action="store_true")
-    ap.add_argument("--reconcile")
     ap.add_argument("--probe")
     ap.add_argument("--answers")
     a = ap.parse_args()
@@ -315,8 +290,6 @@ def main():
         return probe(a.probe)
     if a.answers:
         return answers(a.answers)
-    if a.reconcile:
-        return reconcile(a.reconcile)
     if not a.fetch:
         ap.print_help()
         return 1

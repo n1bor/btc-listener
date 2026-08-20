@@ -622,14 +622,16 @@ passes it had not earned.
 Values are pinned against sources outside this implementation rather than
 captured from it. The wire format: a `verack` and a `ping` frame, a full
 `version` payload, the genesis coinbase transaction id (which is published), and
-a SegWit transaction id computed from the specification. The Script engine and
-the signing messages: Bitcoin Core's `script_tests.json` and `sighash.json`,
-converted into cases by `tools/script_tests_to_aver.py` and answered by the
-engine rather than by the file. And Block 170's real signature, which was
-verified against the message this code computes using thirty lines of Python
-secp256k1 written for the purpose — because a reference implementation and the
-code under test, written by the same hand, agree with each other whether or not
-they agree with Bitcoin.
+a SegWit transaction id computed from the specification. The Script engine, the
+signing messages and whole Transactions against the Outputs they spend: Bitcoin
+Core's `script_tests.json`, `sighash.json`, `tx_valid.json` and
+`tx_invalid.json`, converted into 1831 cases and answered by the engine rather
+than by the file — see [docs/core-corpora.md](docs/core-corpora.md) for which of
+Core's twelve test files are read, how to regenerate each, and what blocks the
+rest. And Block 170's real signature, which was verified against the message
+this code computes using thirty lines of Python secp256k1 written for the
+purpose — because a reference implementation and the code under test, written by
+the same hand, agree with each other whether or not they agree with Bitcoin.
 
 ## Layout
 
