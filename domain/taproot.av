@@ -1,0 +1,157 @@
+module Taproot
+    intent =
+        "Spending a version one witness program: BIP341's key path."
+        "The program is the output key itself, thirty-two bytes and x-only --"
+        "no hash to preimage and no Script to reveal, which is what makes a"
+        "key path spend the same size whatever tree stands behind it. Nothing"
+        "on the chain distinguishes a key path spend of a bare key from one of"
+        "an elaborate contract that nobody needed to open, and that was the"
+        "point of the design rather than a side effect of it."
+        "The script path is BIP342 and is not here. A Witness with more than"
+        "one item after the annex comes off is one, and this says so and"
+        "leaves it undecided rather than guessing."
+        "The annex is a final Witness item beginning 0x50, present only when"
+        "there are at least two items -- with one there is nothing to tell an"
+        "annex from a signature. It has no meaning yet and is committed to"
+        "anyway, so that giving it one later is a soft fork rather than a way"
+        "to rewrite signatures already made."
+    exposes [spend, annexOf, strippedOf]
+    depends [Bytes, Domain.Bip341, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.Transaction]
+    effects []
+
+fn spend(program: List<Int>, context: Context) -> Outcome
+    ? "A Taproot spend, annex taken off before anything counts the Witness."
+    witness = Domain.SpendContext.witnessOf(context)
+    afterAnnex(program, annexOf(witness), strippedOf(witness), context)
+
+verify spend
+    spend(Domain.ScriptState.zeros(32), spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
+    spend(Domain.ScriptState.zeros(32), spending(["aa", "bb"])) => Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+
+fn spending(witness: List<String>) -> Context
+    ? "A Context with a Transaction behind it carrying this Witness."
+      "The Transaction is the empty one, so any case reaching the message"
+      "gets a refusal about the Input index rather than a real hash. The"
+      "cases that need a real Transaction are BIP341's own, in the corpus."
+    Domain.SpendContext.committed(Domain.Rules.latest(), Domain.Bip341.emptyTransaction(), 0, 0, "", witness)
+
+verify spending
+    Domain.SpendContext.hasSpend(spending([])) => true
+    Domain.SpendContext.witnessOf(spending(["aa"])) => ["aa"]
+
+fn afterAnnex(program: List<Int>, annex: Option<String>, witness: List<String>, context: Context) -> Outcome
+    ? "One item left is a key path spend; more is a script path."
+    match List.len(witness)
+        0 -> Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
+        1 -> keyPath(program, witness, annex, context)
+        _ -> Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+
+verify afterAnnex
+    afterAnnex(Domain.ScriptState.zeros(32), Option.None, [], spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
+    afterAnnex(Domain.ScriptState.zeros(32), Option.None, ["aa", "bb"], spending([])) => Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+
+fn annexOf(witness: List<String>) -> Option<String>
+    ? "The annex, when the last of at least two Witness items begins 0x50."
+    match List.len(witness) >= 2
+        false -> Option.None
+        true -> annexIfMarked(lastOf(witness))
+
+verify annexOf
+    annexOf([]) => Option.None
+    annexOf(["50aa"]) => Option.None
+    annexOf(["aa", "50bb"]) => Option.Some("50bb")
+    annexOf(["aa", "bb"]) => Option.None
+
+fn annexIfMarked(last: String) -> Option<String>
+    ? "0x50 is the marker and it is the only thing that makes an annex."
+    match String.startsWith(last, "50")
+        true -> Option.Some(last)
+        false -> Option.None
+
+verify annexIfMarked
+    annexIfMarked("50") => Option.Some("50")
+    annexIfMarked("51") => Option.None
+    annexIfMarked("") => Option.None
+
+fn strippedOf(witness: List<String>) -> List<String>
+    ? "The Witness with the annex taken off, if there was one."
+    match annexOf(witness)
+        Option.None -> witness
+        Option.Some(annex) -> List.take(witness, List.len(witness) - 1)
+
+verify strippedOf
+    strippedOf(["aa", "bb"]) => ["aa", "bb"]
+    strippedOf(["aa", "50bb"]) => ["aa"]
+    strippedOf([]) => []
+
+fn lastOf(items: List<String>) -> String
+    ? "The final item, or nothing when there is none."
+    match List.drop(items, List.len(items) - 1)
+        [] -> ""
+        [head, ..tail] -> head
+
+verify lastOf
+    lastOf([]) => ""
+    lastOf(["a", "b"]) => "b"
+    lastOf(["a"]) => "a"
+
+fn keyPath(program: List<Int>, witness: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "The whole Witness is one signature, checked against the output key."
+    match witness
+        [] -> Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
+        [signature, ..rest] -> signedWith(program, signature, annex, context)
+
+verify keyPath
+    keyPath(Domain.ScriptState.zeros(32), [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
+
+fn signedWith(program: List<Int>, signature: String, annex: Option<String>, context: Context) -> Outcome
+    ? "The hash type comes off the signature before the message is built,"
+      "because the message commits to it."
+    match Domain.Schnorr.hashTypeOf(signature)
+        Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
+        Result.Ok(hashType) -> overMessage(program, signature, hashType, annex, context)
+
+verify signedWith
+    signedWith(Domain.ScriptState.zeros(32), "", Option.None, spending([])) => Outcome.Decided(Ending.Failed("a taproot signature is 0 bytes, which is neither 64 nor 65"))
+
+fn overMessage(program: List<Int>, signature: String, hashType: Int, annex: Option<String>, context: Context) -> Outcome
+    ? "Build the BIP341 message and ask the curve."
+      "A message that will not build is undecided rather than failed. The"
+      "commonest reason is that the caller did not supply a spent Output for"
+      "every Input, which is a gap in what this engine was told and not a"
+      "fault in the spend -- answering Failed there would call a valid"
+      "Transaction invalid, which is the one mistake that must not happen."
+    match Domain.Bip341.message(transactionIn(context), Domain.SpendContext.inputIndexOf(context), Domain.SpendContext.prevoutsOf(context), hashType, annex)
+        Result.Err(why) -> Outcome.Undecided("taproot message: {why}")
+        Result.Ok(message) -> ruled(Domain.Schnorr.verified(hexOf(program), signature, message))
+
+verify overMessage
+    overMessage(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
+
+fn transactionIn(context: Context) -> Transaction
+    ? "The Transaction behind this run. Callers reach here only after"
+      "hasSpend, so the empty one is a shape rather than a case."
+    match Domain.SpendContext.transactionOf(context)
+        Option.None -> Domain.Bip341.emptyTransaction()
+        Option.Some(transaction) -> transaction
+
+verify transactionIn
+    transactionIn(Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Bip341.emptyTransaction()
+
+fn ruled(valid: Bool) -> Outcome
+    ? "The curve has run and there is no third answer."
+    match valid
+        true -> Outcome.Decided(Ending.Passed)
+        false -> Outcome.Decided(Ending.Failed("taproot signature does not verify"))
+
+verify ruled
+    ruled(true) => Outcome.Decided(Ending.Passed)
+    ruled(false) => Outcome.Decided(Ending.Failed("taproot signature does not verify"))
+
+fn hexOf(bytes: List<Int>) -> String
+    ? "Bytes back as hexadecimal, for the key the curve is given."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(bytes), Bytes.fromList([])))
+
+verify hexOf
+    hexOf([0, 81]) => "0051"
+    hexOf([]) => ""

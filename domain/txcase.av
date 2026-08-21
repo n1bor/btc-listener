@@ -15,7 +15,7 @@ module TxCase
         "building a Store around them would put a database in the way of a"
         "pure question."
     exposes [Prevout, verdict]
-    depends [Bytes, Domain.Rules, Domain.TxCheck, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
+    depends [Bytes, Domain.Bip341, Domain.Rules, Domain.TxCheck, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
     effects []
 
 record Prevout
@@ -72,19 +72,49 @@ fn stepInput(transaction: Transaction, input: Input, rest: List<Input>, position
       "and is said so, rather than being counted as a Script that failed."
     match matching(prevouts, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))
         Option.None -> Outcome.Decided(Ending.Failed("no prevout supplied for input {position}"))
-        Option.Some(prevout) -> eachInput(transaction, rest, position + 1, prevouts, worse(sofar, oneInput(transaction, input, position, prevout)))
+        Option.Some(prevout) -> eachInput(transaction, rest, position + 1, prevouts, worse(sofar, oneInput(transaction, input, position, prevout, spentOutputs(transaction, prevouts))))
 
 verify stepInput
     stepInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], 0, [], Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Failed("no prevout supplied for input 0"))
 
-fn oneInput(transaction: Transaction, input: Input, position: Int, prevout: Prevout) -> Outcome
+fn spentOutputs(transaction: Transaction, prevouts: List<Prevout>) -> List<Spent>
+    ? "Every Input's spent Output, in Input order, as Taproot needs them."
+      "In order and complete or not at all: an Input whose Output the case did"
+      "not supply would shift every later index if it were simply left out, so"
+      "a gap gives the empty list and Domain.Bip341 refuses a message whose"
+      "count does not match the Input count. Undecided, never a wrong hash."
+    gathered(Domain.Transaction.inputsOf(transaction), prevouts, [])
+
+verify spentOutputs
+    spentOutputs(Domain.SpendContext.emptyTransaction(), []) => []
+
+fn gathered(inputs: List<Input>, prevouts: List<Prevout>, acc: List<Spent>) -> List<Spent>
+    ? "Each Input's Output looked up by name, in order."
+    match inputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> gatheredOne(head, tail, prevouts, acc)
+
+verify gathered
+    gathered([], [], []) => []
+
+fn gatheredOne(input: Input, rest: List<Input>, prevouts: List<Prevout>, acc: List<Spent>) -> List<Spent>
+    ? "One Input; a miss abandons the whole list rather than shortening it."
+    match matching(prevouts, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))
+        Option.None -> []
+        Option.Some(found) -> gathered(rest, prevouts, List.prepend(Spent(amount = found.amount, script = found.script), acc))
+
+verify gatheredOne
+    gatheredOne(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], [], []) => []
+    gatheredOne(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], [Prevout(txid = "aa", index = 0, script = "51", amount = 5)], []) => [Spent(amount = 5, script = "51")]
+
+fn oneInput(transaction: Transaction, input: Input, position: Int, prevout: Prevout, spent: List<Spent>) -> Outcome
     ? "The Input Script and the Output Script, run the way a spend runs them,"
       "over a Context that names the Transaction so a signature has something"
       "to have committed to."
-    Domain.SpendScript.check(Domain.Transaction.scriptOf(input), prevout.script, Domain.SpendContext.committed(Domain.Rules.latest(), transaction, position, prevout.amount, prevout.script, Domain.Transaction.witnessOf(input)))
+    Domain.SpendScript.check(Domain.Transaction.scriptOf(input), prevout.script, Domain.SpendContext.withPrevouts(Domain.SpendContext.committed(Domain.Rules.latest(), transaction, position, prevout.amount, prevout.script, Domain.Transaction.witnessOf(input)), spent))
 
 verify oneInput
-    oneInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), 0, Prevout(txid = "aa", index = 0, script = "51", amount = 0)) => Outcome.Decided(Ending.Passed)
+    oneInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), 0, Prevout(txid = "aa", index = 0, script = "51", amount = 0), []) => Outcome.Decided(Ending.Passed)
 
 fn matching(prevouts: List<Prevout>, txid: String, index: Int) -> Option<Prevout>
     ? "The Output an Input names, out of the ones the case supplied."

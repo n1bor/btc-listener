@@ -27,7 +27,7 @@ module Witness
         "true item at the end. That last one is stricter than legacy, where a"
         "left-over stack is tolerated -- inside a Witness it never is."
     exposes [spend, nested]
-    depends [Bytes, Crypto.Digest32, Domain.Interp, Domain.Rules, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Bytes, Crypto.Digest32, Domain.Interp, Domain.Rules, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Taproot]
     effects []
 
 fn spend(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -40,12 +40,12 @@ fn spend(inputScriptHex: String, outputScriptHex: String, context: Context) -> O
       "straight back. Core calls this WITNESS_MALLEATED."
     match String.len(inputScriptHex) == 0
         false -> Outcome.Decided(Ending.Failed("witness program spent with a non-empty input script"))
-        true -> nested(outputScriptHex, context)
+        true -> entered(outputScriptHex, false, context)
 
 verify spend
     spend("51", "0014751e76e8199196d454941c45d1b3a323f1433bd6", spending([])) => Outcome.Decided(Ending.Failed("witness program spent with a non-empty input script"))
     spend("", "0015751e76e8199196d454941c45d1b3a323f1433bd6aa", spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 21 bytes, which is neither 20 nor 32"))
-    spend("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", spending([])) => Outcome.Undecided("witness program version 1 has no rules this engine knows")
+    spend("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
     spend("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
 
 fn spending(witness: List<String>) -> Context
@@ -70,9 +70,22 @@ fn nested(redeemHex: String, context: Context) -> Outcome
       "lives on the Input and there is no Input. That is undecided and not a"
       "failure, because an absent Witness and an empty one are the same bytes"
       "and opposite answers."
+    entered(redeemHex, true, context)
+
+fn entered(scriptHex: String, isP2sh: Bool, context: Context) -> Outcome
+    ? "Either form, once the caller's own malleability rule has been checked."
+      "Whether the program was nested matters and is carried rather than"
+      "inferred: a version one program is Taproot only when it was found in"
+      "an Output Script directly. Nested inside P2SH it is a witness program"
+      "of an unknown version, because BIP341 declined to define one there --"
+      "the nested form exists for wallets that could not send to bech32, and"
+      "Taproot has always had bech32m."
     match Domain.SpendContext.hasSpend(context)
         false -> Outcome.Undecided("a witness program needs the transaction that carries its witness")
-        true -> byVersion(programOf(redeemHex), versionOf(redeemHex), context)
+        true -> byVersion(programOf(scriptHex), versionOf(scriptHex), isP2sh, context)
+
+verify entered
+    entered("0014751e76e8199196d454941c45d1b3a323f1433bd6", false, Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
 
 verify nested
     nested("0015751e76e8199196d454941c45d1b3a323f1433bd6aa", spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 21 bytes, which is neither 20 nor 32"))
@@ -113,19 +126,35 @@ verify programOf
     List.len(programOf("0020701a8d401c84fb13e6baf169d59684e17abd9fa216c8cc5b9fc63d622ff8c58d")) => 32
     programOf("") => []
 
-fn byVersion(program: List<Int>, version: Int, context: Context) -> Outcome
-    ? "Version zero is the only one with rules. Everything above it is a"
-      "witness program whose meaning has not been defined, which under"
+fn byVersion(program: List<Int>, version: Int, isP2sh: Bool, context: Context) -> Outcome
+    ? "Version zero is BIP141 and version one is Taproot. Everything else is"
+      "a witness program whose meaning has not been defined, which under"
       "consensus is spendable by anyone -- but saying so is a separate"
       "decision and n1bor/btc-listener#65 makes it. Until then it is"
       "undecided, which is the conservative answer and not a wrong one."
-    match version == 0
-        true -> versionZero(program, context)
-        false -> Outcome.Undecided("witness program version {version} has no rules this engine knows")
+    match version
+        0 -> versionZero(program, context)
+        1 -> versionOne(program, isP2sh, context)
+        _ -> Outcome.Undecided("witness program version {version} has no rules this engine knows")
 
 verify byVersion
-    byVersion([1, 2], 2, spending([])) => Outcome.Undecided("witness program version 2 has no rules this engine knows")
-    byVersion([1, 2], 0, spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 2 bytes, which is neither 20 nor 32"))
+    byVersion([1, 2], 2, false, spending([])) => Outcome.Undecided("witness program version 2 has no rules this engine knows")
+    byVersion([1, 2], 0, false, spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 2 bytes, which is neither 20 nor 32"))
+    byVersion([1, 2], 1, false, spending([])) => Outcome.Undecided("witness program version 1 has no rules this engine knows")
+
+fn versionOne(program: List<Int>, isP2sh: Bool, context: Context) -> Outcome
+    ? "Taproot, but only in the circumstances BIP341 defines it in: the"
+      "program is thirty-two bytes, it was not nested inside P2SH, and the"
+      "Height is at or above the activation. Fail any of those and it is a"
+      "witness program of a version with no rules, undecided here until"
+      "n1bor/btc-listener#65 says anyone can spend it."
+    match Bool.and(Bool.and(List.len(program) == 32, isP2sh == false), Domain.SpendContext.rulesOf(context).taproot)
+        false -> Outcome.Undecided("witness program version 1 has no rules this engine knows")
+        true -> Domain.Taproot.spend(program, context)
+
+verify versionOne
+    versionOne([1, 2], false, spending([])) => Outcome.Undecided("witness program version 1 has no rules this engine knows")
+    versionOne(Domain.ScriptState.zeros(32), true, spending([])) => Outcome.Undecided("witness program version 1 has no rules this engine knows")
 
 fn versionZero(program: List<Int>, context: Context) -> Outcome
     ? "Twenty bytes is a public key hash, thirty-two is a Script hash, and"

@@ -21,7 +21,7 @@ module ScriptWork
         "Cutting a sorted list into contiguous runs is the worst of the three,"
         "because it hands one branch the widest Transactions in the Block."
     exposes [Work, Pending, Piece, Bin, piecesOf, divided, branchCount, sampleWork, manyWork, samplePending, samplePiece, manyPiece]
-    depends [Domain.Spend, Domain.SpendContext, Domain.Transaction]
+    depends [Domain.Bip341, Domain.Spend, Domain.SpendContext, Domain.Transaction]
     effects []
 
 record Pending
@@ -39,6 +39,7 @@ record Piece
     position: Int
     spent: Pending
     weight: Int
+    prevouts: List<Spent>
 
 record Bin
     load: Int
@@ -94,9 +95,39 @@ verify spread
     spread(sampleWork(), 0, [], []) => []
     List.len(spread(wideWork(), 0, wideWork().spent, [])) => 3
 
+fn spentOutputs(spent: List<Pending>, acc: List<Spent>) -> List<Spent>
+    ? "Every Input's spent Output, in Input order, as Taproot needs them."
+      "The same list on every Piece of one Transaction, which costs nothing:"
+      "an AverList is a rope and they share the one value."
+      "In order and complete or not at all. An Input whose Output is not held"
+      "would shift every later index if it were left out, so a gap abandons"
+      "the list and Domain.Bip341 refuses a message whose count does not match"
+      "the Input count. That is undecided, which is what an Output we have not"
+      "got should give -- never a hash over the wrong bytes."
+    match spent
+        [] -> List.reverse(acc)
+        [head, ..tail] -> spentOne(head, tail, acc)
+
+verify spentOutputs
+    spentOutputs([], []) => []
+
+fn spentOne(one: Pending, rest: List<Pending>, acc: List<Spent>) -> List<Spent>
+    ? "One Input's Output, when it resolved."
+    match one.spend
+        Spend.Resolved(value, script) -> spentOutputs(rest, List.prepend(Spent(amount = value, script = script), acc))
+        Spend.Unknown(why) -> []
+        Spend.Invalid(why) -> []
+
+verify spentOne
+    spentOne(samplePending(), [], []) => [Spent(amount = 5, script = "51")]
+    spentOne(Pending(index = 0, input = Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), spend = Spend.Unknown("no")), [], []) => []
+
 fn pieceFor(owner: Work, position: Int, spent: Pending) -> Piece
     ? "One Input of one Transaction, weighted by how wide that Transaction is."
-    Piece(transaction = owner.transaction, position = position, spent = spent, weight = List.len(owner.spent))
+      "The Transaction's whole list of spent Outputs rides along, because a"
+      "Taproot signature commits to all of them and the Piece is only one"
+      "Input."
+    Piece(transaction = owner.transaction, position = position, spent = spent, weight = List.len(owner.spent), prevouts = spentOutputs(owner.spent, []))
 
 verify pieceFor
     pieceFor(sampleWork(), 0, samplePending()).weight => 1

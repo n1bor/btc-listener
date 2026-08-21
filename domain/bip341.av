@@ -19,25 +19,25 @@ module Bip341
         "The annex is a Witness item beginning 0x50 which has no meaning yet"
         "and is committed to anyway, so that giving it one later is a soft"
         "fork rather than a way to rewrite old signatures."
-    exposes [message, preimage, sigMsg, Prevout, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
+    exposes [message, preimage, sigMsg, Spent, emptyTransaction, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
     depends [Bytes, Domain.CompactSize, Domain.Message, Domain.Sighash, Domain.Tagged, Domain.Transaction]
     effects []
 
-record Prevout
+record Spent
     amount: Int
     script: String
 
-fn message(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int, annex: Option<String>) -> Result<String, String>
+fn message(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<String, String>
     ? "The thirty-two byte message, as hexadecimal in the order it is hashed."
       "A key path spend. The script path adds an extension to the same"
       "message and is BIP342's business."
     Result.Ok(hexOf(Domain.Tagged.tapSighash(preimage(transaction, inputIndex, prevouts, hashType, annex)?)))
 
 verify message
-    String.len(message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 0, [Prevout(amount = 1, script = "51")], 0, Option.None)?) => 64
-    message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 5, [Prevout(amount = 1, script = "51")], 0, Option.None) => Result.Err("no input at index 5 to sign")
+    String.len(message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 0, [Spent(amount = 1, script = "51")], 0, Option.None)?) => 64
+    message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 5, [Spent(amount = 1, script = "51")], 0, Option.None) => Result.Err("no input at index 5 to sign")
 
-fn preimage(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+fn preimage(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
     ? "The bytes that get hashed, in the order BIP341 lists them."
       "Exposed for the same reason the other two are: when a signature will"
       "not verify the preimage says which field is wrong and the hash does"
@@ -49,16 +49,16 @@ fn preimage(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, 
 verify preimage
     preimage(emptyTransaction(), 0, [], 0, Option.None) => Result.Err("no input at index 0 to sign")
 
-fn shaped(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
-    ? "A Prevout is needed for every Input, not merely for the one signed."
+fn shaped(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+    ? "A Spent is needed for every Input, not merely for the one signed."
     match List.len(prevouts) == List.len(transaction.inputs)
         false -> Result.Err("taproot needs a prevout for every input: {List.len(transaction.inputs)} inputs but {List.len(prevouts)} prevouts")
         true -> withHashType(transaction, inputIndex, prevouts, hashType, annex)
 
 verify shaped
-    shaped(emptyTransaction(), 0, [Prevout(amount = 1, script = "51")], 0, Option.None) => Result.Err("taproot needs a prevout for every input: 0 inputs but 1 prevouts")
+    shaped(emptyTransaction(), 0, [Spent(amount = 1, script = "51")], 0, Option.None) => Result.Err("taproot needs a prevout for every input: 0 inputs but 1 prevouts")
 
-fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
     ? "A Taproot hash type is one byte, and only some values are defined."
       "Zero is DEFAULT. One, two and three are ALL, NONE and SINGLE, each of"
       "which may have 0x80 added for ANYONECANPAY. Anything else is invalid"
@@ -91,7 +91,7 @@ verify validHashType
     validHashType(4) => false
     validHashType(128) => false
 
-fn sigMsg(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int, annex: Option<String>) -> List<Int>
+fn sigMsg(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> List<Int>
     ? "The message body, field by field in BIP341's order."
       "The epoch byte in front is zero and is not part of SigMsg proper: the"
       "BIP hashes 0x00 || SigMsg so that a future signature scheme can pick a"
@@ -115,7 +115,7 @@ verify spendType
     spendType(Option.None) => 0
     spendType(Option.Some("50")) => 1
 
-fn allInputFields(transaction: Transaction, prevouts: List<Prevout>, hashType: Int) -> List<Int>
+fn allInputFields(transaction: Transaction, prevouts: List<Spent>, hashType: Int) -> List<Int>
     ? "The four commitments to every Input, omitted under ANYONECANPAY."
       "Under ANYONECANPAY the signer is committing to their own Input only,"
       "so the whole-Transaction views are left out and this Input's own"
@@ -140,7 +140,7 @@ verify allOutputField
     allOutputField(emptyTransaction(), 2) => []
     allOutputField(emptyTransaction(), 3) => []
 
-fn thisInputFields(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>, hashType: Int) -> List<Int>
+fn thisInputFields(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int) -> List<Int>
     ? "Under ANYONECANPAY, this Input spelled out; otherwise just its index."
     match Domain.Sighash.isAnyoneCanPay(hashType)
         false -> Domain.Message.littleEndian(inputIndex, 4)
@@ -149,7 +149,7 @@ fn thisInputFields(transaction: Transaction, inputIndex: Int, prevouts: List<Pre
 verify thisInputFields
     thisInputFields(emptyTransaction(), 0, [], 0) => [0, 0, 0, 0]
 
-fn spelledOut(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>) -> List<Int>
+fn spelledOut(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>) -> List<Int>
     ? "The outpoint, the amount, the Script with its length, and the sequence."
     match inputAt(transaction.inputs, inputIndex)
         Option.None -> []
@@ -158,8 +158,8 @@ fn spelledOut(transaction: Transaction, inputIndex: Int, prevouts: List<Prevout>
 verify spelledOut
     spelledOut(emptyTransaction(), 0, []) => []
 
-fn withPrevout(input: Input, prevout: Option<Prevout>) -> List<Int>
-    ? "The Input's own fields, once its Prevout is in hand."
+fn withPrevout(input: Input, prevout: Option<Spent>) -> List<Int>
+    ? "The Input's own fields, once its Spent is in hand."
     match prevout
         Option.None -> []
         Option.Some(found) -> List.concat(outpointOf(input), List.concat(Domain.Message.littleEndian(found.amount, 8), List.concat(scriptField(found.script), Domain.Message.littleEndian(input.sequence, 4))))
@@ -241,7 +241,7 @@ fn outpointOf(input: Input) -> List<Int>
 verify outpointOf
     List.len(outpointOf(Input(previousTxid = "00000000000000000000000000000000000000000000000000000000000000ff", previousIndex = 0, script = "", sequence = 0, witness = []))) => 36
 
-fn hashAmounts(prevouts: List<Prevout>) -> List<Int>
+fn hashAmounts(prevouts: List<Spent>) -> List<Int>
     ? "Single SHA-256 over every Output's amount, eight bytes each."
       "New in BIP341 and the reason a Taproot signer cannot be lied to about"
       "what it is spending."
@@ -250,30 +250,30 @@ fn hashAmounts(prevouts: List<Prevout>) -> List<Int>
 verify hashAmounts
     List.len(hashAmounts([])) => 32
 
-fn everyAmount(prevouts: List<Prevout>, acc: List<Int>) -> List<Int>
+fn everyAmount(prevouts: List<Spent>, acc: List<Int>) -> List<Int>
     ? "Each amount appended in order."
     match prevouts
         [] -> acc
         [head, ..tail] -> everyAmount(tail, List.concat(acc, Domain.Message.littleEndian(head.amount, 8)))
 
 verify everyAmount
-    everyAmount([Prevout(amount = 1, script = "")], []) => [1, 0, 0, 0, 0, 0, 0, 0]
+    everyAmount([Spent(amount = 1, script = "")], []) => [1, 0, 0, 0, 0, 0, 0, 0]
 
-fn hashScriptPubKeys(prevouts: List<Prevout>) -> List<Int>
+fn hashScriptPubKeys(prevouts: List<Spent>) -> List<Int>
     ? "Single SHA-256 over every Output Script, each with its length."
     Domain.Tagged.sha256Of(everyScript(prevouts, []))
 
 verify hashScriptPubKeys
     List.len(hashScriptPubKeys([])) => 32
 
-fn everyScript(prevouts: List<Prevout>, acc: List<Int>) -> List<Int>
+fn everyScript(prevouts: List<Spent>, acc: List<Int>) -> List<Int>
     ? "Each Script appended in order, length prefixed."
     match prevouts
         [] -> acc
         [head, ..tail] -> everyScript(tail, List.concat(acc, scriptField(head.script)))
 
 verify everyScript
-    everyScript([Prevout(amount = 0, script = "51")], []) => [1, 81]
+    everyScript([Spent(amount = 0, script = "51")], []) => [1, 81]
 
 fn hashSequences(inputs: List<Input>) -> List<Int>
     ? "Single SHA-256 over every sequence, four bytes each."
@@ -344,8 +344,8 @@ fn hereOrDeeperOutput(head: Output, tail: List<Output>, index: Int) -> Option<Ou
 verify hereOrDeeperOutput
     hereOrDeeperOutput(Output(value = 1, script = "51"), [], 0) => Option.Some(Output(value = 1, script = "51"))
 
-fn prevoutAt(prevouts: List<Prevout>, index: Int) -> Option<Prevout>
-    ? "The Prevout at this position, or nothing."
+fn prevoutAt(prevouts: List<Spent>, index: Int) -> Option<Spent>
+    ? "The Spent at this position, or nothing."
     match prevouts
         [] -> Option.None
         [head, ..tail] -> hereOrDeeperPrevout(head, tail, index)
@@ -353,14 +353,14 @@ fn prevoutAt(prevouts: List<Prevout>, index: Int) -> Option<Prevout>
 verify prevoutAt
     prevoutAt([], 0) => Option.None
 
-fn hereOrDeeperPrevout(head: Prevout, tail: List<Prevout>, index: Int) -> Option<Prevout>
+fn hereOrDeeperPrevout(head: Spent, tail: List<Spent>, index: Int) -> Option<Spent>
     ? "Counting down to the one wanted."
     match index == 0
         true -> Option.Some(head)
         false -> prevoutAt(tail, index - 1)
 
 verify hereOrDeeperPrevout
-    hereOrDeeperPrevout(Prevout(amount = 1, script = ""), [], 0) => Option.Some(Prevout(amount = 1, script = ""))
+    hereOrDeeperPrevout(Spent(amount = 1, script = ""), [], 0) => Option.Some(Spent(amount = 1, script = ""))
 
 fn emptyTransaction() -> Transaction
     ? "A Transaction with nothing in it, for the cases here."

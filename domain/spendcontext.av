@@ -27,8 +27,8 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, SigVersion, Commitment, Context, bare, committed, inWitnessV0, sigVersionOf, hasSpend, amountOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
-    depends [Domain.Network, Bytes, Domain.Bip143, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
+    exposes [Locking, lockingOf, withoutSignatures, SigVersion, Commitment, Context, bare, committed, inWitnessV0, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    depends [Domain.Network, Bytes, Domain.Bip143, Domain.Bip341, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
 type SigVersion
@@ -42,6 +42,7 @@ record Commitment
     scriptCode: String
     witness: List<String>
     sigVersion: SigVersion
+    prevouts: List<Spent>
 
 record Context
     rules: Rules
@@ -62,7 +63,7 @@ fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: In
       "modules further down. The Witness is carried for the same reason and"
       "is empty for every Input that is not a witness spend, which below the"
       "SegWit activation is all of them."
-    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness, sigVersion = SigVersion.Base)))
+    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness, sigVersion = SigVersion.Base, prevouts = [])))
 
 verify committed
     scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => "51"
@@ -79,7 +80,7 @@ fn inWitnessV0(context: Context, scriptCode: String) -> Context
       "A Context with no spend stays as it is: there is nothing to enter."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = SigVersion.WitnessV0)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = SigVersion.WitnessV0, prevouts = commitment.prevouts)))
 
 verify inWitnessV0
     sigVersionOf(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "52")) => SigVersion.WitnessV0
@@ -110,6 +111,53 @@ fn sigVersionOf(context: Context) -> SigVersion
 verify sigVersionOf
     sigVersionOf(bare(Domain.Rules.latest())) => SigVersion.Base
     sigVersionOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => SigVersion.Base
+
+fn withPrevouts(context: Context, prevouts: List<Spent>) -> Context
+    ? "The same spend, told what every Input of the Transaction spends."
+      "Taproot needs this and the two older signature hashes do not, which is"
+      "why it arrives separately rather than as a seventh argument to"
+      "committed: a caller that has not got it should not be made to say so."
+      "An empty list means not supplied, and Domain.Bip341 refuses a message"
+      "whose Prevout count does not match the Input count -- so a caller that"
+      "forgets gets undecided rather than a message over the wrong bytes."
+    match context.spend
+        Option.None -> context
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = commitment.scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = prevouts)))
+
+verify withPrevouts
+    prevoutsOf(withPrevouts(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), [Spent(amount = 7, script = "51")])) => [Spent(amount = 7, script = "51")]
+    prevoutsOf(withPrevouts(bare(Domain.Rules.latest()), [Spent(amount = 7, script = "51")])) => []
+
+fn prevoutsOf(context: Context) -> List<Spent>
+    ? "What every Input of this Transaction spends, when the caller knew."
+    match context.spend
+        Option.None -> []
+        Option.Some(commitment) -> commitment.prevouts
+
+verify prevoutsOf
+    prevoutsOf(bare(Domain.Rules.latest())) => []
+    prevoutsOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => []
+
+fn transactionOf(context: Context) -> Option<Transaction>
+    ? "The Transaction this run is part of, when there is one."
+    match context.spend
+        Option.None -> Option.None
+        Option.Some(commitment) -> Option.Some(commitment.transaction)
+
+verify transactionOf
+    transactionOf(bare(Domain.Rules.latest())) => Option.None
+    transactionOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => Option.Some(emptyTransaction())
+
+fn inputIndexOf(context: Context) -> Int
+    ? "Which Input of it is being spent. Zero when there is no spend, which"
+      "no caller acts on because they ask hasSpend first."
+    match context.spend
+        Option.None -> 0
+        Option.Some(commitment) -> commitment.inputIndex
+
+verify inputIndexOf
+    inputIndexOf(bare(Domain.Rules.latest())) => 0
+    inputIndexOf(committed(Domain.Rules.latest(), emptyTransaction(), 3, 5, "51", [])) => 3
 
 fn hasSpend(context: Context) -> Bool
     ? "Whether there is a Transaction behind this run at all."
@@ -182,7 +230,7 @@ fn lockingIn(commitment: Commitment) -> Option<Locking>
         Option.Some(input) -> Option.Some(Locking(version = Domain.Transaction.versionOf(commitment.transaction), lockTime = Domain.Transaction.lockTimeOf(commitment.transaction), sequence = Domain.Transaction.sequenceOf(input)))
 
 verify lockingIn
-    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base)) => Option.None
+    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [])) => Option.None
 
 fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
     ? "The Input at a position, counting down."
@@ -258,7 +306,7 @@ fn overScript(context: Context, scriptCode: String) -> Context
       "starts each one -- rather than guessed at by the caller."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = commitment.prevouts)))
 
 verify overScript
     scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
@@ -339,17 +387,22 @@ fn legacyMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The pre-SegWit signature hash, quadratic in the size of the Transaction."
     match Domain.Sighash.legacy(commitment.transaction, commitment.inputIndex, commitment.scriptCode, hashType)
         Result.Err(why) -> Option.None
-        Result.Ok(message) -> Option.Some(message)
+        Result.Ok(digest) -> Option.Some(digest)
 
 fn witnessMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "BIP143, which is where the amount earns its place in the record."
+      "The binding is called digest rather than message because this module"
+      "depends on both Domain.Bip143 and Domain.Bip341, each of which exposes"
+      "a message, and the emitted Rust glob-imports both -- so a local called"
+      "message is ambiguous there even though nothing here refers to one"
+      "unqualified. jasisz/aver#1042."
       "It has no arm that refuses to hash: SIGHASH_SINGLE with no matching"
       "Output commits to no Outputs rather than signing the number one, which"
       "was the point of the redesign. A None here is a hash type that will not"
       "fit in four bytes or an Input index that is not there."
     match Domain.Bip143.message(commitment.transaction, commitment.inputIndex, commitment.scriptCode, commitment.amount, hashType)
         Result.Err(why) -> Option.None
-        Result.Ok(message) -> Option.Some(message)
+        Result.Ok(digest) -> Option.Some(digest)
 
 verify messageOf
-    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")

@@ -19,7 +19,7 @@ module Spends
         "lookups was tried and made an audit of two thousand Blocks go from two"
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Work, Pending, resolved, scriptsAcross, resolve]
-    depends [Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
+    depends [Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
     effects [Disk.readText, Infra.Kv.get]
 
 record Checked
@@ -119,7 +119,7 @@ verify eachInBranch
 
 fn stepOne(piece: Piece, tail: List<Piece>, counts: Outcomes, lines: List<String>, rules: Rules, height: Int, blockId: String) -> Result<Tuple<Outcomes, List<String>>, String>
     ? "One Input's Script pair, run once and both counted and reported from."
-    one = scriptCounts(piece.transaction, piece.spent.index, piece.spent.input, piece.spent.spend, Domain.SpendScript.noOutcomes(), rules)
+    one = scriptCounts(piece.transaction, piece.spent.index, piece.spent.input, piece.spent.spend, Domain.SpendScript.noOutcomes(), rules, piece.prevouts)
     eachInBranch(tail, Domain.SpendScript.merged(counts, one), notedFrom(piece, one, lines, height, blockId), rules, height, blockId)
 
 verify stepOne
@@ -168,7 +168,7 @@ fn resolvedInput(store: Store, blocks: BlockStore, transaction: Transaction, ind
     spend = resolve(store, blocks, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
     over(store, blocks, transaction, index + 1, tail, Gathered(tally = Domain.Spend.absorb(held.tally, spend), pending = List.prepend(Pending(index = index, input = input, spend = spend), held.pending)), rules)
 
-fn scriptCounts(transaction: Transaction, index: Int, input: Input, spend: Spend, counts: Outcomes, rules: Rules) -> Outcomes
+fn scriptCounts(transaction: Transaction, index: Int, input: Input, spend: Spend, counts: Outcomes, rules: Rules, prevouts: List<Spent>) -> Outcomes
     ? "A Script pair can only be run when the Output it spends was found."
       "An Input whose parent is not held is not counted at all, rather than"
       "counted as undecided: undecided is about what the engine cannot answer,"
@@ -176,16 +176,16 @@ fn scriptCounts(transaction: Transaction, index: Int, input: Input, spend: Spend
       "The Output's Script is both the second half of the pair and the Script"
       "code a legacy signature is taken over, which is why it appears twice."
     match spend
-        Spend.Resolved(value, script) -> Domain.SpendScript.count(counts, Domain.SpendScript.check(Domain.Transaction.scriptOf(input), script, Domain.SpendContext.committed(rules, transaction, index, value, script, Domain.Transaction.witnessOf(input))))
+        Spend.Resolved(value, script) -> Domain.SpendScript.count(counts, Domain.SpendScript.check(Domain.Transaction.scriptOf(input), script, Domain.SpendContext.withPrevouts(Domain.SpendContext.committed(rules, transaction, index, value, script, Domain.Transaction.witnessOf(input)), prevouts)))
         Spend.Unknown(why) -> counts
         Spend.Invalid(why) -> counts
 
 verify scriptCounts
-    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "51"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest()).passed => 1
-    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "ba"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest()).undecided => 1
-    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "00"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest()).failed => 1
-    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Unknown("no"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest()) => Domain.SpendScript.noOutcomes()
-    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Invalid("no"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest()) => Domain.SpendScript.noOutcomes()
+    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "51"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest(), []).passed => 1
+    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "ba"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest(), []).undecided => 1
+    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Resolved(5, "00"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest(), []).failed => 1
+    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Unknown("no"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest(), []) => Domain.SpendScript.noOutcomes()
+    scriptCounts(Domain.SpendContext.emptyTransaction(), 0, Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), Spend.Invalid("no"), Domain.SpendScript.noOutcomes(), Domain.Rules.latest(), []) => Domain.SpendScript.noOutcomes()
 
 fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
     ? "What the Output at this position of this Transaction is worth."
