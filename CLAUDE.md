@@ -18,9 +18,13 @@ Aver is not a language you already know. Before writing any `.av` code, read
 no lambdas, no type parameters, `verify` blocks colocated with pure functions,
 explicit effect lists on both the module and each effectful function).
 `../aver/docs/` has the deep dives (`language.md`, `types.md`, `effects.md`,
-`cli.md`). The `aver` on PATH is the release install; a dev build lives at
-`../aver/target/release/aver` when language changes are being tested against
-this project.
+`cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
+whatever that checkout was at when it was last installed — and **`aver
+--version` cannot tell you which**, because the version string does not move
+between releases. Two fixes this project reported were in `upstream/main` and
+absent from a PATH binary reporting the same `0.28.1`. When something verifies
+and will not compile, or the VM and the compiled binary disagree, check
+`git log upstream/main` before believing it is a live bug.
 
 ## Commands
 

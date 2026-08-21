@@ -247,28 +247,30 @@ All 54 pass. Two things are worth saying about the split:
 The 16 private-key entries are skipped and the count is in the module intent.
 They are WIF, and this project has no notion of a key — only of Scripts.
 
-## The probe is written in parts, and why
+## The probe counts its own cases, and why
 
-Every probe splits its cases into `part1()`, `part2()` … joined by
-`List.concat`, rather than one list literal. That is not style. **The VM
-truncates a list literal to `len mod 256` elements, silently, with exit 0** —
-jasisz/aver#1054. `LIST_NEW` carries an 8-bit count and the compiler emits
-`items.len() as u8`.
+Every probe ends with
 
-The Script probe with 1118 cases printed 94 answers. Nothing said so: `aver
-check` was clean, stderr was empty, the exit code was nought. The compiled Rust
-backend gets it right, so the VM and the binary disagree about the value of a
+```
+verify assembled
+    List.len(assembled()) => 1118
+```
+
+which looks like belt and braces and is not. **The VM used to truncate a list
+literal to `len mod 256` elements, silently, with exit 0** — jasisz/aver#1054,
+found here. The Script probe with 1118 cases printed 94 answers; `aver check`
+was clean, stderr was empty, the exit code was nought, and the compiled Rust
+backend got it right, so the VM and the binary disagreed about the value of a
 constant.
 
-Two things guard against it now:
+It is fixed upstream and the probes are back to one literal each. The count
+stays, because it is what caught it: a corpus that cannot say how many cases it
+holds is one that can lose some without saying so.
 
-* Each part is at most 200 cases, and `verify assembled` counts the joined
-  result against the number the tool wrote. A part over the limit fails there
-  rather than quietly shortening the corpus.
-* Every tool refuses to write answers back when the answer count does not match
-  the case count. That is what caught this one; without it the corpus would
-  have recorded 94 answers against 1118 cases and reported a cheerful agreement
-  about the 94.
+The other guard stays too, and it is the one that actually stopped the bad data
+reaching disk: **every tool refuses to write answers back when the answer count
+does not match the case count.** Without that the corpus would have recorded 94
+answers against 1118 cases and printed a cheerful agreement report about the 94.
 
 ## `sighash.json` is the one conformance corpus
 

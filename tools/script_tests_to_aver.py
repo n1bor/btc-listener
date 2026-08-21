@@ -271,16 +271,6 @@ fn main() -> Unit
 %(parts)s"""
 
 
-# The VM truncates a list literal to `len mod 256` elements, silently and
-# with exit 0 -- jasisz/aver#1054.  A corpus of 1118 cases in one literal came
-# back as 94.  The compiled backend is correct, so this is only a problem for
-# `aver run`, which is what the recipe uses.  Splitting the literal into parts
-# under the limit and joining them keeps the probe interpretable; the
-# `verify assembled` case below counts the result, so raising this past 255
-# fails loudly rather than quietly losing cases.
-PROBE_PART = 200
-
-
 def probe(path):
     rows = collected()
     lines = ['        ("%s", "%s", %s),' % (sig, pubkey, rules_literal(flags))
@@ -291,30 +281,27 @@ def probe(path):
 
 
 def parts_source(lines, element="Tuple<String, String, Rules>"):
-    """`assembled` plus the numbered parts it joins, as Aver source."""
-    chunks = [lines[i:i + PROBE_PART] for i in range(0, len(lines), PROBE_PART)]
-    joined = "[]"
-    for k in range(len(chunks), 0, -1):
-        joined = "part%d()" % k if joined == "[]" else "List.concat(part%d(), %s)" % (k, joined)
+    """`assembled`, plus a verify case counting what it holds.
+
+    One literal again: jasisz/aver#1054 -- the VM truncating a list literal to
+    `len mod 256` elements, silently and with exit 0 -- is fixed upstream.  The
+    count stays, because it is what caught that bug: a corpus that cannot say
+    how many cases it holds is one that can lose some without saying so.
+    """
     out = ['fn assembled() -> List<%s>' % element,
            '    ? "Every case Core supplies, as this tool wrote them."',
-           '      "In parts of at most %d because the VM truncates a list literal to"' % PROBE_PART,
-           '      "len mod 256 elements without saying so -- jasisz/aver#1054. The"',
-           '      "verify case counts what comes out, so a part over the limit fails"',
-           '      "here rather than quietly shortening the corpus."',
-           '    %s' % joined,
+           '      "The verify case counts them. A corpus that cannot say how many"',
+           '      "cases it holds can lose some quietly, which jasisz/aver#1054 did"',
+           '      "to 92 percent of this one before it was fixed."',
+           '    [',
+           "\n".join(lines).rstrip(","),
+           '    ]',
            '',
            'verify assembled',
            '    List.len(assembled()) => %d' % len(lines),
            '']
-    for k, chunk in enumerate(chunks, start=1):
-        out += ['fn part%d() -> List<%s>' % (k, element),
-                '    ? "Cases %d to %d."' % ((k - 1) * PROBE_PART + 1, (k - 1) * PROBE_PART + len(chunk)),
-                '    [',
-                "\n".join(chunk).rstrip(","),
-                '    ]',
-                '']
     return "\n".join(out)
+
 
 
 def emit(out_dir, per_file=250, report=""):

@@ -462,9 +462,13 @@ constant.
 The only reason it was caught is that the tool refuses to write answers back
 when the count does not match the case count. Without that it would have
 recorded 94 answers against 1118 cases and printed a cheerful agreement report
-about the 94. The probes are written in parts under the limit now, joined by
-`List.concat`, with a `verify assembled` case that counts the result — so a part
-over the limit fails loudly instead of quietly shortening the corpus.
+about the 94.
+
+*(Fixed upstream the same day, in jasisz/aver#1055, with
+`tests/regressions/verify_runner/list_literal_300_items.av` as the regression.
+The probes are back to one literal each. The `verify assembled` case that counts
+them stays: it is what caught this, and a corpus that cannot say how many cases
+it holds is one that can lose some quietly.)*
 
 ## Update — MINIMALDATA, and the 75 cases it was worth
 
