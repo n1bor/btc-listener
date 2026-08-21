@@ -2,15 +2,16 @@ module Index
     intent =
         "How the Index is spelled inside a Store: its keys, its values, and what"
         "an absent entry means."
-        "Two keyspaces share one Store. The `b:` space maps a Block Id to a"
+        "Several keyspaces share one Store. The `b:` space maps a Block Id to a"
         "Location and is append-only, because a Block Id always names the same"
         "bytes. The `h:` space maps a Height to a Block Id and is the mutable"
         "record of which chain we currently believe, since a reorganisation can"
-        "reassign a Height."
+        "reassign a Height. The `n:` space is its reverse, mapping a Block Id back"
+        "to the Height it sits at, and is written where `t:` is."
         "Everything here is a pure transformation over text, so the whole"
         "encoding is covered by verify blocks rather than by a Store."
     depends [Domain.Text]
-    exposes [BodyState, Location, TxSite, SpentOutput, txKey, outputKey, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, blockKey, heightKey, prunedBelowKey, outputsBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    exposes [BodyState, Location, TxSite, SpentOutput, txKey, outputKey, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, blockKey, blockHeightKey, heightKey, prunedBelowKey, outputsBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
     effects []
 
 record Location
@@ -51,6 +52,24 @@ fn txKey(txid: String) -> String
 verify txKey
     txKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16") => "t:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
     txKey("") => "t:"
+
+fn blockHeightKey(blockId: String) -> String
+    ? "Where a Block's own Height lives: the reverse of the h: keyspace."
+      "h: answers 'which Block is at this Height' and nothing answered 'which"
+      "Height is this Block at', which is the question a Transaction reached by"
+      "its Id has to ask before its Scripts can be judged -- the rules a spend"
+      "is held to are the rules of the Block that mined it."
+      "Written by the same phase that writes t:, and stale in exactly the same"
+      "way. A reorganisation that moves a Block off the chain leaves both its"
+      "t: entries and its n: entry pointing at a Block no Height names any"
+      "more; re-running the phase over the range corrects both together. That"
+      "is why this is not written with h: during the header phase, where it"
+      "would have to be unwound separately."
+    "n:{blockId}"
+
+verify blockHeightKey
+    blockHeightKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "n:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    blockHeightKey("") => "n:"
 
 fn encodeTxSite(site: TxSite) -> String
     ? "A Transaction is named by its Block and its position in it."

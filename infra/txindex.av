@@ -93,9 +93,9 @@ fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -
     location = Domain.Index.decodeLocation(text)?
     got = Infra.Blocks.fetch(state.blocks, state.loaded, location)?
     transactions = Domain.Block.transactionsOf(got.payload)?
-    entries = sitesFor(Domain.Block.txidsOf(transactions), blockId, 0, state.pending)
+    entries = sitesFor(Domain.Block.txidsOf(transactions), blockId, 0, List.prepend(heightEntry(blockId, height), state.pending))
     added = List.len(transactions)
-    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added, counted = Built(blocks = state.counted.blocks + 1, transactions = state.counted.transactions + added))
+    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added + 1, counted = Built(blocks = state.counted.blocks + 1, transactions = state.counted.transactions + added))
     recorded = maybeWrite(carried)?
     walk(recorded, height + 1, to)
 
@@ -111,6 +111,21 @@ fn written(state: Walk) -> Result<Walk, String>
     ! [Disk.appendText, Infra.Kv.putAll]
     grown = flushed(state)?
     Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted))
+
+fn heightEntry(blockId: String, height: Int) -> Entry
+    ? "This Block sits at this Height, written the one place that can say so."
+      "The walk holds both halves already -- it reached the Block by asking h:"
+      "which Block is at this Height -- so recording the reverse costs one entry"
+      "per Block against the several thousand Transaction entries beside it."
+      "It belongs here rather than with the Headers because it has to be as"
+      "fresh as t: is: a Transaction found by its Id is found through an entry"
+      "this phase wrote, and the Height it is judged at should have been written"
+      "by the same pass over the same Block."
+    Entry(key = Domain.Index.blockHeightKey(blockId), value = Domain.Index.encodeHeight(height))
+
+verify heightEntry
+    heightEntry("aa", 0) => Entry(key = "n:aa", value = "0")
+    heightEntry("aa", 300000) => Entry(key = "n:aa", value = "300000")
 
 fn sitesFor(txids: List<String>, blockId: String, position: Int, acc: List<Entry>) -> List<Entry>
     ? "One entry per Transaction: this Id sits at this place in this Block."

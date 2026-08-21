@@ -125,14 +125,38 @@ fn blockOfSite(store: Store, blocks: BlockStore, text: String) -> Result<Found, 
     located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
     match located
         Option.None -> Result.Err("transaction is in block {site.blockId}, whose body is not held")
-        Option.Some(where) -> heldAt(blocks, site.blockId, where)
+        Option.Some(where) -> heldAt(store, blocks, site.blockId, where)
 
-fn heldAt(blocks: BlockStore, blockId: String, where: String) -> Result<Found, String>
-    ? "Read the Block the site named."
-    ! [Disk.readText]
+fn heldAt(store: Store, blocks: BlockStore, blockId: String, where: String) -> Result<Found, String>
+    ? "Read the Block the site named, and ask what Height it sits at."
+      "The Height decides which soft forks were in force, so a Transaction"
+      "reached by its Id cannot be judged without it. The n: keyspace answers,"
+      "having been written by the same phase that wrote the t: entry this"
+      "lookup arrived through."
+    ! [Disk.readText, Infra.Kv.get]
     location = Domain.Index.decodeLocation(where)?
     payload = Infra.Blocks.read(blocks, location)?
-    Result.Ok(Found(height = 0 - 1, blockId = blockId, parentBlockId = Option.None, body = Body.Held(location, payload)))
+    height = heightOf(store, blockId)?
+    Result.Ok(Found(height = height, blockId = blockId, parentBlockId = Option.None, body = Body.Held(location, payload)))
+
+fn heightOf(store: Store, blockId: String) -> Result<Int, String>
+    ? "The Height a Block sits at, or minus one when nothing recorded it."
+      "Minus one is the answer for a directory whose t: entries were written"
+      "before the n: keyspace existed. It means unknown rather than zero, and"
+      "the callers that judge Scripts read it as unknown and say so; re-running"
+      "the txindex phase over the range fills it in."
+    ! [Infra.Kv.get]
+    recorded = Infra.Store.get(store, Domain.Index.blockHeightKey(blockId))?
+    match recorded
+        Option.None -> Result.Ok(0 - 1)
+        Option.Some(text) -> Domain.Index.decodeHeight(text)
+
+verify heightOf
+    heightOf(Infra.Store.fixture([]), "aa") => Result.Ok(0 - 1)
+    heightOf(Infra.Store.fixture([("n:aa", "300000")]), "aa") => Result.Ok(300000)
+    heightOf(Infra.Store.fixture([("n:aa", "0")]), "aa") => Result.Ok(0)
+    heightOf(Infra.Store.fixture([("n:bb", "300000")]), "aa") => Result.Ok(0 - 1)
+    heightOf(Infra.Store.fixture([("n:aa", "x")]), "aa") => Result.Err("Height must be a whole number, got 'x'")
 
 fn withoutBodies(store: Store, from: Int, to: Int, acc: Int) -> Result<Int, String>
     ? "How many Heights in a range the Index names but holds no body for."
