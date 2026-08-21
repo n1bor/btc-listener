@@ -46,6 +46,7 @@ verify check
     check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
     check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(170060))) => Outcome.Decided(Ending.Passed)
     check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
 
@@ -282,6 +283,36 @@ verify redeemed
     redeemed(Domain.ScriptState.holding([[81]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
 
 fn redeemedWith(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> Outcome
+    ? "A redeem script that is itself a witness program is refused, for the"
+      "same reason the bare one is and with the same consequence if it is not."
+      "BIP141 defines the nested forms so a wallet that could only send to a"
+      "three-address could still pay a segwit Output: the redeem script is the"
+      "witness program, and the P2SH Output commits to it by hash as usual."
+      "Run as an ordinary Script it pushes its hash, leaves it on top, and"
+      "comes out true -- so an engine that refuses the bare form and not this"
+      "one still passes every nested segwit spend it is shown."
+      "Core's own vector for it is script_tests.json's \"Basic P2SH(P2WPKH)"
+      "with the wrong key\", which Core answers EVAL_FALSE and this engine"
+      "answered Decided(Passed) until this arm was added."
+    match Domain.Script.isAnyWitnessProgram(hexOf(redeem))
+        true -> Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
+        false -> redeemRun(redeem, rest, context)
+
+verify redeemedWith
+    redeemedWith([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    redeemedWith([0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    redeemedWith([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
+    redeemedWith(nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
+
+fn nestedWitnessRedeem() -> List<Int>
+    ? "The redeem script of Core's \"Basic P2SH(P2WPKH) with the wrong key\":"
+      "a version zero witness program pushing a twenty byte key hash."
+    Domain.Script.bytesOf("00147cf9c846cd4882efec4bf07e44ebdad495c94f4b")
+
+verify nestedWitnessRedeem
+    List.len(nestedWitnessRedeem()) => 22
+
+fn redeemRun(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> Outcome
     ? "The redeem script parsed and run. A redeem script that does not parse"
       "fails the spend rather than going undecided: it was committed to by"
       "hash, so there is nothing further to learn about it."
@@ -292,10 +323,10 @@ fn redeemedWith(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> O
         Result.Err(message) -> Outcome.Decided(Ending.Failed("redeem script: {message}"))
         Result.Ok(ops) -> Domain.Interp.evaluate(ops, Domain.ScriptState.holding(rest), Domain.SpendContext.overScript(context, hexOf(redeem)))
 
-verify redeemedWith
-    redeemedWith([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
-    redeemedWith([0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
-    redeemedWith([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
+verify redeemRun
+    redeemRun([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    redeemRun([0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    redeemRun([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
 
 fn hexOf(script: List<Int>) -> String
     ? "A Script back as hexadecimal, for the Script code a signature in it is"

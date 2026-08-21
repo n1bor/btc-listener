@@ -78,7 +78,22 @@ opcode names, `0x..` byte blobs, decimal numbers that become minimal pushes,
 python3 tools/tx_tests_to_aver.py --fetch
 python3 tools/tx_tests_to_aver.py --emit                       # placeholders
 python3 tools/tx_tests_to_aver.py --probe /tmp/p/main.av       # the middle step
-aver run /tmp/p/main.av --module-root . --providers > /tmp/answers.txt
+
+# the probe needs its own project; see below for why
+mkdir -p /tmp/p && cp -r domain /tmp/p/domain
+cat > /tmp/p/aver.toml <<'TOML'
+[providers]
+schema = 1
+
+[[providers.bindings]]
+capability = "Domain.Primitives"
+crate = "btc_listener_primitives"
+package = "btc-listener-primitives"
+path = "/absolute/path/to/btc-listener/providers/primitives"
+factory = "primitives_binding"
+TOML
+cd /tmp/p && aver run main.av --module-root . --providers > /tmp/answers.txt
+
 python3 tools/tx_tests_to_aver.py --answers /tmp/answers.txt
 ```
 
@@ -86,10 +101,25 @@ python3 tools/tx_tests_to_aver.py --answers /tmp/answers.txt
 that prints one answer a line; `--answers` reads those back and rewrites the
 corpus, then prints the agreement report and bakes it into the headers.
 
-Running the probe needs a directory with `domain/`, `infra/`, `app/` and
-`providers/` symlinked and an `aver.toml` naming only the `Domain.Primitives`
-binding — a project-wide `aver.toml` that also names `Infra.Kv` is refused for
-a program that does not reach it.
+The probe needs a project of its own and the reason is worth stating, because
+the obvious command does not work:
+
+```
+$ aver run /tmp/p/main.av --module-root . --providers
+aver.toml: [[providers.bindings]] index 1 capability 'Infra.Kv' has no
+capability contract in this project
+```
+
+`aver.toml` is read from the module root, but the *project* is whatever the
+entry program reaches — and a corpus probe reaches `Domain.TxCase` and nothing
+under `infra/`. So the repository's own `aver.toml`, which names `Infra.Kv`, is
+refused: it binds a capability the program never uses. Pointing `--module-root`
+at the repository does not help, because that is where the offending file is.
+
+What works is a directory holding a copy of `domain/` alone, `main.av`, and an
+`aver.toml` naming only the `Domain.Primitives` binding with an **absolute**
+`path` back to `providers/primitives`. `infra/` and `app/` are not needed and
+must not be copied — copying them is what drags `Infra.Kv` back in.
 
 Two shapes in Core's Transaction data need care and the tool handles both:
 
