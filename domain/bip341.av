@@ -19,7 +19,7 @@ module Bip341
         "The annex is a Witness item beginning 0x50 which has no meaning yet"
         "and is committed to anyway, so that giving it one later is a soft"
         "fork rather than a way to rewrite old signatures."
-    exposes [message, preimage, sigMsg, Spent, emptyTransaction, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
+    exposes [message, messageWith, Extension, preimage, sigMsg, Spent, emptyTransaction, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
     depends [Bytes, Domain.CompactSize, Domain.Message, Domain.Sighash, Domain.Tagged, Domain.Transaction]
     effects []
 
@@ -27,38 +27,62 @@ record Spent
     amount: Int
     script: String
 
+record Extension
+    leafHash: String
+    keyVersion: Int
+    codeSeparatorPosition: Int
+
 fn message(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<String, String>
+    ? "The thirty-two byte message for a key path spend."
+    messageWith(transaction, inputIndex, prevouts, hashType, annex, Option.None)
+
+fn messageWith(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> Result<String, String>
     ? "The thirty-two byte message, as hexadecimal in the order it is hashed."
-      "A key path spend. The script path adds an extension to the same"
-      "message and is BIP342's business."
-    Result.Ok(hexOf(Domain.Tagged.tapSighash(preimage(transaction, inputIndex, prevouts, hashType, annex)?)))
+      "A script path spend appends an extension -- the leaf being run, the"
+      "key version and where the last executed OP_CODESEPARATOR was -- and"
+      "sets the extension flag in the spend type. Without it a signature made"
+      "for one leaf would be valid under another leaf of the same tree, which"
+      "is the whole reason the leaf is committed to."
+    Result.Ok(hexOf(Domain.Tagged.tapSighash(List.concat(preimage(transaction, inputIndex, prevouts, hashType, annex, extension)?, extensionField(extension)))))
 
 verify message
     String.len(message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 0, [Spent(amount = 1, script = "51")], 0, Option.None)?) => 64
     message(Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, 5, [Spent(amount = 1, script = "51")], 0, Option.None) => Result.Err("no input at index 5 to sign")
 
-fn preimage(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+fn extensionField(extension: Option<Extension>) -> List<Int>
+    ? "The leaf hash, the key version and the code separator position."
+      "The key version is zero and is written out so that a future leaf"
+      "version can change what a public key means without colliding."
+    match extension
+        Option.None -> []
+        Option.Some(found) -> List.concat(bytesOf(found.leafHash), List.concat([found.keyVersion], Domain.Message.littleEndian(found.codeSeparatorPosition, 4)))
+
+verify extensionField
+    extensionField(Option.None) => []
+    List.len(extensionField(Option.Some(Extension(leafHash = "00", keyVersion = 0, codeSeparatorPosition = 0)))) => 6
+
+fn preimage(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> Result<List<Int>, String>
     ? "The bytes that get hashed, in the order BIP341 lists them."
       "Exposed for the same reason the other two are: when a signature will"
       "not verify the preimage says which field is wrong and the hash does"
       "not."
     match Bool.or(inputIndex < 0, inputIndex >= List.len(transaction.inputs))
         true -> Result.Err("no input at index {inputIndex} to sign")
-        false -> shaped(transaction, inputIndex, prevouts, hashType, annex)
+        false -> shaped(transaction, inputIndex, prevouts, hashType, annex, extension)
 
 verify preimage
-    preimage(emptyTransaction(), 0, [], 0, Option.None) => Result.Err("no input at index 0 to sign")
+    preimage(emptyTransaction(), 0, [], 0, Option.None, Option.None) => Result.Err("no input at index 0 to sign")
 
-fn shaped(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+fn shaped(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> Result<List<Int>, String>
     ? "A Spent is needed for every Input, not merely for the one signed."
     match List.len(prevouts) == List.len(transaction.inputs)
         false -> Result.Err("taproot needs a prevout for every input: {List.len(transaction.inputs)} inputs but {List.len(prevouts)} prevouts")
-        true -> withHashType(transaction, inputIndex, prevouts, hashType, annex)
+        true -> withHashType(transaction, inputIndex, prevouts, hashType, annex, extension)
 
 verify shaped
-    shaped(emptyTransaction(), 0, [Spent(amount = 1, script = "51")], 0, Option.None) => Result.Err("taproot needs a prevout for every input: 0 inputs but 1 prevouts")
+    shaped(emptyTransaction(), 0, [Spent(amount = 1, script = "51")], 0, Option.None, Option.None) => Result.Err("taproot needs a prevout for every input: 0 inputs but 1 prevouts")
 
-fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> Result<List<Int>, String>
+fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> Result<List<Int>, String>
     ? "A Taproot hash type is one byte, and only some values are defined."
       "Zero is DEFAULT. One, two and three are ALL, NONE and SINGLE, each of"
       "which may have 0x80 added for ANYONECANPAY. Anything else is invalid"
@@ -66,11 +90,11 @@ fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>
       "legacy would have signed something."
     match validHashType(hashType)
         false -> Result.Err("hash type {hashType} is not one Taproot defines")
-        true -> Result.Ok(sigMsg(transaction, inputIndex, prevouts, hashType, annex))
+        true -> Result.Ok(sigMsg(transaction, inputIndex, prevouts, hashType, annex, extension))
 
 verify withHashType
-    withHashType(emptyTransaction(), 0, [], 4, Option.None) => Result.Err("hash type 4 is not one Taproot defines")
-    withHashType(emptyTransaction(), 0, [], 255, Option.None) => Result.Err("hash type 255 is not one Taproot defines")
+    withHashType(emptyTransaction(), 0, [], 4, Option.None, Option.None) => Result.Err("hash type 4 is not one Taproot defines")
+    withHashType(emptyTransaction(), 0, [], 255, Option.None, Option.None) => Result.Err("hash type 255 is not one Taproot defines")
 
 fn validHashType(hashType: Int) -> Bool
     ? "Zero, or one of ALL, NONE and SINGLE with or without ANYONECANPAY."
@@ -91,29 +115,48 @@ verify validHashType
     validHashType(4) => false
     validHashType(128) => false
 
-fn sigMsg(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>) -> List<Int>
+fn sigMsg(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> List<Int>
     ? "The message body, field by field in BIP341's order."
       "The epoch byte in front is zero and is not part of SigMsg proper: the"
       "BIP hashes 0x00 || SigMsg so that a future signature scheme can pick a"
       "different epoch and never collide with this one."
-    List.concat([0], List.concat([hashType], List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), List.concat(allInputFields(transaction, prevouts, hashType), List.concat(allOutputField(transaction, hashType), List.concat([spendType(annex)], List.concat(thisInputFields(transaction, inputIndex, prevouts, hashType), List.concat(annexField(annex), singleOutputField(transaction, inputIndex, hashType))))))))))
+    List.concat([0], List.concat([hashType], List.concat(Domain.Message.littleEndian(transaction.version, 4), List.concat(Domain.Message.littleEndian(transaction.lockTime, 4), List.concat(allInputFields(transaction, prevouts, hashType), List.concat(allOutputField(transaction, hashType), List.concat([spendType(annex, extension)], List.concat(thisInputFields(transaction, inputIndex, prevouts, hashType), List.concat(annexField(annex), singleOutputField(transaction, inputIndex, hashType))))))))))
 
 verify sigMsg
-    List.len(sigMsg(emptyTransaction(), 0, [], 0, Option.None)) => 175
-    List.len(sigMsg(emptyTransaction(), 0, [], 129, Option.None)) => 43
+    List.len(sigMsg(emptyTransaction(), 0, [], 0, Option.None, Option.None)) => 175
+    List.len(sigMsg(emptyTransaction(), 0, [], 129, Option.None, Option.None)) => 43
 
-fn spendType(annex: Option<String>) -> Int
+fn spendType(annex: Option<String>, extension: Option<Extension>) -> Int
     ? "Two times the extension flag, plus one if an annex is present."
-      "The extension flag is zero for a key path spend. BIP342 sets it to one"
-      "and appends the leaf hash, the key version and the code separator"
-      "position after the rest of the message."
+      "The extension flag is zero for a key path spend and one for a script"
+      "path, which is what tells the two apart in the message."
+    extensionFlag(extension) * 2 + annexFlag(annex)
+
+verify spendType
+    spendType(Option.None, Option.None) => 0
+    spendType(Option.Some("50"), Option.None) => 1
+    spendType(Option.None, Option.Some(Extension(leafHash = "00", keyVersion = 0, codeSeparatorPosition = 0))) => 2
+    spendType(Option.Some("50"), Option.Some(Extension(leafHash = "00", keyVersion = 0, codeSeparatorPosition = 0))) => 3
+
+fn annexFlag(annex: Option<String>) -> Int
+    ? "One when there is an annex."
     match annex
         Option.None -> 0
         Option.Some(bytes) -> 1
 
-verify spendType
-    spendType(Option.None) => 0
-    spendType(Option.Some("50")) => 1
+verify annexFlag
+    annexFlag(Option.None) => 0
+    annexFlag(Option.Some("50")) => 1
+
+fn extensionFlag(extension: Option<Extension>) -> Int
+    ? "One for a script path spend."
+    match extension
+        Option.None -> 0
+        Option.Some(found) -> 1
+
+verify extensionFlag
+    extensionFlag(Option.None) => 0
+    extensionFlag(Option.Some(Extension(leafHash = "00", keyVersion = 0, codeSeparatorPosition = 0))) => 1
 
 fn allInputFields(transaction: Transaction, prevouts: List<Spent>, hashType: Int) -> List<Int>
     ? "The four commitments to every Input, omitted under ANYONECANPAY."
@@ -179,12 +222,21 @@ verify scriptField
 
 fn annexField(annex: Option<String>) -> List<Int>
     ? "The annex, hashed with its own length prefix, when there is one."
+      "Single SHA-256 over the compact size and the annex bytes together --"
+      "the annex is serialised in the Witness as a length-prefixed item and"
+      "is committed to exactly as it appears there."
+      "No vector in BIP341's own set carries an annex, so nothing here is"
+      "checked against a published number. Signet does carry them and the"
+      "chain is the evidence: a spend with an annex whose commitment was"
+      "computed wrongly fails its signature, loudly."
     match annex
         Option.None -> []
-        Option.Some(bytes) -> Domain.Tagged.tapSighash([])
+        Option.Some(bytes) -> Domain.Tagged.sha256Of(scriptField(bytes))
 
 verify annexField
     annexField(Option.None) => []
+    List.len(annexField(Option.Some("50"))) => 32
+    annexField(Option.Some("50")) => Domain.Tagged.sha256Of([1, 80])
 
 fn singleOutputField(transaction: Transaction, inputIndex: Int, hashType: Int) -> List<Int>
     ? "Under SINGLE, the one Output at this Input's index."

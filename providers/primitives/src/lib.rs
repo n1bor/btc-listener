@@ -17,7 +17,7 @@ use ripemd::{Digest, Ripemd160};
 /// Pinned to the contract in `primitives.av`. A mismatch fails at startup
 /// rather than at the first call.
 pub const CONTRACT_HASH: &str =
-    "sha256:59e784f40ab87491c408214c48a1efe612004657f86f7315c1ed9107cc4635ec";
+    "sha256:3354d53ba72a2929c13c737ebe90ec182fed1f7fa4db4a50a99910f10c82678b";
 
 struct Primitives;
 
@@ -48,6 +48,40 @@ fn ripemd160(input: &[u8]) -> [u8; 20] {
     let mut hasher = Ripemd160::new();
     hasher.update(input);
     hasher.finalize().into()
+}
+
+/// BIP341's Taproot commitment: does `output_key` equal `internal_key`
+/// tweaked by `tweak`, with the given parity?  This is the one place the
+/// engine needs elliptic curve point arithmetic rather than verification,
+/// and it is why it cannot be done with `verifySchnorr` alone.
+fn taproot_tweak_matches(
+    internal_key: &[u8],
+    tweak: &[u8],
+    output_key: &[u8],
+    parity_odd: bool,
+) -> bool {
+    use secp256k1::{Parity, Scalar, Secp256k1, XOnlyPublicKey};
+    if internal_key.len() != 32 || tweak.len() != 32 || output_key.len() != 32 {
+        return false;
+    }
+    let internal = match XOnlyPublicKey::from_slice(internal_key) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let output = match XOnlyPublicKey::from_slice(output_key) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let mut scalar_bytes = [0u8; 32];
+    scalar_bytes.copy_from_slice(tweak);
+    // A tweak at or above the group order is not a scalar.  BIP341 says such
+    // a commitment simply does not verify; it is not a fault.
+    let scalar = match Scalar::from_be_bytes(scalar_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let parity = if parity_odd { Parity::Odd } else { Parity::Even };
+    internal.tweak_add_check(&Secp256k1::verification_only(), &output, parity, scalar)
 }
 
 fn verify_schnorr(public_key: &[u8], signature: &[u8], message: &[u8]) -> bool {
@@ -129,6 +163,31 @@ impl CapabilityProvider for Primitives {
                 };
                 Ok(ProviderValue::Bytes(sha1(bytes_in(input, "input")?).to_vec()))
             }
+            "Domain.Primitives.taprootTweakMatches" => {
+                match args {
+                    [internal_key, tweak, output_key, parity_odd] => {
+                        let odd = match parity_odd {
+                            ProviderValue::Bool(b) => *b,
+                            _ => {
+                                return Err(ProviderFault::new(
+                                    "bad_type",
+                                    "taprootTweakMatches parity must be a Bool",
+                                ))
+                            }
+                        };
+                        Ok(ProviderValue::Bool(taproot_tweak_matches(
+                            bytes_in(internal_key, "taprootTweakMatches internal key")?,
+                            bytes_in(tweak, "taprootTweakMatches tweak")?,
+                            bytes_in(output_key, "taprootTweakMatches output key")?,
+                            odd,
+                        )))
+                    }
+                    _ => Err(ProviderFault::new(
+                        "bad_arity",
+                        "taprootTweakMatches takes three Bytes and a Bool",
+                    )),
+                }
+            }
             "Domain.Primitives.verifySchnorr" => {
                 match args {
                     [public_key, signature, message] => Ok(ProviderValue::Bool(verify_schnorr(
@@ -167,6 +226,7 @@ pub fn primitives_binding() -> ProviderBinding {
             "Domain.Primitives.sha1",
             "Domain.Primitives.verifySignature",
             "Domain.Primitives.verifySchnorr",
+            "Domain.Primitives.taprootTweakMatches",
         ],
         Arc::new(Primitives),
     )
@@ -324,6 +384,43 @@ mod tests {
                 &hex_bytes(message),
             );
             assert_eq!(got, *want, "BIP340 vector key={} comment={}", key, comment);
+        }
+    }
+
+
+    /// BIP341's own scriptPubKey vectors, the commitment half.  Each gives an
+    /// internal key, the tweak derived from its script tree, and the output
+    /// key they produce.  The vectors do not record the parity -- an x-only
+    /// key does not carry the sign of its y coordinate -- so the assertion is
+    /// that exactly one of the two parities matches, which is what a spender
+    /// has to get right and what the control block's low bit says.
+    ///
+    /// The negative half matters more than the positive: a wrong tweak must
+    /// match under neither parity, or the check would be satisfied by trying
+    /// both and the commitment would prove nothing.
+    #[test]
+    fn every_bip341_commitment_vector() {
+        let vectors: &[(&str, &str, &str)] = &[
+        ("d6889cb081036e0faefa3a35157ad71086b123b2b144b649798b494c300a961d", "b86e7be8f39bab32a6f2c0443abbc210f0edac0e2c53d501b36b64437d9c6c70", "53a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343"),
+        ("187791b6f712a8ea41c8ecdd0ee77fab3e85263b37e1ec18a3651926b3a6cf27", "cbd8679ba636c1110ea247542cfbd964131a6be84f873f7f3b62a777528ed001", "147c9c57132f6e7ecddba9800bb0c4449251c92a1e60371ee77557b6620f3ea3"),
+        ("93478e9488f956df2396be2ce6c5cced75f900dfa18e7dabd2428aae78451820", "6af9e28dbf9d6aaf027696e2598a5b3d056f5fd2355a7fd5a37a0e5008132d30", "e4d810fd50586274face62b8a807eb9719cef49c04177cc6b76a9a4251d5450e"),
+        ("ee4fe085983462a184015d1f782d6a5f8b9c2b60130aff050ce221ecf3786592", "9e0517edc8259bb3359255400b23ca9507f2a91cd1e4250ba068b4eafceba4a9", "712447206d7a5238acc7ff53fbe94a3b64539ad291c7cdbc490b7577e4b17df5"),
+        ("f9f400803e683727b14f463836e1e78e1c64417638aa066919291a225f0e8dd8", "639f0281b7ac49e742cd25b7f188657626da1ad169209078e2761cefd91fd65e", "77e30a5522dd9f894c3f8b8bd4c4b2cf82ca7da8a3ea6a239655c39c050ab220"),
+        ("e0dfe2300b0dd746a3f8674dfd4525623639042569d829c7f0eed9602d263e6f", "b57bfa183d28eeb6ad688ddaabb265b4a41fbf68e5fed2c72c74de70d5a786f4", "91b64d5324723a985170e4dc5a0f84c041804f2cd12660fa5dec09fc21783605"),
+        ("55adf4e8967fbd2e29f20ac896e60c3b0f1d5b0efa9d34941b5958c7b0a0312d", "6579138e7976dc13b6a92f7bfd5a2fc7684f5ea42419d43368301470f3b74ed9", "75169f4001aa68f15bbed28b218df1d0a62cbbcf1188c6665110c293c907b831"),
+        ];
+        assert_eq!(vectors.len(), 7, "vector table truncated");
+        for (internal, tweak, output) in vectors {
+            let (i, t, o) = (hex_bytes(internal), hex_bytes(tweak), hex_bytes(output));
+            let even = taproot_tweak_matches(&i, &t, &o, false);
+            let odd = taproot_tweak_matches(&i, &t, &o, true);
+            assert!(even ^ odd, "exactly one parity should match for {}", internal);
+
+            // A tweak that is not the right one matches under neither.
+            let mut wrong = t.clone();
+            wrong[31] ^= 1;
+            assert!(!taproot_tweak_matches(&i, &wrong, &o, false));
+            assert!(!taproot_tweak_matches(&i, &wrong, &o, true));
         }
     }
 

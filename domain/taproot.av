@@ -15,8 +15,8 @@ module Taproot
         "annex from a signature. It has no meaning yet and is committed to"
         "anyway, so that giving it one later is a soft fork rather than a way"
         "to rewrite signatures already made."
-    exposes [spend, annexOf, strippedOf]
-    depends [Bytes, Domain.Bip341, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.Transaction]
+    exposes [spend, annexOf, strippedOf, leafHashOf, merkleRootFrom, commits]
+    depends [Bytes, Domain.Bip341, Domain.CompactSize, Domain.Primitives, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.Tagged, Domain.Transaction]
     effects []
 
 fn spend(program: List<Int>, context: Context) -> Outcome
@@ -26,7 +26,7 @@ fn spend(program: List<Int>, context: Context) -> Outcome
 
 verify spend
     spend(Domain.ScriptState.zeros(32), spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
-    spend(Domain.ScriptState.zeros(32), spending(["aa", "bb"])) => Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+    spend(Domain.ScriptState.zeros(32), spending(["aa", "bb"])) => Outcome.Decided(Ending.Failed("the witness script does not match the taproot commitment"))
 
 fn spending(witness: List<String>) -> Context
     ? "A Context with a Transaction behind it carrying this Witness."
@@ -44,11 +44,197 @@ fn afterAnnex(program: List<Int>, annex: Option<String>, witness: List<String>, 
     match List.len(witness)
         0 -> Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
         1 -> keyPath(program, witness, annex, context)
-        _ -> Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+        _ -> scriptPath(program, witness, annex, context)
 
 verify afterAnnex
     afterAnnex(Domain.ScriptState.zeros(32), Option.None, [], spending([])) => Outcome.Decided(Ending.Failed("a taproot spend needs a witness and got none"))
-    afterAnnex(Domain.ScriptState.zeros(32), Option.None, ["aa", "bb"], spending([])) => Outcome.Undecided("a taproot script path spend needs BIP342, which this engine has not got")
+    afterAnnex(Domain.ScriptState.zeros(32), Option.None, ["aa", "bb"], spending([])) => Outcome.Decided(Ending.Failed("the witness script does not match the taproot commitment"))
+
+fn scriptPath(program: List<Int>, witness: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "The last Witness item is the control block and the one before it is the"
+      "Script. Everything under them is the stack the Script runs on."
+      "The commitment is proved rather than signed: the control block carries"
+      "the internal key and the Merkle path, and the Output key is that key"
+      "tweaked by the root. Nobody signs to show the leaf was in the tree."
+    control = lastOf(witness)
+    leaf = lastOf(List.take(witness, List.len(witness) - 1))
+    committed(program, control, leaf, List.take(witness, List.len(witness) - 2), annex, context)
+
+verify scriptPath
+    scriptPath(Domain.ScriptState.zeros(32), ["aa", "bb"], Option.None, spending([])) => Outcome.Decided(Ending.Failed("the witness script does not match the taproot commitment"))
+
+fn committed(program: List<Int>, control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "A leaf that is not in the tree the Output committed to fails the spend."
+    match commits(program, control, leaf)
+        false -> Outcome.Decided(Ending.Failed("the witness script does not match the taproot commitment"))
+        true -> byLeafVersion(leafVersionOf(control), control, leaf, stack, annex, context)
+
+verify committed
+    committed(Domain.ScriptState.zeros(32), "aa", "bb", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("the witness script does not match the taproot commitment"))
+
+fn byLeafVersion(leafVersion: Int, control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "Leaf version 0xc0 is tapscript. Every other version is a leaf whose"
+      "meaning has not been defined, and BIP341 says such a spend is valid --"
+      "the commitment has been proved and there is no rule saying to run"
+      "anything. Core only rejects it under a policy flag, which is the"
+      "giveaway that it is not consensus."
+    match leafVersion == 192
+        false -> Outcome.Decided(Ending.Passed)
+        true -> Outcome.Undecided("a tapscript leaf needs BIP342, which this engine has not got")
+
+verify byLeafVersion
+    byLeafVersion(192, "c0", "51", [], Option.None, spending([])) => Outcome.Undecided("a tapscript leaf needs BIP342, which this engine has not got")
+    byLeafVersion(80, "50", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+
+fn leafVersionOf(control: String) -> Int
+    ? "The control block's first byte with its low bit cleared. That bit is"
+      "the parity of the Output key and is not part of the version."
+    match bytesIn(control)
+        [] -> 0
+        [head, ..tail] -> Bits.and(head, 254)
+
+verify leafVersionOf
+    leafVersionOf("c0") => 192
+    leafVersionOf("c1") => 192
+    leafVersionOf("") => 0
+
+fn parityOf(control: String) -> Bool
+    ? "The low bit of the control block's first byte: whether the Output key's"
+      "y coordinate is odd. An x-only key does not carry it, so the spender"
+      "has to say."
+    match bytesIn(control)
+        [] -> false
+        [head, ..tail] -> Bits.and(head, 1) == 1
+
+verify parityOf
+    parityOf("c0") => false
+    parityOf("c1") => true
+    parityOf("") => false
+
+fn commits(program: List<Int>, control: String, leaf: String) -> Bool
+    ? "Whether this leaf, by this path, gives this Output key."
+    match wellFormed(control)
+        false -> false
+        true -> tweakMatches(program, control, merkleRootFrom(control, leafHashOf(leafVersionOf(control), leaf)))
+
+verify commits
+    commits(Domain.ScriptState.zeros(32), "", "51") => false
+    commits(Domain.ScriptState.zeros(32), "c0", "51") => false
+
+fn wellFormed(control: String) -> Bool
+    ? "A control block is thirty-three bytes plus thirty-two for each step of"
+      "the Merkle path, and the path is at most a hundred and twenty-eight"
+      "steps -- which is the tree depth BIP341 allows."
+    width = Int.div(String.len(control), 2)
+    Bool.and(Bool.and(width >= 33, width <= 4129), Int.mod(width - 33, 32) == 0)
+
+verify wellFormed
+    wellFormed("") => false
+    wellFormed("c0") => false
+    wellFormed(hexOf(Domain.ScriptState.zeros(33))) => true
+    wellFormed(hexOf(Domain.ScriptState.zeros(65))) => true
+    wellFormed(hexOf(Domain.ScriptState.zeros(66))) => false
+    wellFormed(hexOf(Domain.ScriptState.zeros(4129))) => true
+    wellFormed(hexOf(Domain.ScriptState.zeros(4161))) => false
+
+fn leafHashOf(leafVersion: Int, leaf: String) -> List<Int>
+    ? "TapLeaf over the version, the Script's length and the Script."
+    bytes = bytesIn(leaf)
+    Domain.Tagged.tapLeaf(List.concat([leafVersion], List.concat(Domain.CompactSize.encode(List.len(bytes)), bytes)))
+
+verify leafHashOf
+    List.len(leafHashOf(192, "51")) => 32
+    leafHashOf(192, "51") => Domain.Tagged.tapLeaf([192, 1, 81])
+
+fn merkleRootFrom(control: String, leafHash: List<Int>) -> List<Int>
+    ? "Walk the path from the leaf to the root, one thirty-two byte step at a"
+      "time. The path is everything after the first thirty-three bytes."
+    upward(List.drop(bytesIn(control), 33), leafHash)
+
+verify merkleRootFrom
+    merkleRootFrom(hexOf(Domain.ScriptState.zeros(33)), [1]) => [1]
+
+fn upward(path: List<Int>, here: List<Int>) -> List<Int>
+    ? "One sibling at a time, until the path runs out."
+    match List.len(path) >= 32
+        false -> here
+        true -> upward(List.drop(path, 32), joined(here, List.take(path, 32)))
+
+verify upward
+    upward([], [1]) => [1]
+    upward([1], [2]) => [2]
+    List.len(upward(Domain.ScriptState.zeros(32), Domain.ScriptState.zeros(32))) => 32
+
+fn joined(left: List<Int>, right: List<Int>) -> List<Int>
+    ? "TapBranch over the pair, smaller first."
+      "Sorted rather than positional, so a node does not record which side it"
+      "came from and the path does not have to carry the direction."
+    match lexicographicallyBefore(left, right)
+        true -> Domain.Tagged.tapBranch(List.concat(left, right))
+        false -> Domain.Tagged.tapBranch(List.concat(right, left))
+
+verify joined
+    joined([1], [2]) => Domain.Tagged.tapBranch([1, 2])
+    joined([2], [1]) => Domain.Tagged.tapBranch([1, 2])
+    joined([1], [1]) => Domain.Tagged.tapBranch([1, 1])
+
+fn lexicographicallyBefore(left: List<Int>, right: List<Int>) -> Bool
+    ? "Byte by byte, as std::lexicographical_compare has it."
+    match left
+        [] -> List.len(right) > 0
+        [head, ..tail] -> comparedAt(head, tail, right)
+
+verify lexicographicallyBefore
+    lexicographicallyBefore([], []) => false
+    lexicographicallyBefore([], [1]) => true
+    lexicographicallyBefore([1], []) => false
+    lexicographicallyBefore([1], [2]) => true
+    lexicographicallyBefore([2], [1]) => false
+    lexicographicallyBefore([1, 1], [1, 2]) => true
+
+fn comparedAt(head: Int, tail: List<Int>, right: List<Int>) -> Bool
+    ? "This byte decides unless the two are equal, when the rest does."
+    match right
+        [] -> false
+        [other, ..rest] -> deeperOrNot(head, tail, other, rest)
+
+verify comparedAt
+    comparedAt(1, [], []) => false
+    comparedAt(1, [], [2]) => true
+
+fn deeperOrNot(head: Int, tail: List<Int>, other: Int, rest: List<Int>) -> Bool
+    ? "Equal bytes carry the comparison one place further along."
+    match head == other
+        false -> head < other
+        true -> lexicographicallyBefore(tail, rest)
+
+verify deeperOrNot
+    deeperOrNot(1, [], 2, []) => true
+    deeperOrNot(2, [], 1, []) => false
+    deeperOrNot(1, [1], 1, [2]) => true
+
+fn tweakMatches(program: List<Int>, control: String, root: List<Int>) -> Bool
+    ? "The Output key is the internal key tweaked by the Merkle root."
+    internal = List.take(List.drop(bytesIn(control), 1), 32)
+    Domain.Primitives.taprootTweakMatches(bytesOf(internal), bytesOf(Domain.Tagged.tapTweak(List.concat(internal, root))), bytesOf(program), parityOf(control))
+
+verify tweakMatches
+    tweakMatches(Domain.ScriptState.zeros(32), hexOf(Domain.ScriptState.zeros(33)), Domain.ScriptState.zeros(32)) => false
+
+fn bytesIn(hex: String) -> List<Int>
+    ? "Hexadecimal as bytes; unreadable hex is empty and matches nothing."
+    Bytes.toList(Result.withDefault(Bytes.fromHex(hex), Bytes.fromList([])))
+
+verify bytesIn
+    bytesIn("00c0") => [0, 192]
+    bytesIn("zz") => []
+
+fn bytesOf(bytes: List<Int>) -> Bytes
+    ? "A byte list as Bytes, for the provider boundary."
+    Result.withDefault(Bytes.fromList(bytes), Bytes.fromList([]))
+
+verify bytesOf
+    bytesOf([0, 1]) => Bytes.fromList([0, 1])
 
 fn annexOf(witness: List<String>) -> Option<String>
     ? "The annex, when the last of at least two Witness items begins 0x50."
