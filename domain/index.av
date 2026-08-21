@@ -16,7 +16,8 @@ module Index
 
 record Location
     segment: Int
-    line: Int
+    offset: Int
+    length: Int
 
 record TxSite
     blockId: String
@@ -263,80 +264,105 @@ verify outputsBelowKey
     outputsBelowKey() => "meta:outputsBelow"
 
 fn encodeLocation(location: Location) -> String
-    ? "A Location is its Segment and the line within it."
-    "{location.segment}:{location.line}"
+    ? "A Location is its Segment, the byte offset of the Block's bytes within"
+      "it, and how many bytes they are."
+    "{location.segment}:{location.offset}:{location.length}"
 
 verify encodeLocation
-    encodeLocation(Location(segment = 0, line = 0)) => "0:0"
-    encodeLocation(Location(segment = 7, line = 1234)) => "7:1234"
+    encodeLocation(Location(segment = 0, offset = 4, length = 285)) => "0:4:285"
+    encodeLocation(Location(segment = 7, offset = 1234, length = 80)) => "7:1234:80"
 
 fn decodeLocation(text: String) -> Result<Location, String>
-    ? "Read a Location back, rejecting anything that is not two whole numbers."
+    ? "Read a Location back, rejecting anything that is not three whole numbers."
     parts(text, String.split(text, ":"))
 
 verify decodeLocation
-    decodeLocation("0:0") => Result.Ok(Location(segment = 0, line = 0))
-    decodeLocation("7:1234") => Result.Ok(Location(segment = 7, line = 1234))
-    decodeLocation("") => Result.Err("Location must be segment:line, got ''")
-    decodeLocation("7") => Result.Err("Location must be segment:line, got '7'")
-    decodeLocation("7:12:3") => Result.Err("Location must be segment:line, got '7:12:3'")
-    decodeLocation("a:1") => Result.Err("Location must be two whole numbers, got 'a:1'")
-    decodeLocation("7:b") => Result.Err("Location must be two whole numbers, got '7:b'")
-    decodeLocation("-1:0") => Result.Err("Location must be two whole numbers, got '-1:0'")
-    decodeLocation("0:-1") => Result.Err("Location must be two whole numbers, got '0:-1'")
+    decodeLocation("0:4:285") => Result.Ok(Location(segment = 0, offset = 4, length = 285))
+    decodeLocation("7:1234:80") => Result.Ok(Location(segment = 7, offset = 1234, length = 80))
+    decodeLocation("") => Result.Err("Location must be segment:offset:length, got ''")
+    decodeLocation("7") => Result.Err("Location must be segment:offset:length, got '7'")
+    decodeLocation("7:12") => Result.Err("Location must be segment:offset:length, got '7:12'")
+    decodeLocation("7:12:3:4") => Result.Err("Location must be segment:offset:length, got '7:12:3:4'")
+    decodeLocation("a:1:2") => Result.Err("Location must be three whole numbers, got 'a:1:2'")
+    decodeLocation("7:b:2") => Result.Err("Location must be three whole numbers, got '7:b:2'")
+    decodeLocation("7:1:c") => Result.Err("Location must be three whole numbers, got '7:1:c'")
+    decodeLocation("-1:0:2") => Result.Err("Location must be three whole numbers, got '-1:0:2'")
+    decodeLocation("0:-1:2") => Result.Err("Location must be three whole numbers, got '0:-1:2'")
 
 fn parts(text: String, split: List<String>) -> Result<Location, String>
-    ? "Exactly two colon-separated fields, and no more."
+    ? "Exactly three colon-separated fields, and no more."
     match split
-        [] -> Result.Err("Location must be segment:line, got '{text}'")
+        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
         [segment, ..rest] -> afterSegment(text, segment, rest)
 
 verify parts
-    parts("7:1", ["7", "1"]) => Result.Ok(Location(segment = 7, line = 1))
-    parts("x", []) => Result.Err("Location must be segment:line, got 'x'")
+    parts("7:1:2", ["7", "1", "2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    parts("x", []) => Result.Err("Location must be segment:offset:length, got 'x'")
+    parts("7:1", ["7", "1"]) => Result.Err("Location must be segment:offset:length, got '7:1'")
+    parts("7:1:2:3", ["7", "1", "2", "3"]) => Result.Err("Location must be segment:offset:length, got '7:1:2:3'")
 
 fn afterSegment(text: String, segment: String, rest: List<String>) -> Result<Location, String>
-    ? "The second field is the line; a third means the text was not a Location."
+    ? "The second field is the offset."
     match rest
-        [] -> Result.Err("Location must be segment:line, got '{text}'")
-        [line, ..extra] -> afterLine(text, segment, line, extra)
+        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
+        [offset, ..more] -> afterOffset(text, segment, offset, more)
 
 verify afterSegment
-    afterSegment("7:1", "7", ["1"]) => Result.Ok(Location(segment = 7, line = 1))
-    afterSegment("7", "7", []) => Result.Err("Location must be segment:line, got '7'")
+    afterSegment("7:1:2", "7", ["1", "2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    afterSegment("7", "7", []) => Result.Err("Location must be segment:offset:length, got '7'")
 
-fn afterLine(text: String, segment: String, line: String, extra: List<String>) -> Result<Location, String>
-    ? "Reject a third field before reading the numbers."
+fn afterOffset(text: String, segment: String, offset: String, more: List<String>) -> Result<Location, String>
+    ? "The third field is the length; a fourth means the text was not a Location."
+    match more
+        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
+        [length, ..extra] -> afterLength(text, segment, offset, length, extra)
+
+verify afterOffset
+    afterOffset("7:1:2", "7", "1", ["2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    afterOffset("7:1", "7", "1", []) => Result.Err("Location must be segment:offset:length, got '7:1'")
+
+fn afterLength(text: String, segment: String, offset: String, length: String, extra: List<String>) -> Result<Location, String>
+    ? "Reject a fourth field before reading the numbers."
     match extra
-        [] -> located(text, whole(segment), whole(line))
-        [head, ..tail] -> Result.Err("Location must be segment:line, got '{text}'")
+        [] -> located(text, whole(segment), whole(offset), whole(length))
+        [head, ..tail] -> Result.Err("Location must be segment:offset:length, got '{text}'")
 
-verify afterLine
-    afterLine("7:1", "7", "1", []) => Result.Ok(Location(segment = 7, line = 1))
-    afterLine("7:1:2", "7", "1", ["2"]) => Result.Err("Location must be segment:line, got '7:1:2'")
+verify afterLength
+    afterLength("7:1:2", "7", "1", "2", []) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    afterLength("7:1:2:3", "7", "1", "2", ["3"]) => Result.Err("Location must be segment:offset:length, got '7:1:2:3'")
 
-fn located(text: String, segment: Option<Int>, line: Option<Int>) -> Result<Location, String>
-    ? "Both fields must have parsed as non-negative whole numbers."
+fn located(text: String, segment: Option<Int>, offset: Option<Int>, length: Option<Int>) -> Result<Location, String>
+    ? "All three fields must have parsed as non-negative whole numbers."
     match segment
-        Option.None -> Result.Err("Location must be two whole numbers, got '{text}'")
-        Option.Some(s) -> withSegment(text, s, line)
+        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
+        Option.Some(s) -> withSegment(text, s, offset, length)
 
 verify located
-    located("7:1", Option.Some(7), Option.Some(1)) => Result.Ok(Location(segment = 7, line = 1))
-    located("a:1", Option.None, Option.Some(1)) => Result.Err("Location must be two whole numbers, got 'a:1'")
+    located("7:1:2", Option.Some(7), Option.Some(1), Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    located("a:1:2", Option.None, Option.Some(1), Option.Some(2)) => Result.Err("Location must be three whole numbers, got 'a:1:2'")
 
-fn withSegment(text: String, segment: Int, line: Option<Int>) -> Result<Location, String>
-    ? "The Segment parsed; the line still has to."
-    match line
-        Option.None -> Result.Err("Location must be two whole numbers, got '{text}'")
-        Option.Some(l) -> Result.Ok(Location(segment = segment, line = l))
+fn withSegment(text: String, segment: Int, offset: Option<Int>, length: Option<Int>) -> Result<Location, String>
+    ? "The Segment parsed; the offset still has to."
+    match offset
+        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
+        Option.Some(o) -> withOffset(text, segment, o, length)
 
 verify withSegment
-    withSegment("7:1", 7, Option.Some(1)) => Result.Ok(Location(segment = 7, line = 1))
-    withSegment("7:b", 7, Option.None) => Result.Err("Location must be two whole numbers, got '7:b'")
+    withSegment("7:1:2", 7, Option.Some(1), Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    withSegment("7:b:2", 7, Option.None, Option.Some(2)) => Result.Err("Location must be three whole numbers, got '7:b:2'")
+
+fn withOffset(text: String, segment: Int, offset: Int, length: Option<Int>) -> Result<Location, String>
+    ? "The offset parsed; the length still has to."
+    match length
+        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
+        Option.Some(l) -> Result.Ok(Location(segment = segment, offset = offset, length = l))
+
+verify withOffset
+    withOffset("7:1:2", 7, 1, Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
+    withOffset("7:1:c", 7, 1, Option.None) => Result.Err("Location must be three whole numbers, got '7:1:c'")
 
 fn whole(text: String) -> Option<Int>
-    ? "A non-negative whole number, or nothing. Negative Segments and lines are not Locations."
+    ? "A non-negative whole number, or nothing. Negative fields are not Locations."
     match Int.fromString(text)
         Result.Err(e) -> Option.None
         Result.Ok(value) -> nonNegative(value)
@@ -404,11 +430,11 @@ fn bodyStateOf(stored: Option<String>, height: Int, prunedBelow: Int) -> Result<
         Option.None -> Result.Ok(absent(height, prunedBelow))
 
 verify bodyStateOf
-    bodyStateOf(Option.Some("7:1234"), 100, 0) => Result.Ok(BodyState.Stored(Location(segment = 7, line = 1234)))
+    bodyStateOf(Option.Some("7:1234:80"), 100, 0) => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
     bodyStateOf(Option.None, 100, 0) => Result.Ok(BodyState.Missing)
     bodyStateOf(Option.None, 100, 500) => Result.Ok(BodyState.Pruned)
     bodyStateOf(Option.None, 500, 500) => Result.Ok(BodyState.Missing)
-    bodyStateOf(Option.Some("nonsense"), 100, 0) => Result.Err("Location must be segment:line, got 'nonsense'")
+    bodyStateOf(Option.Some("nonsense"), 100, 0) => Result.Err("Location must be segment:offset:length, got 'nonsense'")
 
 fn asStored(text: String) -> Result<BodyState, String>
     ? "An entry is a Location, and a Location that will not decode is corruption."
@@ -416,8 +442,8 @@ fn asStored(text: String) -> Result<BodyState, String>
     Result.Ok(BodyState.Stored(location))
 
 verify asStored
-    asStored("7:1234") => Result.Ok(BodyState.Stored(Location(segment = 7, line = 1234)))
-    asStored("bad") => Result.Err("Location must be segment:line, got 'bad'")
+    asStored("7:1234:80") => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
+    asStored("bad") => Result.Err("Location must be segment:offset:length, got 'bad'")
 
 fn absent(height: Int, prunedBelow: Int) -> BodyState
     ? "Below the Prune Watermark the bytes were discarded; at or above it they never arrived."

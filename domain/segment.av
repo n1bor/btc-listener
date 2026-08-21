@@ -2,19 +2,19 @@ module Segment
     intent =
         "Segments: what they are called, how much they hold, and where the next"
         "Block goes."
-        "A Block is one line of hexadecimal, so a Segment is self-framing and"
-        "needs no length prefixes. A Block never straddles two Segments, which is"
-        "what lets pruning delete whole files, and an oversized Block is given a"
-        "Segment of its own rather than split."
-        "Everything here is pure arithmetic and text, so a Segment's layout is"
-        "settled without touching Disk."
-    exposes [Placement, SegmentState, capBytes, nameOf, initial, place, lineFor, encodeLine, decodeLine, blockAt, blocksIn]
-    depends [Bytes, Domain.Index, Domain.Text]
+        "A Block is one length-framed record — a four-byte little-endian length"
+        "and then the Block's bytes — so a Segment is self-framing and a"
+        "Location can name the bytes by offset alone. A Block never straddles"
+        "two Segments, which is what lets pruning delete whole files, and an"
+        "oversized Block is given a Segment of its own rather than split."
+        "Everything here is pure arithmetic, so a Segment's layout is settled"
+        "without touching Disk."
+    exposes [Placement, SegmentState, capBytes, headerBytes, nameOf, initial, place, headerFor, lengthOf, payloadAt, nextHeader, complete]
+    depends [Bytes, Domain.Index, Domain.Message, Domain.Text]
     effects []
 
 record SegmentState
     segment: Int
-    lines: Int
     used: Int
 
 record Placement
@@ -22,14 +22,23 @@ record Placement
     state: SegmentState
 
 fn capBytes() -> Int
-    ? "How many bytes of Block a Segment holds before the next one starts."
-      "Two mebibytes, set by the hex read path rather than by anything about"
-      "Blocks: a Segment is read whole because Aver has no positional reads, and"
-      "Bytes.fromHex peaks near 927 MB for four mebibytes. See ADR 0004."
-    2097152
+    ? "How many bytes a Segment holds before the next one starts."
+      "One hundred and twenty-eight mebibytes, the size Bitcoin Core settled"
+      "on. A Segment is never read whole — every read is positional — so the"
+      "cap no longer protects a read path; it only sets how coarsely pruning"
+      "deletes and how many files a chain becomes. See ADR 0004 for the two"
+      "mebibytes this used to be, and why."
+    134217728
 
 verify capBytes
-    capBytes() => 2097152
+    capBytes() => 134217728
+
+fn headerBytes() -> Int
+    ? "Every record starts with this many bytes of little-endian length."
+    4
+
+verify headerBytes
+    headerBytes() => 4
 
 fn nameWidth() -> Int
     ? "Segment numbers are padded to this width so a directory listing sorts in order."
@@ -39,168 +48,121 @@ verify nameWidth
     nameWidth() => 6
 
 fn nameOf(segment: Int) -> String
-    ? "The file a Segment lives in. Six digits allows a million of them, some two"
-      "terabytes of Blocks, which is well past anything this program will hold."
-    "blk{Domain.Text.padLeft(String.fromInt(segment), nameWidth())}.hex"
+    ? "The file a Segment lives in. Six digits allows a million of them, which"
+      "at this cap is more chain than exists."
+    "blk{Domain.Text.padLeft(String.fromInt(segment), nameWidth())}.dat"
 
 verify nameOf
-    nameOf(0) => "blk000000.hex"
-    nameOf(1) => "blk000001.hex"
-    nameOf(42) => "blk000042.hex"
-    nameOf(999999) => "blk999999.hex"
-    nameOf(1000000) => "blk1000000.hex"
+    nameOf(0) => "blk000000.dat"
+    nameOf(1) => "blk000001.dat"
+    nameOf(42) => "blk000042.dat"
+    nameOf(999999) => "blk999999.dat"
+    nameOf(1000000) => "blk1000000.dat"
 
 fn initial() -> SegmentState
     ? "Where a Store with no Segments starts."
-    SegmentState(segment = 0, lines = 0, used = 0)
+    SegmentState(segment = 0, used = 0)
 
 verify initial
-    initial() => SegmentState(segment = 0, lines = 0, used = 0)
+    initial() => SegmentState(segment = 0, used = 0)
 
 fn place(state: SegmentState, blockBytes: Int) -> Placement
     ? "Where the next Block goes, and the state that follows it."
-      "A Block that would take the current Segment past the cap starts a new one."
-      "An empty Segment always accepts the Block, however large, because a Block"
-      "cannot be split — so a Block above the cap simply gets a Segment to itself."
+      "The Location names the Block's own bytes: its offset is past the record's"
+      "header. A Block that would take the current Segment past the cap starts"
+      "a new one. An empty Segment always accepts the Block, however large,"
+      "because a Block cannot be split — so a Block above the cap simply gets a"
+      "Segment to itself."
     match rolls(state, blockBytes)
         true -> rolled(state, blockBytes)
         false -> appended(state, blockBytes)
 
 verify place
-    place(initial(), 100) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 100))
-    place(SegmentState(segment = 0, lines = 1, used = 100), 200) => Placement(location = Location(segment = 0, line = 1), state = SegmentState(segment = 0, lines = 2, used = 300))
-    place(SegmentState(segment = 3, lines = 2, used = 2097100), 100) => Placement(location = Location(segment = 4, line = 0), state = SegmentState(segment = 4, lines = 1, used = 100))
-    place(initial(), 5000000) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 5000000))
-    place(SegmentState(segment = 1, lines = 1, used = 10), 5000000) => Placement(location = Location(segment = 2, line = 0), state = SegmentState(segment = 2, lines = 1, used = 5000000))
-    place(SegmentState(segment = 0, lines = 1, used = 2097052), 100) => Placement(location = Location(segment = 0, line = 1), state = SegmentState(segment = 0, lines = 2, used = 2097152))
+    place(initial(), 100) => Placement(location = Location(segment = 0, offset = 4, length = 100), state = SegmentState(segment = 0, used = 104))
+    place(SegmentState(segment = 0, used = 104), 200) => Placement(location = Location(segment = 0, offset = 108, length = 200), state = SegmentState(segment = 0, used = 308))
+    place(SegmentState(segment = 3, used = 134217700), 100) => Placement(location = Location(segment = 4, offset = 4, length = 100), state = SegmentState(segment = 4, used = 104))
+    place(initial(), 200000000) => Placement(location = Location(segment = 0, offset = 4, length = 200000000), state = SegmentState(segment = 0, used = 200000004))
+    place(SegmentState(segment = 1, used = 14), 200000000) => Placement(location = Location(segment = 2, offset = 4, length = 200000000), state = SegmentState(segment = 2, used = 200000004))
+    place(SegmentState(segment = 0, used = 134217624), 100) => Placement(location = Location(segment = 0, offset = 134217628, length = 100), state = SegmentState(segment = 0, used = 134217728))
 
 fn rolls(state: SegmentState, blockBytes: Int) -> Bool
-    ? "A non-empty Segment rolls when the Block would take it past the cap."
-    match state.lines > 0
-        true -> state.used + blockBytes > capBytes()
+    ? "A non-empty Segment rolls when the record would take it past the cap."
+    match state.used > 0
+        true -> state.used + headerBytes() + blockBytes > capBytes()
         false -> false
 
 verify rolls
     rolls(initial(), 100) => false
-    rolls(initial(), 5000000) => false
-    rolls(SegmentState(segment = 0, lines = 1, used = 2097100), 100) => true
-    rolls(SegmentState(segment = 0, lines = 1, used = 2097052), 100) => false
-    rolls(SegmentState(segment = 0, lines = 1, used = 100), 100) => false
+    rolls(initial(), 200000000) => false
+    rolls(SegmentState(segment = 0, used = 134217700), 100) => true
+    rolls(SegmentState(segment = 0, used = 134217624), 100) => false
+    rolls(SegmentState(segment = 0, used = 104), 100) => false
 
 fn rolled(state: SegmentState, blockBytes: Int) -> Placement
-    ? "Start the next Segment, with this Block as its first line."
+    ? "Start the next Segment, with this Block as its first record."
     next = state.segment + 1
-    Placement(location = Location(segment = next, line = 0), state = SegmentState(segment = next, lines = 1, used = blockBytes))
+    Placement(location = Location(segment = next, offset = headerBytes(), length = blockBytes), state = SegmentState(segment = next, used = headerBytes() + blockBytes))
 
 verify rolled
-    rolled(initial(), 100) => Placement(location = Location(segment = 1, line = 0), state = SegmentState(segment = 1, lines = 1, used = 100))
+    rolled(initial(), 100) => Placement(location = Location(segment = 1, offset = 4, length = 100), state = SegmentState(segment = 1, used = 104))
 
 fn appended(state: SegmentState, blockBytes: Int) -> Placement
     ? "Add the Block to the Segment already open."
-    Placement(location = Location(segment = state.segment, line = state.lines), state = SegmentState(segment = state.segment, lines = state.lines + 1, used = state.used + blockBytes))
+    Placement(location = Location(segment = state.segment, offset = state.used + headerBytes(), length = blockBytes), state = SegmentState(segment = state.segment, used = state.used + headerBytes() + blockBytes))
 
 verify appended
-    appended(initial(), 100) => Placement(location = Location(segment = 0, line = 0), state = SegmentState(segment = 0, lines = 1, used = 100))
-    appended(SegmentState(segment = 2, lines = 5, used = 60), 40) => Placement(location = Location(segment = 2, line = 5), state = SegmentState(segment = 2, lines = 6, used = 100))
+    appended(initial(), 100) => Placement(location = Location(segment = 0, offset = 4, length = 100), state = SegmentState(segment = 0, used = 104))
+    appended(SegmentState(segment = 2, used = 60), 40) => Placement(location = Location(segment = 2, offset = 64, length = 40), state = SegmentState(segment = 2, used = 104))
 
-fn encodeLine(payload: Bytes) -> String
-    ? "A Block as one line of hexadecimal, without its terminator."
-    Bytes.toHex(payload)
+fn headerFor(length: Int) -> Result<Bytes, String>
+    ? "The four bytes that precede a record's payload: its length, little-endian."
+    Bytes.fromList(Domain.Message.littleEndian(length, 4))
 
-verify encodeLine
-    encodeLine(Bytes.fromList([1, 2, 255])) => "0102ff"
-    encodeLine(Bytes.fromList([])) => ""
+verify headerFor
+    headerFor(285) => Result.Ok(Bytes.fromHex("1d010000")?)
+    headerFor(0) => Result.Ok(Bytes.fromHex("00000000")?)
+    headerFor(134217728) => Result.Ok(Bytes.fromHex("00000008")?)
 
-fn lineFor(payload: Bytes) -> String
-    ? "What a writer appends: the Block's line and the newline that completes it."
-      "The terminator is what makes a torn append detectable — see completeLines."
-    encodeLine(payload) + "\n"
+fn lengthOf(header: Bytes) -> Result<Int, String>
+    ? "The payload length a record's header declares."
+      "Fewer than four bytes is a header the Segment does not fully hold — a"
+      "torn append, or an offset past the end — and is refused by name so the"
+      "caller can repair or report rather than misread."
+    values = Bytes.toList(header)
+    match List.len(values) == headerBytes()
+        true -> Result.Ok(Domain.Message.readLittleEndian(values))
+        false -> Result.Err("record header is {List.len(values)} bytes, not {headerBytes()}")
 
-verify lineFor
-    lineFor(Bytes.fromList([1, 2, 255])) => "0102ff\n"
-    lineFor(Bytes.fromList([])) => "\n"
+verify lengthOf
+    lengthOf(Bytes.fromHex("1d010000")?) => Result.Ok(285)
+    lengthOf(Bytes.fromHex("00000000")?) => Result.Ok(0)
+    lengthOf(Bytes.fromHex("1d01")?) => Result.Err("record header is 2 bytes, not 4")
+    lengthOf(Bytes.fromHex("")?) => Result.Err("record header is 0 bytes, not 4")
 
-fn decodeLine(line: String) -> Result<Bytes, String>
-    ? "Read one line back into the Block's bytes."
-    Bytes.fromHex(line)
+fn payloadAt(headerAt: Int) -> Int
+    ? "Where a record's payload starts, from where its header does."
+    headerAt + headerBytes()
 
-verify decodeLine
-    decodeLine("0102ff") => Result.Ok(Bytes.fromHex("0102ff")?)
-    decodeLine("") => Result.Ok(Bytes.fromHex("")?)
-    decodeLine("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-    decodeLine("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
+verify payloadAt
+    payloadAt(0) => 4
+    payloadAt(104) => 108
 
-fn blocksIn(contents: String) -> Result<List<Bytes>, String>
-    ? "Every Block a Segment holds, in the order they were appended."
-      "The shape a scan wants. blockAt splits the whole text again for every"
-      "Block asked of it, so taking a Segment apart one Block at a time costs"
-      "one full read and split per Block: measured at 2.1 seconds for a thousand"
-      "Blocks, 22 for three thousand and 206 for nine thousand seven hundred,"
-      "which is the quadratic curve you would expect. Doing it once is linear."
-      "Everything is decoded, including Blocks the caller may not want, which is"
-      "the trade: right for a scan that reads all of them, wrong for one Block"
-      "out of a full Segment. blockAt is still there for that."
-    decodedFrom(Domain.Text.completeLines(contents), [])
+fn nextHeader(headerAt: Int, length: Int) -> Int
+    ? "Where the record after this one starts."
+    headerAt + headerBytes() + length
 
-verify blocksIn
-    blocksIn("") => Result.Ok([])
-    blocksIn("0102ff\n") => Result.Ok([Bytes.fromHex("0102ff")?])
-    blocksIn("0102ff\naabb\n") => Result.Ok([Bytes.fromHex("0102ff")?, Bytes.fromHex("aabb")?])
-    blocksIn("0102ff\naabb") => Result.Ok([Bytes.fromHex("0102ff")?])
-    blocksIn("zz\n") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+verify nextHeader
+    nextHeader(0, 100) => 104
+    nextHeader(104, 200) => 308
 
-fn decodedFrom(lines: List<String>, acc: List<Bytes>) -> Result<List<Bytes>, String>
-    ? "Decode each line in turn, keeping the order they were written in."
-    match lines
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> nextBlock(head, tail, acc)
+fn complete(size: Int, headerAt: Int, length: Int) -> Bool
+    ? "Whether the Segment holds every byte the record claims."
+      "False means the append was torn: the header landed but the payload did"
+      "not all follow."
+    nextHeader(headerAt, length) <= size
 
-verify decodedFrom
-    decodedFrom([], []) => Result.Ok([])
-    decodedFrom(["aabb"], []) => Result.Ok([Bytes.fromHex("aabb")?])
-    decodedFrom(["zz"], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-
-fn nextBlock(head: String, tail: List<String>, acc: List<Bytes>) -> Result<List<Bytes>, String>
-    ? "One Block decoded, then the rest."
-    payload = decodeLine(head)?
-    decodedFrom(tail, List.prepend(payload, acc))
-
-verify nextBlock
-    nextBlock("aabb", [], []) => Result.Ok([Bytes.fromHex("aabb")?])
-    nextBlock("zz", [], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-
-fn blockAt(contents: String, line: Int) -> Result<Bytes, String>
-    ? "The Block a Location names, from the Segment it names."
-      "One Block out of a Segment, splitting the text to find it. Use blocksIn"
-      "when more than one Block from the same Segment is wanted."
-    at(Domain.Text.completeLines(contents), line, line)
-
-verify blockAt
-    blockAt("0102ff\n", 0) => Result.Ok(Bytes.fromHex("0102ff")?)
-    blockAt("0102ff\naabb\n", 1) => Result.Ok(Bytes.fromHex("aabb")?)
-    blockAt("0102ff\n", 1) => Result.Err("Segment has no line 1")
-    blockAt("0102ff\naabb", 1) => Result.Err("Segment has no line 1")
-    blockAt("", 0) => Result.Err("Segment has no line 0")
-    blockAt("zz\n", 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-
-fn at(lines: List<String>, remaining: Int, line: Int) -> Result<Bytes, String>
-    ? "Walk to the requested line, or report that the Segment is shorter than that."
-    match lines
-        [] -> Result.Err("Segment has no line {line}")
-        [head, ..tail] -> here(head, tail, remaining, line)
-
-verify at
-    at([], 0, 0) => Result.Err("Segment has no line 0")
-    at(["0102ff"], 0, 0) => Result.Ok(Bytes.fromHex("0102ff")?)
-    at(["0102ff"], 1, 1) => Result.Err("Segment has no line 1")
-
-fn here(head: String, tail: List<String>, remaining: Int, line: Int) -> Result<Bytes, String>
-    ? "Decode this line if it is the one wanted, or keep walking."
-    match remaining == 0
-        true -> decodeLine(head)
-        false -> at(tail, remaining - 1, line)
-
-verify here
-    here("0102ff", [], 0, 0) => Result.Ok(Bytes.fromHex("0102ff")?)
-    here("0102ff", ["aabb"], 1, 1) => Result.Ok(Bytes.fromHex("aabb")?)
-    here("0102ff", [], 1, 1) => Result.Err("Segment has no line 1")
+verify complete
+    complete(104, 0, 100) => true
+    complete(103, 0, 100) => false
+    complete(308, 104, 200) => true
+    complete(307, 104, 200) => false

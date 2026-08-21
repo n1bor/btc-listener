@@ -10,8 +10,8 @@ module TxIndex
         "entry in memory, so a whole-chain Transaction index is exactly the case"
         "its own intent says it cannot back. Over a range it is useful now, and"
         "the keyspace is the one a real database would be given."
-        "Blocks are read through Infra.Blocks.fetch, which holds a Segment between"
-        "calls, because consecutive Heights usually sit in the same one."
+        "Blocks are read through Infra.Blocks.read, one positional read each,"
+        "which the binary Segments make as cheap as holding one open."
         "Entries are held back and written in batches. A Store hands back a copy"
         "of itself, so one putAll per Block costs the size of the whole Index per"
         "Block: indexing thirty thousand Blocks that way took fourteen minutes"
@@ -24,7 +24,7 @@ module TxIndex
         "dependency. That is jasisz/aver#992; when it closes this line goes."
     exposes [Built, build]
     depends [Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store, Infra.StoreLog]
-    effects [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    effects [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
 
 record Built
     blocks: Int
@@ -33,7 +33,6 @@ record Built
 record Walk
     store: Store
     blocks: BlockStore
-    loaded: Option<Loaded>
     pending: List<Entry>
     waiting: Int
     counted: Built
@@ -52,8 +51,8 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
       "A Height whose body is absent is stepped over rather than refused: the"
       "range is what the caller asked for, and what is held inside it is what"
       "there is to index."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
-    walked = walk(Walk(store = store, blocks = blocks, loaded = Option.None, pending = [], waiting = 0, counted = Built(blocks = 0, transactions = 0)), from, to)?
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    walked = walk(Walk(store = store, blocks = blocks, pending = [], waiting = 0, counted = Built(blocks = 0, transactions = 0)), from, to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
 
@@ -66,14 +65,14 @@ fn flushed(state: Walk) -> Result<Store, String>
 
 fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     match height > to
         true -> Result.Ok(state)
         false -> atHeight(state, height, to)
 
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
     match named
         Option.None -> Result.Ok(state)
@@ -81,7 +80,7 @@ fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 
 fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
     ? "A Block whose body is not held has no Transactions to record."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> walk(state, height + 1, to)
@@ -89,13 +88,13 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
 
 fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
-    ! [Disk.appendText, Disk.readText, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     location = Domain.Index.decodeLocation(text)?
-    got = Infra.Blocks.fetch(state.blocks, state.loaded, location)?
-    transactions = Domain.Block.transactionsOf(got.payload)?
+    payload = Infra.Blocks.read(state.blocks, location)?
+    transactions = Domain.Block.transactionsOf(payload)?
     entries = sitesFor(Domain.Block.txidsOf(transactions), blockId, 0, List.prepend(heightEntry(blockId, height), state.pending))
     added = List.len(transactions)
-    carried = Walk(store = state.store, blocks = state.blocks, loaded = Option.Some(got.loaded), pending = entries, waiting = state.waiting + added + 1, counted = Built(blocks = state.counted.blocks + 1, transactions = state.counted.transactions + added))
+    carried = Walk(store = state.store, blocks = state.blocks, pending = entries, waiting = state.waiting + added + 1, counted = Built(blocks = state.counted.blocks + 1, transactions = state.counted.transactions + added))
     recorded = maybeWrite(carried)?
     walk(recorded, height + 1, to)
 
@@ -110,7 +109,7 @@ fn written(state: Walk) -> Result<Walk, String>
     ? "One putAll for everything held back."
     ! [Disk.appendText, Infra.Kv.putAll]
     grown = flushed(state)?
-    Result.Ok(Walk(store = grown, blocks = state.blocks, loaded = state.loaded, pending = [], waiting = 0, counted = state.counted))
+    Result.Ok(Walk(store = grown, blocks = state.blocks, pending = [], waiting = 0, counted = state.counted))
 
 fn heightEntry(blockId: String, height: Int) -> Entry
     ? "This Block sits at this Height, written the one place that can say so."

@@ -139,14 +139,15 @@ Store is mechanism, and unchanged by which backend holds it.
 _Avoid_: db, catalogue, lookup, registry
 
 **Segment**:
-One size-capped file of Block bytes, and the unit pruning deletes. A Block never
-straddles two of them.
+One size-capped file of length-framed Block records — four bytes of
+little-endian length, then the Block — and the unit pruning deletes. A Block
+never straddles two of them.
 _Avoid_: blk file, shard, partition, volume
 
 **Location**:
-Where a Block's bytes are: a Segment, and the line within it. Meaningless without
-the Segment, so the two travel together.
-_Avoid_: offset, pointer, position, address
+Where a Block's bytes are: a Segment, the byte offset within it, and how many
+bytes they are. Meaningless without the Segment, so the three travel together.
+_Avoid_: pointer, position, address
 
 **UTXO Set**:
 The Outputs no Transaction has yet spent — what a validating node checks each

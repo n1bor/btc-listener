@@ -9,7 +9,7 @@ module Lookup
     depends [Domain.Network, Domain.Rules, Domain.SpendScript, App.Show, Domain.Index, Domain.Rules, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
     ]
 
@@ -17,7 +17,7 @@ fn byTxid(network: Network, rest: List<String>, spending: Bool) -> Unit
     ? "Both commands want a directory and a Transaction Id."
     ! [
         Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
     ]
     match rest
@@ -28,7 +28,7 @@ fn withTxid(network: Network, dir: String, more: List<String>, spending: Bool) -
     ? "The Transaction Id follows the directory."
     ! [
         Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
     ]
     match more
@@ -37,7 +37,10 @@ fn withTxid(network: Network, dir: String, more: List<String>, spending: Bool) -
 
 fn txidRun(network: Network, dir: String, txid: String, spending: Bool) -> Result<List<String>, String>
     ? "Find the Transaction, then either show it or check what it spends."
-    ! [Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Infra.Kv.get, Infra.Kv.open]
+    ! [
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Kv.get, Infra.Kv.open,
+    ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     sited = Infra.Store.get(store, Domain.Index.txKey(txid))?
@@ -53,7 +56,7 @@ fn reported(network: Network, directoryNetwork: Option<Network>, store: Store, b
       "under; the one read off the directory decides how an address is"
       "spelled. A directory can be shown without being told what it is, and"
       "the second is the only one that cannot be got wrong."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     match spending
         false -> App.Show.describeSited(directoryNetwork, found, txid, sited)
         true -> spendReport(network, store, blocks, transaction, found.height, found.blockId)
@@ -63,7 +66,7 @@ fn spendReport(network: Network, store: Store, blocks: BlockStore, transaction: 
       "The Height decides which consensus rules the Scripts are run under, and"
       "it is the Height of the Block holding this Transaction rather than the"
       "tip: a spend is judged by the rules it was mined under."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     rules = rulesFor(network, height)
     work = Infra.Spends.resolved(store, blocks, transaction, rules)?
     answered = Infra.Spends.scriptsAcross([work], rules, height, blockId)?

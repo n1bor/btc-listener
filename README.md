@@ -233,7 +233,7 @@ same way the listener prints loose ones. It needs no Peer.
 ./target/release/main show ~/chain 170
 height 170
 block  00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee
-body   segment 0 line 5, 490 bytes
+body   segment 0 offset 1273, 490 bytes
 check  header hashes to the recorded Block Id
 merkle Transactions build the Root in the Header
 parent follows the Block below it in the Index
@@ -262,7 +262,7 @@ lines. `summary` stops before them:
 ./target/release/main show ~/chain 800000 summary
 height 800000
 block  00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054
-body   segment 0 line 7, 1634536 bytes
+body   segment 0 offset 4181, 1634536 bytes
 check  header hashes to the recorded Block Id
 merkle Transactions build the Root in the Header
 parent follows the Block below it in the Index

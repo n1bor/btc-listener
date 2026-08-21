@@ -62,3 +62,22 @@ So the decision stands, but its reason has moved. Hex text was chosen because
 the decode cost was tolerable, and that argument is now much stronger than when
 it was made — while the case for binary rests on the Segment read and the
 storage doubling rather than on `fromHex`.
+
+## Update, 21 August 2026 — retired
+
+[jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) shipped
+everything this decision was waiting on: `Disk.readBytes`, `writeBytes`,
+`appendBytes`, `Disk.size`, and — the one that changes designs rather than
+formats — `Disk.readBytesAt`, a positional read.
+
+Segments are now length-framed binary ([#31](https://github.com/n1bor/btc-listener/issues/31)):
+four bytes of little-endian length, then the Block's bytes. A Location names a
+Segment, a byte offset and a length, so reading one Block is one positional
+read of exactly its bytes — the whole-Segment read this document kept having
+to price is gone, and with it the Segment cache in the scan paths. The cap
+rises from the 2 MiB the hex read path imposed to Bitcoin Core's 128 MiB,
+where it now only sets pruning's granularity.
+
+As foreseen above, there is no upgrade path: a directory of `.hex` Segments is
+refused by name, and the chain is downloaded fresh. Hex text served for
+exactly the interim it was chosen for.

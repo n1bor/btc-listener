@@ -20,7 +20,7 @@ module Spends
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Work, Pending, resolved, scriptsAcross, resolve]
     depends [Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
-    effects [Disk.readText, Infra.Kv.get]
+    effects [Disk.readBytesAt, Infra.Kv.get]
 
 record Checked
     tally: Tally
@@ -34,7 +34,7 @@ fn resolved(store: Store, blocks: BlockStore, transaction: Transaction, rules: R
       "be declared independent."
       "The Outputs are fetched once and carried, so the Script pass costs no"
       "lookups at all."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     gathered = over(store, blocks, transaction, 0, Domain.Transaction.inputsOf(transaction), Gathered(tally = Domain.Spend.started(), pending = []), rules)?
     Result.Ok(Work(transaction = transaction, tally = gathered.tally, spent = List.reverse(gathered.pending)))
 
@@ -147,7 +147,7 @@ fn over(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, 
     ? "Each Input in turn, carrying the Transaction they belong to and which"
       "one of them this is. A signature commits to both, so a walk that keeps"
       "only the Input cannot check one -- which is what this walk used to be."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     match inputs
         [] -> Result.Ok(held)
         [head, ..tail] -> nextInput(store, blocks, transaction, index, head, tail, held, rules)
@@ -156,7 +156,7 @@ fn nextInput(store: Store, blocks: BlockStore, transaction: Transaction, index: 
     ? "A coinbase Input spends nothing, and marks the whole Transaction."
       "It has no Script to run either: the bytes in a coinbase Input are"
       "arbitrary data that consensus never executes."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     match Domain.Spend.isCoinbaseInput(Domain.Transaction.previousTxidOf(input))
         true -> over(store, blocks, transaction, index + 1, tail, Gathered(tally = Domain.Spend.markCoinbase(held.tally), pending = held.pending), rules)
         false -> resolvedInput(store, blocks, transaction, index, input, tail, held, rules)
@@ -164,7 +164,7 @@ fn nextInput(store: Store, blocks: BlockStore, transaction: Transaction, index: 
 fn resolvedInput(store: Store, blocks: BlockStore, transaction: Transaction, index: Int, input: Input, tail: List<Input>, held: Gathered, rules: Rules) -> Result<Gathered, String>
     ? "Follow one Input back, fold the value in, and hold the Script work back."
       "Prepended rather than appended, and turned round once by the caller."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     spend = resolve(store, blocks, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
     over(store, blocks, transaction, index + 1, tail, Gathered(tally = Domain.Spend.absorb(held.tally, spend), pending = List.prepend(Pending(index = index, input = input, spend = spend), held.pending)), rules)
 
@@ -201,7 +201,7 @@ fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int
       "Heights someone ran the outputs command over, and an Input naming a"
       "position past the end of a Transaction we do hold is Invalid rather"
       "than absent -- a distinction only the longer route can draw."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     direct = Infra.Store.get(store, Domain.Index.outputKey(previousTxid, position))?
     match direct
         Option.Some(text) -> spent(text)
@@ -222,7 +222,7 @@ fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, po
       "Not indexed is Unknown rather than Invalid: the t: keyspace covers the"
       "Heights someone chose to index, and everything else in the chain is"
       "simply absent from it."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     sited = Infra.Store.get(store, Domain.Index.txKey(previousTxid))?
     match sited
         Option.None -> Result.Ok(Spend.Unknown("transaction {previousTxid} is not indexed"))
@@ -230,7 +230,7 @@ fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, po
 
 fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Result<Spend, String>
     ? "The site names a Block; the Index says whether its bytes are held."
-    ! [Disk.readText, Infra.Kv.get]
+    ! [Disk.readBytesAt, Infra.Kv.get]
     site = Domain.Index.decodeTxSite(text)?
     located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
     match located
@@ -239,7 +239,7 @@ fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Resu
 
 fn inBlock(blocks: BlockStore, where: String, site: TxSite, position: Int) -> Result<Spend, String>
     ? "Read the Block and take the Transaction the site points at."
-    ! [Disk.readText]
+    ! [Disk.readBytesAt]
     location = Domain.Index.decodeLocation(where)?
     payload = Infra.Blocks.read(blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?

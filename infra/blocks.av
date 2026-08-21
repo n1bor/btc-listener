@@ -5,13 +5,19 @@ module Blocks
         "The only module that knows a Segment is a file. Where a Block goes is"
         "decided in Domain.Segment, which is pure; this carries the decision to"
         "Disk and nothing more."
+        "Every read is positional — a Location names its bytes exactly, so no"
+        "read touches more of a Segment than the Block asked for."
         "Resume reads the directory rather than counting up from zero, because"
         "pruning removes the low Segments — after it, Segment 0 is absent while"
         "Segment 400 is current, and probing upward from zero would report an"
-        "empty store."
-    exposes [BlockStore, Appended, Loaded, Fetched, open, append, read, readSegment, fetch, prune, currentSegment, segmentPath]
-    depends [Bytes, Domain.Index, Domain.Segment, Domain.Text]
-    effects [Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText]
+        "empty store. Reopening walks the current Segment's record headers and"
+        "truncates a torn final record, so the framing invariant — a Segment is"
+        "whole records, end to end — survives a crash mid-append."
+    exposes [BlockStore, Appended, open, append, read, prune, currentSegment, segmentPath]
+    depends [Bytes, Domain.Index, Domain.Segment]
+    effects [
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+    ]
 
 record BlockStore
     dir: String
@@ -21,62 +27,95 @@ record Appended
     store: BlockStore
     location: Location
 
-record Loaded
-    segment: Int
-    nextLine: Int
-    blocks: List<Bytes>
-
-record Fetched
-    payload: Bytes
-    loaded: Loaded
-
 fn open(dir: String) -> Result<BlockStore, String>
     ? "Pick up where the last run left off, creating the directory if absent."
+      "A directory of hex Segments — the format before this one — is refused by"
+      "name rather than misread; there is no migration, only a fresh download."
       "makeDir is create_dir_all, so calling it on a directory that already"
       "exists succeeds and needs no guard."
-    ! [Disk.listDir, Disk.makeDir, Disk.readText]
+    ! [Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes]
     _made = Disk.makeDir(dir)?
     names = Disk.listDir(dir)?
-    resume(dir, highestSegment(names, Option.None))
+    match hexIn(names)
+        true -> Result.Err("{dir} holds hex Segments, the format before binary; Blocks must be downloaded fresh into a new directory")
+        false -> resume(dir, highestSegment(names, Option.None))
 
 fn resume(dir: String, highest: Option<Int>) -> Result<BlockStore, String>
     ? "An empty directory starts at the beginning; otherwise reopen the last Segment."
-    ! [Disk.readText]
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes]
     match highest
         Option.None -> Result.Ok(BlockStore(dir = dir, state = Domain.Segment.initial()))
         Option.Some(segment) -> reopen(dir, segment)
 
 fn reopen(dir: String, segment: Int) -> Result<BlockStore, String>
-    ? "Count what the last Segment already holds, so the next Block lands after it."
-    ! [Disk.readText]
-    contents = Disk.readText(segmentPath(dir, segment))?
-    Result.Ok(BlockStore(dir = dir, state = stateFrom(segment, contents)))
+    ? "Walk the last Segment's records, so the next Block lands after the last"
+      "whole one. A torn final record — a crash between believing an append and"
+      "finishing it — is cut off, which loses that Block rather than leaving"
+      "bytes no walk can frame; it was never in the Index and is simply"
+      "fetched again."
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes]
+    path = segmentPath(dir, segment)
+    size = Disk.size(path)?
+    whole = wholeRecordsEnd(path, size, 0)?
+    match whole == size
+        true -> Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = size)))
+        false -> repaired(dir, segment, whole)
 
-fn stateFrom(segment: Int, contents: String) -> SegmentState
-    ? "How full a Segment is, from its text alone."
-      "A torn final line is dropped by completeLines, so a Block whose append was"
-      "cut short is neither counted nor read — it is simply fetched again."
-    lines = Domain.Text.completeLines(contents)
-    SegmentState(segment = segment, lines = List.len(lines), used = usedBy(lines, 0))
+fn wholeRecordsEnd(path: String, size: Int, headerAt: Int) -> Result<Int, String>
+    ? "How far the Segment consists of whole records: walk header to header"
+      "until the end of the file, or until a record the file does not fully"
+      "hold — a short header or a missing tail both stop the walk there."
+    ! [Disk.readBytesAt]
+    match headerAt >= size
+        true -> Result.Ok(headerAt)
+        false -> stepPast(path, size, headerAt)
 
-verify stateFrom
-    stateFrom(0, "") => SegmentState(segment = 0, lines = 0, used = 0)
-    stateFrom(3, "aabb\n") => SegmentState(segment = 3, lines = 1, used = 2)
-    stateFrom(3, "aabb\nccddee\n") => SegmentState(segment = 3, lines = 2, used = 5)
-    stateFrom(3, "aabb\nccdd") => SegmentState(segment = 3, lines = 1, used = 2)
+fn stepPast(path: String, size: Int, headerAt: Int) -> Result<Int, String>
+    ? "Read one header and continue past its record if the Segment holds it all."
+    ! [Disk.readBytesAt]
+    header = Disk.readBytesAt(path, headerAt, Domain.Segment.headerBytes())?
+    match Domain.Segment.lengthOf(header)
+        Result.Err(e) -> Result.Ok(headerAt)
+        Result.Ok(length) -> pastIfComplete(path, size, headerAt, length)
 
-fn usedBy(lines: List<String>, acc: Int) -> Int
-    ? "How many Block bytes the lines hold, from their lengths rather than by decoding."
-      "Two hex characters to the byte, so the count costs nothing and a Segment"
-      "can be sized without paying Bytes.fromHex to reopen it."
-    match lines
-        [] -> acc
-        [head, ..tail] -> usedBy(tail, acc + Int.div(String.len(head), 2))
+fn pastIfComplete(path: String, size: Int, headerAt: Int, length: Int) -> Result<Int, String>
+    ? "A record the file holds in full is walked past; one it does not ends the walk."
+    ! [Disk.readBytesAt]
+    match Domain.Segment.complete(size, headerAt, length)
+        true -> wholeRecordsEnd(path, size, Domain.Segment.nextHeader(headerAt, length))
+        false -> Result.Ok(headerAt)
 
-verify usedBy
-    usedBy([], 0) => 0
-    usedBy(["aabb"], 0) => 2
-    usedBy(["aabb", "ccddee"], 0) => 5
+fn repaired(dir: String, segment: Int, keep: Int) -> Result<BlockStore, String>
+    ? "Rewrite the Segment as its whole records only, dropping the torn tail."
+    ! [Disk.readBytesAt, Disk.writeBytes]
+    path = segmentPath(dir, segment)
+    whole = Disk.readBytesAt(path, 0, keep)?
+    _written = Disk.writeBytes(path, whole)?
+    Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = keep)))
+
+fn hexIn(names: List<String>) -> Bool
+    ? "Whether the directory holds Segments in the old hex format."
+    match names
+        [] -> false
+        [head, ..tail] -> hexOrRest(head, tail)
+
+verify hexIn
+    hexIn([]) => false
+    hexIn(["blk000000.dat"]) => false
+    hexIn(["blk000000.hex"]) => true
+    hexIn(["notes.txt", "blk000003.hex"]) => true
+    hexIn(["notes.txt", "kv"]) => false
+
+fn hexOrRest(head: String, tail: List<String>) -> Bool
+    ? "One name checked, then the rest."
+    match Bool.and(String.startsWith(head, "blk"), String.endsWith(head, ".hex"))
+        true -> true
+        false -> hexIn(tail)
+
+verify hexOrRest
+    hexOrRest("blk000000.hex", []) => true
+    hexOrRest("blk000000.dat", ["blk000001.hex"]) => true
+    hexOrRest("blk000000.dat", []) => false
 
 fn highestSegment(names: List<String>, best: Option<Int>) -> Option<Int>
     ? "The largest Segment number in the directory, ignoring anything else in it."
@@ -86,10 +125,10 @@ fn highestSegment(names: List<String>, best: Option<Int>) -> Option<Int>
 
 verify highestSegment
     highestSegment([], Option.None) => Option.None
-    highestSegment(["blk000000.hex"], Option.None) => Option.Some(0)
-    highestSegment(["blk000007.hex", "blk000003.hex"], Option.None) => Option.Some(7)
+    highestSegment(["blk000000.dat"], Option.None) => Option.Some(0)
+    highestSegment(["blk000007.dat", "blk000003.dat"], Option.None) => Option.Some(7)
     highestSegment(["notes.txt"], Option.None) => Option.None
-    highestSegment(["blk000400.hex"], Option.None) => Option.Some(400)
+    highestSegment(["blk000400.dat"], Option.None) => Option.Some(400)
 
 fn better(best: Option<Int>, found: Option<Int>) -> Option<Int>
     ? "Keep whichever Segment number is larger."
@@ -125,17 +164,18 @@ verify higher
 
 fn segmentNumberOf(name: String) -> Option<Int>
     ? "The Segment a file name denotes, or nothing when it names something else."
-    match Bool.and(String.startsWith(name, "blk"), String.endsWith(name, ".hex"))
+    match Bool.and(String.startsWith(name, "blk"), String.endsWith(name, ".dat"))
         false -> Option.None
         true -> numberIn(String.slice(name, 3, String.len(name) - 4))
 
 verify segmentNumberOf
-    segmentNumberOf("blk000000.hex") => Option.Some(0)
-    segmentNumberOf("blk000042.hex") => Option.Some(42)
-    segmentNumberOf("blk999999.hex") => Option.Some(999999)
+    segmentNumberOf("blk000000.dat") => Option.Some(0)
+    segmentNumberOf("blk000042.dat") => Option.Some(42)
+    segmentNumberOf("blk999999.dat") => Option.Some(999999)
     segmentNumberOf("notes.txt") => Option.None
-    segmentNumberOf("blk.hex") => Option.None
-    segmentNumberOf("blkxxxxxx.hex") => Option.None
+    segmentNumberOf("blk000000.hex") => Option.None
+    segmentNumberOf("blk.dat") => Option.None
+    segmentNumberOf("blkxxxxxx.dat") => Option.None
 
 fn numberIn(digits: String) -> Option<Int>
     ? "The digits between the prefix and the suffix, if that is what they are."
@@ -156,86 +196,41 @@ fn currentSegment(store: BlockStore) -> Int
 
 verify currentSegment
     currentSegment(BlockStore(dir = "d", state = Domain.Segment.initial())) => 0
-    currentSegment(BlockStore(dir = "d", state = SegmentState(segment = 7, lines = 2, used = 40))) => 7
+    currentSegment(BlockStore(dir = "d", state = SegmentState(segment = 7, used = 40))) => 7
 
 fn segmentPath(dir: String, segment: Int) -> String
     ? "Where a Segment lives."
     "{dir}/{Domain.Segment.nameOf(segment)}"
 
 verify segmentPath
-    segmentPath("blocks", 0) => "blocks/blk000000.hex"
-    segmentPath("/tmp/chain", 42) => "/tmp/chain/blk000042.hex"
+    segmentPath("blocks", 0) => "blocks/blk000000.dat"
+    segmentPath("/tmp/chain", 42) => "/tmp/chain/blk000042.dat"
 
 fn append(store: BlockStore, payload: Bytes) -> Result<Appended, String>
     ? "Put a Block at the end of the current Segment, or at the start of the next."
-      "The line is written before the Location is believed, so a crash between the"
-      "two loses the Block rather than inventing one."
-    ! [Disk.appendText]
-    placement = Domain.Segment.place(store.state, List.len(Bytes.toList(payload)))
-    _written = Disk.appendText(segmentPath(store.dir, placement.location.segment), Domain.Segment.lineFor(payload))?
+      "Two appends — the length header, then the payload — and the record is"
+      "written before the Location is believed, so a crash anywhere in between"
+      "loses the Block rather than inventing one: reopen truncates whatever"
+      "tail the headers cannot frame."
+    ! [Disk.appendBytes]
+    blockBytes = List.len(Bytes.toList(payload))
+    placement = Domain.Segment.place(store.state, blockBytes)
+    path = segmentPath(store.dir, placement.location.segment)
+    header = Domain.Segment.headerFor(blockBytes)?
+    _header = Disk.appendBytes(path, header)?
+    _payload = Disk.appendBytes(path, payload)?
     Result.Ok(Appended(store = BlockStore(dir = store.dir, state = placement.state), location = placement.location))
 
 fn read(store: BlockStore, location: Location) -> Result<Bytes, String>
-    ? "The Block a Location names."
-      "The whole Segment is read, because Aver cannot read from an offset. That is"
-      "why a Segment is capped at two mebibytes rather than Bitcoin Core's 128."
-      "One Block at a time. Reading a run of them this way re-reads the Segment"
-      "once per Block; fetch does not, and a scan should use that instead."
-    ! [Disk.readText]
-    contents = Disk.readText(segmentPath(store.dir, location.segment))?
-    Domain.Segment.blockAt(contents, location.line)
-
-fn readSegment(store: BlockStore, segment: Int) -> Result<List<Bytes>, String>
-    ? "Every Block in one Segment, decoded together."
-    ! [Disk.readText]
-    contents = Disk.readText(segmentPath(store.dir, segment))?
-    Domain.Segment.blocksIn(contents)
-
-fn fetch(store: BlockStore, loaded: Option<Loaded>, location: Location) -> Result<Fetched, String>
-    ? "The Block a Location names, keeping the Segment it came from for the next call."
-      "A scan walks Heights in order and consecutive Heights usually sit in one"
-      "Segment, so the Segment already in hand answers most calls without going"
-      "near the disk. Hand the Loaded back in each time to get that; pass"
-      "Option.None to start, and read for a single Block on its own."
-      "Only one Segment is held. Locations that alternate between two Segments"
-      "reload on every call, which is no worse than read and no better."
-    ! [Disk.readText]
-    match loaded
-        Option.None -> loadFor(store, location)
-        Option.Some(held) -> reuseOrLoad(store, held, location)
-
-fn reuseOrLoad(store: BlockStore, held: Loaded, location: Location) -> Result<Fetched, String>
-    ? "Use the Segment in hand when it is the one wanted, and not already passed."
-      "A Loaded holds the Blocks from nextLine onward rather than all of them, so"
-      "going forward costs the distance moved and going forward one costs one."
-      "A Location behind nextLine cannot be reached that way and reloads."
-    ! [Disk.readText]
-    match Bool.and(held.segment == location.segment, location.line >= held.nextLine)
-        true -> takeFrom(held, location)
-        false -> loadFor(store, location)
-
-fn loadFor(store: BlockStore, location: Location) -> Result<Fetched, String>
-    ? "Read the Segment the Location names, then take the Block out of it."
-    ! [Disk.readText]
-    blocks = readSegment(store, location.segment)?
-    takeFrom(Loaded(segment = location.segment, nextLine = 0, blocks = blocks), location)
-
-fn takeFrom(held: Loaded, location: Location) -> Result<Fetched, String>
-    ? "The line the Location names, out of the Segment already decoded."
-      "The Loaded handed back starts at that line, so the next one along is the"
-      "head of what remains and costs nothing to reach."
-    ahead = List.drop(held.blocks, location.line - held.nextLine)
-    match ahead
-        [] -> Result.Err("Segment has no line {location.line}")
-        [head, ..tail] -> Result.Ok(Fetched(payload = head, loaded = Loaded(segment = held.segment, nextLine = location.line, blocks = ahead)))
-
-verify takeFrom
-    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 0))?.payload => Bytes.fromHex("aabb")?
-    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 1))?.payload => Bytes.fromHex("ccdd")?
-    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 1))?.loaded.nextLine => 1
-    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = [Bytes.fromHex("aabb")?, Bytes.fromHex("ccdd")?]), Location(segment = 0, line = 2)) => Result.Err("Segment has no line 2")
-    takeFrom(Loaded(segment = 1, nextLine = 4, blocks = [Bytes.fromHex("aabb")?]), Location(segment = 1, line = 4))?.payload => Bytes.fromHex("aabb")?
-    takeFrom(Loaded(segment = 0, nextLine = 0, blocks = []), Location(segment = 0, line = 0)) => Result.Err("Segment has no line 0")
+    ? "The Block a Location names: one positional read of exactly its bytes."
+      "A short answer means the Segment ends before the Block the Index"
+      "promised, which is a fault worth naming, not an empty Block."
+    ! [Disk.readBytesAt]
+    payload = Disk.readBytesAt(segmentPath(store.dir, location.segment), location.offset, location.length)?
+    got = List.len(Bytes.toList(payload))
+    match got == location.length
+        true -> Result.Ok(payload)
+        false -> Result.Err("Segment {location.segment} holds {got} of the {location.length} bytes at offset {location.offset}")
 
 fn prune(store: BlockStore, belowSegment: Int) -> Result<Int, String>
     ? "Delete every Segment below the given one, and say how many went."
