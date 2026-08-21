@@ -1,0 +1,99 @@
+module WitnessUse
+    intent =
+        "Whether an Input's Witness had anything to be a Witness for."
+        "BIP141 does not only say what a witness program means; it also says"
+        "that Witness data anywhere else is invalid. An Input carrying a"
+        "Witness whose Output is an ordinary Script fails, and it fails even"
+        "though nothing would have read the Witness -- Core's"
+        "SCRIPT_ERR_WITNESS_UNEXPECTED, checked at the end of VerifyScript"
+        "once it knows no witness program was found."
+        "The reason is malleability again. Witness data is not covered by the"
+        "Transaction Id, so if it were merely ignored where it has no meaning,"
+        "anyone could staple bytes onto somebody else's Input and change the"
+        "size and weight of a Transaction that was already signed. Refusing it"
+        "outright is what keeps the Witness from being a free field."
+        "Two places count as somewhere for a Witness to belong: the Output"
+        "Script being a witness program, and a P2SH Output whose redeem Script"
+        "is one. The redeem Script is the last thing the Input Script pushes,"
+        "and this reads it without running anything -- the question is about"
+        "the shape of the spend, not about whether it succeeds."
+    exposes [unexpected]
+    depends [Bytes, Domain.Script, Domain.ScriptParse]
+    effects []
+
+fn unexpected(inputScriptHex: String, outputScriptHex: String, witness: List<String>, segWit: Bool) -> Bool
+    ? "Whether this Input carries a Witness with nowhere to put it."
+      "Below the SegWit activation there is no such rule and Witness data is"
+      "not even parsed as such, so the answer is always no."
+    match Bool.and(segWit, List.len(witness) > 0)
+        false -> false
+        true -> nowhereFor(inputScriptHex, outputScriptHex)
+
+verify unexpected
+    unexpected("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", ["aa"], true) => false
+    unexpected("", "51", ["aa"], true) => true
+    unexpected("", "51", [], true) => false
+    unexpected("", "51", ["aa"], false) => false
+
+fn nowhereFor(inputScriptHex: String, outputScriptHex: String) -> Bool
+    ? "Neither the Output Script nor the redeem Script is a witness program."
+    match Domain.Script.isAnyWitnessProgram(outputScriptHex)
+        true -> false
+        false -> notNested(inputScriptHex, outputScriptHex)
+
+verify nowhereFor
+    nowhereFor("", "0014751e76e8199196d454941c45d1b3a323f1433bd6") => false
+    nowhereFor("", "51") => true
+
+fn notNested(inputScriptHex: String, outputScriptHex: String) -> Bool
+    ? "A P2SH Output may hide a witness program in its redeem Script."
+    match Domain.Script.isPayToScriptHash(Domain.Script.bytesOf(outputScriptHex))
+        false -> true
+        true -> Domain.Script.isAnyWitnessProgram(lastPush(inputScriptHex)) == false
+
+verify notNested
+    notNested("", "51") => true
+    notNested("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87") => false
+    notNested("0151", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87") => true
+
+fn lastPush(inputScriptHex: String) -> String
+    ? "The last thing the Input Script pushes, which for a P2SH spend is the"
+      "redeem Script. An Input Script that will not parse pushes nothing, and"
+      "an Input Script whose last Op is not a push has no redeem Script here."
+    match Domain.ScriptParse.opsIn(inputScriptHex)
+        Result.Err(why) -> ""
+        Result.Ok(ops) -> hexOfLast(ops)
+
+verify lastPush
+    lastPush("") => ""
+    lastPush("02aa") => ""
+    lastPush("0151") => "51"
+    lastPush("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b") => "00147cf9c846cd4882efec4bf07e44ebdad495c94f4b"
+
+fn hexOfLast(ops: List<Op>) -> String
+    ? "The data of the final Op, when the final Op is a push."
+    match List.drop(ops, List.len(ops) - 1)
+        [] -> ""
+        [head, ..tail] -> dataOf(head)
+
+verify hexOfLast
+    hexOfLast([]) => ""
+    hexOfLast([Op.Code(81)]) => ""
+
+fn dataOf(op: Op) -> String
+    ? "A push carries data; an opcode does not."
+    match op
+        Op.Push(width, data) -> hexOf(data)
+        Op.Code(code) -> ""
+
+verify dataOf
+    dataOf(Op.Code(81)) => ""
+    dataOf(Op.Push(1, [81])) => "51"
+
+fn hexOf(bytes: List<Int>) -> String
+    ? "Bytes back as hexadecimal, to be asked the witness program question."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(bytes), Bytes.fromList([])))
+
+verify hexOf
+    hexOf([0, 20]) => "0014"
+    hexOf([]) => ""

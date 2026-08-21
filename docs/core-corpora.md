@@ -13,8 +13,10 @@ blocks each one.
 | `script_tests.json` | `domain/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` (middle step missing) |
 | `sighash.json` | `domain/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
+| `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
+| BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 7 | hand-extracted, keyPathSpending |
 
-Between them, 1831 cases out of a corpus of 4327.
+Between them, 1946 cases out of a corpus of 4327.
 
 ## The discipline, and what these corpora are not
 
@@ -71,6 +73,41 @@ corpus today therefore means writing that program first; the Transaction tool's
 Core writes its Scripts in the assembly language `core_read.cpp` parses:
 opcode names, `0x..` byte blobs, decimal numbers that become minimal pushes,
 `'quoted'` strings. `parse_script` in the tool is that reader.
+
+### The Witness rows of `script_tests.json`
+
+The 113 rows carrying a Witness cannot be run as a Script pair: a Witness
+belongs to an Input of a Transaction and the row does not carry one. Core's own
+harness builds two, and `tools/witness_tests_to_aver.py` reproduces exactly that
+construction from `src/test/util/transaction_utils.cpp`:
+
+```
+BuildCreditingTransaction(scriptPubKey, nValue)
+    version 1, locktime 0
+    one input:  prevout null, scriptSig OP_0 OP_0, sequence 0xffffffff
+    one output: the row's scriptPubKey, the row's amount
+
+BuildSpendingTransaction(scriptSig, scriptWitness, txCredit)
+    version 1, locktime 0
+    one input:  prevout (txCredit txid, 0), the row's scriptSig,
+                sequence 0xffffffff, the row's Witness
+    one output: empty script, the same amount
+```
+
+That makes each row a whole Transaction spending one known Output, which is the
+shape `Domain.TxCase` runs -- so these join the corpus beside the Transaction
+cases rather than beside the Script pairs. Same four steps as the Transactions
+below, with `--check` proving the assembly is deterministic.
+
+Getting the construction wrong would look exactly like getting the engine
+wrong, which is the risk this tool carries. It is self-checking in one
+important way: BIP143 and BIP341 both commit to the Transaction Id and to the
+amount, so a harness that built either wrongly would fail **every** signed case
+rather than some of them. Fifty-six of the 108 pass, which is evidence about
+the harness and not only about the engine.
+
+Five rows are left out: the ones carrying the `TAPROOT` flag, which are
+tapscript leaf cases and belong with Core's `script_assets_test.json`.
 
 ### Transactions
 
@@ -211,6 +248,8 @@ them.
 * Scripts: anything over 1000 bytes on either side.
 * Transactions: one case, a 1911 byte Transaction with twelve Inputs. The
   median case is 135 bytes and the next largest is under 500.
+* Witness rows: the five carrying the `TAPROOT` flag, which are tapscript leaf
+  cases rather than BIP141 ones.
 
 They are left out rather than left in failing, and the count is printed when
 the corpus is regenerated.

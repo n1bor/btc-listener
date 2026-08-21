@@ -24,7 +24,7 @@ module SpendScript
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
     exposes [check, Outcomes, noOutcomes, count, merged, noteOf]
-    depends [Domain.Network, Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Witness]
+    depends [Domain.Network, Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Witness, Domain.WitnessUse]
     effects []
 
 fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -37,7 +37,21 @@ fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> O
       "oversized Output Script that this accepted until the limit was put back."
     match Bool.or(tooLong(inputScriptHex), tooLong(outputScriptHex))
         true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
+        false -> witnessPlaced(inputScriptHex, outputScriptHex, context)
+
+fn witnessPlaced(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+    ? "A Witness with nowhere to belong fails the spend before anything runs."
+      "Domain.WitnessUse says why. Core checks it at the end of VerifyScript,"
+      "once it knows no witness program was found anywhere; asking first is"
+      "the same question and answers it without running a Script that cannot"
+      "matter."
+    match Domain.WitnessUse.unexpected(inputScriptHex, outputScriptHex, Domain.SpendContext.witnessOf(context), context.rules.segWit)
+        true -> Outcome.Decided(Ending.Failed("the input carries witness data and its output is not a witness program"))
         false -> notWitness(inputScriptHex, outputScriptHex, context)
+
+verify witnessPlaced
+    witnessPlaced("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    witnessPlaced("", "51", Domain.SpendContext.committed(Domain.Rules.latest(), Domain.SpendContext.emptyTransaction(), 0, 0, "", ["aa"])) => Outcome.Decided(Ending.Failed("the input carries witness data and its output is not a witness program"))
 
 verify check
     check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
