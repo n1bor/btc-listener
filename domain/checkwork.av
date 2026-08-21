@@ -14,7 +14,10 @@ module Checkwork
         "left. Splitting the shared half out was the cheapest way to make"
         "room without moving either loop, and it names a real thing: nothing"
         "below knows whether it is serving one signature or twenty."
-    exposes [bytesOf, validKey, refusal, answered, oneIf]
+        "Domain.Multisig came out of the same file for the same reason and"
+        "reaches these too, which is what made the split pay for itself: two"
+        "callers rather than one."
+    exposes [bytesOf, validKey, refusal, decided, answered, oneIf]
     depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
     effects []
 
@@ -76,3 +79,15 @@ fn oneIf(condition: Bool) -> Int
 verify oneIf
     oneIf(true) => 1
     oneIf(false) => 0
+
+fn decided(two: Two, messageHex: String) -> Ruling
+    ? "The three values a signature check needs, as Bytes."
+      "A message that is not hexadecimal cannot happen -- it came from"
+      "Domain.Sighash -- so the failure branch answers undecidable rather than"
+      "guessing."
+    match Bytes.fromHex(messageHex)
+        Result.Err(why) -> Domain.Ecdsa.Ruling.Undecidable(why)
+        Result.Ok(message) -> Domain.Ecdsa.decide(bytesOf(two.first), bytesOf(two.second), message)
+
+verify decided
+    decided(Two(first = validKey(), second = [4, 5], rest = []), "zz") => Domain.Ecdsa.Ruling.Undecidable("Bytes.fromHex: invalid hexadecimal character 'z'")

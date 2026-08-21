@@ -1,0 +1,318 @@
+module Multisig
+    intent =
+        "OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY, which are a different"
+        "shape from every other opcode."
+        "They reach a variable depth: a count, that many public keys, another"
+        "count, that many signatures, and one item nobody uses. They charge"
+        "their own opcodes against the limit, one per key. And the matching"
+        "between the two lists is a loop with consensus written into its"
+        "order, not a set comparison -- a signature stays until a key answers"
+        "it, every key tried is spent whether it matched or not, and running"
+        "out of keys with signatures still to place fails the whole check. So"
+        "a valid set supplied in the wrong order is invalid."
+        "It came out of Domain.Checksig, which had no room left for the"
+        "verification flags that keep arriving -- CONST_SCRIPTCODE and"
+        "NULLDUMMY are here already, and n1bor/btc-listener#52 has a queue"
+        "behind them. What the two paths share is in Domain.Checkwork, which"
+        "is why neither depends on the other."
+        "The per-pair ruling lives here rather than there because the many"
+        "-signature loop is its only caller with a choice to make: OP_CHECKSIG"
+        "asks about one pair and is done, and this asks about one pair over"
+        "and over against keys it is spending as it goes."
+    exposes [multiple]
+    depends [Domain.Rules, Bytes, Domain.Checkwork, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Domain.Primitives]
+    effects []
+
+fn maxKeys() -> Int
+    ? "Public keys allowed in one OP_CHECKMULTISIG."
+    20
+
+verify maxKeys
+    maxKeys() => 20
+
+fn multiple(code: Int, state: State, context: Context) -> Step
+    ? "OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY."
+      "The stack, from the top down: the key count, that many keys, the"
+      "signature count, that many signatures, and one item nobody uses."
+    match state.stack
+        [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs a public key count")))
+        [head, ..tail] -> countedKeys(code, head, tail, state, context)
+
+verify multiple
+    multiple(174, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
+    multiple(174, Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    multiple(174, Domain.ScriptState.holding([[21]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))
+
+fn countedKeys(code: Int, head: List<Int>, tail: List<List<Int>>, state: State, context: Context) -> Step
+    ? "The key count is a Script number and obeys the rules every other one"
+      "does. Core reads it with CScriptNum(stacktop(-i), fRequireMinimal),"
+      "which refuses a fifth byte and, under MINIMALDATA, one written longer"
+      "than it needed to be."
+    match Domain.StackItem.arithmeticFault(head, Domain.SpendContext.rulesOf(context).policy.minimalData)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} public key count {why}")))
+        Option.None -> withKeyCount(code, Domain.StackItem.asNumber(head), tail, state, context)
+
+verify countedKeys
+    countedKeys(174, [1, 2, 3, 4, 5], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG public key count is over four bytes")))
+    countedKeys(174, [1, 0], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags(["MINIMALDATA"]))) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG public key count is not minimally encoded")))
+    countedKeys(174, [], [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+
+fn withKeyCount(code: Int, keys: Int, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "Between nought and twenty keys, and they count against the opcode limit."
+    match Bool.or(keys < 0, keys > maxKeys())
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} wants {keys} public keys, which is more than {maxKeys()}")))
+        false -> charged(code, keys, rest, state, context)
+
+verify withKeyCount
+    withKeyCount(174, 21, [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 21 public keys, which is more than 20")))
+    withKeyCount(174, 0, [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+
+fn charged(code: Int, keys: Int, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "Each public key is an opcode as far as the limit is concerned."
+    limit = Domain.ScriptState.maxOps()
+    spent = state.opCount + keys
+    match spent > limit
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("script uses more than {limit} opcodes")))
+        false -> withKeys(code, keys, rest, State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = spent), context)
+
+verify charged
+    charged(174, 5, [[], []], State(stack = [[], [], []], alt = [], conditions = [], opCount = 200), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("script uses more than 201 opcodes")))
+    charged(174, 0, [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [[1]], alt = [], conditions = [], opCount = 0))
+
+fn withKeys(code: Int, keys: Int, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "Take the keys, then the signature count that sits under them."
+    match List.len(rest) < keys + 1
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs {keys} public keys and a signature count")))
+        false -> withSigCount(code, keys, List.take(rest, keys), List.drop(rest, keys), state, context)
+
+verify withKeys
+    withKeys(174, 3, [[]], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 3 public keys and a signature count")))
+    withKeys(174, 0, [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+
+fn withSigCount(code: Int, keys: Int, keyItems: List<List<Int>>, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "The signature count is the first item under the keys."
+    match rest
+        [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs a signature count")))
+        [head, ..tail] -> countedSigs(code, keys, keyItems, head, tail, state, context)
+
+verify withSigCount
+    withSigCount(174, 0, [], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a signature count")))
+    withSigCount(174, 0, [], [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+
+fn countedSigs(code: Int, keys: Int, keyItems: List<List<Int>>, head: List<Int>, tail: List<List<Int>>, state: State, context: Context) -> Step
+    ? "And the signature count, read the same way as the key count above."
+    match Domain.StackItem.arithmeticFault(head, Domain.SpendContext.rulesOf(context).policy.minimalData)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} signature count {why}")))
+        Option.None -> withSigs(code, keys, keyItems, Domain.StackItem.asNumber(head), tail, state, context)
+
+verify countedSigs
+    countedSigs(174, 0, [], [1, 2, 3, 4, 5], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG signature count is over four bytes")))
+    countedSigs(174, 0, [], [1, 0], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags(["MINIMALDATA"]))) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG signature count is not minimally encoded")))
+    countedSigs(174, 0, [], [], [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1], []]))
+
+fn withSigs(code: Int, keys: Int, keyItems: List<List<Int>>, sigs: Int, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "No more signatures than keys, and they have to be on the stack, along"
+      "with the item OP_CHECKMULTISIG takes and does not use."
+    match Bool.or(sigs < 0, sigs > keys)
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} wants {sigs} signatures for {keys} public keys")))
+        false -> withDummy(code, keyItems, sigs, rest, state, context)
+
+verify withSigs
+    withSigs(174, 0, [], 1, [[]], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG wants 1 signatures for 0 public keys")))
+    withSigs(174, 0, [], 0, [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1], []]))
+
+fn withDummy(code: Int, keyItems: List<List<Int>>, sigs: Int, rest: List<List<Int>>, state: State, context: Context) -> Step
+    ? "One item past the signatures, thrown away, and a Script that does not"
+      "supply it is invalid. Everything below it survives."
+    consumed = sigs + 1
+    match List.len(rest) < consumed
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs {sigs} signatures and the item it discards")))
+        false -> pastDummy(code, keyItems, List.take(rest, sigs), List.take(List.drop(rest, sigs), 1), List.drop(rest, consumed), state, context)
+
+verify withDummy
+    withDummy(174, [], 1, [[]], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards")))
+    withDummy(174, [], 0, [[], []], Domain.ScriptState.holding([[], [], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1], []]))
+
+fn pastDummy(code: Int, keyItems: List<List<Int>>, sigItems: List<List<Int>>, dummy: List<List<Int>>, below: List<List<Int>>, state: State, context: Context) -> Step
+    ? "BIP147: the item OP_CHECKMULTISIG discards must be the empty push."
+      "The opcode reads one item too many and never looks at it, which made"
+      "it a place to put anything at all -- and a place to change a"
+      "Transaction Id without changing what it does, since nothing signed it."
+      "BIP147 closed that with SegWit and was Policy for the two years"
+      "before, so Domain.Rules.nullDummy asks both halves."
+      "The item arrives as a one-element slice rather than as itself, because"
+      "it comes out of the stack by List.take and unwrapping it here would"
+      "cost a function this file has no room for. Empty slice cannot happen:"
+      "withDummy has already refused a stack too short to hold it."
+    match Domain.Rules.dummyWrong(Domain.SpendContext.rulesOf(context), dummy)
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} discards an item that is not the empty push")))
+        false -> decidedMultiple(code, keyItems, sigItems, below, state, context)
+
+verify pastDummy
+    pastDummy(174, [], [], [[]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pastDummy(174, [], [], [[1]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG discards an item that is not the empty push")))
+    pastDummy(174, [], [], [[1]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags([]))) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pastDummy(174, [], [], [[1]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags(["NULLDUMMY"]))) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG discards an item that is not the empty push")))
+
+fn decidedMultiple(code: Int, keyItems: List<List<Int>>, sigItems: List<List<Int>>, below: List<List<Int>>, state: State, context: Context) -> Step
+    ? "No signatures at all succeeds, because there is nothing to check."
+      "Anything else goes through the matching below, over a Script code with"
+      "every one of the signatures deleted from it. All of them, before any of"
+      "them is checked, which is what Bitcoin does and is not the same as"
+      "deleting each one as its turn comes -- see n1bor/btc-listener#49."
+    match sigItems
+        [] -> Domain.Checkwork.answered(code, true, below, state)
+        [head, ..tail] -> multiPastDeletion(code, keyItems, sigItems, below, state, context)
+
+verify decidedMultiple
+    decidedMultiple(174, [], [], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    decidedMultiple(174, [Domain.Checkwork.validKey()], [[]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    decidedMultiple(174, [Domain.Checkwork.validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
+
+fn multiPastDeletion(code: Int, keyItems: List<List<Int>>, sigItems: List<List<Int>>, below: List<List<Int>>, state: State, context: Context) -> Step
+    ? "CONST_SCRIPTCODE over the multiple-signature deletion."
+      "Core walks every signature through FindAndDelete before checking any"
+      "of them and refuses as soon as one of them bites, so asking about all"
+      "of them at once gives the same answer: the deletion here is already"
+      "all of them together."
+    match Bool.and(Domain.SpendContext.rulesOf(context).policy.constScriptCode, Domain.SpendContext.deletes(context, sigItems))
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} deletes its own signatures from the script, which CONST_SCRIPTCODE forbids")))
+        false -> multiAnswered(code, multiRuling(sigItems, keyItems, Domain.SpendContext.withoutSignatures(context, sigItems)), below, state)
+
+verify multiPastDeletion
+    multiPastDeletion(174, [Domain.Checkwork.validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
+    multiPastDeletion(174, [Domain.Checkwork.validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.committed(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "5102040552", [])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG deletes its own signatures from the script, which CONST_SCRIPTCODE forbids")))
+
+fn multiAnswered(code: Int, ruling: Ruling, below: List<List<Int>>, state: State) -> Step
+    ? "The whole check, turned back into a Step."
+    match ruling
+        Domain.Ecdsa.Ruling.Valid -> Domain.Checkwork.answered(code, true, below, state)
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Checkwork.answered(code, false, below, state)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
+
+verify multiAnswered
+    multiAnswered(174, Domain.Ecdsa.Ruling.Valid, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Invalid("no"), [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Undecidable("no"), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
+
+fn multiRuling(sigItems: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Ruling
+    ? "Signatures against public keys, in order, each key used at most once."
+      "This is the reference client's loop and the order is consensus, not"
+      "convenience: a signature stays until a key matches it, every key is"
+      "spent whether it matched or not, and running out of keys with"
+      "signatures still to place fails the whole check. So the signatures must"
+      "appear in the same order as the keys that verify them, and a valid set"
+      "supplied in the wrong order is invalid."
+    match sigItems
+        [] -> Domain.Ecdsa.Ruling.Valid
+        [head, ..tail] -> multiAgainst(head, tail, keyItems, context)
+
+verify multiRuling
+    multiRuling([], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Valid
+    multiRuling([[]], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+
+fn multiAgainst(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Ruling
+    ? "One signature, against the keys that are left."
+      "The message is taken once, here, rather than once for every key tried."
+      "It is fixed by the signature's hash type and by the Context, and this"
+      "loop changes neither: it spends keys. Taking it inside the loop built"
+      "the same signature hash once per key, and a signature hash is a whole"
+      "modified copy of the Transaction, so a three key check paid for three."
+    match keyItems
+        [] -> Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+        [head, ..tail] -> againstKeys(signature, rest, keyItems, context, messageOnce(signature, context))
+
+verify multiAgainst
+    multiAgainst([], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+    multiAgainst([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+
+fn messageOnce(signature: List<Int>, context: Context) -> Result<Option<String>, String>
+    ? "The message this signature's hash type names, kept for a whole key loop."
+      "Err is a hash type the signature does not carry, which refuses the pair"
+      "outright; Ok(None) is a Context with no Transaction behind it, which"
+      "leaves the pair undecided. The two have to stay apart, which is why"
+      "this is a Result of an Option and not either one alone."
+    match Domain.Ecdsa.hashTypeOf(signature)
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(hashType) -> Result.Ok(Domain.SpendContext.messageFor(context, hashType))
+
+verify messageOnce
+    messageOnce([], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Err("signature is empty and has no hash type")
+    messageOnce([4, 5], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Option.None)
+
+fn againstKeys(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Ruling
+    ? "The key loop proper, carrying the message it does not change."
+    match keyItems
+        [] -> Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+        [head, ..tail] -> multiAdvanced(ruledWith(signature, head, message), signature, rest, tail, context, message)
+
+verify againstKeys
+    againstKeys([], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+    againstKeys([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+
+fn ruledWith(signature: List<Int>, publicKey: List<Int>, message: Result<Option<String>, String>) -> Ruling
+    ? "One pair, with the message already in hand."
+      "The shape is still asked first, so a signature the reference client"
+      "refuses before any arithmetic never reaches the curve."
+    match Domain.Ecdsa.decideShape(signature, publicKey)
+        Domain.Ecdsa.Ruling.Valid -> Domain.Ecdsa.Ruling.Valid
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> overMessageOrWhy(signature, publicKey, message)
+
+verify ruledWith
+    ruledWith([], Domain.Checkwork.validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("empty signature")
+    ruledWith([4, 5], Domain.Checkwork.validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+    ruledWith([4, 5], Domain.Checkwork.validKey(), Result.Err("signature is empty and has no hash type")) => Domain.Ecdsa.Ruling.Invalid("signature is empty and has no hash type")
+
+fn overMessageOrWhy(signature: List<Int>, publicKey: List<Int>, message: Result<Option<String>, String>) -> Ruling
+    ? "A hash type that was never there refuses the pair; anything else asks the curve."
+    match message
+        Result.Err(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Result.Ok(found) -> overOneMessage(signature, publicKey, found)
+
+verify overMessageOrWhy
+    overMessageOrWhy([4, 5], Domain.Checkwork.validKey(), Result.Err("no hash type")) => Domain.Ecdsa.Ruling.Invalid("no hash type")
+    overMessageOrWhy([4, 5], Domain.Checkwork.validKey(), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+
+fn multiAdvanced(ruling: Ruling, signature: List<Int>, rest: List<List<Int>>, keyRest: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Ruling
+    ? "A key is spent either way. The signature is only spent when it matched."
+    match ruling
+        Domain.Ecdsa.Ruling.Valid -> multiRuling(rest, keyRest, context)
+        Domain.Ecdsa.Ruling.Invalid(why) -> againstKeys(signature, rest, keyRest, context, message)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> Domain.Ecdsa.Ruling.Undecidable(why)
+
+verify multiAdvanced
+    multiAdvanced(Domain.Ecdsa.Ruling.Valid, [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Valid
+    multiAdvanced(Domain.Ecdsa.Ruling.Undecidable("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Undecidable("no")
+    multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them")
+
+fn oneRuling(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ruling
+    ? "One pair. The shape is asked first, exactly as it is for OP_CHECKSIG,"
+      "so a signature the reference client refuses before any arithmetic never"
+      "reaches the curve and never needs a Transaction."
+    match Domain.Ecdsa.decideShape(signature, publicKey)
+        Domain.Ecdsa.Ruling.Valid -> Domain.Ecdsa.Ruling.Valid
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> overOne(signature, publicKey, context)
+
+verify oneRuling
+    oneRuling([], Domain.Checkwork.validKey(), Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Invalid("empty signature")
+    oneRuling([4, 5], Domain.Checkwork.validKey(), Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+
+fn overOne(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ruling
+    ? "The message this signature's hash type names, and then the curve."
+    match Domain.Ecdsa.hashTypeOf(signature)
+        Result.Err(why) -> Domain.Ecdsa.Ruling.Invalid(why)
+        Result.Ok(hashType) -> overOneMessage(signature, publicKey, Domain.SpendContext.messageFor(context, hashType))
+
+verify overOne
+    overOne([4, 5], Domain.Checkwork.validKey(), Domain.SpendContext.bare(Domain.Rules.latest())) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+
+fn overOneMessage(signature: List<Int>, publicKey: List<Int>, message: Option<String>) -> Ruling
+    ? "Undecidable without a Transaction, decided with one."
+    match message
+        Option.None -> Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+        Option.Some(hex) -> Domain.Checkwork.decided(Two(first = publicKey, second = signature, rest = []), hex)
+
+verify overOneMessage
+    overOneMessage([4, 5], Domain.Checkwork.validKey(), Option.None) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")

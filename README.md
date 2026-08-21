@@ -485,7 +485,7 @@ every case carries the verification flags Core ran it under:
 
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
-| `script_tests.json` Script pairs | 1118 | 932 | 99 | 87 |
+| `script_tests.json` Script pairs | 1118 | 1009 | 24 | 85 |
 | `script_tests.json` Witness rows | 108 | 91 | 17 | 0 |
 | `tx_valid` + `tx_invalid` | 213 | 210 | 3 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
@@ -495,10 +495,10 @@ Split by direction, which is the split that matters:
 | | |
 |---|---|
 | **we refuse what Core accepts** | **0** |
-| we accept what Core refuses | 119 |
+| we accept what Core refuses | 44 |
 
 The nought is the one to watch — that is the direction a defect would show up
-in. Every one of the 119 in the other direction is a verification flag with no
+in. Every one of the 44 in the other direction is a verification flag with no
 field yet, and each is a rule that became one after Blocks breaking it were
 already valid. See
 [ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md) and

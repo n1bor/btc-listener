@@ -465,3 +465,57 @@ recorded 94 answers against 1118 cases and printed a cheerful agreement report
 about the 94. The probes are written in parts under the limit now, joined by
 `List.concat`, with a `verify assembled` case that counts the result — so a part
 over the limit fails loudly instead of quietly shortening the corpus.
+
+## Update — MINIMALDATA, and the 75 cases it was worth
+
+n1bor/btc-listener#69. `Domain.StackItem.isMinimalNumber` and `isMinimalPush`
+were written, exposed and **called by nothing** — the same shape
+`Domain.Ecdsa.isValidEncoding` is still in. Between them they account for 75 of
+the 99 Script disagreements: 54 recorded by Core as `SCRIPTNUM` and 21 as
+`MINIMALDATA`.
+
+Two rules, and Core has two error names for them because they catch different
+mistakes:
+
+* **The push.** `CheckMinimalPush` in `EvalScript`, under `fExec` — a push
+  written the long way *inside a branch that is not taken* is not an error.
+  That is the opposite of CONST_SCRIPTCODE two lines above it, which is refused
+  in an untaken branch, and getting the two the same way round matters.
+* **The number.** `CScriptNum(vch, fRequireMinimal)` wherever a stack item is
+  read as a number. The order inside that constructor is load-bearing: it
+  throws on the width *before* it looks at the encoding, so a five-byte operand
+  that is also written the long way is refused for its width. Asking the other
+  way round gives a different error name and Core's corpus notices.
+
+Everywhere a number is read now goes through
+`Domain.StackItem.arithmeticFault`, which answers both in that order: the
+arithmetic opcodes, OP_WITHIN, the OP_PICK and OP_ROLL depth, the
+OP_CHECKMULTISIG key and signature counts, the OP_CHECKSIGADD count, and the
+timelock number — which is five bytes wide rather than four, and Core says why
+in as many words: a four-byte lock time would give Bitcoin a year 2038 problem.
+
+```
+cases 1118   agree 932 → 1009   disagree 99 → 24   undecided 87 → 85
+
+  we accept what Core refuses  24
+  we refuse what Core accepts   0
+
+  DISCOURAGE_UPGRADABLE_NOPS  10
+  SIG_DER                      8
+  SIG_PUSHONLY                 4
+  NULLFAIL                     2
+```
+
+**Two of the multisig sites had no width check at all**, flag or no flag. The
+key count and the signature count were read straight off the stack with
+`asNumber`, so a five-byte count would have been read as a number where Core
+refuses it outright — and that one is not a flag, `CScriptNum` throws whatever
+the flags say. It is a consensus rule this engine did not have, found by
+implementing a Policy one next to it.
+
+Two files had to be split to make room, and both cuts name something real.
+`Domain.ScriptNumOps` holds the opcodes that read a number off the stack, which
+is the machinery `Domain.ScriptMath`'s intent explicitly says is not its.
+`Domain.Multisig` holds OP_CHECKMULTISIG, which is a different shape from every
+other opcode — variable depth, its own opcode charge, and a matching loop with
+consensus written into its order.

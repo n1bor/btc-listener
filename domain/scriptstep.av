@@ -9,8 +9,8 @@ module ScriptStep
         "The stack limit lives here rather than in each caller because it is"
         "checked on the way out of every opcode that grows the stack, and one"
         "place is easier to be sure of than fifteen."
-    exposes [landed, pushing, stoppedUnless, undecidedUnlessNop]
-    depends [Domain.Network, Domain.Opcode, Domain.Rules, Domain.ScriptState]
+    exposes [landed, pushing, pushingMinimal, stoppedUnless, undecidedUnlessNop]
+    depends [Domain.Network, Domain.Opcode, Domain.Rules, Domain.ScriptState, Domain.StackItem]
     effects []
 
 fn landed(stack: List<List<Int>>, state: State) -> Step
@@ -32,6 +32,21 @@ fn pushing(item: List<Int>, state: State) -> Step
 verify pushing
     pushing([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
     pushing([1], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2]))) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
+
+fn pushingMinimal(code: Int, item: List<Int>, state: State, minimal: Bool) -> Step
+    ? "One more item, unless MINIMALDATA objects to how it was pushed."
+      "It is here rather than in Domain.ScriptOps because that file had no"
+      "room, and here rather than folded into pushing because most callers"
+      "are opcodes putting a computed value on the stack and there is no push"
+      "opcode behind those to be minimal or not."
+    match Domain.StackItem.pushFault(code, item, minimal)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Option.None -> pushing(item, state)
+
+verify pushingMinimal
+    pushingMinimal(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pushingMinimal(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
+    pushingMinimal(1, [17], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[17]]))
 
 fn stoppedUnless(ok: Bool, why: String, tail: List<List<Int>>, state: State) -> Step
     ? "The shape every VERIFY opcode has: consume the items, and stop when the"

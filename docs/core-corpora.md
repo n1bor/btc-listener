@@ -110,11 +110,11 @@ writes the real ones back and prints the agreement report, split by direction:
 
 ```
 cases        1118
-agree         932
-disagree       99
-undecided      87  (this engine cannot answer; not a disagreement)
+agree        1009
+disagree       24
+undecided      85  (this engine cannot answer; not a disagreement)
 
-  we accept what Core refuses  99  (a rule not implemented)
+  we accept what Core refuses  24  (a rule not implemented)
   we refuse what Core accepts   0  (the direction a defect shows up in)
 ```
 

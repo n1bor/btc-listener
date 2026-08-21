@@ -37,12 +37,26 @@ verify enforced
 
 fn withTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
     ? "Five bytes, not four."
+      "Core says why in as many words: a four byte lock time would give"
+      "Bitcoin a year 2038 problem, and the field it is compared against is a"
+      "uint32 that only runs out in 2106."
     match List.len(top) <= 5
         false -> refused(code, "needs a number of five bytes or fewer")
-        true -> withValue(code, Domain.StackItem.asNumber(top), state, context)
+        true -> withMinimalTop(code, top, state, context)
 
 verify withTop
     withTop(177, [1, 2, 3, 4, 5, 6], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs a number of five bytes or fewer")))
+
+fn withMinimalTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
+    ? "MINIMALDATA reaches the lock time too, because Core builds this number"
+      "with fRequireMinimal like any other -- only the width differs."
+    match Domain.StackItem.minimalFault(top, Domain.SpendContext.rulesOf(context).policy.minimalData)
+        Option.Some(why) -> refused(code, "was given a number that {why}")
+        Option.None -> withValue(code, Domain.StackItem.asNumber(top), state, context)
+
+verify withMinimalTop
+    withMinimalTop(177, [1, 0], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags(["MINIMALDATA"]))) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY was given a number that is not minimally encoded")))
+    withMinimalTop(177, [1, 0], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.underFlags([]))) => Step.Stop(Outcome.Undecided("OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"))
 
 fn withValue(code: Int, value: Int, state: State, context: Context) -> Step
     ? "A negative lock is meaningless and fails rather than being ignored."

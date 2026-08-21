@@ -14,7 +14,7 @@ module StackItem
         "question rather than enforced."
         "Minimal encoding is a rule about how a push was written rather than"
         "what it pushed, so it needs the opcode as well as the bytes."
-    exposes [asNumber, fromNumber, isTruthy, fitsArithmetic, isMinimalNumber, isMinimalPush]
+    exposes [asNumber, fromNumber, isTruthy, fitsArithmetic, isMinimalNumber, isMinimalPush, arithmeticFault, minimalFault, arithmeticFaultIn, pushFault]
     depends [Domain.Opcode]
     effects []
 
@@ -360,3 +360,83 @@ verify widerMinimal
     widerMinimal(77, 300) => true
     widerMinimal(78, 300) => false
     widerMinimal(78, 70000) => true
+
+fn arithmeticFault(item: List<Int>, minimal: Bool) -> Option<String>
+    ? "Why this item cannot be read as an arithmetic operand, if it cannot."
+      "Two rules in the order the reference client applies them. CScriptNum's"
+      "constructor throws on the width first and only then on the encoding, so"
+      "a five byte item that is also non-minimal is refused for its width --"
+      "which is the answer Core's corpus expects and not the same answer as"
+      "asking the other way round."
+      "None is not an assurance that the item is a sensible number. It says"
+      "no rule in force objects to reading it as one."
+    match fitsArithmetic(item)
+        false -> Option.Some("is over four bytes")
+        true -> minimalFault(item, minimal)
+
+verify arithmeticFault
+    arithmeticFault([1], false) => Option.None
+    arithmeticFault([1], true) => Option.None
+    arithmeticFault([1, 2, 3, 4, 5], false) => Option.Some("is over four bytes")
+    arithmeticFault([1, 2, 3, 4, 5], true) => Option.Some("is over four bytes")
+    arithmeticFault([1, 0], false) => Option.None
+    arithmeticFault([1, 0], true) => Option.Some("is not minimally encoded")
+    arithmeticFault([], true) => Option.None
+
+fn minimalFault(item: List<Int>, minimal: Bool) -> Option<String>
+    ? "MINIMALDATA over a number: written longer than it needed to be."
+      "Off unless the flag asks, because the chain is full of Scripts that"
+      "break it and were valid when they were mined."
+    match Bool.and(minimal, isMinimalNumber(item) == false)
+        true -> Option.Some("is not minimally encoded")
+        false -> Option.None
+
+verify minimalFault
+    minimalFault([1, 0], true) => Option.Some("is not minimally encoded")
+    minimalFault([1, 0], false) => Option.None
+    minimalFault([128], true) => Option.Some("is not minimally encoded")
+    minimalFault([1], true) => Option.None
+    minimalFault([], true) => Option.None
+
+fn arithmeticFaultIn(items: List<List<Int>>, minimal: Bool) -> Option<String>
+    ? "The first of these operands that cannot be read, if any cannot."
+      "The order is the order they are given, and callers give them top of"
+      "stack first so the message names the same operand the reference client"
+      "would have named."
+    match items
+        [] -> Option.None
+        [head, ..tail] -> faultOrNext(head, tail, minimal)
+
+verify arithmeticFaultIn
+    arithmeticFaultIn([], true) => Option.None
+    arithmeticFaultIn([[1], [2]], true) => Option.None
+    arithmeticFaultIn([[1], [1, 0]], true) => Option.Some("is not minimally encoded")
+    arithmeticFaultIn([[1, 2, 3, 4, 5], [1, 0]], true) => Option.Some("is over four bytes")
+
+fn faultOrNext(head: List<Int>, tail: List<List<Int>>, minimal: Bool) -> Option<String>
+    ? "This one, or whatever is wrong with the ones after it."
+    match arithmeticFault(head, minimal)
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> arithmeticFaultIn(tail, minimal)
+
+verify faultOrNext
+    faultOrNext([1], [], true) => Option.None
+    faultOrNext([1, 0], [], true) => Option.Some("is not minimally encoded")
+    faultOrNext([1], [[1, 0]], true) => Option.Some("is not minimally encoded")
+
+fn pushFault(code: Int, data: List<Int>, minimal: Bool) -> Option<String>
+    ? "MINIMALDATA over the push itself: a rule about how it was written."
+      "Distinct from the one above, which is about a number being read. This"
+      "one is about the opcode chosen to put the bytes there, and the two have"
+      "separate errors in Core -- MINIMALDATA against SCRIPTNUM -- because"
+      "they catch different mistakes."
+    match Bool.and(minimal, isMinimalPush(code, data) == false)
+        true -> Option.Some("push is not written the shortest way it could be")
+        false -> Option.None
+
+verify pushFault
+    pushFault(1, [1], true) => Option.Some("push is not written the shortest way it could be")
+    pushFault(1, [1], false) => Option.None
+    pushFault(1, [17], true) => Option.None
+    pushFault(76, [17], true) => Option.Some("push is not written the shortest way it could be")
+    pushFault(0, [], true) => Option.None

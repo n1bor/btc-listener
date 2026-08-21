@@ -18,7 +18,7 @@ module Policy
         "in them and a case that says CONST_SCRIPTCODE should be readable"
         "against the line in tx_invalid.json that says the same. The mapping"
         "from name to field is the only place the two vocabularies meet."
-        "One rule to start with. Core has eighteen flag names and most of"
+        "Two rules so far. Core has eighteen flag names and most of"
         "them have no field here yet, which is deliberate rather than"
         "unfinished: a field nothing reads is a rule nothing enforces dressed"
         "up as one. An unmodelled flag simply leaves the engine lenient, so a"
@@ -36,37 +36,42 @@ module Policy
 
 record Policy
     constScriptCode: Bool
+    minimalData: Bool
 
 fn none() -> Policy
     ? "No Policy rule in force: what a Block was mined under."
       "The default everywhere the engine reads the chain. Domain.Rules.at"
       "returns this and has no way to return anything else, which is what"
       "keeps an audit honest."
-    Policy(constScriptCode = false)
+    Policy(constScriptCode = false, minimalData = false)
 
 verify none
     none().constScriptCode => false
+    none().minimalData => false
 
 fn every() -> Policy
     ? "Every Policy rule this module models, in force."
       "What Core's tx_valid.json means by an empty flag list, since that"
       "corpus names the flags to leave out rather than the ones to apply."
-    Policy(constScriptCode = true)
+    Policy(constScriptCode = true, minimalData = true)
 
 verify every
     every().constScriptCode => true
-    every() => named(["CONST_SCRIPTCODE"])
+    every().minimalData => true
+    every() => named(["CONST_SCRIPTCODE", "MINIMALDATA"])
 
 fn named(flags: List<String>) -> Policy
     ? "The rules Core's flag names ask for, and no others."
       "How script_tests.json and tx_invalid.json are read: the list is the"
       "flags passed to VerifyScript, so a name absent means the rule is off."
-    Policy(constScriptCode = asks(flags, "CONST_SCRIPTCODE"))
+    Policy(constScriptCode = asks(flags, "CONST_SCRIPTCODE"), minimalData = asks(flags, "MINIMALDATA"))
 
 verify named
     named([]) => none()
     named(["NONE"]) => none()
     named(["CONST_SCRIPTCODE"]).constScriptCode => true
+    named(["CONST_SCRIPTCODE"]).minimalData => false
+    named(["MINIMALDATA"]).minimalData => true
     named(["NULLDUMMY"]) => none()
     named(["P2SH", "WITNESS"]) => none()
 
@@ -77,12 +82,14 @@ fn exceptNamed(flags: List<String>) -> Policy
       "there and with verify_flags in tx_invalid.json. So the same word means"
       "opposite things in the two files, and a tool that treated them alike"
       "would be running half the corpus under rules Core never applied to it."
-    Policy(constScriptCode = asks(flags, "CONST_SCRIPTCODE") == false)
+    Policy(constScriptCode = asks(flags, "CONST_SCRIPTCODE") == false, minimalData = asks(flags, "MINIMALDATA") == false)
 
 verify exceptNamed
     exceptNamed([]) => every()
-    exceptNamed(["CONST_SCRIPTCODE"]) => none()
+    exceptNamed(["CONST_SCRIPTCODE", "MINIMALDATA"]) => none()
     exceptNamed(["CONST_SCRIPTCODE"]).constScriptCode => false
+    exceptNamed(["CONST_SCRIPTCODE"]).minimalData => true
+    exceptNamed(["MINIMALDATA"]).minimalData => false
     exceptNamed(["DERSIG", "LOW_S", "STRICTENC", "NULLDUMMY"]).constScriptCode => true
 
 fn asks(flags: List<String>, name: String) -> Bool

@@ -55,10 +55,21 @@ fn added(state: State, context: Context) -> Step
       "weight budget needs and what the old batch opcode could not give."
     match Domain.ScriptState.topThree(state.stack, Domain.Opcode.nameOf(186))
         Result.Err(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
-        Result.Ok(three) -> counted(three, state, context)
+        Result.Ok(three) -> readCount(three, state, context)
 
 verify added
     added(Domain.ScriptState.empty(), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD needs three items")))
+
+fn readCount(three: Three, state: State, context: Context) -> Step
+    ? "The count is a Script number like any other, and Core reads it with"
+      "fRequireMinimal -- so a fifth byte refuses it, and under MINIMALDATA so"
+      "does a shorter one written the long way."
+    match Domain.StackItem.arithmeticFault(three.second, Domain.SpendContext.rulesOf(context).policy.minimalData)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD count {why}")))
+        Option.None -> counted(three, state, context)
+
+verify readCount
+    readCount(Three(first = [], second = [1, 2, 3, 4, 5], third = [], rest = []), Domain.ScriptState.empty(), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD count is over four bytes")))
 
 fn counted(three: Three, state: State, context: Context) -> Step
     ? "The key on top, the count under it, the signature under that."

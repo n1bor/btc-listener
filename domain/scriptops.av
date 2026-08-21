@@ -16,43 +16,48 @@ module ScriptOps
         "fail a Script wherever they appear, so none of them may wait behind a"
         "branch that is not being taken."
     exposes [step]
-    depends [Domain.LockTime, Domain.Rules, Bytes, Crypto.Digest32, Domain.Checksig, Domain.Primitives, Domain.Hash, Domain.Opcode, Domain.ScriptMath, Domain.ScriptParse, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
+    depends [Domain.LockTime, Domain.Rules, Bytes, Crypto.Digest32, Domain.Checksig, Domain.Primitives, Domain.Hash, Domain.Opcode, Domain.ScriptMath, Domain.ScriptNumOps, Domain.ScriptParse, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
     effects []
 
 fn step(op: Op, state: State, context: Context) -> Step
     ? "One Op against the machine."
     match op
-        Op.Push(code, data) -> pushed(data, state)
+        Op.Push(code, data) -> pushed(code, data, state, Domain.SpendContext.rulesOf(context).policy.minimalData)
         Op.Code(code) -> coded(code, state, context)
 
 verify step
     step(Op.Push(1, [1]), Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
     step(Op.Code(106), Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
-fn pushed(data: List<Int>, state: State) -> Step
+fn pushed(code: Int, data: List<Int>, state: State, minimal: Bool) -> Step
     ? "An oversized push fails a Script even in a branch that is not being"
       "taken, so the size is checked before the condition stack is."
     limit = Domain.ScriptState.maxItem()
     width = List.len(data)
     match width > limit
         true -> Step.Stop(Outcome.Decided(Ending.Failed("push of {width} bytes is over the {limit} byte limit")))
-        false -> pushedIfExecuting(data, state)
+        false -> pushedIfExecuting(code, data, state, minimal)
 
 verify pushed
-    pushed([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    pushed(Domain.ScriptState.zeros(521), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
-    pushed(Domain.ScriptState.zeros(521), State(stack = [], alt = [], conditions = [false], opCount = 0)) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
+    pushed(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pushed(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
+    pushed(76, Domain.ScriptState.zeros(521), Domain.ScriptState.empty(), false) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
+    pushed(76, Domain.ScriptState.zeros(521), State(stack = [], alt = [], conditions = [false], opCount = 0), false) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
 
-fn pushedIfExecuting(data: List<Int>, state: State) -> Step
+fn pushedIfExecuting(code: Int, data: List<Int>, state: State, minimal: Bool) -> Step
     ? "Otherwise a push only happens in a branch being executed."
+      "MINIMALDATA is asked here rather than beside the size limit, because"
+      "Core asks it under fExec: a push written the long way in a branch that"
+      "is not taken is not an error, and an oversized one is."
     match Domain.ScriptState.executing(state.conditions)
         false -> Step.Continue(state)
-        true -> Domain.ScriptStep.pushing(data, state)
+        true -> Domain.ScriptStep.pushingMinimal(code, data, state, minimal)
 
 verify pushedIfExecuting
-    pushedIfExecuting([1], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    pushedIfExecuting([1], State(stack = [], alt = [], conditions = [false], opCount = 0)) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
-    pushedIfExecuting([1], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2]))) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
+    pushedIfExecuting(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pushedIfExecuting(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
+    pushedIfExecuting(1, [1], State(stack = [], alt = [], conditions = [false], opCount = 0), true) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    pushedIfExecuting(1, [17], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2])), true) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
 
 fn coded(code: Int, state: State, context: Context) -> Step
     ? "Opcodes above OP_16 count against the limit whether executed or not, and"
@@ -168,12 +173,12 @@ fn operated(code: Int, state: State, context: Context) -> Step
         108 -> fromAlt(state)
         115 -> ifDup(state)
         116 -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(List.len(state.stack)), state)
-        121 -> pickedOrRolled(code, state)
-        122 -> pickedOrRolled(code, state)
+        121 -> pickedOrRolled(code, state, Domain.SpendContext.rulesOf(context))
+        122 -> pickedOrRolled(code, state, Domain.SpendContext.rulesOf(context))
         130 -> sized(state)
         135 -> equality(code, state)
         136 -> equality(code, state)
-        165 -> within(state)
+        165 -> Domain.ScriptNumOps.within(state, Domain.SpendContext.rulesOf(context))
         166 -> hashed(code, state)
         167 -> hashed(code, state)
         168 -> hashed(code, state)
@@ -208,8 +213,8 @@ fn byGroup(code: Int, state: State, rules: Rules) -> Step
     match Domain.Opcode.kindOf(code)
         Domain.Opcode.Kind.SmallNumber -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.Opcode.smallNumberValue(code)), state)
         Domain.Opcode.Kind.Rearrange -> shuffled(code, state)
-        Domain.Opcode.Kind.UnaryArithmetic -> unaryArith(code, state)
-        Domain.Opcode.Kind.BinaryArithmetic -> binaryArith(code, state)
+        Domain.Opcode.Kind.UnaryArithmetic -> Domain.ScriptNumOps.unaryArith(code, state, rules)
+        Domain.Opcode.Kind.BinaryArithmetic -> Domain.ScriptNumOps.binaryArith(code, state, rules)
         Domain.Opcode.Kind.Nop -> Step.Continue(state)
         Domain.Opcode.Kind.Undecidable -> Domain.ScriptStep.undecidedUnlessNop(code, state, rules)
         Domain.Opcode.Kind.Invalid -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} makes any script that runs it invalid")))
@@ -347,26 +352,26 @@ verify shuffled
     shuffled(113, Domain.ScriptState.holding([[6], [5], [4], [3], [2], [1]])) => Step.Continue(Domain.ScriptState.holding([[2], [1], [6], [5], [4], [3]]))
     shuffled(113, Domain.ScriptState.holding([[6], [5]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_2ROT needs 6 items")))
 
-fn pickedOrRolled(code: Int, state: State) -> Step
+fn pickedOrRolled(code: Int, state: State, rules: Rules) -> Step
     ? "OP_PICK copies an item from a depth the Script names; OP_ROLL moves it."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs a depth")))
-        [head, ..tail] -> countedDepth(code, head, tail, state)
+        [head, ..tail] -> countedDepth(code, head, tail, state, rules)
 
 verify pickedOrRolled
-    pickedOrRolled(121, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_PICK needs a depth")))
-    pickedOrRolled(121, Domain.ScriptState.holding([[1], [7], [8]])) => Step.Continue(Domain.ScriptState.holding([[8], [7], [8]]))
-    pickedOrRolled(122, Domain.ScriptState.holding([[1], [7], [8]])) => Step.Continue(Domain.ScriptState.holding([[8], [7]]))
+    pickedOrRolled(121, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_PICK needs a depth")))
+    pickedOrRolled(121, Domain.ScriptState.holding([[1], [7], [8]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[8], [7], [8]]))
+    pickedOrRolled(122, Domain.ScriptState.holding([[1], [7], [8]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[8], [7]]))
 
-fn countedDepth(code: Int, head: List<Int>, tail: List<List<Int>>, state: State) -> Step
-    ? "The depth is a number like any other and obeys the same four-byte rule."
-    match Domain.StackItem.fitsArithmetic(head)
-        false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} depth is over four bytes")))
-        true -> atDepth(code, Domain.StackItem.asNumber(head), tail, state)
+fn countedDepth(code: Int, head: List<Int>, tail: List<List<Int>>, state: State, rules: Rules) -> Step
+    ? "The depth is a number like any other and obeys the same rules."
+    match Domain.StackItem.arithmeticFault(head, rules.policy.minimalData)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} depth {why}")))
+        Option.None -> atDepth(code, Domain.StackItem.asNumber(head), tail, state)
 
 verify countedDepth
-    countedDepth(121, [1, 2, 3, 4, 5], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_PICK depth is over four bytes")))
-    countedDepth(121, [0], [[7]], Domain.ScriptState.holding([[1], [7]])) => Step.Continue(Domain.ScriptState.holding([[7], [7]]))
+    countedDepth(121, [1, 2, 3, 4, 5], [], Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_PICK depth is over four bytes")))
+    countedDepth(121, [0], [[7]], Domain.ScriptState.holding([[1], [7]]), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.holding([[7], [7]]))
 
 fn atDepth(code: Int, n: Int, tail: List<List<Int>>, state: State) -> Step
     ? "Nought is the item that was under the depth itself, so a stack of one"
@@ -404,94 +409,3 @@ fn equalityOn(code: Int, two: Two, state: State) -> Step
 verify equalityOn
     equalityOn(135, Two(first = [1], second = [1], rest = []), Domain.ScriptState.holding([[1], [1]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
     equalityOn(136, Two(first = [1], second = [2], rest = []), Domain.ScriptState.holding([[1], [2]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_EQUALVERIFY found two different items")))
-
-fn unaryArith(code: Int, state: State) -> Step
-    ? "The arithmetic on one operand."
-    match state.stack
-        [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} needs an item")))
-        [head, ..tail] -> unaryOn(code, head, tail, state)
-
-verify unaryArith
-    unaryArith(139, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_1ADD needs an item")))
-    unaryArith(139, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[2]]))
-    unaryArith(143, Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[129]]))
-    unaryArith(145, Domain.ScriptState.holding([[]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-
-fn unaryOn(code: Int, top: List<Int>, tail: List<List<Int>>, state: State) -> Step
-    ? "Arithmetic takes at most four bytes, whatever the stack is willing to hold."
-    match Domain.StackItem.fitsArithmetic(top)
-        false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} operand is over four bytes")))
-        true -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.unaryValue(code, Domain.StackItem.asNumber(top))), Domain.ScriptState.withStack(state, tail))
-
-verify unaryOn
-    unaryOn(139, [1, 2, 3, 4, 5], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_1ADD operand is over four bytes")))
-    unaryOn(140, [1], [], Domain.ScriptState.holding([[1]])) => Step.Continue(Domain.ScriptState.holding([[]]))
-
-fn binaryArith(code: Int, state: State) -> Step
-    ? "The arithmetic on two operands, the numeric comparisons included."
-    match Domain.ScriptState.topTwo(state.stack, Domain.Opcode.nameOf(code))
-        Result.Err(message) -> Step.Stop(Outcome.Decided(Ending.Failed(message)))
-        Result.Ok(two) -> binaryOn(code, two, state)
-
-verify binaryArith
-    binaryArith(147, Domain.ScriptState.holding([[1]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ADD needs two items")))
-    binaryArith(147, Domain.ScriptState.holding([[2], [3]])) => Step.Continue(Domain.ScriptState.holding([[5]]))
-    binaryArith(148, Domain.ScriptState.holding([[2], [5]])) => Step.Continue(Domain.ScriptState.holding([[3]]))
-    binaryArith(159, Domain.ScriptState.holding([[3], [2]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    binaryArith(157, Domain.ScriptState.holding([[1], [2]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NUMEQUALVERIFY found two different numbers")))
-
-fn binaryOn(code: Int, two: Two, state: State) -> Step
-    ? "Both operands obey the four-byte rule."
-    match Bool.and(Domain.StackItem.fitsArithmetic(two.first), Domain.StackItem.fitsArithmetic(two.second))
-        false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} operand is over four bytes")))
-        true -> binaryDone(code, Domain.StackItem.asNumber(two.second), Domain.StackItem.asNumber(two.first), two.rest, state)
-
-verify binaryOn
-    binaryOn(147, Two(first = [1, 2, 3, 4, 5], second = [1], rest = []), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ADD operand is over four bytes")))
-    binaryOn(147, Two(first = [2], second = [3], rest = []), Domain.ScriptState.holding([[2], [3]])) => Step.Continue(Domain.ScriptState.holding([[5]]))
-
-fn binaryDone(code: Int, a: Int, b: Int, deeper: List<List<Int>>, state: State) -> Step
-    ? "a was the deeper of the two and b was on top, so OP_SUB is a minus b."
-      "OP_NUMEQUALVERIFY stops on its answer instead of pushing it."
-    match code == 157
-        true -> Domain.ScriptStep.stoppedUnless(a == b, "OP_NUMEQUALVERIFY found two different numbers", deeper, state)
-        false -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.binaryValue(code, a, b)), Domain.ScriptState.withStack(state, deeper))
-
-verify binaryDone
-    binaryDone(147, 2, 3, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[5]]))
-    binaryDone(148, 5, 3, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[2]]))
-    binaryDone(157, 1, 2, [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NUMEQUALVERIFY found two different numbers")))
-    binaryDone(157, 2, 2, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
-
-fn within(state: State) -> Step
-    ? "OP_WITHIN, the only opcode reaching three items down."
-    match Domain.ScriptState.topThree(state.stack, "OP_WITHIN")
-        Result.Err(message) -> Step.Stop(Outcome.Decided(Ending.Failed(message)))
-        Result.Ok(three) -> withinOn(three, state)
-
-verify within
-    within(Domain.ScriptState.holding([[1], [2]])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_WITHIN needs three items")))
-    within(Domain.ScriptState.holding([[5], [1], [3]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    within(Domain.ScriptState.holding([[5], [1], [7]])) => Step.Continue(Domain.ScriptState.holding([[]]))
-
-fn withinOn(three: Three, state: State) -> Step
-    ? "The upper bound is on top, the lower under it, the value under both."
-      "The range is half open: the lower bound is inside it and the upper is"
-      "not, which is the one thing about this opcode worth checking twice."
-    match Bool.and(Domain.StackItem.fitsArithmetic(three.first), Bool.and(Domain.StackItem.fitsArithmetic(three.second), Domain.StackItem.fitsArithmetic(three.third)))
-        false -> Step.Stop(Outcome.Decided(Ending.Failed("OP_WITHIN operand is over four bytes")))
-        true -> inRange(Domain.StackItem.asNumber(three.third), Domain.StackItem.asNumber(three.second), Domain.StackItem.asNumber(three.first), three.rest, state)
-
-verify withinOn
-    withinOn(Three(first = [1, 2, 3, 4, 5], second = [1], third = [2], rest = []), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_WITHIN operand is over four bytes")))
-    withinOn(Three(first = [5], second = [1], third = [3], rest = []), Domain.ScriptState.holding([[5], [1], [3]])) => Step.Continue(Domain.ScriptState.holding([[1]]))
-
-fn inRange(value: Int, lower: Int, upper: Int, deeper: List<List<Int>>, state: State) -> Step
-    ? "Lower bound included, upper bound not."
-    Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(Domain.ScriptMath.oneIf(Bool.and(value >= lower, value < upper))), Domain.ScriptState.withStack(state, deeper))
-
-verify inRange
-    inRange(3, 1, 5, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    inRange(1, 1, 5, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    inRange(5, 1, 5, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
-    inRange(0, 1, 5, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
