@@ -27,9 +27,13 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
-    depends [Domain.Network, Bytes, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
+    exposes [Locking, lockingOf, withoutSignatures, SigVersion, Commitment, Context, bare, committed, inWitnessV0, sigVersionOf, amountOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    depends [Domain.Network, Bytes, Domain.Bip143, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
+
+type SigVersion
+    Base
+    WitnessV0
 
 record Commitment
     transaction: Transaction
@@ -37,6 +41,7 @@ record Commitment
     amount: Int
     scriptCode: String
     witness: List<String>
+    sigVersion: SigVersion
 
 record Context
     rules: Rules
@@ -57,12 +62,67 @@ fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: In
       "modules further down. The Witness is carried for the same reason and"
       "is empty for every Input that is not a witness spend, which below the"
       "SegWit activation is all of them."
-    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness)))
+    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness, sigVersion = SigVersion.Base)))
 
 verify committed
     scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => "51"
     rulesOf(committed(Domain.Rules.at(Network.Mainnet, 1), emptyTransaction(), 0, 5, "51", [])) => Domain.Rules.at(Network.Mainnet, 1)
     witnessOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", ["aabb", "cc"])) => ["aabb", "cc"]
+
+fn inWitnessV0(context: Context, scriptCode: String) -> Context
+    ? "The same spend, entered as a version zero witness program."
+      "Two things change together and must not be changed apart: the Script"
+      "code a signature commits to becomes the witness Script rather than the"
+      "Output Script, and the hash becomes BIP143's rather than the legacy"
+      "one. A caller that set one and forgot the other would compute a real"
+      "message over the wrong bytes and get a clean, wrong answer."
+      "A Context with no spend stays as it is: there is nothing to enter."
+    match context.spend
+        Option.None -> context
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = SigVersion.WitnessV0)))
+
+verify inWitnessV0
+    sigVersionOf(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "52")) => SigVersion.WitnessV0
+    scriptCodeOf(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "52")) => "52"
+    sigVersionOf(inWitnessV0(bare(Domain.Rules.latest()), "52")) => SigVersion.Base
+    scriptCodeOf(withoutSignatures(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), "5101ab52"), [[171]])) => "5101ab52"
+
+fn bip143Transaction() -> Transaction
+    ? "The unsigned Transaction from BIP143's own P2SH-P2WPKH worked example."
+      "Kept here so the routing can be checked end to end rather than by"
+      "reading it: Domain.Bip143 proves it computes the message, and this"
+      "proves a Context that entered the witness path actually asks for it."
+    Result.withDefault(Domain.Transaction.decode(Bytes.toList(Result.withDefault(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000"), Bytes.fromList([])))), emptyTransaction())
+
+verify bip143Transaction
+    Domain.Transaction.versionOf(bip143Transaction()) => 1
+    List.len(Domain.Transaction.inputsOf(bip143Transaction())) => 1
+    List.len(Domain.Transaction.outputsOf(bip143Transaction())) => 2
+
+fn sigVersionOf(context: Context) -> SigVersion
+    ? "Which signature hash this run's signatures commit to."
+      "A Context with no spend answers Base, because there is no witness spend"
+      "without a Transaction and nothing downstream can act on the difference."
+    match context.spend
+        Option.None -> SigVersion.Base
+        Option.Some(commitment) -> commitment.sigVersion
+
+verify sigVersionOf
+    sigVersionOf(bare(Domain.Rules.latest())) => SigVersion.Base
+    sigVersionOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => SigVersion.Base
+
+fn amountOf(context: Context) -> Int
+    ? "What the Output being spent was worth, which BIP143 commits to."
+      "Zero when there is no spend, which is also what a case that supplied no"
+      "amount carries -- the two are indistinguishable and neither can be"
+      "checked against anything."
+    match context.spend
+        Option.None -> 0
+        Option.Some(commitment) -> commitment.amount
+
+verify amountOf
+    amountOf(bare(Domain.Rules.latest())) => 0
+    amountOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => 5
 
 fn witnessOf(context: Context) -> List<String>
     ? "The Witness stack this run has behind it, innermost item first."
@@ -107,7 +167,7 @@ fn lockingIn(commitment: Commitment) -> Option<Locking>
         Option.Some(input) -> Option.Some(Locking(version = Domain.Transaction.versionOf(commitment.transaction), lockTime = Domain.Transaction.lockTimeOf(commitment.transaction), sequence = Domain.Transaction.sequenceOf(input)))
 
 verify lockingIn
-    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [])) => Option.None
+    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base)) => Option.None
 
 fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
     ? "The Input at a position, counting down."
@@ -183,7 +243,7 @@ fn overScript(context: Context, scriptCode: String) -> Context
       "starts each one -- rather than guessed at by the caller."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion)))
 
 verify overScript
     scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
@@ -199,9 +259,20 @@ fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
       "signing, which is on the chain exactly once in the first 290329 Blocks:"
       "a P2SH redeem Script carrying one of its own signatures where a public"
       "key should be. See n1bor/btc-listener#49."
+      "BIP143 dropped it, so the witness path must not do this. Deleting a"
+      "signature from a witness scriptCode would change the message every"
+      "signature in that Script commits to, and every one of them would then"
+      "fail. That is why the version is asked first and the witness arm"
+      "returns the Context untouched."
       "Total: a Script code that is already in hand parsed once to get here, so"
       "withoutPushes cannot refuse it and the other arm leaves the Context as"
       "it was -- which is what the engine did before this existed."
+    match sigVersionOf(context)
+        SigVersion.WitnessV0 -> context
+        SigVersion.Base -> deletedFrom(context, signatures)
+
+fn deletedFrom(context: Context, signatures: List<List<Int>>) -> Context
+    ? "The deletion itself, on the legacy path where it applies."
     match Domain.ScriptParse.withoutPushes(scriptCodeOf(context), signatures)
         Result.Err(why) -> context
         Result.Ok(stripped) -> overScript(context, stripped)
@@ -235,14 +306,35 @@ fn messageFor(context: Context, hashType: Int) -> Option<String>
 verify messageFor
     messageFor(bare(Domain.Rules.latest()), 1) => Option.None
     messageFor(committed(Domain.Rules.latest(), signedTransaction(), 0, 0, signedScriptCode(), []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageFor(inWitnessV0(committed(Domain.Rules.latest(), bip143Transaction(), 0, 1000000000, "51", []), "76a91479091972186c449eb1ded22b78e40d009bdf008988ac"), 1) => Option.Some("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
 
 fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The signature hash for one Input, or None when it cannot be built."
       "A signature hash that will not build is not a signature that fails: it"
       "is a question this engine cannot ask, so it stays undecided."
+      "Which hash depends on how the Output was reached, not on what the"
+      "signature looks like. The same bytes in the same Script mean the legacy"
+      "hash under a bare Output and the BIP143 one under a witness program, so"
+      "the version travels with the spend rather than being guessed here."
+    match commitment.sigVersion
+        SigVersion.Base -> legacyMessage(commitment, hashType)
+        SigVersion.WitnessV0 -> witnessMessage(commitment, hashType)
+
+fn legacyMessage(commitment: Commitment, hashType: Int) -> Option<String>
+    ? "The pre-SegWit signature hash, quadratic in the size of the Transaction."
     match Domain.Sighash.legacy(commitment.transaction, commitment.inputIndex, commitment.scriptCode, hashType)
         Result.Err(why) -> Option.None
         Result.Ok(message) -> Option.Some(message)
 
+fn witnessMessage(commitment: Commitment, hashType: Int) -> Option<String>
+    ? "BIP143, which is where the amount earns its place in the record."
+      "It has no arm that refuses to hash: SIGHASH_SINGLE with no matching"
+      "Output commits to no Outputs rather than signing the number one, which"
+      "was the point of the redesign. A None here is a hash type that will not"
+      "fit in four bytes or an Input index that is not there."
+    match Domain.Bip143.message(commitment.transaction, commitment.inputIndex, commitment.scriptCode, commitment.amount, hashType)
+        Result.Err(why) -> Option.None
+        Result.Ok(message) -> Option.Some(message)
+
 verify messageOf
-    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
