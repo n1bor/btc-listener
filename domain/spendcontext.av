@@ -27,7 +27,7 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    exposes [Locking, lockingOf, withoutSignatures, deletes, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Domain.Network, Bytes, Domain.Bip143, Domain.Bip341, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
@@ -376,6 +376,27 @@ verify withoutSignatures
     scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]])) => "5152"
     scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [])) => "5101ab52"
     scriptCodeOf(withoutSignatures(bare(Domain.Rules.latest()), [[171]])) => ""
+
+fn deletes(context: Context, signatures: List<List<Int>>) -> Bool
+    ? "Whether FindAndDelete would actually remove something."
+      "Core's CheckSignatureEncoding path keeps the count FindAndDelete"
+      "returns and, under SCRIPT_VERIFY_CONST_SCRIPTCODE, fails the Script"
+      "when it is not zero -- so what matters is not that the deletion was"
+      "attempted but that it bit. Asked by comparing the Script code either"
+      "side of it, because withoutSignatures returns a Context and the count"
+      "is not otherwise anywhere."
+      "False on the witness paths, and not by accident: withoutSignatures"
+      "returns the Context untouched there, so nothing is ever deleted and"
+      "the flag has nothing to refuse. BIP143 dropped FindAndDelete and Core"
+      "guards its own check with sigversion == BASE for the same reason."
+    scriptCodeOf(withoutSignatures(context, signatures)) == scriptCodeOf(context) == false
+
+verify deletes
+    deletes(bare(Domain.Rules.latest()), [[171]]) => false
+    deletes(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]]) => true
+    deletes(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), []) => false
+    deletes(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5152", []), [[171]]) => false
+    deletes(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), "5101ab52"), [[171]]) => false
 
 fn scriptCodeOf(context: Context) -> String
     ? "The Script the signature is taken over, which is the one being run:"

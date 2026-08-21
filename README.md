@@ -479,23 +479,30 @@ read it — a version byte and a push of a hash leaves the hash on the stack and
 comes out true. Witness programs are refused before they are run now, and those
 Blocks read `0 passed / 0 failed / 6493 undecided`.
 
-Bitcoin Core's own `script_tests.json` is the adversarial test, and nothing
-written here would be half as unkind. Of its 1,288 rows, 1,120 assemble into
-Script pairs — the rest are comments, or segwit cases carrying a witness this
-engine does not run:
+Bitcoin Core's own test data is the adversarial test, and nothing written here
+would be half as unkind. Four files are read, 1,946 cases between them, and
+every case carries the verification flags Core ran it under:
+
+| corpus | cases | agree | disagree | undecided |
+|---|---|---|---|---|
+| `script_tests.json` Script pairs | 1118 | 932 | 99 | 87 |
+| `script_tests.json` Witness rows | 108 | 91 | 17 | 0 |
+| `tx_valid` + `tx_invalid` | 213 | 210 | 3 | 0 |
+| `sighash.json` | 500 | 500 | 0 | 0 |
+
+Split by direction, which is the split that matters:
 
 | | |
 |---|---|
-| agree with Core | 865 |
-| undecided — needs a primitive | 159 |
 | **we refuse what Core accepts** | **0** |
-| we accept what Core refuses | 96 |
+| we accept what Core refuses | 119 |
 
-The nought is the one that matters — that is the direction a defect would show
-up in. All 96 in the other direction are attributable to verification flags this
-engine deliberately does not apply, each of which became a rule after Blocks
-breaking it were already valid. See
-[ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md).
+The nought is the one to watch — that is the direction a defect would show up
+in. Every one of the 119 in the other direction is a verification flag with no
+field yet, and each is a rule that became one after Blocks breaking it were
+already valid. See
+[ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md) and
+[docs/core-corpora.md](docs/core-corpora.md).
 
 ## Checking a range
 

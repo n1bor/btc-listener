@@ -234,6 +234,10 @@ The nought is the number that matters. Not one case in Core's adversarial
 corpus is refused by this engine and accepted by the reference client, which is
 the direction a defect would show up in.
 
+*(Superseded. The table below was hand-maintained and went stale; the corpus now
+records Core's expected error and the flags beside every case, so the report is
+computed from the file. See the last update in this document.)*
+
 The 96 in the other direction are each attributable to a verification flag this
 engine deliberately does not apply:
 
@@ -360,3 +364,104 @@ at its first `OP_DUP` long before reaching `OP_HASH160`, so it reported no
 RIPEMD160 problem at all. Real evaluation runs the Input script first and the
 Output script on what it leaves. Until the engine does that, any count of what
 it can and cannot decide is measuring the wrong thing.
+
+## Update — the flags, and what they were worth
+
+`Domain.Rules` was a Height and the soft forks in force at it. Core runs a
+Script under a set of verification flags, which is a different and finer thing,
+and every corpus here was being run under `Domain.Rules.latest()` — every rule
+on, for every case, whatever the case asked for. n1bor/btc-listener#52.
+
+Two records now, and the split is structural rather than a convention:
+
+* `Domain.Rules` carries the soft forks, because a soft fork has a Height and
+  `at(network, height)` can answer for it. P2SH, the two timelock opcodes,
+  SegWit, BIP147 null dummy, Taproot.
+* `Domain.Policy` carries Policy — rules a node applies over and above what
+  the chain enforces — and `Domain.Rules.at` **cannot return
+  anything but `none()`** of it. Only `underFlags` and `exceptFlags`, which take
+  Core's own flag names, can return anything else, and only a corpus calls
+  those. A Policy rule reachable from a Height would make the auditor
+  reject Transactions that are in the chain, which is the one outcome that must
+  not happen.
+
+What that was worth, measured before and after:
+
+| corpus | cases | disagreements before | after |
+|---|---|---|---|
+| `tx_valid` + `tx_invalid` | 213 | 19 | **3** |
+| `script_tests` Witness rows | 108 | 23 | **17** |
+
+The three left in the Transaction corpus are one `DERSIG` and two
+`DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM`; the seventeen are ten
+`WITNESS_PUBKEYTYPE`, six `MINIMALIF` and one `DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM`.
+Every one is a flag with no field yet. **Nought in either corpus is this engine
+refusing what Core accepts**, which is the direction a defect shows up in, and
+the tools now report the two directions separately rather than summing them.
+
+Three rules landed with the plumbing. `CONST_SCRIPTCODE` refuses
+OP_CODESEPARATOR in a legacy Script and refuses a FindAndDelete that actually
+bit; `NULLDUMMY` is BIP147; `DERSIG` is left for #22, which gives it a Height as
+well as a flag rather than half of each.
+
+One thing the corpus caught about itself. BIP147 came into force with SegWit on
+every Network, so it started as a derived field rather than one of its own —
+and `tx_valid.json` has three cases that turn NULLDUMMY off while leaving
+WITNESS on, which Core can do because they are independent flags there. Folding
+them together made this engine **refuse all three**: strict where Core was
+lenient, which is the rarer and more alarming of the two ways to be wrong. One
+field per rule now, even where two rules have had the same answer on every
+Block ever mined.
+
+## Update — the Script corpus can be audited from the file
+
+n1bor/btc-listener#70. `script_tests.json` carries Core's answer — element five
+of each row is the expected script error, `OK` for a pair that verifies — and
+the generator was throwing it away along with the flags. So the agreement lived
+in the hand-maintained table above and went stale, and 1118 rows collapsed to
+997 distinct pairs because rows differing only by their flags became literal
+duplicates.
+
+Both are now on every case. Recomputed from the file rather than from memory:
+
+```
+cases        1118
+agree         932
+disagree       99
+undecided      87  (this engine cannot answer; not a disagreement)
+
+  we accept what Core refuses  99  (a rule not implemented)
+  we refuse what Core accepts   0  (the direction a defect shows up in)
+
+disagreements by the error Core expected:
+  SCRIPTNUM                     54
+  MINIMALDATA                   21
+  DISCOURAGE_UPGRADABLE_NOPS    10
+  SIG_DER                        8
+  SIG_PUSHONLY                   4
+  NULLFAIL                       2
+```
+
+The stale table said 96 and named `WITNESS_PROGRAM_WITNESS_EMPTY` and
+`SIG_NULLDUMMY`, neither of which is a disagreement any more, and did not
+mention `SIG_PUSHONLY` at all.
+
+## Update — a list literal that lost 92 percent of its cases
+
+Getting the Script probe to run at all turned up an Aver bug worth recording,
+because of the shape of it rather than the size. jasisz/aver#1054.
+
+The probe walks a list literal of every case. Run under `aver run`, 1118 cases
+printed 94 answers. Exit 0, nothing on stderr, `aver check` clean. The list
+literal itself was short: `LIST_NEW` carries an 8-bit element count and the
+compiler emits `items.len() as u8`, so a literal of *n* elements becomes *n mod
+256* — 1118 mod 256 is 94, 400 gives 144, 256 gives nought. The compiled Rust
+backend is correct, so the VM and the binary disagree about the value of a
+constant.
+
+The only reason it was caught is that the tool refuses to write answers back
+when the count does not match the case count. Without that it would have
+recorded 94 answers against 1118 cases and printed a cheerful agreement report
+about the 94. The probes are written in parts under the limit now, joined by
+`List.concat`, with a `verify assembled` case that counts the result — so a part
+over the limit fails loudly instead of quietly shortening the corpus.

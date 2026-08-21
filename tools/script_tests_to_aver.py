@@ -9,13 +9,28 @@ how many of Core's cases we agree with, and exactly which ones we do not and
 why.
 
 Usage:
-    python3 tools/script_tests_to_aver.py --fetch          # refresh the inputs
-    python3 tools/script_tests_to_aver.py --assemble OUT   # write cases.tsv
-    python3 tools/script_tests_to_aver.py --emit RESULTS   # write the .av files
+    python3 tools/script_tests_to_aver.py --fetch                 # refresh the inputs
+    python3 tools/script_tests_to_aver.py --emit                  # placeholders
+    python3 tools/script_tests_to_aver.py --probe /tmp/p/main.av  # the middle step
+    aver run /tmp/p/main.av --module-root . --providers > answers.txt
+    python3 tools/script_tests_to_aver.py --answers answers.txt
 
-The middle step is a compiled Aver program: assembling is Python's job,
-answering is the engine's, and keeping them apart is what stops this from
-being a test that agrees with itself.
+The middle step is an Aver program: assembling is Python's job, answering is
+the engine's, and keeping them apart is what stops this from being a test that
+agrees with itself.
+
+Two things each case carries that it did not before n1bor/btc-listener#70:
+
+* **The flags.**  Core hands `script_tests.json`'s flag field straight to
+  VerifyScript, so a row marked P2SH,WITNESS is a row Core deliberately ran
+  with only those rules on.  Running every row under every rule -- which this
+  tool did -- meant the agreement was partly luck, and it also collapsed 1118
+  rows into 997 distinct pairs, because the 121 rows that differ only by their
+  flags became literal duplicates.
+* **Core's answer.**  It is in the file: element five of each row is the
+  expected script error, `OK` for a pair that verifies.  Without it the
+  agreement could not be recomputed from the corpus and lived in a
+  hand-maintained table in ADR 0005 that went stale.
 """
 
 import argparse
@@ -142,81 +157,264 @@ def rows():
             yield None, None, flags, expected, str(e)
 
 
-def assemble(path):
-    kept = skipped = 0
-    with open(path, "w") as f:
-        for sig, pubkey, flags, expected, why in rows():
-            if why is not None:
-                skipped += 1
-                continue
-            f.write("%s\t%s\t%s\t%s\n" % (sig, pubkey, flags, expected))
-            kept += 1
-    print("assembled %d cases, skipped %d" % (kept, skipped))
+def collected():
+    """Every row that assembles and fits, as (sigHex, pubkeyHex, flags, expected)."""
+    out = []
+    for sig, pubkey, flags, expected, why in rows():
+        if why is not None:
+            continue
+        # `aver verify` runs on the VM, which has a million-step budget, and a
+        # Script of several thousand bytes exceeds it.  The compiled engine has
+        # no such limit and answers these; they are left out of the corpus
+        # rather than left in it failing.  n1bor/btc-listener#75.
+        if max(len(sig), len(pubkey)) // 2 > VM_SCRIPT_LIMIT:
+            continue
+        out.append((sig, pubkey, flags, expected))
+    return out
 
 
-HEADER = '''module ScriptCases%(k)d
+def rules_literal(flags):
+    """The Rules expression for one row, in Core's own flag names.
+
+    script_tests.json hands its flags straight to VerifyScript, so the list is
+    read as it stands -- unlike tx_valid.json, which names the flags to leave
+    out.  NONE is Core's spelling of the empty set.
+    """
+    names = [w.strip() for w in flags.split(",") if w.strip() not in ("", "NONE")]
+    return "Domain.Rules.underFlags([%s])" % ", ".join('"%s"' % n for n in names)
+
+
+HEADER = """module ScriptCases%(k)d
     intent =
         "Bitcoin Core's own script_tests.json, converted into cases: part %(k)d of %(n)d."
         "Adversarial in a way nothing written here would be. Every case is a"
         "pair of Scripts that Core runs together, and the answer recorded is"
-        "this engine's, not Core's -- see tools/script_tests_to_aver.py and the"
-        "agreement report in ADR 0005 for what the difference between the two"
-        "amounts to and why."
-        "Nothing here was written by hand and nothing should be. Regenerate it."
+        "this engine's, not Core's -- so this is a regression corpus and not a"
+        "conformance one. What Core says is on the comment above each case,"
+        "and where the two differ the case records what this engine does"
+        "today."
+        "Each case also carries the rules Core ran it under. script_tests.json"
+        "hands its flag field straight to VerifyScript, so a row marked"
+        "P2SH,WITNESS is one Core deliberately ran with only those rules on."
+        "Running every row under every rule, which this corpus did before"
+        "n1bor/btc-listener#70, made the agreement partly luck -- and it"
+        "collapsed the file, because rows that differ only by their flags"
+        "became literal duplicates."
+%(report)s        "Nothing here was written by hand and nothing should be. Regenerate it"
+        "with tools/script_tests_to_aver.py."
     exposes [case]
-    depends [Domain.ScriptState, Domain.SpendScript]
+    depends [Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript]
     effects []
 
-fn case(inputScriptHex: String, outputScriptHex: String) -> Outcome
-    ? "One pair of Scripts, run the way a spend runs them."
-    Domain.SpendScript.check(inputScriptHex, outputScriptHex)
+fn case(inputScriptHex: String, outputScriptHex: String, rules: Rules) -> Outcome
+    ? "One pair of Scripts, run the way a spend runs them, but bare: these"
+      "cases are about what the engine does with a Script and not about any"
+      "Transaction, so a signature in one has nothing to have committed to."
+    Domain.SpendScript.check(inputScriptHex, outputScriptHex, Domain.SpendContext.bare(rules))
 
-verify case'''
+verify case"""
+
+PLACEHOLDER = "Outcome.Decided(Ending.Passed)"
+
+PROBE = """module Main
+    intent =
+        "Prints this engine's answer for every Script pair, one a line."
+        "The middle step: Python assembles the cases, the engine answers them,"
+        "and Python writes the answers back. Keeping the three apart is what"
+        "stops the corpus from being a test that agrees with itself."
+    exposes [main]
+    depends [Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript]
+    effects [Console.print]
+
+fn shown(outcome: Outcome) -> String
+    ? "The answer in the form the corpus writes it."
+    match outcome
+        Outcome.Undecided(why) -> "Outcome.Undecided(\\"{why}\\")"
+        Outcome.Decided(ending) -> shownEnding(ending)
+
+verify shown
+    shown(Outcome.Decided(Ending.Passed)) => "Outcome.Decided(Ending.Passed)"
+
+fn shownEnding(ending: Ending) -> String
+    ? "Passed has nothing to say; Failed says why."
+    match ending
+        Ending.Passed -> "Outcome.Decided(Ending.Passed)"
+        Ending.Failed(why) -> "Outcome.Decided(Ending.Failed(\\"{why}\\"))"
+
+verify shownEnding
+    shownEnding(Ending.Passed) => "Outcome.Decided(Ending.Passed)"
+
+fn eachCase(cases: List<Tuple<String, String, Rules>>) -> Unit
+    ? "Every case in turn, in the order they were assembled."
+    ! [Console.print]
+    match cases
+        [] -> Unit
+        [head, ..tail] -> oneThenRest(head, tail)
+
+fn oneThenRest(one: Tuple<String, String, Rules>, rest: List<Tuple<String, String, Rules>>) -> Unit
+    ? "Answer this one, then the rest."
+    ! [Console.print]
+    _said = printOne(one)
+    eachCase(rest)
+
+fn printOne(one: Tuple<String, String, Rules>) -> Unit
+    ? "One line, matched apart."
+    ! [Console.print]
+    match one
+        (inputScriptHex, outputScriptHex, rules) -> Console.print(shown(Domain.SpendScript.check(inputScriptHex, outputScriptHex, Domain.SpendContext.bare(rules))))
+
+fn main() -> Unit
+    ? "The whole corpus, answered."
+    ! [Console.print]
+    eachCase(assembled())
+
+%(parts)s"""
 
 
-def emit(results_path, out_dir, per_file=250):
-    """results_path is sigHex<TAB>pubkeyHex<TAB>verdict<TAB>detail from the engine."""
-    lines = [l.rstrip("\n").split("\t") for l in open(results_path)
-             if l.strip() and not l.startswith("#")]
-    cases, oversized = [], 0
-    for sig, pubkey, verdict, detail in lines:
-        # `aver verify` runs on the VM, which has a million-step budget, and a
-        # Script of several thousand bytes exceeds it.  The compiled engine has
-        # no such limit and answers these; they are left out of the corpus
-        # rather than left in it failing.  See the agreement report in ADR 0005.
-        if max(len(sig), len(pubkey)) // 2 > VM_SCRIPT_LIMIT:
-            oversized += 1
-            continue
-        if verdict == "PASSED":
-            expect = "Outcome.Decided(Ending.Passed)"
-        elif verdict == "FAILED":
-            expect = 'Outcome.Decided(Ending.Failed("%s"))' % detail
-        else:
-            expect = 'Outcome.Undecided("%s")' % detail
-        cases.append('    case("%s", "%s") => %s' % (sig, pubkey, expect))
-    if oversized:
-        print("left out %d case(s) too long for the verify VM" % oversized)
-    parts = [cases[i:i + per_file] for i in range(0, len(cases), per_file)]
+# The VM truncates a list literal to `len mod 256` elements, silently and
+# with exit 0 -- jasisz/aver#1054.  A corpus of 1118 cases in one literal came
+# back as 94.  The compiled backend is correct, so this is only a problem for
+# `aver run`, which is what the recipe uses.  Splitting the literal into parts
+# under the limit and joining them keeps the probe interpretable; the
+# `verify assembled` case below counts the result, so raising this past 255
+# fails loudly rather than quietly losing cases.
+PROBE_PART = 200
+
+
+def probe(path):
+    rows = collected()
+    lines = ['        ("%s", "%s", %s),' % (sig, pubkey, rules_literal(flags))
+             for sig, pubkey, flags, expected in rows]
+    open(path, "w").write(PROBE % {"parts": parts_source(lines)})
+    print("wrote probe with %d cases to %s" % (len(rows), path))
+    return 0
+
+
+def parts_source(lines, element="Tuple<String, String, Rules>"):
+    """`assembled` plus the numbered parts it joins, as Aver source."""
+    chunks = [lines[i:i + PROBE_PART] for i in range(0, len(lines), PROBE_PART)]
+    joined = "[]"
+    for k in range(len(chunks), 0, -1):
+        joined = "part%d()" % k if joined == "[]" else "List.concat(part%d(), %s)" % (k, joined)
+    out = ['fn assembled() -> List<%s>' % element,
+           '    ? "Every case Core supplies, as this tool wrote them."',
+           '      "In parts of at most %d because the VM truncates a list literal to"' % PROBE_PART,
+           '      "len mod 256 elements without saying so -- jasisz/aver#1054. The"',
+           '      "verify case counts what comes out, so a part over the limit fails"',
+           '      "here rather than quietly shortening the corpus."',
+           '    %s' % joined,
+           '',
+           'verify assembled',
+           '    List.len(assembled()) => %d' % len(lines),
+           '']
+    for k, chunk in enumerate(chunks, start=1):
+        out += ['fn part%d() -> List<%s>' % (k, element),
+                '    ? "Cases %d to %d."' % ((k - 1) * PROBE_PART + 1, (k - 1) * PROBE_PART + len(chunk)),
+                '    [',
+                "\n".join(chunk).rstrip(","),
+                '    ]',
+                '']
+    return "\n".join(out)
+
+
+def emit(out_dir, per_file=250, report=""):
+    rows = collected()
+    print("assembled %d cases" % len(rows))
+    parts = [rows[i:i + per_file] for i in range(0, len(rows), per_file)]
     for k, chunk in enumerate(parts, start=1):
+        lines = []
+        for sig, pubkey, flags, expected in chunk:
+            lines.append("    // Core: %s  flags %s" % (expected, flags.strip() or "NONE"))
+            lines.append('    case("%s", "%s", %s) => %s'
+                         % (sig, pubkey, rules_literal(flags), PLACEHOLDER))
         path = os.path.join(out_dir, "scriptcases%d.av" % k)
-        open(path, "w").write(HEADER % {"k": k, "n": len(parts)} + "\n" + "\n".join(chunk) + "\n")
+        open(path, "w").write(HEADER % {"k": k, "n": len(parts), "report": report}
+                              + "\n" + "\n".join(lines) + "\n")
         print("wrote %s with %d cases" % (path, len(chunk)))
+    return 0
+
+
+def written_back(out_dir, got):
+    """Put the engine's answers into the emitted files, in the order given."""
+    it = iter(got)
+    for name in sorted(os.listdir(out_dir),
+                       key=lambda n: int(re.findall(r"\d+", n)[0])
+                       if re.fullmatch(r"scriptcases\d+\.av", n) else 0):
+        if not re.fullmatch(r"scriptcases\d+\.av", name):
+            continue
+        path = os.path.join(out_dir, name)
+        out = []
+        for line in open(path).read().split("\n"):
+            m = re.match(r"    (case\(.*\)) => ", line)
+            out.append("    %s => %s" % (m.group(1), next(it)) if m else line)
+        open(path, "w").write("\n".join(out))
+
+
+def answers(answers_path, out_dir):
+    """Write the engine's own answers into the corpus, and report the agreement."""
+    got = [l.rstrip("\n") for l in open(answers_path) if l.startswith("Outcome.")]
+    rows = collected()
+    if len(got) != len(rows):
+        print("have %d answers for %d cases -- refusing to guess which is which"
+              % (len(got), len(rows)))
+        return 1
+    agree = undecided = lax = strict = 0
+    by_error = {}
+    for (sig, pubkey, flags, expected), answer in zip(rows, got):
+        core_valid = expected == "OK"
+        if answer.startswith("Outcome.Undecided"):
+            undecided += 1
+            continue
+        ours_valid = answer == "Outcome.Decided(Ending.Passed)"
+        if ours_valid == core_valid:
+            agree += 1
+        elif ours_valid:
+            lax += 1
+            by_error[expected] = by_error.get(expected, 0) + 1
+        else:
+            strict += 1
+            by_error["(we refuse, Core accepts)"] = by_error.get("(we refuse, Core accepts)", 0) + 1
+    disagree = lax + strict
+    print("cases        %d" % len(rows))
+    print("agree        %d" % agree)
+    print("disagree     %d" % disagree)
+    print("undecided    %d  (this engine cannot answer; not a disagreement)" % undecided)
+    print()
+    print("  we accept what Core refuses  %d  (a rule not implemented)" % lax)
+    print("  we refuse what Core accepts  %d  (the direction a defect shows up in)" % strict)
+    if by_error:
+        print("\ndisagreements by the error Core expected:")
+        for name, n in sorted(by_error.items(), key=lambda kv: -kv[1]):
+            print("  %-42s %d" % (name, n))
+    report = ('        "Standing as this was generated: %d cases, %d agree with Core,"\n'
+              '        "%d disagree, %d this engine cannot answer. Of the disagreements,"\n'
+              '        "%d are a rule this engine does not implement and %d are this engine"\n'
+              '        "refusing what Core accepts -- which is the direction a defect shows"\n'
+              '        "up in, so any of those is a bug until shown otherwise. Run the tool"\n'
+              '        "for the breakdown by Core error."\n'
+              % (len(rows), agree, disagree, undecided, lax, strict))
+    emit(out_dir, report=report)
+    written_back(out_dir, got)
+    return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true")
-    ap.add_argument("--assemble")
-    ap.add_argument("--emit")
-    ap.add_argument("--out", default=os.path.join(HERE, "..", "domain"))
+    ap.add_argument("--emit", action="store_true")
+    ap.add_argument("--probe")
+    ap.add_argument("--answers")
+    ap.add_argument("--out", default=os.path.abspath(os.path.join(HERE, "..", "domain")))
     a = ap.parse_args()
     if a.fetch:
         fetch()
-    if a.assemble:
-        assemble(a.assemble)
     if a.emit:
-        emit(a.emit, a.out)
-    if not (a.fetch or a.assemble or a.emit):
+        return emit(a.out)
+    if a.probe:
+        return probe(a.probe)
+    if a.answers:
+        return answers(a.answers, a.out)
+    if not a.fetch:
         ap.print_help()
         return 1
     return 0

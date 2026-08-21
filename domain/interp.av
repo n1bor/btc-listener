@@ -21,8 +21,12 @@ module Interp
         "answers them without anything here asking. That is deliberate: they are"
         "switched on by verification flags rather than by consensus everywhere,"
         "so applying them unconditionally would refuse Scripts the network"
-        "accepted. They wait for a flags argument, which waits for the test"
-        "corpus that needs one."
+        "accepted. The flags now exist -- Domain.Policy, reached through the"
+        "Context -- so what is left is to call them; n1bor/btc-listener#69."
+        "One flag does land here. CONST_SCRIPTCODE refuses OP_CODESEPARATOR in"
+        "a legacy Script, and refuses it before the branch is even taken,"
+        "which is why it sits above the executed guard below rather than"
+        "inside it."
     exposes [run, evaluate, reach]
     depends [Domain.Rules, Bytes, Domain.Primitives, Domain.ScriptParse, Domain.ScriptOps, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
@@ -149,23 +153,59 @@ verify separates
 
 fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
     ? "Take the Step the Op asks for, then carry on or stop as it says."
-      "OP_CODESEPARATOR is handled here rather than in Domain.ScriptOps because"
-      "this is the only place that holds the rest of the Script, which is"
-      "exactly what it names: from here on, a signature is taken over what"
-      "follows the separator. It still costs an Op against the limit."
+      "CONST_SCRIPTCODE is asked before anything else, because Core asks it"
+      "before anything else: the check sits above the fExec guard in"
+      "EvalScript, so an OP_CODESEPARATOR inside a branch that is not being"
+      "taken is refused just the same. tx_invalid.json says so in as many"
+      "words -- CODESEPARATOR in an unexecuted IF block is still invalid --"
+      "and putting the check one line lower would pass that case."
+      "OP_CODESEPARATOR is otherwise handled here rather than in"
+      "Domain.ScriptOps because this is the only place that holds the rest of"
+      "the Script, which is exactly what it names: from here on, a signature"
+      "is taken over what follows the separator. It still costs an Op against"
+      "the limit."
       "Only when it actually runs. Inside a branch that is not being taken it"
       "is skipped like any other Op, and moving the Script code there would"
       "sign the wrong bytes -- Core moves pbegincodehash under fExec and so"
       "does this. Found by Core's tx_valid.json, on a prevout Script that"
       "reads IF CODESEPARATOR ENDIF <key> CHECKSIGVERIFY CODESEPARATOR 1."
-    match Bool.and(separates(op), Domain.ScriptState.executing(state.conditions))
-        true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.overScript(context, bytesHex(rest)))
-        false -> ordinary(op, rest, state, context)
+    match Bool.and(separates(op), refusesSeparators(context))
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("OP_CODESEPARATOR in a legacy script, which CONST_SCRIPTCODE forbids")))
+        false -> executed(op, rest, state, context)
 
 verify stepped
     stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
     stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
     stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+
+fn refusesSeparators(context: Context) -> Bool
+    ? "Whether CONST_SCRIPTCODE is in force over a legacy Script."
+      "Core guards the rule with sigversion == BASE, so a witness Script may"
+      "still use OP_CODESEPARATOR under the flag -- BIP143 made the Script"
+      "code independent of it, and tapscript gives it a fresh meaning as the"
+      "position a signature commits to. Only the legacy path is refused."
+      "The flag itself is Policy and never on when the engine is"
+      "reading the chain: Domain.Rules.at can only build Domain.Policy.none()."
+    match Domain.SpendContext.sigVersionOf(context)
+        Domain.SpendContext.SigVersion.Base -> Domain.SpendContext.rulesOf(context).policy.constScriptCode
+        Domain.SpendContext.SigVersion.WitnessV0 -> false
+        Domain.SpendContext.SigVersion.Tapscript -> false
+
+verify refusesSeparators
+    refusesSeparators(Domain.SpendContext.bare(Domain.Rules.latest())) => false
+    refusesSeparators(Domain.SpendContext.bare(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]))) => true
+    refusesSeparators(Domain.SpendContext.bare(Domain.Rules.underFlags([]))) => false
+    refusesSeparators(Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => false
+
+fn executed(op: Op, rest: List<Op>, state: State, context: Context) -> Step
+    ? "OP_CODESEPARATOR moves the Script code, but only if it actually runs."
+    match Bool.and(separates(op), Domain.ScriptState.executing(state.conditions))
+        true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.overScript(context, bytesHex(rest)))
+        false -> ordinary(op, rest, state, context)
+
+verify executed
+    executed(Op.Code(171), [Op.Code(81)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [[1]], alt = [], conditions = [], opCount = 1))
+    executed(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn ordinary(op: Op, rest: List<Op>, state: State, context: Context) -> Step
     ? "Every other Op, against the machine."

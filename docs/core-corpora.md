@@ -10,7 +10,7 @@ blocks each one.
 
 | Core file | ours | cases | tool |
 |---|---|---|---|
-| `script_tests.json` | `domain/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` (middle step missing) |
+| `script_tests.json` | `domain/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` |
 | `sighash.json` | `domain/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
 | `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
@@ -42,9 +42,9 @@ generated file:
 
 ```
 cases        213
-agree         70
-disagree      22
-undecided    121  (this engine cannot answer; not a disagreement)
+agree        210
+disagree      3
+undecided     0  (this engine cannot answer; not a disagreement)
 ```
 
 `undecided` is not failure. It is the third value: the engine saying it cannot
@@ -52,23 +52,76 @@ judge, which for an unimplemented opcode is the honest answer. A disagreement
 is either a rule not implemented — and then it should have an issue — or a bug.
 There should never be one that is neither.
 
+## Each case carries the flags Core ran it under
+
+Core does not run a Script under a Height. It runs one under a set of
+verification flags, and `Domain.Rules` is a Height and the soft forks in force
+at it — a different and coarser thing. Until n1bor/btc-listener#52 the corpora
+ran every case under `Domain.Rules.latest()`, which is every rule on, and that
+is not what Core did to any of them.
+
+Two things now cross the gap:
+
+* `Domain.Rules.underFlags(names)` — the rules Core's flag names ask for, and
+  no others.
+* `Domain.Rules.exceptFlags(names)` — every rule **except** the ones named.
+
+The asymmetry is Core's, not a choice made here. `src/test/transaction_tests.cpp`
+verifies `tx_valid.json` with `~verify_flags` and `tx_invalid.json` with
+`verify_flags`, so the same word means opposite things in the two files;
+`script_tests.json` uses its flags as they stand. A generated case therefore
+reads:
+
+```
+    // Core: invalid  flags P2SH,WITNESS  -- Invalid witness script
+    case("0100…", [Prevout(…)], Domain.Rules.underFlags(["P2SH", "WITNESS"])) => …
+```
+
+Flags divide into two kinds and land in two places:
+
+* Soft forks — `P2SH`, `WITNESS`, `CHECKLOCKTIMEVERIFY`, `CHECKSEQUENCEVERIFY`,
+  `TAPROOT`, `NULLDUMMY` — are consensus and have a Height, so they are fields
+  of `Domain.Rules` and `at()` answers for them.
+* Policy — `CONST_SCRIPTCODE` and the rest, rules a node applies over and
+  above what the chain enforces — are `Domain.Policy`, which
+  `Domain.Rules.at()` **cannot** return anything but `none()` of. That is
+  structural rather than a convention: a Policy rule reachable from a
+  Height would make the auditor reject Transactions that are in the chain.
+
+A flag `Domain.Policy` has no field for is not modelled, and the engine is then
+lenient about it. A case that turns on such a flag will disagree with Core, and
+that disagreement is the honest record of the gap rather than a silent pass.
+
 ## Regenerating
 
 ### Scripts
 
+Same three steps as the Transaction corpus below, and the same probe project:
+
 ```
 python3 tools/script_tests_to_aver.py --fetch
-python3 tools/script_tests_to_aver.py --assemble /tmp/cases.tsv
-#   step 2 -- see the warning below
-python3 tools/script_tests_to_aver.py --emit /tmp/results.tsv
+python3 tools/script_tests_to_aver.py --probe /tmp/p/main.av
+cd /tmp/p && aver run main.av --module-root . --providers > /tmp/answers.txt
+python3 tools/script_tests_to_aver.py --answers /tmp/answers.txt
 ```
 
-`--emit` wants a file of `sigHex<TAB>pubkeyHex<TAB>verdict<TAB>detail`, one a
-line, which is step 2's output. **Whatever produced it is not in this
-repository.** The tool's own docstring says "The middle step is a compiled Aver
-program", and there is no such program in `tools/`. Regenerating the Script
-corpus today therefore means writing that program first; the Transaction tool's
-`--probe` is the shape to copy.
+`--emit` on its own writes the cases with placeholder answers; `--answers`
+writes the real ones back and prints the agreement report, split by direction:
+
+```
+cases        1118
+agree         932
+disagree       99
+undecided      87  (this engine cannot answer; not a disagreement)
+
+  we accept what Core refuses  99  (a rule not implemented)
+  we refuse what Core accepts   0  (the direction a defect shows up in)
+```
+
+The second of those two numbers is the one that matters, because it is the
+direction a defect shows up in. A rule not implemented makes this engine
+lenient; a rule implemented wrongly makes it strict, and strict is what would
+reject a Block.
 
 Core writes its Scripts in the assembly language `core_read.cpp` parses:
 opcode names, `0x..` byte blobs, decimal numbers that become minimal pushes,
@@ -165,6 +218,29 @@ Two shapes in Core's Transaction data need care and the tool handles both:
   no Input at all.
 * A prevout may carry a fourth element, the amount, which SegWit needs. It
   defaults to zero.
+
+## The probe is written in parts, and why
+
+Every probe splits its cases into `part1()`, `part2()` … joined by
+`List.concat`, rather than one list literal. That is not style. **The VM
+truncates a list literal to `len mod 256` elements, silently, with exit 0** —
+jasisz/aver#1054. `LIST_NEW` carries an 8-bit count and the compiler emits
+`items.len() as u8`.
+
+The Script probe with 1118 cases printed 94 answers. Nothing said so: `aver
+check` was clean, stderr was empty, the exit code was nought. The compiled Rust
+backend gets it right, so the VM and the binary disagree about the value of a
+constant.
+
+Two things guard against it now:
+
+* Each part is at most 200 cases, and `verify assembled` counts the joined
+  result against the number the tool wrote. A part over the limit fails there
+  rather than quietly shortening the corpus.
+* Every tool refuses to write answers back when the answer count does not match
+  the case count. That is what caught this one; without it the corpus would
+  have recorded 94 answers against 1118 cases and reported a cheerful agreement
+  about the 94.
 
 ## `sighash.json` is the one conformance corpus
 

@@ -1,0 +1,78 @@
+module Checkwork
+    intent =
+        "The parts of a signature check that do not depend on how many"
+        "signatures there are."
+        "OP_CHECKSIG takes one signature and one key; OP_CHECKMULTISIG takes"
+        "a list of each and walks them against one another. The two loops are"
+        "different and live in Domain.Checksig. What they share is smaller and"
+        "sits here: how a check that came out false is written back to the"
+        "stack, which pairs can be refused without a curve, and the two"
+        "conversions those need."
+        "They are here rather than there because Domain.Checksig is where the"
+        "verification flags land -- CONST_SCRIPTCODE, NULLDUMMY, and the ones"
+        "n1bor/btc-listener#52 leaves for later -- and that file had no room"
+        "left. Splitting the shared half out was the cheapest way to make"
+        "room without moving either loop, and it names a real thing: nothing"
+        "below knows whether it is serving one signature or twenty."
+    exposes [bytesOf, validKey, refusal, answered, oneIf]
+    depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
+    effects []
+
+fn bytesOf(values: List<Int>) -> Bytes
+    ? "A stack item as Bytes. Everything on a stack this module sees is bytes"
+      "already, so the failure branch is unreachable."
+    Result.withDefault(Bytes.fromList(values), Bytes.fromList([]))
+
+verify bytesOf
+    Bytes.toList(bytesOf([1, 2])) => [1, 2]
+
+fn validKey() -> List<Int>
+    ? "A public key of the right shape, for the cases above."
+      "Its bytes are never looked at beyond the first and the length, because"
+      "looking at the rest is what needs a curve."
+    List.prepend(2, Domain.ScriptState.zeros(32))
+
+verify validKey
+    List.len(validKey()) => 33
+    Domain.Ecdsa.isValidPublicKey(validKey()) => true
+
+fn refusal(signature: List<Int>, publicKey: List<Int>) -> Option<String>
+    ? "Whether this pair fails for a reason that needs no curve."
+      "Some means it definitely fails; None means not on this evidence. The"
+      "Valid arm is unreachable -- decideShape has no message and no curve, so"
+      "it cannot say a signature is good -- but the type admits it and a"
+      "refusal is exactly what Valid is not."
+    match Domain.Ecdsa.decideShape(signature, publicKey)
+        Domain.Ecdsa.Ruling.Valid -> Option.None
+        Domain.Ecdsa.Ruling.Invalid(why) -> Option.Some(why)
+        Domain.Ecdsa.Ruling.Undecidable(why) -> Option.None
+
+verify refusal
+    refusal([], [2]) => Option.Some("empty signature")
+    refusal([4, 5], [2, 3]) => Option.Some("public key is 2 bytes, which is not a public key")
+    refusal([4, 5], validKey()) => Option.None
+
+fn answered(code: Int, outcome: Bool, rest: List<List<Int>>, state: State) -> Step
+    ? "A check that came out false pushes false, unless the opcode is a VERIFY."
+      "OP_CHECKSIG does not fail a Script when the signature is bad. It pushes"
+      "false and lets the Script decide what that means, which is what makes"
+      "the OP_IF branches in a multisig fallback work."
+    match Bool.or(code == 173, code == 175)
+        true -> Domain.ScriptStep.stoppedUnless(outcome, "{Domain.Opcode.nameOf(code)} found a signature that does not check", rest, state)
+        false -> Domain.ScriptStep.pushing(Domain.StackItem.fromNumber(oneIf(outcome)), Domain.ScriptState.withStack(state, rest))
+
+verify answered
+    answered(172, false, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
+    answered(172, true, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    answered(173, false, [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
+    answered(173, true, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn oneIf(condition: Bool) -> Int
+    ? "How Script writes a true or false answer."
+    match condition
+        true -> 1
+        false -> 0
+
+verify oneIf
+    oneIf(true) => 1
+    oneIf(false) => 0

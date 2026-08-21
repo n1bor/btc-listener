@@ -36,10 +36,24 @@ module Rules
         "because below its Height a witness program is an anyone-can-spend push"
         "of a hash and above it the Witness decides -- the same shape with two"
         "different meanings, which is what a soft fork is."
-        "BIP147 null dummy came into force with SegWit on every Network, so it"
-        "rides on the same field rather than getting one that would always hold"
-        "the same value. n1bor/btc-listener#52 splits it out if the policy half"
-        "ever needs to differ from the consensus one."
+        "BIP147 null dummy came into force with SegWit on every Network, so"
+        "at() derives it from the same Height. It still gets a field of its"
+        "own, and the reason is Core: SCRIPT_VERIFY_NULLDUMMY and"
+        "SCRIPT_VERIFY_WITNESS are independent flags there, and tx_valid.json"
+        "has three cases that turn the first off while leaving the second on."
+        "Folding the two together made this engine refuse all three -- strict"
+        "where Core was lenient, which is the rarer and more alarming of the"
+        "two ways to be wrong. One field per rule, even when two rules have"
+        "always had the same answer on every Block ever mined."
+        "The policy half is the other thing this record carries. Core does not"
+        "run a Script under a Height at all; it runs one under verification"
+        "flags, and most of those are Policy rather than consensus."
+        "Domain.Policy holds them and this record holds one of those. What"
+        "matters is which way round: at() takes a Height and can only return"
+        "Domain.Policy.none(), so an auditor gets no Policy rule by"
+        "construction and cannot be made to reject a Transaction the chain"
+        "contains. Only underFlags and exceptFlags, which take Core's own flag"
+        "names, can return anything else, and only a corpus calls those."
         "BIP66 is the next and Domain.Ecdsa.isValidEncoding is already written"
         "for it, but the chain here stops below 363725, so wiring it in would"
         "ship consensus code no measurement could reach. It goes in when there"
@@ -49,8 +63,8 @@ module Rules
         "P2SH is the exception and n1bor/btc-listener#66 covers it: Core has no"
         "BIP16 Height at all, because BIP16 activated on a Block timestamp and"
         "Core now enforces P2SH everywhere with one named Block excused."
-    exposes [Rules, at, latest, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
-    depends [Domain.Network]
+    exposes [Rules, at, latest, underFlags, exceptFlags, dummyWrong, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
+    depends [Domain.Network, Domain.Policy]
     effects []
 
 record Rules
@@ -58,11 +72,14 @@ record Rules
     checkLockTimeVerify: Bool
     checkSequenceVerify: Bool
     segWit: Bool
+    nullDummy: Bool
     taproot: Bool
+    policy: Policy
 
 fn at(network: Network, height: Int) -> Rules
     ? "The rules a Block at this Height on this Network was mined under."
-    Rules(payToScriptHash = height >= payToScriptHashHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = height >= segWitHeight(network), taproot = height >= taprootHeight(network))
+    witnessed = height >= segWitHeight(network)
+    Rules(payToScriptHash = height >= payToScriptHashHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = witnessed, nullDummy = witnessed, taproot = height >= taprootHeight(network), policy = Domain.Policy.none())
 
 verify at
     at(Network.Mainnet, 0).payToScriptHash => false
@@ -77,6 +94,8 @@ verify at
     at(Network.Mainnet, 419328).checkSequenceVerify => true
     at(Network.Mainnet, 481823).segWit => false
     at(Network.Mainnet, 481824).segWit => true
+    at(Network.Mainnet, 481823).nullDummy => false
+    at(Network.Mainnet, 481824).nullDummy => true
     at(Network.Signet, 1).segWit => true
     at(Network.Signet, 1).payToScriptHash => true
     at(Network.Signet, 1).checkLockTimeVerify => true
@@ -171,7 +190,7 @@ fn latest() -> Rules
       "What a Script corpus written today means, and what a caller checking a"
       "Script with no Block behind it should get. Core's own vectors are"
       "written against the current rules and are read that way."
-    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true, taproot = true)
+    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true, nullDummy = true, taproot = true, policy = Domain.Policy.none())
 
 verify latest
     latest().payToScriptHash => true
@@ -227,3 +246,113 @@ verify payToScriptHashHeight
     payToScriptHashHeight(Network.Testnet) => 1
     payToScriptHashHeight(Network.Signet) => 1
     payToScriptHashHeight(Network.Regtest) => 1
+
+fn underFlags(flags: List<String>) -> Rules
+    ? "The rules Core's verification flags ask for, and no others."
+      "How script_tests.json and tx_invalid.json are read: the names are the"
+      "flags handed to VerifyScript, so a soft fork whose name is absent is"
+      "off. That is not the same question as a Height, and reading those two"
+      "corpora as though every rule were in force is what made a case marked"
+      "P2SH,WITNESS pass here and fail in Core -- the case had turned SegWit"
+      "on deliberately and this engine had it on regardless, so the agreement"
+      "on every other row was luck rather than measurement."
+      "WITNESS implies P2SH, because Core's FillFlags says so and asserts it"
+      "of both Transaction corpora. No row of the three files breaks it, so"
+      "the Bool.or below never changes an answer; it is here so that a row"
+      "which did would be read the way Core reads it rather than silently"
+      "losing P2SH."
+      "A flag Domain.Policy does not model leaves its rule off, which is"
+      "lenient. A case that turns on one will therefore disagree with Core,"
+      "and that disagreement is the honest record of the gap."
+    Rules(payToScriptHash = Bool.or(Domain.Policy.asks(flags, "P2SH"), Domain.Policy.asks(flags, "WITNESS")), checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY"), checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY"), segWit = Domain.Policy.asks(flags, "WITNESS"), nullDummy = Domain.Policy.asks(flags, "NULLDUMMY"), taproot = Domain.Policy.asks(flags, "TAPROOT"), policy = Domain.Policy.named(flags))
+
+verify underFlags
+    underFlags([]).payToScriptHash => false
+    underFlags([]).segWit => false
+    underFlags([]).taproot => false
+    underFlags([]).policy => Domain.Policy.none()
+    underFlags(["NONE"]).payToScriptHash => false
+    underFlags(["NONE"]).policy => Domain.Policy.none()
+    underFlags(["P2SH"]).payToScriptHash => true
+    underFlags(["P2SH"]).segWit => false
+    underFlags(["P2SH", "WITNESS"]).segWit => true
+    underFlags(["WITNESS"]).payToScriptHash => true
+    underFlags(["P2SH", "WITNESS", "TAPROOT"]).taproot => true
+    underFlags(["NULLDUMMY"]).nullDummy => true
+    underFlags(["P2SH", "WITNESS"]).nullDummy => false
+    underFlags(["CHECKLOCKTIMEVERIFY"]).checkLockTimeVerify => true
+    underFlags(["CHECKSEQUENCEVERIFY"]).checkSequenceVerify => true
+    underFlags(["CONST_SCRIPTCODE"]).policy => Domain.Policy.named(["CONST_SCRIPTCODE"])
+
+fn exceptFlags(flags: List<String>) -> Rules
+    ? "Every rule except the ones Core's flag names list."
+      "tx_valid.json is read this way and the asymmetry is Core's, not a"
+      "choice made here: src/test/transaction_tests.cpp calls CheckTxScripts"
+      "with ~verify_flags for tx_valid.json and with verify_flags for"
+      "tx_invalid.json. The same word means opposite things in the two files."
+      "Core's TrimFlags then says P2SH off clears WITNESS, which is why SegWit"
+      "asks about both names below."
+    witnessed = withoutWitness(flags)
+    Rules(payToScriptHash = Domain.Policy.asks(flags, "P2SH") == false, checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY") == false, checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY") == false, segWit = witnessed, nullDummy = Domain.Policy.asks(flags, "NULLDUMMY") == false, taproot = Bool.and(Domain.Policy.asks(flags, "TAPROOT") == false, witnessed), policy = Domain.Policy.exceptNamed(flags))
+
+verify exceptFlags
+    exceptFlags([]).payToScriptHash => true
+    exceptFlags([]).segWit => true
+    exceptFlags([]).taproot => true
+    exceptFlags([]).policy => Domain.Policy.every()
+    exceptFlags(["P2SH"]).payToScriptHash => false
+    exceptFlags(["P2SH"]).segWit => false
+    exceptFlags(["P2SH"]).taproot => false
+    exceptFlags(["WITNESS"]).payToScriptHash => true
+    exceptFlags(["WITNESS"]).segWit => false
+    exceptFlags(["TAPROOT"]).taproot => false
+    exceptFlags(["TAPROOT"]).segWit => true
+    exceptFlags(["NULLDUMMY"]).nullDummy => false
+    exceptFlags(["NULLDUMMY"]).segWit => true
+    exceptFlags(["CONST_SCRIPTCODE"]).policy => Domain.Policy.exceptNamed(["CONST_SCRIPTCODE"])
+
+fn withoutWitness(flags: List<String>) -> Bool
+    ? "Whether SegWit survives this exclusion list."
+      "Core's TrimFlags clears WITNESS when P2SH is not set, so excluding"
+      "either name turns it off."
+    Bool.and(Domain.Policy.asks(flags, "WITNESS") == false, Domain.Policy.asks(flags, "P2SH") == false)
+
+verify withoutWitness
+    withoutWitness([]) => true
+    withoutWitness(["WITNESS"]) => false
+    withoutWitness(["P2SH"]) => false
+    withoutWitness(["DERSIG"]) => true
+
+fn dummyWrong(rules: Rules, dummy: List<List<Int>>) -> Bool
+    ? "Whether BIP147 refuses the item OP_CHECKMULTISIG discards."
+      "The item arrives as the one-element slice the stack was cut into,"
+      "which is what Domain.Checksig has in hand. An empty slice is a stack"
+      "too short to hold a dummy at all, which that module has already"
+      "refused, so it answers false rather than inventing an opinion."
+    match dummy
+        [] -> false
+        [item, ..rest] -> dummyNotEmpty(rules, item)
+
+verify dummyWrong
+    dummyWrong(latest(), [[]]) => false
+    dummyWrong(latest(), [[1]]) => true
+    dummyWrong(latest(), []) => false
+    dummyWrong(underFlags([]), [[1]]) => false
+    dummyWrong(exceptFlags(["NULLDUMMY"]), [[1]]) => false
+    dummyWrong(exceptFlags([]), [[1]]) => true
+    dummyWrong(underFlags(["NULLDUMMY"]), [[1]]) => true
+    dummyWrong(underFlags(["NULLDUMMY"]), [[]]) => false
+    dummyWrong(at(Network.Mainnet, 481823), [[1]]) => false
+    dummyWrong(at(Network.Mainnet, 481824), [[1]]) => true
+
+fn dummyNotEmpty(rules: Rules, item: List<Int>) -> Bool
+    ? "The rule itself: under BIP147 a dummy with any bytes in it is refused."
+    match item
+        [] -> false
+        [byte, ..more] -> rules.nullDummy
+
+verify dummyNotEmpty
+    dummyNotEmpty(latest(), []) => false
+    dummyNotEmpty(latest(), [0]) => true
+    dummyNotEmpty(latest(), [1]) => true
+    dummyNotEmpty(underFlags([]), [1]) => false

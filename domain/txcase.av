@@ -24,58 +24,58 @@ record Prevout
     script: String
     amount: Int
 
-fn verdict(rawHex: String, prevouts: List<Prevout>) -> Outcome
+fn verdict(rawHex: String, prevouts: List<Prevout>, rules: Rules) -> Outcome
     ? "Every Input of this Transaction, against the Output it names."
       "One answer for the whole Transaction: a failure anywhere fails it, and"
       "anything this engine cannot decide leaves it undecided, because a"
       "Transaction is valid only if every one of its Inputs is."
     match Bytes.fromHex(rawHex)
         Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
-        Result.Ok(raw) -> decoded(Domain.Transaction.decode(Bytes.toList(raw)), prevouts)
+        Result.Ok(raw) -> decoded(Domain.Transaction.decode(Bytes.toList(raw)), prevouts, rules)
 
 verify verdict
-    verdict("zz", []) => Outcome.Decided(Ending.Failed("Bytes.fromHex: invalid hexadecimal character 'z'"))
-    verdict("", []) => Outcome.Decided(Ending.Failed("Transaction ends before its lock time"))
+    verdict("zz", [], Domain.Rules.latest()) => Outcome.Decided(Ending.Failed("Bytes.fromHex: invalid hexadecimal character 'z'"))
+    verdict("", [], Domain.Rules.latest()) => Outcome.Decided(Ending.Failed("Transaction ends before its lock time"))
 
-fn decoded(transaction: Result<Transaction, String>, prevouts: List<Prevout>) -> Outcome
+fn decoded(transaction: Result<Transaction, String>, prevouts: List<Prevout>, rules: Rules) -> Outcome
     ? "A Transaction that will not decode fails before any Script runs."
     match transaction
         Result.Err(why) -> Outcome.Decided(Ending.Failed(why))
-        Result.Ok(whole) -> shaped(whole, prevouts)
+        Result.Ok(whole) -> shaped(whole, prevouts, rules)
 
 verify decoded
-    decoded(Result.Err("no"), []) => Outcome.Decided(Ending.Failed("no"))
+    decoded(Result.Err("no"), [], Domain.Rules.latest()) => Outcome.Decided(Ending.Failed("no"))
 
-fn shaped(transaction: Transaction, prevouts: List<Prevout>) -> Outcome
+fn shaped(transaction: Transaction, prevouts: List<Prevout>, rules: Rules) -> Outcome
     ? "Bitcoin's CheckTransaction runs before any Script does, and rejects a"
       "Transaction on its shape alone: no Inputs, an amount that cannot"
       "exist, the same Output spent twice. Core marks those cases BADTX and"
       "they are as much consensus as anything a Script decides."
     match Domain.TxCheck.wrongWith(transaction)
         Option.Some(why) -> Outcome.Decided(Ending.Failed(why))
-        Option.None -> eachInput(transaction, Domain.Transaction.inputsOf(transaction), 0, prevouts, Outcome.Decided(Ending.Passed))
+        Option.None -> eachInput(transaction, Domain.Transaction.inputsOf(transaction), 0, prevouts, rules, Outcome.Decided(Ending.Passed))
 
 verify shaped
-    shaped(Domain.SpendContext.emptyTransaction(), []) => Outcome.Decided(Ending.Failed("no inputs"))
+    shaped(Domain.SpendContext.emptyTransaction(), [], Domain.Rules.latest()) => Outcome.Decided(Ending.Failed("no inputs"))
 
-fn eachInput(transaction: Transaction, inputs: List<Input>, position: Int, prevouts: List<Prevout>, sofar: Outcome) -> Outcome
+fn eachInput(transaction: Transaction, inputs: List<Input>, position: Int, prevouts: List<Prevout>, rules: Rules, sofar: Outcome) -> Outcome
     ? "In order, carrying the worst answer so far."
     match inputs
         [] -> sofar
-        [head, ..tail] -> stepInput(transaction, head, tail, position, prevouts, sofar)
+        [head, ..tail] -> stepInput(transaction, head, tail, position, prevouts, rules, sofar)
 
 verify eachInput
-    eachInput(Domain.SpendContext.emptyTransaction(), [], 0, [], Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Passed)
+    eachInput(Domain.SpendContext.emptyTransaction(), [], 0, [], Domain.Rules.latest(), Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Passed)
 
-fn stepInput(transaction: Transaction, input: Input, rest: List<Input>, position: Int, prevouts: List<Prevout>, sofar: Outcome) -> Outcome
+fn stepInput(transaction: Transaction, input: Input, rest: List<Input>, position: Int, prevouts: List<Prevout>, rules: Rules, sofar: Outcome) -> Outcome
     ? "An Input whose Output the case did not supply is the case's own fault"
       "and is said so, rather than being counted as a Script that failed."
     match matching(prevouts, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))
         Option.None -> Outcome.Decided(Ending.Failed("no prevout supplied for input {position}"))
-        Option.Some(prevout) -> eachInput(transaction, rest, position + 1, prevouts, worse(sofar, oneInput(transaction, input, position, prevout, spentOutputs(transaction, prevouts))))
+        Option.Some(prevout) -> eachInput(transaction, rest, position + 1, prevouts, rules, worse(sofar, oneInput(transaction, input, position, prevout, spentOutputs(transaction, prevouts), rules)))
 
 verify stepInput
-    stepInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], 0, [], Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Failed("no prevout supplied for input 0"))
+    stepInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], 0, [], Domain.Rules.latest(), Outcome.Decided(Ending.Passed)) => Outcome.Decided(Ending.Failed("no prevout supplied for input 0"))
 
 fn spentOutputs(transaction: Transaction, prevouts: List<Prevout>) -> List<Spent>
     ? "Every Input's spent Output, in Input order, as Taproot needs them."
@@ -107,14 +107,14 @@ verify gatheredOne
     gatheredOne(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], [], []) => []
     gatheredOne(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], [Prevout(txid = "aa", index = 0, script = "51", amount = 5)], []) => [Spent(amount = 5, script = "51")]
 
-fn oneInput(transaction: Transaction, input: Input, position: Int, prevout: Prevout, spent: List<Spent>) -> Outcome
+fn oneInput(transaction: Transaction, input: Input, position: Int, prevout: Prevout, spent: List<Spent>, rules: Rules) -> Outcome
     ? "The Input Script and the Output Script, run the way a spend runs them,"
       "over a Context that names the Transaction so a signature has something"
       "to have committed to."
-    Domain.SpendScript.check(Domain.Transaction.scriptOf(input), prevout.script, Domain.SpendContext.withPrevouts(Domain.SpendContext.committed(Domain.Rules.latest(), transaction, position, prevout.amount, prevout.script, Domain.Transaction.witnessOf(input)), spent))
+    Domain.SpendScript.check(Domain.Transaction.scriptOf(input), prevout.script, Domain.SpendContext.withPrevouts(Domain.SpendContext.committed(rules, transaction, position, prevout.amount, prevout.script, Domain.Transaction.witnessOf(input)), spent))
 
 verify oneInput
-    oneInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), 0, Prevout(txid = "aa", index = 0, script = "51", amount = 0), []) => Outcome.Decided(Ending.Passed)
+    oneInput(Domain.SpendContext.emptyTransaction(), Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), 0, Prevout(txid = "aa", index = 0, script = "51", amount = 0), [], Domain.Rules.latest()) => Outcome.Decided(Ending.Passed)
 
 fn matching(prevouts: List<Prevout>, txid: String, index: Int) -> Option<Prevout>
     ? "The Output an Input names, out of the ones the case supplied."
