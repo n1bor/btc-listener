@@ -1,0 +1,325 @@
+module Witness
+    intent =
+        "Running a version zero witness program: BIP141's execution, and the"
+        "rules that are consensus rather than policy."
+        "A witness spend is not a Script pair. The Output Script is a version"
+        "byte and a push, the Input Script is empty, and everything that"
+        "actually decides the spend arrives in a third place -- the Witness --"
+        "which the Transaction carries per Input and which the txid does not"
+        "commit to. That last part is the point of the design and the reason"
+        "the Script code and the signature hash both have to change with it."
+        "Two shapes exist at version zero and no others ever will. A twenty"
+        "byte program is a public key hash and the Script is synthesised from"
+        "it; a thirty-two byte program is the SHA-256 of a Script the Witness"
+        "supplies. Any other width at version zero is invalid permanently,"
+        "which is not the same as unknown: a version this engine does not know"
+        "is undecided, a v0 program of the wrong width is failed."
+        "The limits here are Bitcoin Core's consensus ones, taken from"
+        "VerifyWitnessProgram and ExecuteWitnessScript in src/script/"
+        "interpreter.cpp. Core also has a hundred item cap and a 3600 byte"
+        "witnessScript cap and neither is consensus -- both are standardness,"
+        "MAX_STANDARD_P2WSH_STACK_ITEMS and MAX_STANDARD_P2WSH_SCRIPT_SIZE,"
+        "which keep such spends out of a mempool without making the Blocks"
+        "that contain them invalid. An auditor that enforced them would reject"
+        "Transactions the chain contains, so they are deliberately absent."
+        "What is consensus: every Witness item is at most 520 bytes, the same"
+        "limit a push inside a Script has; and the stack must hold exactly one"
+        "true item at the end. That last one is stricter than legacy, where a"
+        "left-over stack is tolerated -- inside a Witness it never is."
+    exposes [spend, nested]
+    depends [Bytes, Crypto.Digest32, Domain.Interp, Domain.Rules, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    effects []
+
+fn spend(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+    ? "A bare witness program, spent by the Witness its Input carried."
+      "The Input Script must be empty and exactly empty. Anything in it fails"
+      "the spend rather than being ignored, because the whole reason the"
+      "Witness was moved out of the Input Script was that a third party could"
+      "edit the Input Script without invalidating the signatures -- and an"
+      "engine that tolerated a stray push here would hand that malleability"
+      "straight back. Core calls this WITNESS_MALLEATED."
+    match String.len(inputScriptHex) == 0
+        false -> Outcome.Decided(Ending.Failed("witness program spent with a non-empty input script"))
+        true -> nested(outputScriptHex, context)
+
+verify spend
+    spend("51", "0014751e76e8199196d454941c45d1b3a323f1433bd6", spending([])) => Outcome.Decided(Ending.Failed("witness program spent with a non-empty input script"))
+    spend("", "0015751e76e8199196d454941c45d1b3a323f1433bd6aa", spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 21 bytes, which is neither 20 nor 32"))
+    spend("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", spending([])) => Outcome.Undecided("witness program version 1 has no rules this engine knows")
+    spend("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+
+fn spending(witness: List<String>) -> Context
+    ? "A Context with a Transaction behind it carrying this Witness."
+      "The Transaction is the empty one because none of the cases here reach a"
+      "signature -- the ones that do live in the corpus, where the Transaction"
+      "is real and Core supplied the answer."
+    Domain.SpendContext.committed(Domain.Rules.latest(), Domain.SpendContext.emptyTransaction(), 0, 0, "", witness)
+
+verify spending
+    Domain.SpendContext.hasSpend(spending([])) => true
+    Domain.SpendContext.witnessOf(spending(["aa"])) => ["aa"]
+
+fn nested(redeemHex: String, context: Context) -> Outcome
+    ? "A witness program that arrived as a P2SH redeem Script."
+      "BIP141 defines the nested forms so a wallet that could only send to a"
+      "three-address could still pay a segwit Output. Once the redeem Script"
+      "is in hand the execution is identical -- the caller has already checked"
+      "that the Input Script was exactly one push of it, which is the nested"
+      "form's own malleability rule and cannot be checked from here."
+      "A run with no Transaction behind it cannot be answered: the Witness"
+      "lives on the Input and there is no Input. That is undecided and not a"
+      "failure, because an absent Witness and an empty one are the same bytes"
+      "and opposite answers."
+    match Domain.SpendContext.hasSpend(context)
+        false -> Outcome.Undecided("a witness program needs the transaction that carries its witness")
+        true -> byVersion(programOf(redeemHex), versionOf(redeemHex), context)
+
+verify nested
+    nested("0015751e76e8199196d454941c45d1b3a323f1433bd6aa", spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 21 bytes, which is neither 20 nor 32"))
+    nested("5202dc96", spending([])) => Outcome.Undecided("witness program version 2 has no rules this engine knows")
+    nested("0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+
+fn versionOf(scriptHex: String) -> Int
+    ? "The witness version a program declares, from its first byte."
+      "OP_0 is version nought and OP_1 through OP_16 are one through sixteen,"
+      "which is the eighty offset every small integer opcode carries."
+    match bytesOf(scriptHex)
+        [] -> 0
+        [head, ..tail] -> versionOfByte(head)
+
+verify versionOf
+    versionOf("0014751e76e8199196d454941c45d1b3a323f1433bd6") => 0
+    versionOf("5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c") => 1
+    versionOf("60020102") => 16
+    versionOf("") => 0
+
+fn versionOfByte(head: Int) -> Int
+    ? "OP_0 is nought; everything else in range is the opcode less eighty."
+    match head == 0
+        true -> 0
+        false -> head - 80
+
+verify versionOfByte
+    versionOfByte(0) => 0
+    versionOfByte(81) => 1
+    versionOfByte(96) => 16
+
+fn programOf(scriptHex: String) -> List<Int>
+    ? "The program itself: everything after the version byte and the push."
+    List.drop(bytesOf(scriptHex), 2)
+
+verify programOf
+    List.len(programOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => 20
+    List.len(programOf("0020701a8d401c84fb13e6baf169d59684e17abd9fa216c8cc5b9fc63d622ff8c58d")) => 32
+    programOf("") => []
+
+fn byVersion(program: List<Int>, version: Int, context: Context) -> Outcome
+    ? "Version zero is the only one with rules. Everything above it is a"
+      "witness program whose meaning has not been defined, which under"
+      "consensus is spendable by anyone -- but saying so is a separate"
+      "decision and n1bor/btc-listener#65 makes it. Until then it is"
+      "undecided, which is the conservative answer and not a wrong one."
+    match version == 0
+        true -> versionZero(program, context)
+        false -> Outcome.Undecided("witness program version {version} has no rules this engine knows")
+
+verify byVersion
+    byVersion([1, 2], 2, spending([])) => Outcome.Undecided("witness program version 2 has no rules this engine knows")
+    byVersion([1, 2], 0, spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 2 bytes, which is neither 20 nor 32"))
+
+fn versionZero(program: List<Int>, context: Context) -> Outcome
+    ? "Twenty bytes is a public key hash, thirty-two is a Script hash, and"
+      "nothing else is anything. A version zero program of another width is"
+      "invalid for good: no soft fork can give it a meaning, because it is"
+      "already spent-or-not under rules in force."
+    match List.len(program)
+        20 -> keyHash(program, stackOf(Domain.SpendContext.witnessOf(context), []), context)
+        32 -> scriptHash(program, stackOf(Domain.SpendContext.witnessOf(context), []), context)
+        _ -> Outcome.Decided(Ending.Failed("a version zero witness program is {List.len(program)} bytes, which is neither 20 nor 32"))
+
+verify versionZero
+    versionZero([1, 2], spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 2 bytes, which is neither 20 nor 32"))
+    versionZero([], spending([])) => Outcome.Decided(Ending.Failed("a version zero witness program is 0 bytes, which is neither 20 nor 32"))
+
+fn stackOf(hexes: List<String>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "The Witness items as bytes, top of stack first."
+      "A Witness is serialised bottom first: the item a Script pops last is"
+      "written first. Prepending each in turn therefore leaves the last one"
+      "on top, which is where the Script expects to find it."
+    match hexes
+        [] -> acc
+        [head, ..tail] -> stackOf(tail, List.prepend(bytesOf(head), acc))
+
+verify stackOf
+    stackOf([], []) => []
+    stackOf(["01", "02"], []) => [[2], [1]]
+    List.len(stackOf(["aabb", "cc", "dd"], [])) => 3
+
+fn oversized(items: List<List<Int>>) -> Option<String>
+    ? "Whether any Witness item is over the 520 byte stack item limit."
+      "Core checks this over the whole Witness before the Script runs, not as"
+      "each item is pushed, so an oversized item fails the spend even if the"
+      "Script would never have touched it."
+    match items
+        [] -> Option.None
+        [head, ..tail] -> tooBigOrNext(head, tail)
+
+verify oversized
+    oversized([]) => Option.None
+    oversized([[1], [2]]) => Option.None
+    oversized([Domain.ScriptState.zeros(521)]) => Option.Some("a witness item is 521 bytes, over the 520 byte limit")
+
+fn tooBigOrNext(head: List<Int>, tail: List<List<Int>>) -> Option<String>
+    ? "This one, then the rest."
+    match List.len(head) > Domain.ScriptState.maxItem()
+        true -> Option.Some("a witness item is {List.len(head)} bytes, over the {Domain.ScriptState.maxItem()} byte limit")
+        false -> oversized(tail)
+
+verify tooBigOrNext
+    tooBigOrNext([1], []) => Option.None
+    tooBigOrNext(Domain.ScriptState.zeros(521), []) => Option.Some("a witness item is 521 bytes, over the 520 byte limit")
+
+fn keyHash(program: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "P2WPKH. The Witness is a signature and a public key, exactly two items"
+      "and never any other number, and the Script is not supplied at all --"
+      "it is built from the program, which is the key's hash."
+    match List.len(stack) == 2
+        false -> Outcome.Decided(Ending.Failed("a twenty byte witness program needs exactly two witness items, not {List.len(stack)}"))
+        true -> executed(keyHashScript(program), stack, context)
+
+verify keyHash
+    keyHash([1], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a twenty byte witness program needs exactly two witness items, not 0"))
+    keyHash([1], [[1], [2], [3]], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a twenty byte witness program needs exactly two witness items, not 3"))
+
+fn keyHashScript(program: List<Int>) -> List<Int>
+    ? "OP_DUP OP_HASH160 <the program> OP_EQUALVERIFY OP_CHECKSIG."
+      "The pay-to-public-key-hash Script, synthesised rather than read. This"
+      "is also the Script code the BIP143 message is taken over, which is why"
+      "it is built once and handed to both."
+    List.concat([118, 169, 20], List.concat(program, [136, 172]))
+
+verify keyHashScript
+    List.len(keyHashScript(Domain.ScriptState.zeros(20))) => 25
+    keyHashScript([1]) => [118, 169, 20, 1, 136, 172]
+
+fn scriptHash(program: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "P2WSH. The top Witness item is the Script, and the rest is the stack it"
+      "runs on. The commitment is a single SHA-256 of that Script, not the"
+      "HASH160 every other Bitcoin hash commitment uses -- twenty bytes is not"
+      "enough for a Script hash that a third party might try to collide."
+    match stack
+        [] -> Outcome.Decided(Ending.Failed("a thirty-two byte witness program needs a witness script and got none"))
+        [head, ..tail] -> matchedScript(program, head, tail, context)
+
+verify scriptHash
+    scriptHash([1], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a thirty-two byte witness program needs a witness script and got none"))
+
+fn matchedScript(program: List<Int>, script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "The witness Script only runs if it is the one the Output committed to."
+    match sameBytes(sha256Of(script), program)
+        false -> Outcome.Decided(Ending.Failed("the witness script does not hash to the program the output committed to"))
+        true -> executed(script, stack, context)
+
+verify matchedScript
+    matchedScript([1], [81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("the witness script does not hash to the program the output committed to"))
+    matchedScript(sha256Of([81]), [81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+
+fn sameBytes(left: List<Int>, right: List<Int>) -> Bool
+    ? "Whether two byte strings are the same."
+      "Written out rather than compared where it is used, to work around"
+      "jasisz/aver#1037: comparing a call result with a parameter verifies"
+      "and then emits Rust that will not compile, because the call returns an"
+      "owned list and the parameter is a borrow. Both sides being parameters"
+      "makes them both borrows and the comparison legal. Delete this the"
+      "moment the fix lands upstream."
+    left == right
+
+verify sameBytes
+    sameBytes([1, 2], [1, 2]) => true
+    sameBytes([1, 2], [1, 3]) => false
+    sameBytes([], []) => true
+
+fn sha256Of(script: List<Int>) -> List<Int>
+    ? "A single SHA-256 of a Script, as the thirty-two byte program encodes."
+      "Total: bytes that came off a Witness stack are bytes, so the failure"
+      "branch of fromList is unreachable and hashes nothing rather than"
+      "aborting."
+    Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Result.withDefault(Bytes.fromList(script), Bytes.fromList([])))))
+
+verify sha256Of
+    List.len(sha256Of([81])) => 32
+    sha256Of([]) => Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([]))))
+
+fn executed(script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "Run the Script on the Witness stack, under BIP143's signature hash."
+      "The Script code and the signature version change together and are set"
+      "in one call, because setting one without the other computes a real"
+      "message over the wrong bytes and answers confidently and wrongly."
+    match oversized(stack)
+        Option.Some(why) -> Outcome.Decided(Ending.Failed(why))
+        Option.None -> parsed(script, stack, context)
+
+verify executed
+    executed([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    executed([81], [Domain.ScriptState.zeros(521)], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a witness item is 521 bytes, over the 520 byte limit"))
+
+fn parsed(script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "A witness Script that does not parse fails the spend rather than going"
+      "undecided: it was committed to by hash, so there is nothing further to"
+      "learn about it."
+    match Domain.ScriptParse.parse(script)
+        Result.Err(why) -> Outcome.Decided(Ending.Failed("witness script: {why}"))
+        Result.Ok(ops) -> cleanly(Domain.Interp.reach(ops, Domain.ScriptState.holding(stack), Domain.SpendContext.inWitnessV0(context, hexOf(script))))
+
+verify parsed
+    parsed([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    parsed([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("witness script: push of 2 bytes runs past the end of the script"))
+    parsed([81, 81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not 2"))
+
+fn cleanly(step: Step) -> Outcome
+    ? "Inside a Witness the stack must hold exactly one item at the end."
+      "Legacy tolerates a left-over stack under most flag sets; a witness"
+      "Script never does, and this is consensus rather than policy. Without"
+      "it a spender could push anything they liked underneath a passing"
+      "Script and the spend would still be valid, which is malleability of"
+      "the kind SegWit existed to remove."
+    match step
+        Step.Stop(outcome) -> outcome
+        Step.Continue(final) -> onlyOne(final)
+
+verify cleanly
+    cleanly(Step.Continue(Domain.ScriptState.holding([[1]]))) => Outcome.Decided(Ending.Passed)
+    cleanly(Step.Continue(Domain.ScriptState.holding([[1], [1]]))) => Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not 2"))
+    cleanly(Step.Stop(Outcome.Undecided("no"))) => Outcome.Undecided("no")
+
+fn onlyOne(final: State) -> Outcome
+    ? "One item, and it has to be true; the truth of it is the ordinary rule."
+    match List.len(final.stack) == 1
+        false -> Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not {List.len(final.stack)}"))
+        true -> Outcome.Decided(Domain.ScriptState.settled(final))
+
+verify onlyOne
+    onlyOne(Domain.ScriptState.holding([[1]])) => Outcome.Decided(Ending.Passed)
+    onlyOne(Domain.ScriptState.holding([[0]])) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    onlyOne(Domain.ScriptState.empty()) => Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not 0"))
+
+fn bytesOf(scriptHex: String) -> List<Int>
+    ? "Hexadecimal as bytes; unreadable hex is empty and matches nothing."
+      "Every caller here is handed hex that came out of the Transaction"
+      "decoder, which produced it from bytes in the first place."
+    Bytes.toList(Result.withDefault(Bytes.fromHex(scriptHex), Bytes.fromList([])))
+
+verify bytesOf
+    bytesOf("0014") => [0, 20]
+    bytesOf("zz") => []
+    bytesOf("") => []
+
+fn hexOf(script: List<Int>) -> String
+    ? "A Script back as hexadecimal, for the Script code the message is taken"
+      "over. Bytes that came off a stack are bytes, so the failure branch is"
+      "unreachable and answers with nothing rather than aborting."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(script), Bytes.fromList([])))
+
+verify hexOf
+    hexOf([0, 20]) => "0014"
+    hexOf([]) => ""
