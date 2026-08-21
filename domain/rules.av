@@ -49,7 +49,7 @@ module Rules
         "P2SH is the exception and n1bor/btc-listener#66 covers it: Core has no"
         "BIP16 Height at all, because BIP16 activated on a Block timestamp and"
         "Core now enforces P2SH everywhere with one named Block excused."
-    exposes [Rules, at, latest, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight]
+    exposes [Rules, at, latest, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
     depends [Domain.Network]
     effects []
 
@@ -58,10 +58,11 @@ record Rules
     checkLockTimeVerify: Bool
     checkSequenceVerify: Bool
     segWit: Bool
+    taproot: Bool
 
 fn at(network: Network, height: Int) -> Rules
     ? "The rules a Block at this Height on this Network was mined under."
-    Rules(payToScriptHash = height >= payToScriptHashHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = height >= segWitHeight(network))
+    Rules(payToScriptHash = height >= payToScriptHashHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = height >= segWitHeight(network), taproot = height >= taprootHeight(network))
 
 verify at
     at(Network.Mainnet, 0).payToScriptHash => false
@@ -84,6 +85,10 @@ verify at
     at(Network.Testnet, 834623).segWit => false
     at(Network.Testnet, 834624).segWit => true
     at(Network.Regtest, 0).segWit => true
+    at(Network.Mainnet, 709631).taproot => false
+    at(Network.Mainnet, 709632).taproot => true
+    at(Network.Mainnet, 481824).taproot => false
+    at(Network.Signet, 1).taproot => true
 
 fn stillNop(rules: Rules, code: Int) -> Bool
     ? "Whether this opcode had no meaning yet and was simply a NOP."
@@ -166,14 +171,39 @@ fn latest() -> Rules
       "What a Script corpus written today means, and what a caller checking a"
       "Script with no Block behind it should get. Core's own vectors are"
       "written against the current rules and are read that way."
-    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true)
+    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true, taproot = true)
 
 verify latest
     latest().payToScriptHash => true
     latest().checkLockTimeVerify => true
     latest().segWit => true
-    latest() => at(Network.Mainnet, segWitHeight(Network.Mainnet))
+    latest().taproot => true
+    latest() => at(Network.Mainnet, taprootHeight(Network.Mainnet))
     latest() => at(Network.Signet, 1)
+
+fn taprootHeight(network: Network) -> Int
+    ? "BIP341 and BIP342 came into force at this Height."
+      "Below it a version one witness program is a witness program of an"
+      "unknown version, which under consensus is spendable by anyone; above"
+      "it the same bytes are an output key and the Witness has to satisfy it."
+      "Core no longer carries the Height: Taproot activated by BIP9 and the"
+      "deployment entry has been retired. What is left is MinBIP9WarningHeight"
+      "in src/kernel/chainparams.cpp, commented 'taproot activation height +"
+      "miner confirmation window' -- 711648 on mainnet and 2013984 on testnet,"
+      "less the 2016 block window, which is where these two numbers come from."
+    match network
+        Network.Mainnet -> 709632
+        Network.Testnet -> 2011968
+        Network.Signet -> 1
+        Network.Regtest -> 0
+
+verify taprootHeight
+    taprootHeight(Network.Mainnet) => 709632
+    taprootHeight(Network.Mainnet) => 711648 - 2016
+    taprootHeight(Network.Testnet) => 2011968
+    taprootHeight(Network.Testnet) => 2013984 - 2016
+    taprootHeight(Network.Signet) => 1
+    taprootHeight(Network.Regtest) => 0
 
 fn payToScriptHashHeight(network: Network) -> Int
     ? "BIP16 became a consensus rule at this Height on mainnet, 1 April 2012."

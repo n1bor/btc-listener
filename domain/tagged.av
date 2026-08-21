@@ -1,0 +1,64 @@
+module Tagged
+    intent =
+        "BIP340's tagged hashes, which Taproot uses everywhere it hashes."
+        "A tagged hash is SHA256(SHA256(tag) || SHA256(tag) || message). The"
+        "tag is doubled rather than used once, and that is the whole design:"
+        "the two copies fill a SHA-256 block exactly, so the midstate after"
+        "them is fixed per tag and an implementation can precompute it. The"
+        "point of the construction is domain separation -- a Taproot leaf hash"
+        "and a Taproot sighash of the same bytes must not collide, because"
+        "they mean different things and one is signed."
+        "The tags are written out as their ASCII bytes rather than converted"
+        "from a String. Domain.Message has the converter and depends on"
+        "Domain.Hash, which would make a cycle out of a ten byte constant."
+    exposes [tapSighash, tapLeaf, tapBranch, tapTweak, sha256Of]
+    depends [Bytes, Crypto.Digest32]
+    effects []
+
+fn tapSighash(message: List<Int>) -> List<Int>
+    ? "The tag Taproot signature messages are hashed under."
+    taggedWith([84, 97, 112, 83, 105, 103, 104, 97, 115, 104], message)
+
+verify tapSighash
+    List.len(tapSighash([])) => 32
+    tapSighash([]) => taggedWith([84, 97, 112, 83, 105, 103, 104, 97, 115, 104], [])
+
+fn tapLeaf(message: List<Int>) -> List<Int>
+    ? "The tag a tapscript leaf is hashed under, for the Merkle tree."
+    taggedWith([84, 97, 112, 76, 101, 97, 102], message)
+
+verify tapLeaf
+    List.len(tapLeaf([])) => 32
+
+fn tapBranch(message: List<Int>) -> List<Int>
+    ? "The tag an interior Merkle node is hashed under."
+    taggedWith([84, 97, 112, 66, 114, 97, 110, 99, 104], message)
+
+verify tapBranch
+    List.len(tapBranch([])) => 32
+
+fn tapTweak(message: List<Int>) -> List<Int>
+    ? "The tag the internal key is tweaked under to give the output key."
+    taggedWith([84, 97, 112, 84, 119, 101, 97, 107], message)
+
+verify tapTweak
+    List.len(tapTweak([])) => 32
+
+fn taggedWith(tag: List<Int>, message: List<Int>) -> List<Int>
+    ? "SHA256(SHA256(tag) || SHA256(tag) || message)."
+      "Single SHA-256 throughout, not the double hash Bitcoin uses elsewhere."
+    sha256Of(List.concat(sha256Of(tag), List.concat(sha256Of(tag), message)))
+
+verify taggedWith
+    List.len(taggedWith([84], [1, 2])) => 32
+    taggedWith([84], []) => sha256Of(List.concat(sha256Of([84]), sha256Of([84])))
+
+fn sha256Of(bytes: List<Int>) -> List<Int>
+    ? "A single SHA-256, as a list of bytes."
+      "Total: bytes that reached here came from a Transaction or a Script and"
+      "are bytes, so the failure branch of fromList is unreachable."
+    Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Result.withDefault(Bytes.fromList(bytes), Bytes.fromList([])))))
+
+verify sha256Of
+    List.len(sha256Of([])) => 32
+    sha256Of([97, 98, 99]) => Bytes.toList(Crypto.Digest32.toBytes(Crypto.sha256(Bytes.fromList([97, 98, 99]))))
