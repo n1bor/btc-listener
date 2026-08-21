@@ -682,3 +682,51 @@ known there, only the rules are not in force yet, and refusing it would refuse
 a Transaction the chain contains. Only genuinely unknown versions — and a
 version one program of the wrong width, or nested inside P2SH — reach the
 discourage.
+
+## Update: the one Height that is not Core's, and why it can stay
+
+Every activation Height in `Domain.Rules` is copied from
+`src/kernel/chainparams.cpp` except one. Core carries no BIP16 Height, because
+BIP16 did not activate on one: it activated on a Block timestamp, 1333238400,
+1 April 2012. What Core has instead is P2SH enforced everywhere with a single
+Block excused by name:
+
+```cpp
+consensus.script_flag_exceptions.emplace( // BIP16 exception
+    uint256{"00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"},
+    SCRIPT_VERIFY_NONE);
+```
+
+This engine uses 173805, the first Block after the timestamp. A Height is a
+fair approximation of a timestamp rule, but it is an approximation, and the two
+rules can disagree over Heights 170061 to 173804 — 3,744 Blocks where Core
+enforces P2SH and this engine does not. That is the lenient direction, which is
+the one worth being nervous about.
+
+The range was audited with `payToScriptHashHeight` pinned to 1, so that P2SH is
+enforced across all of it, and compared against the ordinary build:
+
+| | scripts | passed | failed | undecided | unresolved |
+|---|---|---|---|---|---|
+| Height 173805 | 353,817 | 353,817 | 0 | 0 | 0 |
+| P2SH always on | 353,817 | 353,816 | 1 | 0 | 0 |
+
+The one failure is Block **170060**, transaction
+`6a26d2ecb67f27d1fa5524763b49029d7106e91e3cc05743073461a719776192`, refused
+with `OP_CHECKMULTISIG needs 1 signatures and the item it discards` — the same
+message `Domain.SpendScript`'s own case for that transaction already pins. It
+is the Block Core excuses, it sits *below* the disputed range, and both models
+let it through for their own reasons.
+
+Inside the disputed range itself: no difference at all. Nothing undecided and
+nothing unresolved, so this is exhaustive rather than a sample — every Script
+in every Block between the two rules was run both ways.
+
+The conclusion is stronger than "no divergence found so far". Those 3,744
+Blocks are closed history; mainnet will not gain another Block at Height
+172000. The Blocks that could tell the Height apart from the exception list all
+exist already, and none of them does. Modelling Core's exception list would
+need a Block Id to reach `Rules`, and would buy nothing that can ever be
+observed on mainnet.
+
+What did need fixing was the doc comment, which claimed the Height was Core's.
