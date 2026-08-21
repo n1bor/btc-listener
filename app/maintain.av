@@ -11,7 +11,7 @@ module Maintain
         "still appending to the log while it copies would leave what it copied"
         "short of what the log holds."
     exposes [prune, txIndex, outputs, audit, migrate]
-    depends [Domain.Network, Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
+    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
@@ -227,7 +227,21 @@ fn auditRun(network: Network, dir: String, span: Span) -> Result<String, String>
         Time.now, Time.unixMs,
     ]
     counts = Infra.Audit.run(network, dir, span.from, span.to)?
-    Result.Ok("blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  unresolved {counts.unresolved}  scripts {counts.scripts.passed} passed / {counts.scripts.failed} failed / {counts.scripts.undecided} undecided  FAULTS {counts.faults}")
+    Result.Ok(summary(counts))
+
+fn summary(counts: Counts) -> String
+    ? "The line a whole run ends on."
+      "Pure and separate from the run so that both shapes of it can be"
+      "checked. That matters more than it sounds: n1bor/btc-listener#76 was"
+      "not a counting bug but a reading one -- the line ended FAULTS 0 while"
+      "a hundred failed Scripts sat earlier in it -- and a line nothing can"
+      "check is a line whose wording drifts."
+    "blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  unresolved {counts.unresolved}  scripts {counts.scripts.passed} passed / {counts.scripts.failed} failed / {counts.scripts.undecided} undecided  {Infra.Audit.standing(counts)} ({Infra.Audit.breakdown(counts)})"
+
+verify summary
+    summary(Counts(blocks = 51, transactions = 1842, resolved = 1791, coinbase = 51, unresolved = 0, faults = 0, scripts = Domain.SpendScript.Outcomes(passed = 3652, failed = 0, undecided = 0, note = Option.None))) => "blocks 51  transactions 1842  spends resolved 1791  coinbase 51  unresolved 0  scripts 3652 passed / 0 failed / 0 undecided  CLEAN (faults 0, script failures 0)"
+    summary(Counts(blocks = 51, transactions = 1842, resolved = 1791, coinbase = 51, unresolved = 0, faults = 0, scripts = Domain.SpendScript.Outcomes(passed = 3596, failed = 56, undecided = 0, note = Option.None))) => "blocks 51  transactions 1842  spends resolved 1791  coinbase 51  unresolved 0  scripts 3596 passed / 56 failed / 0 undecided  FAILED (faults 0, script failures 56)"
+    summary(Counts(blocks = 2, transactions = 3, resolved = 1, coinbase = 2, unresolved = 0, faults = 1, scripts = Domain.SpendScript.Outcomes(passed = 4, failed = 0, undecided = 0, note = Option.None))) => "blocks 2  transactions 3  spends resolved 1  coinbase 2  unresolved 0  scripts 4 passed / 0 failed / 0 undecided  FAILED (faults 1, script failures 0)"
 
 fn heights(range: List<String>) -> Option<Span>
     ? "Two whole numbers, or nothing."

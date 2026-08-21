@@ -14,7 +14,7 @@ module StackItem
         "question rather than enforced."
         "Minimal encoding is a rule about how a push was written rather than"
         "what it pushed, so it needs the opcode as well as the bytes."
-    exposes [asNumber, fromNumber, isTruthy, fitsArithmetic, isMinimalNumber, isMinimalPush, arithmeticFault, minimalFault, arithmeticFaultIn, pushFault]
+    exposes [asNumber, fromNumber, isTruthy, fitsArithmetic, isMinimalNumber, isMinimalPush, isConditionMinimal, arithmeticFault, minimalFault, arithmeticFaultIn, pushFault]
     depends [Domain.Opcode]
     effects []
 
@@ -440,3 +440,34 @@ verify pushFault
     pushFault(1, [17], true) => Option.None
     pushFault(76, [17], true) => Option.Some("push is not written the shortest way it could be")
     pushFault(0, [], true) => Option.None
+
+fn isConditionMinimal(item: List<Int>) -> Bool
+    ? "Whether OP_IF's argument is exactly true or exactly false."
+      "The empty push or a single byte holding one, and nothing else. This is"
+      "narrower than isMinimalNumber, which would accept any number written"
+      "the shortest way -- OP_IF casts to a Bool and every non-zero item casts"
+      "to true, so without this a Witness could carry any of a great many"
+      "items where a one is meant and change the Transaction Id by choosing"
+      "between them. That is what BIP147's sibling rule closes."
+    match item
+        [] -> true
+        [head, ..rest] -> onlyOne(head, rest)
+
+verify isConditionMinimal
+    isConditionMinimal([]) => true
+    isConditionMinimal([1]) => true
+    isConditionMinimal([0]) => false
+    isConditionMinimal([2]) => false
+    isConditionMinimal([1, 0]) => false
+    isConditionMinimal([129]) => false
+
+fn onlyOne(head: Int, rest: List<Int>) -> Bool
+    ? "One byte, and that byte a one."
+    match rest
+        [] -> head == 1
+        [next, ..more] -> false
+
+verify onlyOne
+    onlyOne(1, []) => true
+    onlyOne(0, []) => false
+    onlyOne(1, [0]) => false

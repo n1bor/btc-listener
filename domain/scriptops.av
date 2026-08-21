@@ -98,8 +98,8 @@ fn flowOrRest(code: Int, state: State, context: Context) -> Step
     ? "Flow control runs even inside a branch that is not being taken, because"
       "an OP_IF nested in a skipped branch still needs its OP_ENDIF."
     match code
-        99 -> opened(code, state)
-        100 -> opened(code, state)
+        99 -> opened(code, state, context)
+        100 -> opened(code, state, context)
         103 -> switched(state)
         104 -> closed(state)
         _ -> whenExecuting(code, state, context)
@@ -108,29 +108,44 @@ verify flowOrRest
     flowOrRest(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
     flowOrRest(104, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ENDIF outside an OP_IF")))
 
-fn opened(code: Int, state: State) -> Step
+fn opened(code: Int, state: State, context: Context) -> Step
     ? "OP_IF and OP_NOTIF open a branch."
       "Inside a branch not being taken nothing is popped, because the pushes"
       "that would have supplied the condition were skipped too."
     match Domain.ScriptState.executing(state.conditions)
         false -> Step.Continue(Domain.ScriptState.withConditions(state, List.prepend(false, state.conditions)))
-        true -> openedNow(code, state)
+        true -> openedNow(code, state, context)
 
 verify opened
-    opened(99, Domain.ScriptState.holding([[1]])) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
-    opened(99, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
+    opened(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    opened(99, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
 
-fn openedNow(code: Int, state: State) -> Step
+fn openedNow(code: Int, state: State, context: Context) -> Step
     ? "Take the condition off the stack and open the branch on it."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} on an empty stack")))
-        [head, ..tail] -> Step.Continue(State(stack = tail, alt = state.alt, conditions = List.prepend(Domain.ScriptState.taken(Domain.StackItem.isTruthy(head), code), state.conditions), opCount = state.opCount))
+        [head, ..tail] -> openedOn(code, head, tail, state, context)
 
 verify openedNow
-    openedNow(99, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
-    openedNow(100, Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NOTIF on an empty stack")))
-    openedNow(99, Domain.ScriptState.holding([[1]])) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
-    openedNow(100, Domain.ScriptState.holding([[1]])) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    openedNow(99, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
+    openedNow(100, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NOTIF on an empty stack")))
+    openedNow(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    openedNow(100, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+
+fn openedOn(code: Int, head: List<Int>, tail: List<List<Int>>, state: State, context: Context) -> Step
+    ? "The condition, once it is known there is one."
+      "MINIMALIF, in two halves that belong in two places:"
+      "Domain.SpendContext says whether the rule is in force here, because"
+      "that turns on the Script version as well as the flag, and"
+      "Domain.StackItem says whether the item satisfies it."
+    match Bool.and(Domain.SpendContext.minimalConditions(context), Domain.StackItem.isConditionMinimal(head) == false)
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} takes an argument that is not exactly true or false")))
+        false -> Step.Continue(State(stack = tail, alt = state.alt, conditions = List.prepend(Domain.ScriptState.taken(Domain.StackItem.isTruthy(head), code), state.conditions), opCount = state.opCount))
+
+verify openedOn
+    openedOn(99, [1], [], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    openedOn(99, [2], [], Domain.ScriptState.holding([[2]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    openedOn(99, [2], [], Domain.ScriptState.holding([[2]]), Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["P2SH", "WITNESS", "MINIMALIF"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF takes an argument that is not exactly true or false")))
 
 fn switched(state: State) -> Step
     ? "OP_ELSE flips the branch it is in."

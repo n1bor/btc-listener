@@ -240,29 +240,17 @@ fn multiAgainst(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List
       "loop changes neither: it spends keys. Taking it inside the loop built"
       "the same signature hash once per key, and a signature hash is a whole"
       "modified copy of the Transaction, so a three key check paid for three."
-      "BIP66 is asked here and only here, which is where Core asks it: inside"
-      "the loop, once there is a key to try the signature against. A signature"
-      "left over when the keys run out is never reached and never measured --"
-      "Core exits the loop on fSuccess before it looks at the encoding, and"
-      "checking them all up front would refuse Scripts it accepts."
+      "A signature left over when the keys run out is never measured for its"
+      "encoding: Core exits the loop on fSuccess before it looks, and checking"
+      "them all up front would refuse Scripts it accepts."
     match keyItems
         [] -> Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
-        [head, ..tail] -> encodedThenKeys(signature, rest, keyItems, context)
+        [head, ..tail] -> againstKeys(signature, rest, keyItems, context, messageOnce(signature, context))
 
 verify multiAgainst
     multiAgainst([], [], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
     multiAgainst([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
     multiAgainst([4, 5], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"]))) => Result.Err("signature is not strict DER")
-
-fn encodedThenKeys(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Result<Ruling, String>
-    ? "The encoding, then the keys."
-    match Domain.Checkwork.encodingFault(signature, Domain.SpendContext.rulesOf(context).strictDer)
-        Option.Some(why) -> Result.Err(why)
-        Option.None -> againstKeys(signature, rest, keyItems, context, messageOnce(signature, context))
-
-verify encodedThenKeys
-    encodedThenKeys([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
-    encodedThenKeys([4, 5], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"]))) => Result.Err("signature is not strict DER")
 
 fn messageOnce(signature: List<Int>, context: Context) -> Result<Option<String>, String>
     ? "The message this signature's hash type names, kept for a whole key loop."
@@ -282,11 +270,27 @@ fn againstKeys(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<
     ? "The key loop proper, carrying the message it does not change."
     match keyItems
         [] -> Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
-        [head, ..tail] -> multiAdvanced(ruledWith(signature, head, message), signature, rest, tail, context, message)
+        [head, ..tail] -> encodedPair(signature, head, rest, tail, context, message)
 
 verify againstKeys
     againstKeys([], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
     againstKeys([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
+
+fn encodedPair(signature: List<Int>, publicKey: List<Int>, rest: List<List<Int>>, keyRest: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Result<Ruling, String>
+    ? "Both encodings, at the top of each turn of the loop, which is where"
+      "Core checks them."
+      "The key advances every iteration -- Core's ikey++ is unconditional --"
+      "so the key measured is this turn's key and not the first one. Checking"
+      "only the first missed two of Core's cases: a P2WSH multisig whose"
+      "second key is uncompressed and whose signature is the second key's, so"
+      "the loop reaches the bad key only after the first has failed."
+    match Domain.Checkwork.pairFault(signature, publicKey, context)
+        Option.Some(why) -> Result.Err(why)
+        Option.None -> multiAdvanced(ruledWith(signature, publicKey, message), signature, rest, keyRest, context, message)
+
+verify encodedPair
+    encodedPair([], Domain.Checkwork.validKey(), [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
+    encodedPair([4, 5], Domain.Checkwork.validKey(), [], [], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"])), Result.Ok(Option.None)) => Result.Err("signature is not strict DER")
 
 fn ruledWith(signature: List<Int>, publicKey: List<Int>, message: Result<Option<String>, String>) -> Ruling
     ? "One pair, with the message already in hand."

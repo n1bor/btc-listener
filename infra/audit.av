@@ -20,7 +20,7 @@ module Audit
         "Heights. Resolving a spend reads its parent through Infra.Blocks.read"
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
-    exposes [Counts, run]
+    exposes [Counts, run, standing, breakdown]
     depends [Domain.Network, Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.print,
@@ -49,6 +49,35 @@ fn run(network: Network, dir: String, from: Int, to: Int) -> Result<Counts, Stri
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
     walk(network, store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), Infra.Pace.pacedFrom(Time.unixMs()))
+
+fn standing(counts: Counts) -> String
+    ? "One word for whether anything went wrong."
+      "There was none, and the one that looked like it -- FAULTS, last on the"
+      "line and the only capitals -- answered a narrower question. A failed"
+      "Script is not a fault -- faults are the Block and Transaction level"
+      "findings, counted apart on purpose -- but it means this engine believes"
+      "the chain contains a spend that does not verify, which is the most"
+      "serious thing this program can find. n1bor/btc-listener#76, found by an"
+      "experiment that printed '105 failed ... FAULTS 0' and read as good news."
+    match Bool.or(counts.faults > 0, counts.scripts.failed > 0)
+        true -> "FAILED"
+        false -> "CLEAN"
+
+verify standing
+    standing(zero()) => "CLEAN"
+    standing(Counts(blocks = 1, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 1, scripts = Domain.SpendScript.noOutcomes())) => "FAILED"
+    standing(Counts(blocks = 1, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Outcomes(passed = 0, failed = 1, undecided = 0, note = Option.None))) => "FAILED"
+    standing(Counts(blocks = 1, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Outcomes(passed = 9, failed = 0, undecided = 3, note = Option.None))) => "CLEAN"
+
+fn breakdown(counts: Counts) -> String
+    ? "What went wrong, for the reader who has read the standing. Both numbers"
+      "always, nought included, so the shape of the line never changes, and"
+      "the count after the word so that one of anything still reads."
+    "faults {counts.faults}, script failures {counts.scripts.failed}"
+
+verify breakdown
+    breakdown(zero()) => "faults 0, script failures 0"
+    breakdown(Counts(blocks = 1, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 2, scripts = Outcomes(passed = 0, failed = 3, undecided = 0, note = Option.None))) => "faults 2, script failures 3"
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -294,7 +323,7 @@ fn maybeReport(height: Int, counts: Counts, pace: Pace) -> Result<Pace, String>
 fn reported(height: Int, counts: Counts, pace: Pace, nowMs: Int) -> Result<Pace, String>
     ? "One progress line, and the Pace the next one measures from."
     ! [Console.print, Time.now]
-    _said = Console.print("  {Time.now()}  height {height}: {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, {counts.scripts.failed} failed scripts, {counts.faults} faults, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
+    _said = Console.print("  {Time.now()}  height {height}: {standing(counts)} ({breakdown(counts)}), {counts.blocks} blocks, {counts.transactions} transactions, {counts.resolved} spends, {counts.scripts.undecided} undecided scripts, recent {Infra.Pace.perSecond(counts.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counts.transactions - pace.lastItems, nowMs - pace.lastMs)} tx/s, overall {Infra.Pace.perSecond(counts.blocks, nowMs - pace.startedMs)} blocks/s {Infra.Pace.perSecond(counts.transactions, nowMs - pace.startedMs)} tx/s")
     Result.Ok(Infra.Pace.advanced(pace, nowMs, counts.blocks, counts.transactions))
 
 fn tallied(work: List<Work>, counts: Counts, answered: Tuple<Outcomes, List<String>>, height: Int, blockId: String) -> Counts

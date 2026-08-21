@@ -17,8 +17,8 @@ module Checkwork
         "Domain.Multisig came out of the same file for the same reason and"
         "reaches these too, which is what made the split pay for itself: two"
         "callers rather than one."
-    exposes [bytesOf, validKey, refusal, decided, answered, answeredWith, anySignature, encodingFault, oneIf]
-    depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
+    exposes [bytesOf, validKey, refusal, decided, answered, answeredWith, anySignature, pairFault, encodingFault, isCompressed, oneIf]
+    depends [Bytes, Domain.Ecdsa, Domain.Network, Domain.Opcode, Domain.Rules, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem]
     effects []
 
 fn bytesOf(values: List<Int>) -> Bytes
@@ -168,3 +168,63 @@ verify derFault
     derFault([4, 5], true) => Option.Some("signature is not strict DER")
     derFault([4, 5], false) => Option.None
     derFault(Bytes.toList(Bytes.fromHex("304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901")?), true) => Option.None
+
+fn pairFault(signature: List<Int>, publicKey: List<Int>, context: Context) -> Option<String>
+    ? "Why the rules in force refuse this pair before anything checks it."
+      "Core's order, and the order matters because the two have separate"
+      "errors: CheckSignatureEncoding then CheckPubKeyEncoding, both above"
+      "CheckECDSASignature, both returning false out of EvalScript."
+    match encodingFault(signature, Domain.SpendContext.rulesOf(context).strictDer)
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> keyFault(publicKey, context)
+
+verify pairFault
+    pairFault([], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Option.None
+    pairFault([4, 5], validKey(), Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"]))) => Option.Some("signature is not strict DER")
+    pairFault([], validKey(), Domain.SpendContext.bare(Domain.Rules.latest())) => Option.None
+
+fn keyFault(publicKey: List<Int>, context: Context) -> Option<String>
+    ? "WITNESS_PUBKEYTYPE: only compressed keys in a witness v0 spend."
+      "An uncompressed key and its compressed form spend the same coins from"
+      "different Output Scripts, so allowing both under SegWit would have"
+      "carried a choice nothing signs into the new format. Policy rather than"
+      "consensus because the v0 Blocks already contain uncompressed keys."
+      "Witness v0 only. Tapscript keys are x-only and 32 bytes, so the"
+      "question does not arise, and a legacy Script has the history."
+    match Bool.and(compressedOnly(context), isCompressed(publicKey) == false)
+        true -> Option.Some("public key is not compressed")
+        false -> Option.None
+
+verify keyFault
+    keyFault(validKey(), Domain.SpendContext.bare(Domain.Rules.latest())) => Option.None
+    keyFault([4], Domain.SpendContext.bare(Domain.Rules.latest())) => Option.None
+    keyFault([4], Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["P2SH", "WITNESS", "WITNESS_PUBKEYTYPE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => Option.Some("public key is not compressed")
+    keyFault(validKey(), Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["P2SH", "WITNESS", "WITNESS_PUBKEYTYPE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => Option.None
+
+fn compressedOnly(context: Context) -> Bool
+    ? "Whether the rule is in force here, which turns on the Script version."
+    match Domain.SpendContext.sigVersionOf(context)
+        Domain.SpendContext.SigVersion.WitnessV0 -> Domain.SpendContext.rulesOf(context).policy.witnessPubKeyType
+        Domain.SpendContext.SigVersion.Base -> false
+        Domain.SpendContext.SigVersion.Tapscript -> false
+
+verify compressedOnly
+    compressedOnly(Domain.SpendContext.bare(Domain.Rules.latest())) => false
+    compressedOnly(Domain.SpendContext.bare(Domain.Rules.underFlags(["WITNESS_PUBKEYTYPE"]))) => false
+    compressedOnly(Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["P2SH", "WITNESS", "WITNESS_PUBKEYTYPE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => true
+
+fn isCompressed(publicKey: List<Int>) -> Bool
+    ? "Thirty-three bytes beginning two or three, which is Core's"
+      "IsCompressedPubKey. The first byte carries the parity of the y"
+      "coordinate the other thirty-two do not."
+    match publicKey
+        [] -> false
+        [head, ..rest] -> Bool.and(List.len(rest) == 32, Bool.or(head == 2, head == 3))
+
+verify isCompressed
+    isCompressed([]) => false
+    isCompressed(validKey()) => true
+    isCompressed([4]) => false
+    isCompressed(List.prepend(4, Domain.ScriptState.zeros(32))) => false
+    isCompressed(List.prepend(3, Domain.ScriptState.zeros(32))) => true
+    isCompressed(List.prepend(2, Domain.ScriptState.zeros(31))) => false

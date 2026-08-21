@@ -27,7 +27,7 @@ module Witness
         "true item at the end. That last one is stricter than legacy, where a"
         "left-over stack is tolerated -- inside a Witness it never is."
     exposes [spend, nested]
-    depends [Bytes, Crypto.Digest32, Domain.Interp, Domain.Network, Domain.Rules, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Taproot]
+    depends [Bytes, Crypto.Digest32, Domain.Interp, Domain.Network, Domain.Policy, Domain.Rules, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Taproot]
     effects []
 
 fn spend(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -132,7 +132,7 @@ fn byVersion(program: List<Int>, version: Int, isP2sh: Bool, context: Context) -
     match version
         0 -> versionZero(program, context)
         1 -> versionOne(program, isP2sh, context)
-        _ -> upgradable()
+        _ -> upgradable(context)
 
 verify byVersion
     byVersion([1, 2], 2, false, spending([])) => Outcome.Decided(Ending.Passed)
@@ -140,7 +140,7 @@ verify byVersion
     byVersion([1, 2], 1, false, spending([])) => Outcome.Decided(Ending.Passed)
     byVersion([1, 2], 16, false, Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
 
-fn upgradable() -> Outcome
+fn upgradable(context: Context) -> Outcome
     ? "A witness program of a version nobody has defined is spendable by"
       "anyone, and this engine can say so."
       "Not a guess and not leniency. BIP141 reserved versions one through"
@@ -160,10 +160,18 @@ fn upgradable() -> Outcome
       "here. It has its own carve-out in Core so that it stays relayable"
       "rather than being caught by the policy flag, but the consensus answer"
       "is the same one every unknown program gets."
-    Outcome.Decided(Ending.Passed)
+      "The flag is modelled now, which is why this takes a Context. On the"
+      "chain it is never set -- Domain.Rules.at can only build"
+      "Domain.Policy.none() -- so an audit still gets Passed, which is the"
+      "consensus answer and the only one it may have."
+    match Domain.SpendContext.rulesOf(context).policy.discourageUpgradableWitness
+        true -> Outcome.Decided(Ending.Failed("witness program of an unknown version"))
+        false -> Outcome.Decided(Ending.Passed)
 
 verify upgradable
-    upgradable() => Outcome.Decided(Ending.Passed)
+    upgradable(Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    upgradable(Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 800000))) => Outcome.Decided(Ending.Passed)
+    upgradable(Domain.SpendContext.bare(Domain.Rules.underFlags(["P2SH", "WITNESS", "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"]))) => Outcome.Decided(Ending.Failed("witness program of an unknown version"))
 
 fn versionOne(program: List<Int>, isP2sh: Bool, context: Context) -> Outcome
     ? "Taproot, but only in the circumstances BIP341 defines it in: the"
@@ -171,14 +179,29 @@ fn versionOne(program: List<Int>, isP2sh: Bool, context: Context) -> Outcome
       "Height is at or above the activation. Fail any of those and it is a"
       "witness program of a version with no rules, undecided here until"
       "n1bor/btc-listener#65 says anyone can spend it."
-    match Bool.and(Bool.and(List.len(program) == 32, isP2sh == false), Domain.SpendContext.rulesOf(context).taproot)
-        false -> upgradable()
-        true -> needsWitness(program, context)
+    match Bool.and(List.len(program) == 32, isP2sh == false)
+        false -> upgradable(context)
+        true -> taprootOrNot(program, context)
 
 verify versionOne
     versionOne([1, 2], false, spending([])) => Outcome.Decided(Ending.Passed)
     versionOne(Domain.ScriptState.zeros(32), true, spending([])) => Outcome.Decided(Ending.Passed)
     versionOne(Domain.ScriptState.zeros(32), false, Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481824))) => Outcome.Decided(Ending.Passed)
+
+fn taprootOrNot(program: List<Int>, context: Context) -> Outcome
+    ? "A thirty-two byte version one program that was not nested inside P2SH."
+      "Below the Taproot Height it is spendable by anyone -- and the"
+      "discourage flag does not reach it, which is Core's doing and not an"
+      "oversight: that branch returns success before the flag is consulted."
+      "The shape is known there, only the rules are not in force yet, and"
+      "refusing it would refuse a Transaction the chain contains."
+    match Domain.SpendContext.rulesOf(context).taproot
+        false -> Outcome.Decided(Ending.Passed)
+        true -> needsWitness(program, context)
+
+verify taprootOrNot
+    taprootOrNot(Domain.ScriptState.zeros(32), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481824))) => Outcome.Decided(Ending.Passed)
+    taprootOrNot(Domain.ScriptState.zeros(32), Domain.SpendContext.bare(Domain.Rules.underFlags(["P2SH", "WITNESS", "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"]))) => Outcome.Decided(Ending.Passed)
 
 fn needsWitness(program: List<Int>, context: Context) -> Outcome
     ? "Taproot cannot be answered without the Transaction that carries the"

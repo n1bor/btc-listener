@@ -486,21 +486,14 @@ every case carries the verification flags Core ran it under:
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
 | `script_tests.json` Script pairs | 1118 | 1048 | 0 | 70 |
-| `script_tests.json` Witness rows | 108 | 91 | 17 | 0 |
-| `tx_valid` + `tx_invalid` | 213 | 211 | 2 | 0 |
+| `script_tests.json` Witness rows | 108 | 108 | 0 | 0 |
+| `tx_valid` + `tx_invalid` | 213 | 213 | 0 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
 
-Split by direction, which is the split that matters:
-
-| | |
-|---|---|
-| **we refuse what Core accepts** | **0** |
-| we accept what Core refuses | 19 |
-
-The nought is the one to watch — that is the direction a defect would show up
-in. Every one of the 19 in the other direction is a verification flag with no
-field yet, and each is a rule that became one after Blocks breaking it were
-already valid. See
+**Nothing disagrees, in either direction.** The seventy undecided are Script
+pairs whose answer needs a Transaction the row does not carry, which is the
+honest answer rather than a disagreement — and the direction that would matter,
+refusing what Core accepts, is nought and has always been nought. See
 [ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md) and
 [docs/core-corpora.md](docs/core-corpora.md).
 
@@ -512,16 +505,22 @@ each Input's Script pair as far as it runs.
 
 ```bash
 ./target/release/main audit ~/chain 1 20000
-  ... height 18001: 18000 blocks, 18129 transactions, 129 spends, 1008 undecided scripts, 0 failed scripts, 0 faults
-blocks 20000  transactions 20136  spends resolved 136  coinbase 20000  unresolved 0  scripts 0 passed / 0 failed / 1157 undecided  FAULTS 0
+  ... height 18001: CLEAN (faults 0, script failures 0), 18000 blocks, 18129 transactions, 129 spends, 1008 undecided scripts
+blocks 20000  transactions 20136  spends resolved 136  coinbase 20000  unresolved 0  scripts 0 passed / 0 failed / 1157 undecided  CLEAN (faults 0, script failures 0)
 ```
+
+**CLEAN** is the word to read first, and it is `FAILED` if *either* a fault or
+a failed Script was found. It used to be `FAULTS 0`, which was last on the line
+and the only capitals and answered a narrower question than it looked like: a
+failed Script is not a fault, so a run could report a hundred of them and still
+end `FAULTS 0`. It did, once, and was read as good news (#76).
 
 The two counts are over different things, which is why they differ so widely.
 **spends** counts Transactions — 136 of the 20,136 here are not coinbases.
 **scripts** counts Inputs, one Script pair each, and those 136 Transactions have
 1,157 Inputs between them.
 
-**unresolved** and **FAULTS** are separate on purpose. Over a prefix of the
+**unresolved** and **faults** are separate on purpose. Over a prefix of the
 chain every Input's parent is held, so `unresolved 0` is a real claim and
 anything else is a defect. Once a directory has been pruned that stops being
 true — a parent below the Watermark is gone deliberately — so unresolved counts

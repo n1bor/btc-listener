@@ -630,3 +630,51 @@ With the real Height restored, either side of activation:
 That experiment also turned up n1bor/btc-listener#76: the summary line ends
 `FAULTS 0` in capitals while a hundred and five failed Scripts sit earlier in
 the same line, and the first read of it was *good, no faults*.
+
+## Update — every case, and a consensus rule that was never there
+
+MINIMALIF, WITNESS_PUBKEYTYPE and DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM, which
+were the last nineteen disagreements across the three corpora.
+
+| corpus | cases | agree | disagree | undecided |
+|---|---|---|---|---|
+| `script_tests.json` Script pairs | 1118 | 1048 | **0** | 70 |
+| `script_tests.json` Witness rows | 108 | 108 | **0** | 0 |
+| `tx_valid` + `tx_invalid` | 213 | 213 | **0** | 0 |
+
+**This engine and Bitcoin Core now agree about every case in every corpus read
+here**, in both directions. The seventy undecided are Script pairs whose answer
+needs a Transaction the row does not carry, which is the honest answer and not
+a disagreement.
+
+**MINIMALIF was not implemented at all, and half of it is consensus.** Under
+witness v0 it is Policy and the flag asks for it. In tapscript BIP342 wrote it
+into consensus — there was no history to protect — so a taproot spend whose
+OP_IF takes anything but the empty push or a single one is invalid, flag or no
+flag. This engine accepted them. Signet has had Taproot since Height 1 and the
+ranges audited here contain none, which is why nothing caught it: absence of
+evidence, and the corpus was the evidence.
+
+The rule splits cleanly in two and the two halves went to two places.
+`Domain.SpendContext` answers whether it is in force, because that turns on the
+Script version; `Domain.StackItem` answers whether the item satisfies it. It is
+narrower than minimal number encoding — OP_IF casts to a Bool and every
+non-zero item casts to true, so without it a Witness could carry any of a great
+many items where a one is meant and change the Transaction Id by choosing
+between them.
+
+Two placements were got wrong first and Core's corpus said so.
+
+**The uncompressed key is measured on the turn of the loop that reaches it.**
+Checking only the first key missed two cases: a P2WSH multisig whose *second*
+key is uncompressed and whose signature is the second key's, so the loop
+reaches the bad key only after the first has failed. Core's `ikey++` is
+unconditional and `CheckPubKeyEncoding` sits at the top of the same `while`,
+so the key measured is that turn's key.
+
+**A version one program below the Taproot Height is not discouraged.** Core
+returns success from that branch before the flag is consulted: the shape is
+known there, only the rules are not in force yet, and refusing it would refuse
+a Transaction the chain contains. Only genuinely unknown versions — and a
+version one program of the wrong width, or nested inside P2SH — reach the
+discourage.

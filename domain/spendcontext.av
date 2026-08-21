@@ -27,7 +27,7 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, deletes, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    exposes [Locking, lockingOf, withoutSignatures, deletes, minimalConditions, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Domain.Network, Bytes, Domain.Bip143, Domain.Bip341, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
@@ -397,6 +397,28 @@ verify deletes
     deletes(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), []) => false
     deletes(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5152", []), [[171]]) => false
     deletes(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), "5101ab52"), [[171]]) => false
+
+fn minimalConditions(context: Context) -> Bool
+    ? "Whether OP_IF's argument has to be exactly true or exactly false here."
+      "Three answers for three versions of Script, and only one of them is a"
+      "flag. In tapscript it is consensus and always on -- BIP342 wrote it in"
+      "rather than leaving it to Policy, because there was no history to"
+      "protect. Under witness v0 it is Policy and MINIMALIF asks for it: the"
+      "Blocks contain v0 spends that break it. In a legacy Script it is not a"
+      "rule at all and never was."
+      "So a tapscript spend is refused here without any flag being set, which"
+      "is the only arm of this that an audit can reach."
+    match sigVersionOf(context)
+        SigVersion.Tapscript -> true
+        SigVersion.WitnessV0 -> rulesOf(context).policy.minimalIf
+        SigVersion.Base -> false
+
+verify minimalConditions
+    minimalConditions(bare(Domain.Rules.latest())) => false
+    minimalConditions(bare(Domain.Rules.underFlags(["MINIMALIF"]))) => false
+    minimalConditions(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "51")) => false
+    minimalConditions(inWitnessV0(committed(Domain.Rules.underFlags(["MINIMALIF"]), emptyTransaction(), 0, 5, "51", []), "51")) => true
+    minimalConditions(inTapscript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 0))) => true
 
 fn scriptCodeOf(context: Context) -> String
     ? "The Script the signature is taken over, which is the one being run:"
