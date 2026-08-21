@@ -1,0 +1,164 @@
+module Payto
+    intent =
+        "What a recognised Output Script pays to, written the way a wallet"
+        "would show it."
+        "Domain.Script says which shape a Script has; this turns that shape"
+        "into an address. They were one module until the second one needed a"
+        "Network and the first did not, and the cut is where the two questions"
+        "already differed: a P2WPKH Output is a P2WPKH Output on every chain,"
+        "and its address is not."
+        "The prefixes and version bytes are the whole of the difference. Every"
+        "Network shares the same Script shapes and the same hashes; what a"
+        "chain owns is the letters at the front, which is exactly what stops"
+        "a mainnet address being pasted into a testnet wallet."
+        "n1bor/btc-listener#34 is the other half: a directory does not yet say"
+        "which Network filled it, so the CLI still asks for mainnet and gets"
+        "mainnet. Everything below already takes the Network, so that issue is"
+        "now a question of threading one value from the directory to here."
+    exposes [describe, describeOn, addressFor, addressOn, prefixOf]
+    depends [Domain.Base58, Domain.Bech32, Domain.Network, Domain.Script]
+    effects []
+
+fn describe(scriptHex: String) -> String
+    ? "The Script's kind and the mainnet address it pays, or its hex."
+      "Mainnet because the callers cannot yet say otherwise; #34."
+    describeOn(Network.Mainnet, scriptHex)
+
+verify describe
+    describe("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => "P2PKH  1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
+    describe("0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    describe("ffff") => "nonstandard ffff"
+
+fn describeOn(network: Network, scriptHex: String) -> String
+    ? "The same, on a named Network."
+    render(network, Domain.Script.kindOf(scriptHex), scriptHex)
+
+verify describeOn
+    describeOn(Network.Mainnet, "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798") => "P2TR   bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+    describeOn(Network.Signet, "0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+    describeOn(Network.Mainnet, "51024e73") => "P2A    bc1pfeessrawgf"
+    describeOn(Network.Mainnet, "6a0b68656c6c6f20776f726c64") => "OP_RETURN 6a0b68656c6c6f20776f726c64"
+
+fn addressFor(network: Network, scriptHex: String) -> Result<String, String>
+    ? "The address alone, for a caller that has the hexadecimal and wants no"
+      "decoration."
+      "describeOn is for a person reading a Transaction and pads the kind out"
+      "so a column lines up. This is for anything comparing an address with"
+      "another address, which is what Core's key_io_valid.json does."
+    addressOn(network, Domain.Script.kindOf(scriptHex), Domain.Script.bytesOf(scriptHex))
+
+verify addressFor
+    addressFor(Network.Mainnet, "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
+    addressFor(Network.Signet, "0014751e76e8199196d454941c45d1b3a323f1433bd6") => Result.Ok("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
+    addressFor(Network.Mainnet, "6a0b68656c6c6f20776f726c64") => Result.Err("no address for OP_RETURN")
+
+fn prefixOf(network: Network) -> String
+    ? "The human-readable part a Bech32 address on this Network begins with."
+      "BIP173 names bc and tb; signet borrows testnet's, which is deliberate"
+      "-- signet is a testnet and its addresses are meant to be refused by a"
+      "mainnet wallet, not told apart from testnet's."
+    match network
+        Network.Mainnet -> "bc"
+        Network.Testnet -> "tb"
+        Network.Signet -> "tb"
+        Network.Regtest -> "bcrt"
+
+verify prefixOf
+    prefixOf(Network.Mainnet) => "bc"
+    prefixOf(Network.Testnet) => "tb"
+    prefixOf(Network.Signet) => "tb"
+    prefixOf(Network.Regtest) => "bcrt"
+
+fn pubKeyHashVersion(network: Network) -> Int
+    ? "The byte a base58 pay-to-public-key-hash address begins with."
+      "Nought gives a 1 and 111 gives an m or an n. Every chain but mainnet"
+      "uses the same pair, which is why a regtest address and a testnet one"
+      "are indistinguishable in base58 and are told apart only by Bech32."
+    match network
+        Network.Mainnet -> 0
+        Network.Testnet -> 111
+        Network.Signet -> 111
+        Network.Regtest -> 111
+
+verify pubKeyHashVersion
+    pubKeyHashVersion(Network.Mainnet) => 0
+    pubKeyHashVersion(Network.Testnet) => 111
+    pubKeyHashVersion(Network.Signet) => 111
+    pubKeyHashVersion(Network.Regtest) => 111
+
+fn scriptHashVersion(network: Network) -> Int
+    ? "And the byte a base58 pay-to-script-hash address begins with."
+      "Five gives a 3 and 196 gives a 2."
+    match network
+        Network.Mainnet -> 5
+        Network.Testnet -> 196
+        Network.Signet -> 196
+        Network.Regtest -> 196
+
+verify scriptHashVersion
+    scriptHashVersion(Network.Mainnet) => 5
+    scriptHashVersion(Network.Testnet) => 196
+    scriptHashVersion(Network.Signet) => 196
+    scriptHashVersion(Network.Regtest) => 196
+
+fn render(network: Network, kind: String, scriptHex: String) -> String
+    ? "An address when one could be derived, otherwise the kind and the hex."
+    match addressOn(network, kind, Domain.Script.bytesOf(scriptHex))
+        Result.Ok(address) -> "{padded(kind)} {address}"
+        Result.Err(reason) -> "{padded(kind)} {scriptHex}"
+
+verify render
+    render(Network.Mainnet, "nonstandard", "ffff") => "nonstandard ffff"
+
+fn padded(kind: String) -> String
+    ? "Pad the kind so the addresses beside it line up."
+    padRight(kind, 6)
+
+verify padded
+    padded("P2SH") => "P2SH  "
+    padded("OP_RETURN") => "OP_RETURN"
+
+fn padRight(text: String, width: Int) -> String
+    ? "Pad with spaces until the text is at least `width` characters."
+    match String.len(text) >= width
+        true -> text
+        false -> padRight(text + " ", width)
+
+verify padRight
+    padRight("ab", 4) => "ab  "
+    padRight("abcdef", 3) => "abcdef"
+
+fn addressOn(network: Network, kind: String, script: List<Int>) -> Result<String, String>
+    ? "Derive the address a recognised script pays to."
+      "The witness shapes differ only in which version the program follows,"
+      "and that version is what selects Bech32 or Bech32m."
+    program = List.drop(script, 2)
+    match kind
+        "P2PKH" -> Domain.Base58.encodeCheck(pubKeyHashVersion(network), List.take(List.drop(script, 3), 20))
+        "P2SH" -> Domain.Base58.encodeCheck(scriptHashVersion(network), List.take(program, 20))
+        "P2WPKH" -> Result.Ok(Domain.Bech32.encode(prefixOf(network), 0, program))
+        "P2WSH" -> Result.Ok(Domain.Bech32.encode(prefixOf(network), 0, program))
+        "P2TR" -> Result.Ok(Domain.Bech32.encode(prefixOf(network), 1, program))
+        _ -> laterWitnessAddress(network, kind, script)
+
+verify addressOn
+    addressOn(Network.Mainnet, "P2PKH", Domain.Script.bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
+    addressOn(Network.Mainnet, "P2SH", Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => Result.Ok("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ")
+    addressOn(Network.Mainnet, "P2WPKH", Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+    addressOn(Network.Mainnet, "P2TR", Domain.Script.bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => Result.Ok("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
+    addressOn(Network.Mainnet, "OP_RETURN", []) => Result.Err("no address for OP_RETURN")
+    addressOn(Network.Signet, "P2WPKH", Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
+    addressOn(Network.Testnet, "P2PKH", Domain.Script.bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r")
+
+fn laterWitnessAddress(network: Network, kind: String, script: List<Int>) -> Result<String, String>
+    ? "A witness program of an undefined version still has an address, and"
+      "Domain.Bech32.encode already picks Bech32m for every version above"
+      "nought, which is what BIP350 asks for."
+    match Bool.or(kind == "witness", kind == "P2A")
+        true -> Result.Ok(Domain.Bech32.encode(prefixOf(network), Domain.Script.witnessVersionOf(script), List.drop(script, 2)))
+        false -> Result.Err("no address for {kind}")
+
+verify laterWitnessAddress
+    laterWitnessAddress(Network.Mainnet, "witness", Domain.Script.bytesOf("520250ed")) => Result.Ok("bc1z2rksukkjr8")
+    laterWitnessAddress(Network.Mainnet, "P2A", Domain.Script.bytesOf("51024e73")) => Result.Ok("bc1pfeessrawgf")
+    laterWitnessAddress(Network.Mainnet, "OP_RETURN", []) => Result.Err("no address for OP_RETURN")

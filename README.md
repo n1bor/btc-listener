@@ -480,8 +480,8 @@ comes out true. Witness programs are refused before they are run now, and those
 Blocks read `0 passed / 0 failed / 6493 undecided`.
 
 Bitcoin Core's own test data is the adversarial test, and nothing written here
-would be half as unkind. Four files are read, 1,946 cases between them, and
-every case carries the verification flags Core ran it under:
+would be half as unkind. Five files are read, 2,000 cases between them, and
+every Script case carries the verification flags Core ran it under:
 
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
@@ -489,6 +489,7 @@ every case carries the verification flags Core ran it under:
 | `script_tests.json` Witness rows | 108 | 108 | 0 | 0 |
 | `tx_valid` + `tx_invalid` | 213 | 213 | 0 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
+| `key_io_valid.json` | 54 | 54 | 0 | 0 |
 
 **Nothing disagrees, in either direction.** The seventy undecided are Script
 pairs whose answer needs a Transaction the row does not carry, which is the

@@ -6,55 +6,9 @@ module Script
         "plus an encoding, never a hash of a public key."
         "Anything unrecognised keeps its hex: guessing at a script that does not"
         "match a known shape would be worse than saying so."
-    exposes [describe, kindOf, isAnyWitnessProgram, isPayToScriptHash, isPushOnly, pushOnly, bytesOf]
+    exposes [kindOf, witnessVersionOf, isAnyWitnessProgram, isPayToScriptHash, isPushOnly, pushOnly, bytesOf]
     depends [Bytes, Domain.Base58, Domain.Bech32, Domain.ScriptParse]
     effects []
-
-fn mainnetPrefix() -> String
-    ? "The human-readable part of a mainnet SegWit address."
-    "bc"
-
-verify mainnetPrefix
-    mainnetPrefix() => "bc"
-
-fn describe(scriptHex: String) -> String
-    ? "The script's kind and the address it pays, or its hex when unrecognised."
-    render(kindOf(scriptHex), scriptHex)
-
-verify describe
-    describe("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac") => "P2PKH  1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
-    describe("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087") => "P2SH   32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ"
-    describe("0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-    describe("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798") => "P2TR   bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
-    describe("6a0b68656c6c6f20776f726c64") => "OP_RETURN 6a0b68656c6c6f20776f726c64"
-    describe("ffff") => "nonstandard ffff"
-
-fn render(kind: String, scriptHex: String) -> String
-    ? "An address when one could be derived, otherwise the kind and the hex."
-    match addressOf(kind, bytesOf(scriptHex))
-        Result.Ok(address) -> "{padded(kind)} {address}"
-        Result.Err(reason) -> "{padded(kind)} {scriptHex}"
-
-verify render
-    render("nonstandard", "ffff") => "nonstandard ffff"
-
-fn padded(kind: String) -> String
-    ? "Pad the kind so the addresses beside it line up."
-    padRight(kind, 6)
-
-verify padded
-    padded("P2SH") => "P2SH  "
-    padded("OP_RETURN") => "OP_RETURN"
-
-fn padRight(text: String, width: Int) -> String
-    ? "Pad with spaces until the text is at least `width` characters."
-    match String.len(text) >= width
-        true -> text
-        false -> padRight(text + " ", width)
-
-verify padRight
-    padRight("ab", 4) => "ab  "
-    padRight("abcdef", 3) => "abcdef"
 
 fn bytesOf(scriptHex: String) -> List<Int>
     ? "The script as bytes; unreadable hex simply matches nothing."
@@ -125,16 +79,66 @@ verify classify
 
 fn versionOneOrMultisig(script: List<Int>) -> String
     ? "A leading OP_1 opens a version-one witness program or a bare multisig."
-      "The two share their first byte and nothing else, so the length settles it:"
-      "a Taproot output is OP_1 and a thirty-two byte push and stops there."
+      "The two share their first byte and nothing else, so the shape settles"
+      "it: a Taproot output is OP_1 and a thirty-two byte push and stops"
+      "there."
+      "Thirty-two is not the only width a version one program may have, which"
+      "is the whole of n1bor/btc-listener#71. BIP141 allows two to forty for"
+      "every version, and this branch used to accept thirty-four bytes or"
+      "nothing -- so OP_16 and a two byte push was called a witness program"
+      "and OP_1 and a two byte push was called nonstandard, which is the same"
+      "shape judged two ways."
     match isWitnessProgram(script, 81, 34)
         true -> "P2TR"
-        false -> multisigOrNot(script)
+        false -> anchorOrLater(script)
 
 verify versionOneOrMultisig
     versionOneOrMultisig(bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => "P2TR"
+    versionOneOrMultisig(bytesOf("51024e73")) => "P2A"
+    versionOneOrMultisig(bytesOf("510250ed")) => "witness"
     versionOneOrMultisig(bytesOf("514104cc71eb30d653c0c3163990c47b976f3fb3f37cccdcbedb169a1dfef58bbfbfaff7d8a473e7e2e6d317b87bafe8bde97e3cf8f065dec022b51d11fcdd0d348ac4410461cbdcc5409fb4b4d42b51d33381354d80e550078cb532a34bfa2fcfdeb7d76519aecc62770f5b0e4ef8551946d8a540911abe3e7854a26f39f58b25c15342af52ae")) => "P2MS"
     versionOneOrMultisig(bytesOf("5100")) => "nonstandard"
+
+fn anchorOrLater(script: List<Int>) -> String
+    ? "A version one program that is not thirty-two bytes wide."
+      "Still a witness program, still anyone-can-spend under consensus, still"
+      "with a perfectly good Bech32m address. Only its width says Taproot"
+      "does not claim it."
+    match looksLikeWitness(script)
+        true -> anchorOrWitness(script)
+        false -> multisigOrNot(script)
+
+verify anchorOrLater
+    anchorOrLater(bytesOf("51024e73")) => "P2A"
+    anchorOrLater(bytesOf("510250ed")) => "witness"
+    anchorOrLater(bytesOf("5100")) => "nonstandard"
+
+fn anchorOrWitness(script: List<Int>) -> String
+    ? "Core's pay-to-anchor, which is one particular version one program."
+      "OP_1 and a push of the two bytes 0x4e73, and nothing else -- Core's"
+      "CScript::IsPayToAnchor. It was given a carve-out so that it stays"
+      "relayable rather than being caught by the upgradable-witness policy"
+      "flag, which makes it the one program of an undefined version that is"
+      "standard. Worth a name of its own for that reason: consensus treats it"
+      "like any other, and Policy does not."
+      "Written byte by byte rather than as a comparison against the four"
+      "bytes, which is how Core writes it too -- and which this has to do"
+      "anyway: comparing a parameter with a call result verifies and then"
+      "emits Rust that will not compile, jasisz/aver#1060."
+    match Bool.and(programWidth(script) == 2, Bool.and(byteAt(script, 2) == 78, byteAt(script, 3) == 115))
+        true -> anchorName()
+        false -> witnessName()
+
+verify anchorOrWitness
+    anchorOrWitness(bytesOf("51024e73")) => "P2A"
+    anchorOrWitness(bytesOf("510250ed")) => "witness"
+
+fn anchorName() -> String
+    ? "What Core calls it, spelled the way this file spells the other kinds."
+    "P2A"
+
+verify anchorName
+    anchorName() => "P2A"
 
 fn multisigOrNot(script: List<Int>) -> String
     ? "Bare multisig: OP_m, the keys, OP_n, OP_CHECKMULTISIG."
@@ -306,38 +310,6 @@ verify isWitnessProgram
     isWitnessProgram(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"), 0, 22) => true
     isWitnessProgram(bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"), 0, 34) => false
 
-fn addressOf(kind: String, script: List<Int>) -> Result<String, String>
-    ? "Derive the address a recognised script pays to."
-      "The witness shapes differ only in which version the program follows,"
-      "and that version is what selects Bech32 or Bech32m."
-    program = List.drop(script, 2)
-    match kind
-        "P2PKH" -> Domain.Base58.encodeCheck(Domain.Base58.pubKeyHashVersion(), List.take(List.drop(script, 3), 20))
-        "P2SH" -> Domain.Base58.encodeCheck(Domain.Base58.scriptHashVersion(), List.take(program, 20))
-        "P2WPKH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
-        "P2WSH" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 0, program))
-        "P2TR" -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), 1, program))
-        _ -> laterWitnessAddress(kind, script)
-
-fn laterWitnessAddress(kind: String, script: List<Int>) -> Result<String, String>
-    ? "A witness program of an undefined version still has an address, and"
-      "Domain.Bech32.encode already picks Bech32m for every version above"
-      "nought, which is what BIP350 asks for."
-    match kind == witnessName()
-        true -> Result.Ok(Domain.Bech32.encode(mainnetPrefix(), witnessVersionOf(script), List.drop(script, 2)))
-        false -> Result.Err("no address for {kind}")
-
-verify laterWitnessAddress
-    laterWitnessAddress("witness", bytesOf("520250ed")) => Result.Ok("bc1z2rksukkjr8")
-    laterWitnessAddress("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
-
-verify addressOf
-    addressOf("P2PKH", bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")) => Result.Ok("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
-    addressOf("P2SH", bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")) => Result.Ok("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ")
-    addressOf("P2WPKH", bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")) => Result.Ok("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
-    addressOf("P2TR", bytesOf("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")) => Result.Ok("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
-    addressOf("OP_RETURN", []) => Result.Err("no address for OP_RETURN")
-
 fn isAnyWitnessProgram(scriptHex: String) -> Bool
     ? "Whether this Output is a witness program of any version, as BIP141 has it."
       "A different question from kindOf, which names the three shapes anyone"
@@ -415,6 +387,7 @@ verify pushOnly
     pushOnly([]) => true
     pushOnly([Op.Code(81), Op.Push(2, [1, 2])]) => true
     pushOnly([Op.Code(118)]) => false
+
 fn pushOnlyFrom(soFar: Bool, rest: List<Op>) -> Bool
     ? "The rest of the Ops, once the one before them has been judged. Split"
       "out so that neither half holds a call open while the other runs."
@@ -426,6 +399,7 @@ verify pushOnlyFrom
     pushOnlyFrom(false, []) => false
     pushOnlyFrom(true, []) => true
     pushOnlyFrom(true, [Op.Code(118)]) => false
+
 fn isPush(op: Op) -> Bool
     ? "One Op, by the same rule."
     match op

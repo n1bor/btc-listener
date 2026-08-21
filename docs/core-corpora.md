@@ -15,8 +15,9 @@ blocks each one.
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
 | `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
 | BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 7 | hand-extracted, keyPathSpending |
+| `key_io_valid.json` | `domain/keyiocases.av` | 54 | `tools/key_io_to_aver.py` |
 
-Between them, 1946 cases out of a corpus of 4327.
+Between them, 2000 cases out of a corpus of 4327.
 
 ## The discipline, and what these corpora are not
 
@@ -219,6 +220,33 @@ Two shapes in Core's Transaction data need care and the tool handles both:
 * A prevout may carry a fourth element, the amount, which SegWit needs. It
   defaults to zero.
 
+## `key_io_valid.json` is the second conformance corpus
+
+`tools/key_io_to_aver.py` writes the 54 address entries into
+`domain/keyiocases.av`. Like `sighash.json` and unlike the other three, **Core
+supplies the answer** — each entry is an address, the Output Script hex it
+stands for, and metadata naming the chain — so this is a conformance test, and
+a case that fails means this engine and Bitcoin Core disagree about an address.
+
+```
+python3 tools/key_io_to_aver.py --fetch
+python3 tools/key_io_to_aver.py --emit
+python3 tools/key_io_to_aver.py --check    # regenerate and diff
+```
+
+All 54 pass. Two things are worth saying about the split:
+
+* **Every Network in the file is read**, not just mainnet. That is most of the
+  value: base58 cannot tell testnet, signet and regtest apart — they share both
+  version bytes — so the prefixes are only really tested by the Bech32 entries,
+  and those are the forty this corpus adds.
+* Core's `testnet4` reads as `Network.Testnet` here. The fork changed the
+  genesis Block and the difficulty rules, not the letters at the front of an
+  address.
+
+The 16 private-key entries are skipped and the count is in the module intent.
+They are WIF, and this project has no notion of a key — only of Scripts.
+
 ## The probe is written in parts, and why
 
 Every probe splits its cases into `part1()`, `part2()` … joined by
@@ -280,7 +308,6 @@ files match.
 
 | Core file | what it is | what blocks it |
 |---|---|---|
-| `key_io_valid.json` | addresses beside the Output Script they stand for | **nothing** — 14 mainnet entries run today, 12 match, 2 do not (#54) |
 | `key_io_invalid.json` | strings that must not decode as addresses | `Domain.Base58` and `Domain.Bech32` are encode-only; there is no decoder to point it at |
 | `base58_encode_decode.json` | raw base58, no checksum | `Domain.Base58` exposes only `encodeCheck`; the inner encoder is private |
 | `bip341_wallet_vectors.json` | Taproot key and script paths | Taproot, #12 |
@@ -288,10 +315,9 @@ files match.
 | `blockfilters.json` | BIP157/158 compact Block filters | not on the roadmap |
 | `asmap.raw` | peer ASN mapping | peer diversity, #27 at the earliest |
 
-`key_io_valid.json` is the one worth taking now. Core gives each entry as an
-address string, the Output Script hex it stands for, and metadata naming the
-chain — so `Domain.Script.describe` is exactly the function under test, and the
-entries are already split by network for when #34 gives a directory one.
+`key_io_invalid.json` is the one worth taking next, and #72 says what it costs:
+a decoder. Every address this project prints is produced by code no vector has
+contradicted, because there is nothing to feed a string to.
 
 ## What each corpus can and cannot express
 
