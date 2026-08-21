@@ -17,7 +17,7 @@ module Checkwork
         "Domain.Multisig came out of the same file for the same reason and"
         "reaches these too, which is what made the split pay for itself: two"
         "callers rather than one."
-    exposes [bytesOf, validKey, refusal, decided, answered, oneIf]
+    exposes [bytesOf, validKey, refusal, decided, answered, answeredWith, anySignature, oneIf]
     depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
     effects []
 
@@ -91,3 +91,50 @@ fn decided(two: Two, messageHex: String) -> Ruling
 
 verify decided
     decided(Two(first = validKey(), second = [4, 5], rest = []), "zz") => Domain.Ecdsa.Ruling.Undecidable("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn answeredWith(code: Int, outcome: Bool, signatures: List<List<Int>>, rest: List<List<Int>>, state: State, nullFail: Bool) -> Step
+    ? "The same answer, unless NULLFAIL objects to how it was reached."
+      "BIP146: a signature check that comes out false must have been handed"
+      "the empty push. Anything else is a signature that was meant to check"
+      "and does not, and the only reason to put one there is that it can be"
+      "altered without changing what the Script does -- which changes the"
+      "Transaction Id and nothing else."
+      "A list rather than one signature because OP_CHECKMULTISIG has several"
+      "and Core requires all of them empty when the check as a whole failed."
+      "OP_CHECKSIG passes a list of one, so there is one rule and one path."
+    match Bool.and(Bool.and(outcome == false, nullFail), anySignature(signatures))
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} was given a signature that does not check and is not empty")))
+        false -> answered(code, outcome, rest, state)
+
+verify answeredWith
+    answeredWith(172, true, [[4, 5]], [], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    answeredWith(172, false, [[]], [], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[]]))
+    answeredWith(172, false, [[4, 5]], [], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[]]))
+    answeredWith(172, false, [[4, 5]], [], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG was given a signature that does not check and is not empty")))
+    answeredWith(174, false, [[], [4]], [], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG was given a signature that does not check and is not empty")))
+
+fn anySignature(items: List<List<Int>>) -> Bool
+    ? "Whether any of these items has a byte in it."
+      "Matched apart rather than measured, because a length is a walk of the"
+      "whole list and the first byte settles it."
+    match items
+        [] -> false
+        [head, ..tail] -> presentOrNext(head, tail)
+
+verify anySignature
+    anySignature([]) => false
+    anySignature([[]]) => false
+    anySignature([[], []]) => false
+    anySignature([[4]]) => true
+    anySignature([[], [4]]) => true
+
+fn presentOrNext(head: List<Int>, tail: List<List<Int>>) -> Bool
+    ? "This one, or whatever is in the ones after it."
+    match head
+        [] -> anySignature(tail)
+        [byte, ..more] -> true
+
+verify presentOrNext
+    presentOrNext([], []) => false
+    presentOrNext([4], []) => true
+    presentOrNext([], [[4]]) => true

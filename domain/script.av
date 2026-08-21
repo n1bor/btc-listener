@@ -6,8 +6,8 @@ module Script
         "plus an encoding, never a hash of a public key."
         "Anything unrecognised keeps its hex: guessing at a script that does not"
         "match a known shape would be worse than saying so."
-    exposes [describe, kindOf, isAnyWitnessProgram, isPayToScriptHash, bytesOf]
-    depends [Bytes, Domain.Base58, Domain.Bech32]
+    exposes [describe, kindOf, isAnyWitnessProgram, isPayToScriptHash, isPushOnly, pushOnly, bytesOf]
+    depends [Bytes, Domain.Base58, Domain.Bech32, Domain.ScriptParse]
     effects []
 
 fn mainnetPrefix() -> String
@@ -384,3 +384,55 @@ verify isVersionByte
     isVersionByte(96) => true
     isVersionByte(97) => false
     isVersionByte(80) => false
+
+fn isPushOnly(scriptHex: String) -> Bool
+    ? "Whether this Script only puts things on the stack."
+      "A Script that will not parse is not push-only, which is Core's answer"
+      "too: CScript::IsPushOnly walks with GetOp and returns false the moment"
+      "it cannot read the next opcode. So a truncated push is refused here"
+      "rather than reaching a parser that would refuse it anyway -- the same"
+      "verdict, one step earlier."
+    match Domain.ScriptParse.opsIn(scriptHex)
+        Result.Err(why) -> false
+        Result.Ok(ops) -> pushOnly(ops)
+
+verify isPushOnly
+    isPushOnly("") => true
+    isPushOnly("51") => true
+    isPushOnly("0102") => true
+    isPushOnly("76") => false
+    isPushOnly("02aa") => false
+
+fn pushOnly(ops: List<Op>) -> Bool
+    ? "Whether every Op only puts something on the stack. OP_0 through OP_16"
+      "and OP_1NEGATE are pushes despite being Codes, which is why the test is"
+      "on the opcode number rather than on the constructor."
+    match ops
+        [] -> true
+        [head, ..tail] -> pushOnlyFrom(isPush(head), tail)
+
+verify pushOnly
+    pushOnly([]) => true
+    pushOnly([Op.Code(81), Op.Push(2, [1, 2])]) => true
+    pushOnly([Op.Code(118)]) => false
+fn pushOnlyFrom(soFar: Bool, rest: List<Op>) -> Bool
+    ? "The rest of the Ops, once the one before them has been judged. Split"
+      "out so that neither half holds a call open while the other runs."
+    match soFar
+        false -> false
+        true -> pushOnly(rest)
+
+verify pushOnlyFrom
+    pushOnlyFrom(false, []) => false
+    pushOnlyFrom(true, []) => true
+    pushOnlyFrom(true, [Op.Code(118)]) => false
+fn isPush(op: Op) -> Bool
+    ? "One Op, by the same rule."
+    match op
+        Op.Push(code, bytes) -> true
+        Op.Code(code) -> code <= 96
+
+verify isPush
+    isPush(Op.Push(2, [1, 2])) => true
+    isPush(Op.Code(96)) => true
+    isPush(Op.Code(97)) => false

@@ -519,3 +519,48 @@ is the machinery `Domain.ScriptMath`'s intent explicitly says is not its.
 `Domain.Multisig` holds OP_CHECKMULTISIG, which is a different shape from every
 other opcode — variable depth, its own opcode charge, and a matching loop with
 consensus written into its order.
+
+## Update — the rest of the Script flags, and a consensus rule they found
+
+DISCOURAGE_UPGRADABLE_NOPS, SIGPUSHONLY and NULLFAIL, which between them are
+16 of the 24 disagreements left after MINIMALDATA.
+
+```
+cases 1118   agree 1009 → 1026   disagree 24 → 8   undecided 85 → 84
+
+  we accept what Core refuses  8
+  we refuse what Core accepts  0
+```
+
+**Every disagreement left is `SIG_DER`**, which is #22.
+
+The three rules are small. DISCOURAGE_UPGRADABLE_NOPS refuses OP_NOP1 and
+OP_NOP4 to OP_NOP10 — not OP_NOP, which is spelled for doing nothing and is not
+going to become anything, and Core has the two in separate cases of the same
+switch for that reason. SIGPUSHONLY refuses an Input Script that does anything
+but push, asked first of everything because Core asks it at the top of
+`VerifyScript`. NULLFAIL requires a signature check that came out false to have
+been handed the empty push; for OP_CHECKMULTISIG that is *every* signature, not
+just the one that failed, which is what the `ikey2` counter in Core's cleanup
+loop is for.
+
+**What they found is worth more than the three of them.** SIGPUSHONLY only
+accounted for one of the four cases Core marks `SIG_PUSHONLY`. The other three
+carry flags `P2SH` and `P2SH,STRICTENC` — they never turn SIGPUSHONLY on at
+all. They are BIP16:
+
+```cpp
+if ((flags & SCRIPT_VERIFY_P2SH) && scriptPubKey.IsPayToScriptHash())
+{
+    // scriptSig must be literals-only or validation fails
+    if (!scriptSig.IsPushOnly())
+        return set_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
+```
+
+This engine knew the rule and drew the wrong conclusion from it. It used
+push-only as one of the conditions for *deciding whether to re-run the redeem
+Script* — so an Input Script that broke it was quietly treated as not a P2SH
+spend at all, and the answer stopped at the outer run, which hashes the top
+item, compares it, leaves true and passes. Core fails it. A consensus rule,
+misread as a classification rather than a refusal, and the third one this
+sequence has turned up by implementing a Policy rule next to it.

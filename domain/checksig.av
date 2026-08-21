@@ -129,7 +129,7 @@ fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
       "uses and also the only order that works: an empty signature has no hash"
       "type byte to build a message with."
     match Domain.Checkwork.refusal(two.second, two.first)
-        Option.Some(why) -> Domain.Checkwork.answered(code, false, two.rest, state)
+        Option.Some(why) -> Domain.Checkwork.answeredWith(code, false, [two.second], two.rest, state, Domain.SpendContext.rulesOf(context).policy.nullFail)
         Option.None -> againstMessage(code, two, state, context)
 
 verify singleOn
@@ -165,34 +165,34 @@ fn pastDeletion(code: Int, two: Two, state: State, context: Context, hashType: I
       "objected to and no answer about the signature is reached."
     match Bool.and(Domain.SpendContext.rulesOf(context).policy.constScriptCode, Domain.SpendContext.deletes(context, [two.second]))
         true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} deletes its own signature from the script, which CONST_SCRIPTCODE forbids")))
-        false -> overMessage(code, two, state, Domain.SpendContext.messageFor(Domain.SpendContext.withoutSignatures(context, [two.second]), hashType))
+        false -> overMessage(code, two, state, Domain.SpendContext.messageFor(Domain.SpendContext.withoutSignatures(context, [two.second]), hashType), Domain.SpendContext.rulesOf(context).policy.nullFail)
 
 verify pastDeletion
     pastDeletion(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare(Domain.Rules.latest()), 1) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
     pastDeletion(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.committed(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "5102040552", []), 1) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG deletes its own signature from the script, which CONST_SCRIPTCODE forbids")))
 
-fn overMessage(code: Int, two: Two, state: State, message: Option<String>) -> Step
+fn overMessage(code: Int, two: Two, state: State, message: Option<String>, nullFail: Bool) -> Step
     ? "The curve, asked."
       "Without a message there is nothing to ask about and the answer names"
       "the Transaction. With one, the signature, the key and the message go to"
       "Domain.Ecdsa and come back decided."
     match message
         Option.None -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
-        Option.Some(hex) -> ruled(code, two, state, Domain.Checkwork.decided(two, hex))
+        Option.Some(hex) -> ruled(code, two, state, Domain.Checkwork.decided(two, hex), nullFail)
 
 verify overMessage
-    overMessage(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.None) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
-    overMessage(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00")) => Step.Continue(Domain.ScriptState.holding([[]]))
+    overMessage(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.None, false) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
+    overMessage(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Option.Some("00"), false) => Step.Continue(Domain.ScriptState.holding([[]]))
 
-fn ruled(code: Int, two: Two, state: State, ruling: Ruling) -> Step
+fn ruled(code: Int, two: Two, state: State, ruling: Ruling, nullFail: Bool) -> Step
     ? "The Ruling turned back into a Step. Undecidable stays undecided and"
       "says so in this module's words rather than Domain.Ecdsa's, because the"
       "caller is counting opcodes and not curves."
     match ruling
         Domain.Ecdsa.Ruling.Valid -> Domain.Checkwork.answered(code, true, two.rest, state)
-        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Checkwork.answered(code, false, two.rest, state)
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Checkwork.answeredWith(code, false, [two.second], two.rest, state, nullFail)
         Domain.Ecdsa.Ruling.Undecidable(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs secp256k1"))
 
 verify ruled
-    ruled(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.Ecdsa.Ruling.Undecidable("no")) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
-    ruled(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.Ecdsa.Ruling.Invalid("no")) => Step.Continue(Domain.ScriptState.holding([[]]))
+    ruled(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.Ecdsa.Ruling.Undecidable("no"), false) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs secp256k1"))
+    ruled(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.Ecdsa.Ruling.Invalid("no"), false) => Step.Continue(Domain.ScriptState.holding([[]]))

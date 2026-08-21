@@ -9,7 +9,7 @@ module ScriptStep
         "The stack limit lives here rather than in each caller because it is"
         "checked on the way out of every opcode that grows the stack, and one"
         "place is easier to be sure of than fifteen."
-    exposes [landed, pushing, pushingMinimal, stoppedUnless, undecidedUnlessNop]
+    exposes [landed, pushing, pushingMinimal, nopped, stoppedUnless, undecidedUnlessNop]
     depends [Domain.Network, Domain.Opcode, Domain.Rules, Domain.ScriptState, Domain.StackItem]
     effects []
 
@@ -47,6 +47,30 @@ verify pushingMinimal
     pushingMinimal(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
     pushingMinimal(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
     pushingMinimal(1, [17], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[17]]))
+
+fn nopped(code: Int, state: State, rules: Rules) -> Step
+    ? "An opcode that does nothing, unless the rules object to it doing"
+      "nothing."
+      "DISCOURAGE_UPGRADABLE_NOPS refuses OP_NOP1 and OP_NOP4 to OP_NOP10,"
+      "which are the ones a future soft fork could still give a meaning to. It"
+      "does not refuse OP_NOP itself, which is spelled for exactly this and is"
+      "not going to become anything. Core has the two in separate cases of the"
+      "same switch for that reason."
+      "Refusing them is Policy rather than consensus and could not be anything"
+      "else: a Block containing one is valid, and will stay valid unless and"
+      "until a soft fork says otherwise. What the flag buys is that a wallet"
+      "cannot get such a Script relayed and so cannot come to depend on it"
+      "meaning nothing."
+    match Bool.and(rules.policy.discourageUpgradableNops, code != 97)
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} is a NOP a soft fork could still claim")))
+        false -> Step.Continue(state)
+
+verify nopped
+    nopped(97, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.empty())
+    nopped(176, Domain.ScriptState.empty(), Domain.Rules.latest()) => Step.Continue(Domain.ScriptState.empty())
+    nopped(97, Domain.ScriptState.empty(), Domain.Rules.underFlags(["DISCOURAGE_UPGRADABLE_NOPS"])) => Step.Continue(Domain.ScriptState.empty())
+    nopped(176, Domain.ScriptState.empty(), Domain.Rules.underFlags(["DISCOURAGE_UPGRADABLE_NOPS"])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NOP1 is a NOP a soft fork could still claim")))
+    nopped(185, Domain.ScriptState.empty(), Domain.Rules.underFlags(["DISCOURAGE_UPGRADABLE_NOPS"])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NOP10 is a NOP a soft fork could still claim")))
 
 fn stoppedUnless(ok: Bool, why: String, tail: List<List<Int>>, state: State) -> Step
     ? "The shape every VERIFY opcode has: consume the items, and stop when the"

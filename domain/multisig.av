@@ -177,23 +177,29 @@ fn multiPastDeletion(code: Int, keyItems: List<List<Int>>, sigItems: List<List<I
       "all of them together."
     match Bool.and(Domain.SpendContext.rulesOf(context).policy.constScriptCode, Domain.SpendContext.deletes(context, sigItems))
         true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} deletes its own signatures from the script, which CONST_SCRIPTCODE forbids")))
-        false -> multiAnswered(code, multiRuling(sigItems, keyItems, Domain.SpendContext.withoutSignatures(context, sigItems)), below, state)
+        false -> multiAnswered(code, multiRuling(sigItems, keyItems, Domain.SpendContext.withoutSignatures(context, sigItems)), sigItems, below, state, Domain.SpendContext.rulesOf(context).policy.nullFail)
 
 verify multiPastDeletion
     multiPastDeletion(174, [Domain.Checkwork.validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
     multiPastDeletion(174, [Domain.Checkwork.validKey()], [[4, 5]], [], Domain.ScriptState.empty(), Domain.SpendContext.committed(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "5102040552", [])) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG deletes its own signatures from the script, which CONST_SCRIPTCODE forbids")))
 
-fn multiAnswered(code: Int, ruling: Ruling, below: List<List<Int>>, state: State) -> Step
+fn multiAnswered(code: Int, ruling: Ruling, sigItems: List<List<Int>>, below: List<List<Int>>, state: State, nullFail: Bool) -> Step
     ? "The whole check, turned back into a Step."
+      "Every signature goes to NULLFAIL, not just the one that failed. Core"
+      "walks the arguments off the stack afterwards and refuses any non-empty"
+      "signature among them once the check as a whole has failed -- the keys"
+      "are exempt, which is what the ikey2 counter in that loop is for."
     match ruling
         Domain.Ecdsa.Ruling.Valid -> Domain.Checkwork.answered(code, true, below, state)
-        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Checkwork.answered(code, false, below, state)
+        Domain.Ecdsa.Ruling.Invalid(why) -> Domain.Checkwork.answeredWith(code, false, sigItems, below, state, nullFail)
         Domain.Ecdsa.Ruling.Undecidable(why) -> Step.Stop(Outcome.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to"))
 
 verify multiAnswered
-    multiAnswered(174, Domain.Ecdsa.Ruling.Valid, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    multiAnswered(174, Domain.Ecdsa.Ruling.Invalid("no"), [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
-    multiAnswered(174, Domain.Ecdsa.Ruling.Undecidable("no"), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Valid, [], [], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Invalid("no"), [[]], [], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[]]))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Undecidable("no"), [], [], Domain.ScriptState.empty(), false) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Invalid("no"), [[4, 5]], [], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG was given a signature that does not check and is not empty")))
+    multiAnswered(174, Domain.Ecdsa.Ruling.Invalid("no"), [[]], [], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[]]))
 
 fn multiRuling(sigItems: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Ruling
     ? "Signatures against public keys, in order, each key used at most once."
