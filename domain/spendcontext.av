@@ -17,12 +17,17 @@ module SpendContext
         "The rules travel here rather than beside, because the Context already"
         "reaches every opcode and which soft forks were in force is as much"
         "part of what a Script is run against as the Transaction is."
-        "Only legacy is here. A witness spend is refused before the engine runs"
-        "-- Domain.SpendScript stops on any witness program -- so BIP143 is not"
-        "reachable from this path and pretending otherwise would be writing a"
-        "branch nothing enters. Domain.Bip143 is written and checked; it joins"
-        "this when witness evaluation does."
-    exposes [Locking, lockingOf, withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, emptyTransaction, signedTransaction, signedScriptCode]
+        "The Witness rides here too, and this is the only place it could. A"
+        "witness spend needs three things the two Scripts do not carry: the"
+        "stack the Witness supplies, the amount, and the Transaction BIP143"
+        "commits to. The amount and the Transaction were already here for the"
+        "legacy hash, so the Witness joining them costs one field and leaves"
+        "Domain.SpendScript.check with the arity it had."
+        "It is not read yet. Domain.Checksig still routes every signature to"
+        "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
+        "is the plumbing under it, and the proof it is only plumbing is that"
+        "no answer moved when it landed."
+    exposes [Locking, lockingOf, withoutSignatures, Commitment, Context, bare, committed, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Domain.Network, Bytes, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
@@ -31,6 +36,7 @@ record Commitment
     inputIndex: Int
     amount: Int
     scriptCode: String
+    witness: List<String>
 
 record Context
     rules: Rules
@@ -44,16 +50,33 @@ verify bare
     bare(Domain.Rules.latest()).spend => Option.None
     bare(Domain.Rules.latest()).rules => Domain.Rules.latest()
 
-fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: Int, scriptCode: String) -> Context
+fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: Int, scriptCode: String, witness: List<String>) -> Context
     ? "A run of one Input of a real Transaction against the Output it claims."
       "The amount is carried even though a legacy signature hash does not use"
       "it, because BIP143 does and the Input knows it here rather than three"
-      "modules further down."
-    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode)))
+      "modules further down. The Witness is carried for the same reason and"
+      "is empty for every Input that is not a witness spend, which below the"
+      "SegWit activation is all of them."
+    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness)))
 
 verify committed
-    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => "51"
-    rulesOf(committed(Domain.Rules.at(Network.Mainnet, 1), emptyTransaction(), 0, 5, "51")) => Domain.Rules.at(Network.Mainnet, 1)
+    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => "51"
+    rulesOf(committed(Domain.Rules.at(Network.Mainnet, 1), emptyTransaction(), 0, 5, "51", [])) => Domain.Rules.at(Network.Mainnet, 1)
+    witnessOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", ["aabb", "cc"])) => ["aabb", "cc"]
+
+fn witnessOf(context: Context) -> List<String>
+    ? "The Witness stack this run has behind it, innermost item first."
+      "A Context with no spend has none, which is not the same as a spend whose"
+      "Input carried none -- but nothing downstream can tell the two apart and"
+      "nothing should need to: both mean there is no Witness to run."
+    match context.spend
+        Option.None -> []
+        Option.Some(commitment) -> commitment.witness
+
+verify witnessOf
+    witnessOf(bare(Domain.Rules.latest())) => []
+    witnessOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => []
+    witnessOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", ["aabb", "cc"])) => ["aabb", "cc"]
 
 record Locking
     version: Int
@@ -74,7 +97,7 @@ fn lockingOf(context: Context) -> Option<Locking>
 
 verify lockingOf
     lockingOf(bare(Domain.Rules.latest())) => Option.None
-    lockingOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => Option.None
+    lockingOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => Option.None
 
 fn lockingIn(commitment: Commitment) -> Option<Locking>
     ? "An Input index the Transaction does not have leaves this None rather"
@@ -84,7 +107,7 @@ fn lockingIn(commitment: Commitment) -> Option<Locking>
         Option.Some(input) -> Option.Some(Locking(version = Domain.Transaction.versionOf(commitment.transaction), lockTime = Domain.Transaction.lockTimeOf(commitment.transaction), sequence = Domain.Transaction.sequenceOf(input)))
 
 verify lockingIn
-    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "")) => Option.None
+    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [])) => Option.None
 
 fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
     ? "The Input at a position, counting down."
@@ -160,12 +183,12 @@ fn overScript(context: Context, scriptCode: String) -> Context
       "starts each one -- rather than guessed at by the caller."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness)))
 
 verify overScript
     scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
-    scriptCodeOf(overScript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51"), "52")) => "52"
-    rulesOf(overScript(committed(Domain.Rules.at(Network.Mainnet, 0), emptyTransaction(), 0, 5, "51"), "52")) => Domain.Rules.at(Network.Mainnet, 0)
+    scriptCodeOf(overScript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "52")) => "52"
+    rulesOf(overScript(committed(Domain.Rules.at(Network.Mainnet, 0), emptyTransaction(), 0, 5, "51", []), "52")) => Domain.Rules.at(Network.Mainnet, 0)
 
 fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
     ? "The same spend, over a Script code with these signatures deleted."
@@ -184,8 +207,8 @@ fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
         Result.Ok(stripped) -> overScript(context, stripped)
 
 verify withoutSignatures
-    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52"), [[171]])) => "5152"
-    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52"), [])) => "5101ab52"
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]])) => "5152"
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [])) => "5101ab52"
     scriptCodeOf(withoutSignatures(bare(Domain.Rules.latest()), [[171]])) => ""
 
 fn scriptCodeOf(context: Context) -> String
@@ -198,7 +221,7 @@ fn scriptCodeOf(context: Context) -> String
 
 verify scriptCodeOf
     scriptCodeOf(bare(Domain.Rules.latest())) => ""
-    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51")) => "51"
+    scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => "51"
 
 fn messageFor(context: Context, hashType: Int) -> Option<String>
     ? "The thirty-two byte message this signature should have been taken over,"
@@ -211,7 +234,7 @@ fn messageFor(context: Context, hashType: Int) -> Option<String>
 
 verify messageFor
     messageFor(bare(Domain.Rules.latest()), 1) => Option.None
-    messageFor(committed(Domain.Rules.latest(), signedTransaction(), 0, 0, signedScriptCode()), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageFor(committed(Domain.Rules.latest(), signedTransaction(), 0, 0, signedScriptCode(), []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
 
 fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The signature hash for one Input, or None when it cannot be built."
@@ -222,4 +245,4 @@ fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
         Result.Ok(message) -> Option.Some(message)
 
 verify messageOf
-    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode()), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
