@@ -11,11 +11,12 @@ module Payto
         "Network shares the same Script shapes and the same hashes; what a"
         "chain owns is the letters at the front, which is exactly what stops"
         "a mainnet address being pasted into a testnet wallet."
-        "n1bor/btc-listener#34 is the other half: a directory does not yet say"
-        "which Network filled it, so the CLI still asks for mainnet and gets"
-        "mainnet. Everything below already takes the Network, so that issue is"
-        "now a question of threading one value from the directory to here."
-    exposes [describe, describeOn, addressFor, addressOn, prefixOf]
+        "Where the Network comes from is the directory rather than the command"
+        "line: Infra.Chain.networkOf reads the genesis the Index was seeded"
+        "with. A word typed at a prompt can be wrong about a directory and a"
+        "genesis cannot, and the failure it prevents -- a mainnet address on a"
+        "signet Output -- is one nothing downstream would catch."
+    exposes [describe, describeOn, describeMaybe, addressFor, addressOn, prefixOf]
     depends [Domain.Base58, Domain.Bech32, Domain.Network, Domain.Script]
     effects []
 
@@ -38,6 +39,25 @@ verify describeOn
     describeOn(Network.Signet, "0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
     describeOn(Network.Mainnet, "51024e73") => "P2A    bc1pfeessrawgf"
     describeOn(Network.Mainnet, "6a0b68656c6c6f20776f726c64") => "OP_RETURN 6a0b68656c6c6f20776f726c64"
+
+fn describeMaybe(network: Option<Network>, scriptHex: String) -> String
+    ? "The same again, for a caller whose Network is only probably known."
+      "A directory says which chain filled it through the genesis it was"
+      "seeded with, and a directory seeded from a chain none of the four arms"
+      "recognises cannot have its addresses spelled -- the prefix and the"
+      "version byte are exactly what is missing. That case shows the kind and"
+      "the raw Script, which is what an unrecognised Script already gets, and"
+      "is the honest answer rather than mainnet's letters on another chain's"
+      "hash."
+    match network
+        Option.None -> "{padded(Domain.Script.kindOf(scriptHex))} {scriptHex}"
+        Option.Some(named) -> describeOn(named, scriptHex)
+
+verify describeMaybe
+    describeMaybe(Option.Some(Network.Mainnet), "0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    describeMaybe(Option.Some(Network.Signet), "0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+    describeMaybe(Option.None, "0014751e76e8199196d454941c45d1b3a323f1433bd6") => "P2WPKH 0014751e76e8199196d454941c45d1b3a323f1433bd6"
+    describeMaybe(Option.None, "ffff") => "nonstandard ffff"
 
 fn addressFor(network: Network, scriptHex: String) -> Result<String, String>
     ? "The address alone, for a caller that has the hexadecimal and wants no"

@@ -8,7 +8,7 @@ module Transaction
         "for a SegWit Transaction the marker, flag and Witnesses are excluded —"
         "which is why decoding tracks where each section began."
     exposes [decode, decodeNext, Decoded, summaryLines, amount, witnessOf, Transaction, Input, Output, versionOf, inputsOf, outputsOf, lockTimeOf, txidOf, sizeOf, isSegWitOf, previousTxidOf, previousIndexOf, sequenceOf, scriptOf, valueOf, outputScriptOf, witnessItemsOf]
-    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Payto, Domain.Script, Domain.Text]
+    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network, Domain.Payto, Domain.Script, Domain.Text]
     effects []
 
 record Input
@@ -118,9 +118,14 @@ fn outputScriptOf(output: Output) -> String
     ? "The Output's locking script, as hex."
     output.script
 
-fn summaryLines(transaction: Transaction) -> List<String>
+fn summaryLines(network: Option<Network>, transaction: Transaction) -> List<String>
     ? "How a decoded Transaction is shown to a reader."
-    List.concat(List.concat([headline(transaction), shapeLine(transaction)], inputLines(transaction.inputs, [])), outputLines(transaction.outputs, []))
+      "The Network reaches this far down only because an Output line names an"
+      "address, and an address is the one part of a Transaction that is not"
+      "the same on every chain. It is an Option because the caller reads it"
+      "off a directory rather than being told, and a directory can be seeded"
+      "from a chain none of the arms knows."
+    List.concat(List.concat([headline(transaction), shapeLine(transaction)], inputLines(transaction.inputs, [])), outputLines(network, transaction.outputs, []))
 
 fn headline(transaction: Transaction) -> String
     ? "The first line: identity, shape and size."
@@ -154,19 +159,25 @@ fn inputLine(input: Input) -> String
     ? "An Input: what it spends, and how much Witness data it carried."
     "   in  {input.previousTxid}:{input.previousIndex} seq {input.sequence} witness {List.len(input.witness)}"
 
-fn outputLines(outputs: List<Output>, acc: List<String>) -> List<String>
+fn outputLines(network: Option<Network>, outputs: List<Output>, acc: List<String>) -> List<String>
     ? "One line per Output."
     match outputs
         [] -> List.reverse(acc)
-        [head, ..tail] -> outputLines(tail, List.prepend(outputLine(head), acc))
+        [head, ..tail] -> outputLines(network, tail, List.prepend(outputLine(network, head), acc))
 
 verify outputLines
-    List.len(outputLines([], [])) => 0
-    List.len(outputLines([Output(value = 1, script = "51")], [])) => 1
+    List.len(outputLines(Option.Some(Network.Mainnet), [], [])) => 0
+    List.len(outputLines(Option.Some(Network.Mainnet), [Output(value = 1, script = "51")], [])) => 1
+    List.len(outputLines(Option.None, [Output(value = 1, script = "51")], [])) => 1
 
-fn outputLine(output: Output) -> String
+fn outputLine(network: Option<Network>, output: Output) -> String
     ? "An Output: its amount and who it pays."
-    "   out {amount(output.value)} BTC  {Domain.Payto.describe(output.script)}"
+    "   out {amount(output.value)} BTC  {Domain.Payto.describeMaybe(network, output.script)}"
+
+verify outputLine
+    outputLine(Option.Some(Network.Mainnet), Output(value = 1, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "   out 0.00000001 BTC  P2WPKH bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    outputLine(Option.Some(Network.Signet), Output(value = 1, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "   out 0.00000001 BTC  P2WPKH tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+    outputLine(Option.None, Output(value = 1, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6")) => "   out 0.00000001 BTC  P2WPKH 0014751e76e8199196d454941c45d1b3a323f1433bd6"
 
 fn amount(satoshis: Int) -> String
     ? "Satoshis rendered as BTC, with all eight decimal places."

@@ -9,8 +9,8 @@ module Chain
         "on purpose look identical in the Index, and the Prune Watermark is what"
         "tells them apart. A caller that treats them alike either re-downloads"
         "what it discarded or reports a hole where there was a decision."
-    exposes [withoutBodies, Body, Found, at, transactionAt, watermark]
-    depends [Bytes, Domain.Index, Infra.Blocks, Infra.Store]
+    exposes [withoutBodies, Body, Found, at, transactionAt, watermark, networkOf]
+    depends [Bytes, Domain.Block, Domain.Index, Domain.Network, Infra.Blocks, Infra.Store]
     effects [Disk.readText, Infra.Kv.get]
 
 type Body
@@ -23,6 +23,37 @@ record Found
     blockId: String
     parentBlockId: Option<String>
     body: Body
+
+fn networkOf(store: Store) -> Result<Option<Network>, String>
+    ? "Which Network filled this directory, from the genesis it was seeded with."
+      "Asked once when a directory opens, because a Script's address depends on"
+      "it and nothing else in the directory says. The download writes h:0 ="
+      "genesis before it asks for a single Header -- the Locator has to name"
+      "something -- so this is a fingerprint every directory already carries"
+      "rather than a new record to keep."
+      "Nothing means the Index names no Block at Height zero, or names one no"
+      "arm recognises. Both are answered by showing raw Script hex, which is"
+      "what an unrecognised Script already gets."
+    ! [Infra.Kv.get]
+    seeded = Infra.Store.get(store, Domain.Index.heightKey(0))?
+    Result.Ok(recognised(seeded))
+
+verify networkOf
+    networkOf(Infra.Store.fixture([])) => Result.Ok(Option.None)
+    networkOf(Infra.Store.fixture([("h:00000000", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")])) => Result.Ok(Option.Some(Network.Mainnet))
+    networkOf(Infra.Store.fixture([("h:00000000", "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6")])) => Result.Ok(Option.Some(Network.Signet))
+    networkOf(Infra.Store.fixture([("h:00000000", "nonsense")])) => Result.Ok(Option.None)
+
+fn recognised(seeded: Option<String>) -> Option<Network>
+    ? "A Height zero the Index does not name says as little as one it does not recognise."
+    match seeded
+        Option.None -> Option.None
+        Option.Some(genesisId) -> Domain.Block.networkOf(genesisId)
+
+verify recognised
+    recognised(Option.None) => Option.None
+    recognised(Option.Some("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")) => Option.Some(Network.Mainnet)
+    recognised(Option.Some("nonsense")) => Option.None
 
 fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
     ? "Everything known about one Height, including why its body is absent."

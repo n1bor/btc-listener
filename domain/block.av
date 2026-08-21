@@ -6,7 +6,7 @@ module Block
         "only Result here guards that length and the octet range beneath it."
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
-    exposes [BlockHeader, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, locatorHeights, getHeadersPayload]
+    exposes [BlockHeader, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, networkOf, locatorHeights, getHeadersPayload]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network, Domain.Transaction]
     effects []
 
@@ -337,6 +337,61 @@ verify genesisBlockId
     genesisBlockId(Network.Testnet) => "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
     genesisBlockId(Network.Signet) => "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
     genesisBlockId(Network.Regtest) => "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+
+fn networkOf(genesisId: String) -> Option<Network>
+    ? "Which Network a genesis Block Id names, if any of them do."
+      "The reverse of genesisBlockId, and the only fingerprint of its Network a"
+      "chain directory carries: the download seeds h:0 with it so the Locator"
+      "has something to name, so every directory already answers this without"
+      "being asked to record anything new."
+      "Nothing is an answer. A directory seeded from a chain none of the four"
+      "arms knows is not a directory whose addresses can be spelled, and"
+      "guessing mainnet is how a mainnet address ends up on a signet Output."
+    match genesisId == genesisBlockId(Network.Mainnet)
+        true -> Option.Some(Network.Mainnet)
+        false -> laterNetwork(genesisId)
+
+verify networkOf
+    networkOf(genesisBlockId(Network.Mainnet)) => Option.Some(Network.Mainnet)
+    networkOf(genesisBlockId(Network.Testnet)) => Option.Some(Network.Testnet)
+    networkOf(genesisBlockId(Network.Signet)) => Option.Some(Network.Signet)
+    networkOf(genesisBlockId(Network.Regtest)) => Option.Some(Network.Regtest)
+    networkOf("") => Option.None
+    networkOf("00") => Option.None
+
+fn laterNetwork(genesisId: String) -> Option<Network>
+    ? "The three that are not mainnet, one arm at a time."
+      "Split because a match arm cannot test four equalities at once and a"
+      "chain of them reads no worse than the nesting Aver does not have."
+    match genesisId == genesisBlockId(Network.Testnet)
+        true -> Option.Some(Network.Testnet)
+        false -> signetOrLater(genesisId)
+
+verify laterNetwork
+    laterNetwork(genesisBlockId(Network.Testnet)) => Option.Some(Network.Testnet)
+    laterNetwork(genesisBlockId(Network.Signet)) => Option.Some(Network.Signet)
+    laterNetwork("") => Option.None
+
+fn signetOrLater(genesisId: String) -> Option<Network>
+    ? "Signet, or the last arm."
+    match genesisId == genesisBlockId(Network.Signet)
+        true -> Option.Some(Network.Signet)
+        false -> regtestOrNone(genesisId)
+
+verify signetOrLater
+    signetOrLater(genesisBlockId(Network.Signet)) => Option.Some(Network.Signet)
+    signetOrLater(genesisBlockId(Network.Regtest)) => Option.Some(Network.Regtest)
+    signetOrLater("") => Option.None
+
+fn regtestOrNone(genesisId: String) -> Option<Network>
+    ? "Regtest is the last one there is; anything else names no Network here."
+    match genesisId == genesisBlockId(Network.Regtest)
+        true -> Option.Some(Network.Regtest)
+        false -> Option.None
+
+verify regtestOrNone
+    regtestOrNone(genesisBlockId(Network.Regtest)) => Option.Some(Network.Regtest)
+    regtestOrNone("") => Option.None
 
 fn headersOf(payload: List<Int>) -> Result<List<BlockHeader>, String>
     ? "Read a headers Message: a count, then that many Headers each followed by a zero."
