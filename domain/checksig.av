@@ -31,9 +31,26 @@ module Checksig
         "everything is in hand except the arithmetic. The second is the one"
         "a real spend gives, and it is the only thing left between this module"
         "and an answer."
-    exposes [step, isSignatureOpcode]
-    depends [Domain.Rules, Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Domain.Primitives]
+    exposes [step, isSignatureOpcode, answersFor]
+    depends [Domain.Rules, Domain.Tapsig, Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.SpendContext, Domain.StackItem, Domain.Primitives]
     effects []
+
+fn answersFor(code: Int, context: Context) -> Bool
+    ? "Which opcodes this module answers for, which depends on the version."
+      "OP_CHECKSIGADD exists only in tapscript. Below it the opcode is"
+      "undefined and running it makes the Script invalid, which is what"
+      "Domain.Opcode already says -- so it must not be routed here outside a"
+      "tapscript, or a pre-Taproot Script would quietly gain an opcode."
+    match Domain.SpendContext.sigVersionOf(context)
+        Domain.SpendContext.SigVersion.Tapscript -> Bool.or(isSignatureOpcode(code), code == 186)
+        Domain.SpendContext.SigVersion.Base -> isSignatureOpcode(code)
+        Domain.SpendContext.SigVersion.WitnessV0 -> isSignatureOpcode(code)
+
+verify answersFor
+    answersFor(172, Domain.SpendContext.bare(Domain.Rules.latest())) => true
+    answersFor(186, Domain.SpendContext.bare(Domain.Rules.latest())) => false
+    answersFor(186, Domain.Tapsig.spending()) => true
+    answersFor(81, Domain.Tapsig.spending()) => false
 
 fn isSignatureOpcode(code: Int) -> Bool
     ? "The four this module answers for."
@@ -48,10 +65,44 @@ verify isSignatureOpcode
 
 fn step(code: Int, state: State, context: Context) -> Step
     ? "One signature opcode against the machine."
+    match Domain.SpendContext.sigVersionOf(context)
+        Domain.SpendContext.SigVersion.Tapscript -> tapscriptStep(code, state, context)
+        Domain.SpendContext.SigVersion.Base -> legacyStep(code, state, context)
+        Domain.SpendContext.SigVersion.WitnessV0 -> legacyStep(code, state, context)
+
+fn legacyStep(code: Int, state: State, context: Context) -> Step
+    ? "One signature opcode under the two older signature versions."
     match code
         172 -> single(code, state, context)
         173 -> single(code, state, context)
         _ -> multiple(code, state, context)
+
+verify legacyStep
+    legacyStep(172, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
+
+fn tapscriptStep(code: Int, state: State, context: Context) -> Step
+    ? "BIP342 kept two of these, added one and removed two."
+      "OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY were removed rather than"
+      "left alone: their batch validation cannot be counted in advance, which"
+      "the weight budget needs, and OP_CHECKSIGADD does the same job as a sum."
+    match code
+        172 -> tapscriptSingle(code, state, context)
+        173 -> tapscriptSingle(code, state, context)
+        186 -> Domain.Tapsig.added(state, context)
+        _ -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} does not exist in tapscript")))
+
+verify tapscriptStep
+    tapscriptStep(174, Domain.ScriptState.empty(), Domain.Tapsig.spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG does not exist in tapscript")))
+    tapscriptStep(175, Domain.ScriptState.empty(), Domain.Tapsig.spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIGVERIFY does not exist in tapscript")))
+
+fn tapscriptSingle(code: Int, state: State, context: Context) -> Step
+    ? "The two items OP_CHECKSIG works on, then BIP342's rules over them."
+    match Domain.ScriptState.topTwo(state.stack, Domain.Opcode.nameOf(code))
+        Result.Err(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Result.Ok(two) -> Domain.Tapsig.checked(code, two, state, context)
+
+verify tapscriptSingle
+    tapscriptSingle(172, Domain.ScriptState.empty(), Domain.Tapsig.spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
 
 verify step
     step(172, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))

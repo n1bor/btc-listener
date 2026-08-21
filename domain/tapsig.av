@@ -1,0 +1,198 @@
+module Tapsig
+    intent =
+        "BIP342's signature opcodes, which are not the legacy ones renamed."
+        "Three differences and each is consensus. A signature that is present"
+        "and does not verify FAILS the Script rather than pushing false --"
+        "under legacy an invalid signature is merely a false, which is what"
+        "let a spender put junk in and have the Script carry on. An empty"
+        "signature is the only way to say no, and it pushes false without any"
+        "verification at all. And a public key of the wrong width is not an"
+        "error: thirty-two bytes is BIP340, zero bytes fails, and any other"
+        "width is a key version nobody has defined, which succeeds so that"
+        "defining one later is a soft fork."
+        "Core's own comment on the order calls it consensus critical and it"
+        "is: the upgradable key check comes before the emptiness check, the"
+        "Script fails on an empty signature with an invalid key, and it fails"
+        "on a non-empty invalid signature."
+        "OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY do not exist here. They"
+        "were removed rather than left alone, because their batch validation"
+        "does not fit the sigops budget, and OP_CHECKSIGADD replaces them --"
+        "a threshold is now written as a sum rather than as a loop."
+        "What is NOT here is the validation weight budget. BIP342 gives each"
+        "Witness a weight of its serialised size plus fifty and charges fifty"
+        "for every signature check that is not skipped; a Script that runs out"
+        "fails. This engine does not count it, so it would call valid a"
+        "Transaction Core calls invalid. That cannot happen on a chain: such a"
+        "Transaction is one Core rejected and is therefore in no Block. It can"
+        "happen on a crafted vector, and n1bor/btc-listener#68 is the record."
+    exposes [checked, added, spending]
+    depends [Bytes, Domain.Bip341, Domain.Opcode, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.StackItem]
+    effects []
+
+fn checked(code: Int, two: Two, state: State, context: Context) -> Step
+    ? "OP_CHECKSIG and OP_CHECKSIGVERIFY under tapscript."
+      "The top of the stack is the public key and the one below it is the"
+      "signature, the same order as legacy."
+    settled(code, ruling(code, two.second, two.first, context), two.rest, state)
+
+verify checked
+    checked(172, Two(first = [], second = [], rest = []), Domain.ScriptState.holding([[], []]), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG was given a public key of no bytes at all")))
+    checked(172, Two(first = Domain.ScriptState.zeros(32), second = [], rest = []), Domain.ScriptState.holding([[], []]), spending()) => Step.Continue(Domain.ScriptState.holding([[]]))
+
+fn spending() -> Context
+    ? "A tapscript Context over the empty Transaction, for the cases here."
+    Domain.SpendContext.inTapscript(Domain.SpendContext.committed(Domain.Rules.latest(), Domain.Bip341.emptyTransaction(), 0, 0, "", []), Domain.SpendContext.TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 0))
+
+verify spending
+    Domain.SpendContext.sigVersionOf(spending()) => Domain.SpendContext.SigVersion.Tapscript
+
+fn added(state: State, context: Context) -> Step
+    ? "OP_CHECKSIGADD: a public key, a number and a signature, and the number"
+      "comes back one higher if the signature checked."
+      "This is what replaced OP_CHECKMULTISIG. A three-of-five is now five"
+      "CHECKSIGADDs and a NUMEQUAL, which costs one byte more per key and"
+      "makes every signature check countable in advance -- which is what the"
+      "weight budget needs and what the old batch opcode could not give."
+    match Domain.ScriptState.topThree(state.stack, Domain.Opcode.nameOf(186))
+        Result.Err(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Result.Ok(three) -> counted(three, state, context)
+
+verify added
+    added(Domain.ScriptState.empty(), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD needs three items")))
+
+fn counted(three: Three, state: State, context: Context) -> Step
+    ? "The key on top, the count under it, the signature under that."
+    match ruling(186, three.third, three.first, context)
+        Answer.Fails(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Answer.Undecided(why) -> Step.Stop(Outcome.Undecided(why))
+        Answer.Answered(passed) -> Step.Continue(Domain.ScriptState.withStack(state, List.prepend(sum(three.second, passed), three.rest)))
+
+verify counted
+    counted(Three(first = [], second = [], third = [], rest = []), Domain.ScriptState.empty(), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD was given a public key of no bytes at all")))
+
+fn sum(count: List<Int>, passed: Bool) -> List<Int>
+    ? "The running count, one higher when the signature checked."
+      "Encoded the way Script numbers are, so that a NUMEQUAL against a"
+      "literal threshold compares equal."
+    Domain.StackItem.fromNumber(Domain.StackItem.asNumber(count) + oneIf(passed))
+
+verify sum
+    sum([], false) => []
+    sum([], true) => [1]
+    sum([2], true) => [3]
+
+fn oneIf(passed: Bool) -> Int
+    ? "One when it checked, nought when it did not."
+    match passed
+        true -> 1
+        false -> 0
+
+verify oneIf
+    oneIf(true) => 1
+    oneIf(false) => 0
+
+type Answer
+    Answered(Bool)
+    Fails(String)
+    Undecided(String)
+
+fn ruling(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
+    ? "BIP342's order, which Core's own comment calls consensus critical."
+      "A key of no bytes fails whatever the signature is -- including an empty"
+      "one, which is why the width is asked before the emptiness."
+    match List.len(publicKey)
+        0 -> Answer.Fails("{Domain.Opcode.nameOf(code)} was given a public key of no bytes at all")
+        32 -> overCurve(code, signature, publicKey, context)
+        _ -> Answer.Answered(List.len(signature) > 0)
+
+verify ruling
+    ruling(172, [], [], spending()) => Answer.Fails("OP_CHECKSIG was given a public key of no bytes at all")
+    ruling(186, [], [], spending()) => Answer.Fails("OP_CHECKSIGADD was given a public key of no bytes at all")
+    ruling(172, [], [1, 2, 3], spending()) => Answer.Answered(false)
+    ruling(172, [9], [1, 2, 3], spending()) => Answer.Answered(true)
+
+fn overCurve(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
+    ? "An empty signature is a plain no and never reaches the curve."
+    match List.len(signature) == 0
+        true -> Answer.Answered(false)
+        false -> shaped(code, signature, publicKey, context)
+
+verify overCurve
+    overCurve(172, [], Domain.ScriptState.zeros(32), spending()) => Answer.Answered(false)
+
+fn shaped(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
+    ? "A signature of any width but sixty-four or sixty-five fails the Script."
+    match Domain.Schnorr.hashTypeOf(hexOf(signature))
+        Result.Err(why) -> Answer.Fails(why)
+        Result.Ok(hashType) -> overMessage(code, signature, publicKey, hashType, context)
+
+verify shaped
+    shaped(172, [1], Domain.ScriptState.zeros(32), spending()) => Answer.Fails("a taproot signature is 1 bytes, which is neither 64 nor 65")
+
+fn overMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context) -> Answer
+    ? "The message, then the curve. A signature that is present and does not"
+      "verify fails the Script -- it does not push false, which is the"
+      "difference from legacy that matters most."
+    match Domain.SpendContext.messageFor(context, hashType)
+        Option.None -> Answer.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to")
+        Option.Some(digest) -> verified(code, signature, publicKey, digest)
+
+verify overMessage
+    overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 0, spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+
+fn verified(code: Int, signature: List<Int>, publicKey: List<Int>, digest: String) -> Answer
+    ? "The curve has run and there is no third answer."
+    match Domain.Schnorr.verified(hexOf(publicKey), hexOf(signature), digest)
+        true -> Answer.Answered(true)
+        false -> Answer.Fails("{Domain.Opcode.nameOf(code)} found a schnorr signature that does not verify")
+
+verify verified
+    verified(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), "00") => Answer.Fails("OP_CHECKSIG found a schnorr signature that does not verify")
+
+fn settled(code: Int, ruled: Answer, rest: List<List<Int>>, state: State) -> Step
+    ? "CHECKSIG pushes the answer; CHECKSIGVERIFY insists on it."
+    match ruled
+        Answer.Fails(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Answer.Undecided(why) -> Step.Stop(Outcome.Undecided(why))
+        Answer.Answered(passed) -> pushedOrVerified(code, passed, rest, state)
+
+verify settled
+    settled(172, Answer.Fails("no"), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
+
+fn pushedOrVerified(code: Int, passed: Bool, rest: List<List<Int>>, state: State) -> Step
+    ? "One seventy-two pushes, one seventy-three verifies."
+    match code == 173
+        false -> Step.Continue(Domain.ScriptState.withStack(state, List.prepend(truth(passed), rest)))
+        true -> insisted(passed, rest, state)
+
+verify pushedOrVerified
+    pushedOrVerified(172, true, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    pushedOrVerified(172, false, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[]]))
+
+fn insisted(passed: Bool, rest: List<List<Int>>, state: State) -> Step
+    ? "CHECKSIGVERIFY leaves nothing behind and fails if it did not check."
+    match passed
+        true -> Step.Continue(Domain.ScriptState.withStack(state, rest))
+        false -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(173)} found a signature that does not check")))
+
+verify insisted
+    insisted(true, [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+    insisted(false, [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
+
+fn truth(passed: Bool) -> List<Int>
+    ? "How Script writes true and false: one byte, or no bytes at all."
+    match passed
+        true -> [1]
+        false -> []
+
+verify truth
+    truth(true) => [1]
+    truth(false) => []
+
+fn hexOf(bytes: List<Int>) -> String
+    ? "Bytes as hexadecimal, for the curve and the shape rules."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(bytes), Bytes.fromList([])))
+
+verify hexOf
+    hexOf([0, 81]) => "0051"
+    hexOf([]) => ""

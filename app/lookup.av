@@ -6,7 +6,7 @@ module Lookup
         "to get there, so they are one path with a choice at the end rather than"
         "two paths that happen to agree."
     exposes [byTxid]
-    depends [Domain.Network, Domain.SpendScript, App.Show, Domain.Index, Domain.Rules, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Domain.Network, Domain.Rules, Domain.SpendScript, App.Show, Domain.Index, Domain.Rules, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -58,9 +58,46 @@ fn spendReport(network: Network, store: Store, blocks: BlockStore, transaction: 
       "it is the Height of the Block holding this Transaction rather than the"
       "tip: a spend is judged by the rules it was mined under."
     ! [Disk.readText, Infra.Kv.get]
-    work = Infra.Spends.resolved(store, blocks, transaction, Domain.Rules.at(network, height))?
-    answered = Infra.Spends.scriptsAcross([work], Domain.Rules.at(network, height), height, blockId)?
-    Result.Ok(List.concat(App.Show.describeSpend(transaction, work.tally), App.Show.describeScripts(onlyOutcomes(answered))))
+    rules = rulesFor(network, height)
+    work = Infra.Spends.resolved(store, blocks, transaction, rules)?
+    answered = Infra.Spends.scriptsAcross([work], rules, height, blockId)?
+    Result.Ok(List.concat(App.Show.describeSpend(transaction, work.tally), List.concat(App.Show.describeScripts(onlyOutcomes(answered)), caveat(height))))
+
+fn rulesFor(network: Network, height: Int) -> Rules
+    ? "The rules to judge this Transaction under."
+      "A Transaction reached by its Id has no Height. The Index names it by"
+      "Block, because a Block Id names one Block and a Height does not -- two"
+      "chains can both have a Block at 300000. The Block's own Height is not"
+      "in doubt once the Block is known; there is simply no map from one to"
+      "the other, so Infra.Chain.heldAt hands back minus one. Minus one is"
+      "below every activation, so asking Domain.Rules.at for it turns every"
+      "soft fork off -- and a witness program judged with SegWit off is an"
+      "anyone-can-spend push of a hash that passes."
+      "That is the lax direction and it is the dangerous one, so an unknown"
+      "Height is judged under every rule this engine knows instead. A spend"
+      "mined before a fork may then be reported undecided or failed when it"
+      "was valid; the caveat line below says so. Reporting the reverse -- a"
+      "pass for something that does not pass -- is the mistake worth avoiding."
+      "n1bor/btc-listener#67 is the real fix: the Index has no Block Id to"
+      "Height map, and adding one is a format change that belongs with the"
+      "binary Index work rather than here."
+    match height < 0
+        true -> Domain.Rules.latest()
+        false -> Domain.Rules.at(network, height)
+
+verify rulesFor
+    rulesFor(Network.Signet, 0 - 1) => Domain.Rules.latest()
+    rulesFor(Network.Mainnet, 170060) => Domain.Rules.at(Network.Mainnet, 170060)
+
+fn caveat(height: Int) -> List<String>
+    ? "Say so when the Height was not known, because the rules depend on it."
+    match height < 0
+        false -> []
+        true -> ["       (height unknown from a txid lookup, so scripts were judged under every rule this engine knows -- see n1bor/btc-listener#67)"]
+
+verify caveat
+    caveat(300000) => []
+    List.len(caveat(0 - 1)) => 1
 
 fn onlyOutcomes(answered: Tuple<Outcomes, List<String>>) -> Outcomes
     ? "One Transaction was asked about, so the Block total is its total."

@@ -27,13 +27,19 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, SigVersion, Commitment, Context, bare, committed, inWitnessV0, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    exposes [Locking, lockingOf, withoutSignatures, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Domain.Network, Bytes, Domain.Bip143, Domain.Bip341, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
 type SigVersion
     Base
     WitnessV0
+    Tapscript
+
+record TapContext
+    leafHash: String
+    annex: Option<String>
+    codeSeparatorPosition: Int
 
 record Commitment
     transaction: Transaction
@@ -43,6 +49,7 @@ record Commitment
     witness: List<String>
     sigVersion: SigVersion
     prevouts: List<Spent>
+    tap: Option<TapContext>
 
 record Context
     rules: Rules
@@ -63,7 +70,7 @@ fn committed(rules: Rules, transaction: Transaction, inputIndex: Int, amount: In
       "modules further down. The Witness is carried for the same reason and"
       "is empty for every Input that is not a witness spend, which below the"
       "SegWit activation is all of them."
-    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness, sigVersion = SigVersion.Base, prevouts = [])))
+    Context(rules = rules, spend = Option.Some(Commitment(transaction = transaction, inputIndex = inputIndex, amount = amount, scriptCode = scriptCode, witness = witness, sigVersion = SigVersion.Base, prevouts = [], tap = Option.None)))
 
 verify committed
     scriptCodeOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => "51"
@@ -80,7 +87,7 @@ fn inWitnessV0(context: Context, scriptCode: String) -> Context
       "A Context with no spend stays as it is: there is nothing to enter."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = SigVersion.WitnessV0, prevouts = commitment.prevouts)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = SigVersion.WitnessV0, prevouts = commitment.prevouts, tap = commitment.tap)))
 
 verify inWitnessV0
     sigVersionOf(inWitnessV0(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), "52")) => SigVersion.WitnessV0
@@ -99,6 +106,30 @@ verify bip143Transaction
     Domain.Transaction.versionOf(bip143Transaction()) => 1
     List.len(Domain.Transaction.inputsOf(bip143Transaction())) => 1
     List.len(Domain.Transaction.outputsOf(bip143Transaction())) => 2
+
+fn inTapscript(context: Context, tap: TapContext) -> Context
+    ? "The same spend, entered as a BIP342 tapscript leaf."
+      "The leaf hash goes in because the message commits to it: a signature"
+      "made for one leaf must not be valid under another leaf of the same"
+      "tree. The annex comes along because the message commits to that too"
+      "and only the caller that stripped it knows what it was."
+    match context.spend
+        Option.None -> context
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = commitment.scriptCode, witness = commitment.witness, sigVersion = SigVersion.Tapscript, prevouts = commitment.prevouts, tap = Option.Some(tap))))
+
+verify inTapscript
+    sigVersionOf(inTapscript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 0))) => SigVersion.Tapscript
+    sigVersionOf(inTapscript(bare(Domain.Rules.latest()), TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 0))) => SigVersion.Base
+
+fn tapOf(context: Context) -> Option<TapContext>
+    ? "The leaf being run, when this is a tapscript."
+    match context.spend
+        Option.None -> Option.None
+        Option.Some(commitment) -> commitment.tap
+
+verify tapOf
+    tapOf(bare(Domain.Rules.latest())) => Option.None
+    tapOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => Option.None
 
 fn sigVersionOf(context: Context) -> SigVersion
     ? "Which signature hash this run's signatures commit to."
@@ -122,7 +153,7 @@ fn withPrevouts(context: Context, prevouts: List<Spent>) -> Context
       "forgets gets undecided rather than a message over the wrong bytes."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = commitment.scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = prevouts)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = commitment.scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = prevouts, tap = commitment.tap)))
 
 verify withPrevouts
     prevoutsOf(withPrevouts(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), [Spent(amount = 7, script = "51")])) => [Spent(amount = 7, script = "51")]
@@ -230,7 +261,7 @@ fn lockingIn(commitment: Commitment) -> Option<Locking>
         Option.Some(input) -> Option.Some(Locking(version = Domain.Transaction.versionOf(commitment.transaction), lockTime = Domain.Transaction.lockTimeOf(commitment.transaction), sequence = Domain.Transaction.sequenceOf(input)))
 
 verify lockingIn
-    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [])) => Option.None
+    lockingIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None)) => Option.None
 
 fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
     ? "The Input at a position, counting down."
@@ -306,7 +337,7 @@ fn overScript(context: Context, scriptCode: String) -> Context
       "starts each one -- rather than guessed at by the caller."
     match context.spend
         Option.None -> context
-        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = commitment.prevouts)))
+        Option.Some(commitment) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = commitment.prevouts, tap = commitment.tap)))
 
 verify overScript
     scriptCodeOf(overScript(bare(Domain.Rules.latest()), "51")) => ""
@@ -332,6 +363,7 @@ fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
       "it was -- which is what the engine did before this existed."
     match sigVersionOf(context)
         SigVersion.WitnessV0 -> context
+        SigVersion.Tapscript -> context
         SigVersion.Base -> deletedFrom(context, signatures)
 
 fn deletedFrom(context: Context, signatures: List<List<Int>>) -> Context
@@ -382,10 +414,24 @@ fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
     match commitment.sigVersion
         SigVersion.Base -> legacyMessage(commitment, hashType)
         SigVersion.WitnessV0 -> witnessMessage(commitment, hashType)
+        SigVersion.Tapscript -> tapscriptMessage(commitment, hashType)
 
 fn legacyMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The pre-SegWit signature hash, quadratic in the size of the Transaction."
     match Domain.Sighash.legacy(commitment.transaction, commitment.inputIndex, commitment.scriptCode, hashType)
+        Result.Err(why) -> Option.None
+        Result.Ok(digest) -> Option.Some(digest)
+
+fn tapscriptMessage(commitment: Commitment, hashType: Int) -> Option<String>
+    ? "BIP341's message with BIP342's extension: the leaf being run, the key"
+      "version and where the last executed OP_CODESEPARATOR was."
+    match commitment.tap
+        Option.None -> Option.None
+        Option.Some(tap) -> tapscriptMessageWith(commitment, hashType, tap)
+
+fn tapscriptMessageWith(commitment: Commitment, hashType: Int, tap: TapContext) -> Option<String>
+    ? "The message, once the leaf is in hand."
+    match Domain.Bip341.messageWith(commitment.transaction, commitment.inputIndex, commitment.prevouts, hashType, tap.annex, Option.Some(Domain.Bip341.Extension(leafHash = tap.leafHash, keyVersion = 0, codeSeparatorPosition = tap.codeSeparatorPosition)))
         Result.Err(why) -> Option.None
         Result.Ok(digest) -> Option.Some(digest)
 
@@ -405,4 +451,4 @@ fn witnessMessage(commitment: Commitment, hashType: Int) -> Option<String>
         Result.Ok(digest) -> Option.Some(digest)
 
 verify messageOf
-    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = []), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")

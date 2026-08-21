@@ -16,7 +16,7 @@ module Taproot
         "anyway, so that giving it one later is a soft fork rather than a way"
         "to rewrite signatures already made."
     exposes [spend, annexOf, strippedOf, leafHashOf, merkleRootFrom, commits]
-    depends [Bytes, Domain.Bip341, Domain.CompactSize, Domain.Primitives, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.Tagged, Domain.Transaction]
+    depends [Bytes, Domain.Bip341, Domain.CompactSize, Domain.Interp, Domain.Primitives, Domain.Rules, Domain.Schnorr, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Tagged, Domain.Transaction]
     effects []
 
 fn spend(program: List<Int>, context: Context) -> Outcome
@@ -80,11 +80,116 @@ fn byLeafVersion(leafVersion: Int, control: String, leaf: String, stack: List<St
       "giveaway that it is not consensus."
     match leafVersion == 192
         false -> Outcome.Decided(Ending.Passed)
-        true -> Outcome.Undecided("a tapscript leaf needs BIP342, which this engine has not got")
+        true -> tapscript(control, leaf, stack, annex, context)
 
 verify byLeafVersion
-    byLeafVersion(192, "c0", "51", [], Option.None, spending([])) => Outcome.Undecided("a tapscript leaf needs BIP342, which this engine has not got")
     byLeafVersion(80, "50", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+    byLeafVersion(192, "c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+
+fn tapscript(control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "A BIP342 leaf, run against the Witness under it."
+      "OP_SUCCESS is asked first and asked of the whole Script, executed"
+      "branches or not: BIP342 says that if the Script contains one anywhere,"
+      "the spend is valid and nothing runs. That is what reserves the opcodes"
+      "for later soft forks, and it means a Script holding one need not even"
+      "parse past it."
+    match hasSuccessOpcode(bytesIn(leaf))
+        true -> Outcome.Decided(Ending.Passed)
+        false -> parsedLeaf(control, leaf, stack, annex, context)
+
+verify tapscript
+    tapscript("c0", "50", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+    tapscript("c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+    tapscript("c0", "00", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+
+fn parsedLeaf(control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "A leaf that does not parse fails the spend: it was committed to by"
+      "hash, so there is nothing further to learn about it."
+    match Domain.ScriptParse.parse(bytesIn(leaf))
+        Result.Err(why) -> Outcome.Decided(Ending.Failed("tapscript leaf: {why}"))
+        Result.Ok(ops) -> ranLeaf(ops, control, leaf, stack, annex, context)
+
+verify parsedLeaf
+    parsedLeaf("c0", "02aa", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("tapscript leaf: push of 2 bytes runs past the end of the script"))
+
+fn ranLeaf(ops: List<Op>, control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "The leaf, over the Witness stack, under BIP341's message with BIP342's"
+      "extension. The same cleanstack rule as version zero applies."
+    cleanly(Domain.Interp.reach(ops, Domain.ScriptState.holding(stackOf(stack, [])), Domain.SpendContext.inTapscript(context, Domain.SpendContext.TapContext(leafHash = hexOf(leafHashOf(leafVersionOf(control), leaf)), annex = annex, codeSeparatorPosition = 4294967295))))
+
+verify ranLeaf
+    ranLeaf([], "c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("a tapscript must leave exactly one item, not 0"))
+
+fn stackOf(hexes: List<String>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "The Witness items as bytes, top of stack first, as version zero does."
+    match hexes
+        [] -> acc
+        [head, ..tail] -> stackOf(tail, List.prepend(bytesIn(head), acc))
+
+verify stackOf
+    stackOf([], []) => []
+    stackOf(["01", "02"], []) => [[2], [1]]
+
+fn cleanly(step: Step) -> Outcome
+    ? "Inside a Witness the stack must hold exactly one true item at the end."
+    match step
+        Step.Stop(outcome) -> outcome
+        Step.Continue(final) -> onlyOne(final)
+
+verify cleanly
+    cleanly(Step.Continue(Domain.ScriptState.holding([[1]]))) => Outcome.Decided(Ending.Passed)
+    cleanly(Step.Continue(Domain.ScriptState.holding([[1], [1]]))) => Outcome.Decided(Ending.Failed("a tapscript must leave exactly one item, not 2"))
+
+fn onlyOne(final: State) -> Outcome
+    ? "One item, and it has to be true."
+    match List.len(final.stack) == 1
+        false -> Outcome.Decided(Ending.Failed("a tapscript must leave exactly one item, not {List.len(final.stack)}"))
+        true -> Outcome.Decided(Domain.ScriptState.settled(final))
+
+verify onlyOne
+    onlyOne(Domain.ScriptState.holding([[1]])) => Outcome.Decided(Ending.Passed)
+    onlyOne(Domain.ScriptState.holding([[0]])) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+
+fn hasSuccessOpcode(script: List<Int>) -> Bool
+    ? "Whether any byte of the Script is an OP_SUCCESS."
+      "Scanned as raw bytes rather than as parsed Ops, because BIP342 says a"
+      "Script containing one succeeds even if it does not parse -- the whole"
+      "point is that a future soft fork may give these opcodes operands this"
+      "parser has never heard of."
+    match script
+        [] -> false
+        [head, ..tail] -> Bool.or(isSuccessOpcode(head), hasSuccessOpcode(tail))
+
+verify hasSuccessOpcode
+    hasSuccessOpcode([]) => false
+    hasSuccessOpcode([81, 82]) => false
+    hasSuccessOpcode([81, 80]) => true
+    hasSuccessOpcode([187]) => true
+
+fn isSuccessOpcode(code: Int) -> Bool
+    ? "BIP342's OP_SUCCESS set: 80, 98, 126 to 129, 131 to 134, 137 and 138,"
+      "141 and 142, 149 to 153, and everything from 187 to 254."
+      "These are the opcodes that were disabled or undefined and had no"
+      "meaning worth keeping, so Taproot handed them to whoever wants them."
+    Bool.or(Bool.or(Bool.or(code == 80, code == 98), Bool.or(Bool.and(code >= 126, code <= 129), Bool.and(code >= 131, code <= 134))), Bool.or(Bool.or(Bool.and(code >= 137, code <= 138), Bool.and(code >= 141, code <= 142)), Bool.or(Bool.and(code >= 149, code <= 153), Bool.and(code >= 187, code <= 254))))
+
+verify isSuccessOpcode
+    isSuccessOpcode(80) => true
+    isSuccessOpcode(98) => true
+    isSuccessOpcode(126) => true
+    isSuccessOpcode(129) => true
+    isSuccessOpcode(130) => false
+    isSuccessOpcode(134) => true
+    isSuccessOpcode(137) => true
+    isSuccessOpcode(142) => true
+    isSuccessOpcode(149) => true
+    isSuccessOpcode(153) => true
+    isSuccessOpcode(186) => false
+    isSuccessOpcode(187) => true
+    isSuccessOpcode(254) => true
+    isSuccessOpcode(255) => false
+    isSuccessOpcode(81) => false
+    isSuccessOpcode(172) => false
 
 fn leafVersionOf(control: String) -> Int
     ? "The control block's first byte with its low bit cleared. That bit is"
