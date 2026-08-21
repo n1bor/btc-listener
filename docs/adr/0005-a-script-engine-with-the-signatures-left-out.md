@@ -564,3 +564,69 @@ spend at all, and the answer stopped at the outer run, which hashes the top
 item, compares it, leaves true and passes. Core fails it. A consensus rule,
 misread as a classification rather than a refusal, and the third one this
 sequence has turned up by implementing a Policy rule next to it.
+
+## Update — BIP66, and the measurement that earned it
+
+n1bor/btc-listener#22 held strict DER back for two years on the ground that
+the chain here stopped below Height 363,725, so wiring it in would ship
+consensus code no measurement could reach. That is no longer true: the
+directory holds Block 363,725 and the ones either side, and `txindex` resolves
+across the activation.
+
+`Domain.Ecdsa.isValidEncoding` is called now, from both signature paths, as a
+refusal rather than a false answer — Core has `CheckSignatureEncoding` above
+`CheckECDSASignature` and returns false out of `EvalScript`, which is not the
+same as pushing an empty item.
+
+**The Script corpus now disagrees with Core about nothing.**
+
+```
+cases 1118   agree 1026 → 1048   disagree 8 → 0   undecided 84 → 70
+```
+
+The undecided count fell too: fourteen cases that used to answer *needs the
+transaction* are settled by the encoding refusal, which happens before any
+message is needed.
+
+Two things about the placement are Core's and not obvious.
+
+**The empty push is exempt**, and not as a special case — `CheckSignatureEncoding`
+returns true for a zero-length signature before it looks at anything. An empty
+signature is how a Script says it has none; it goes on to fail the check and
+push false rather than failing the Script.
+
+**In OP_CHECKMULTISIG the encoding is asked inside the matching loop**, once
+there is a key to try the signature against, and never for a signature left
+over when the keys run out. Core exits that loop on `fSuccess` before it looks
+at the encoding. Checking them all up front would have been simpler and would
+have refused Scripts Core accepts, which is the direction that matters.
+
+### Does the Height carry any weight?
+
+A field that never changes an answer is decoration, so it was measured
+directly: `strictDerHeight(Network.Mainnet)` pinned to 1, recompiled, and four
+slices below the real activation re-run.
+
+| slice | scripts | failed |
+|---|---|---|
+| 170,000–170,050 | 3,596 | **56** |
+| 250,000–250,050 | 39,262 | **105** |
+| 300,001–300,050 | 34,964 | 0 |
+| 363,000–363,050 | 117,233 | 0 |
+
+So the chain really does contain signatures that BIP66 refuses — a hundred and
+sixty-one of them in two slices of fifty Blocks — and applying today's rule to
+2012 and 2013 would reject spends the network accepted. They have died out by
+Height 300,000, which is why the two slices nearest activation are clean and
+why the soft fork could be scheduled where it was.
+
+With the real Height restored, either side of activation:
+
+```
+363,000–363,724   1,884,727 scripts   0 failed   0 faults   (lax)
+363,725–364,400     863,901 scripts   0 failed   0 faults   (strict)
+```
+
+That experiment also turned up n1bor/btc-listener#76: the summary line ends
+`FAULTS 0` in capitals while a hundred and five failed Scripts sit earlier in
+the same line, and the first read of it was *good, no faults*.

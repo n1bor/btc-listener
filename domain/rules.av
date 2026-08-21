@@ -54,21 +54,23 @@ module Rules
         "construction and cannot be made to reject a Transaction the chain"
         "contains. Only underFlags and exceptFlags, which take Core's own flag"
         "names, can return anything else, and only a corpus calls those."
-        "BIP66 is the next and Domain.Ecdsa.isValidEncoding is already written"
-        "for it, but the chain here stops below 363725, so wiring it in would"
-        "ship consensus code no measurement could reach. It goes in when there"
-        "are Blocks to check it against, and it costs one field and one line --"
-        "which is the whole point of the record being here."
+        "BIP66 strict DER is the fifth, and it went in when the chain reached"
+        "it rather than before: n1bor/btc-listener#22 held it back for two"
+        "years on exactly that ground, and what unblocked it was holding Block"
+        "363725 and the ones either side of it. It is the same shape as SegWit"
+        "-- a soft fork with a Height -- and Core has a flag for it as well,"
+        "so underFlags reads DERSIG into the same field."
         "Every Height below is from Bitcoin Core's src/kernel/chainparams.cpp."
         "P2SH is the exception and n1bor/btc-listener#66 covers it: Core has no"
         "BIP16 Height at all, because BIP16 activated on a Block timestamp and"
         "Core now enforces P2SH everywhere with one named Block excused."
-    exposes [Rules, at, latest, underFlags, exceptFlags, dummyWrong, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
+    exposes [Rules, at, latest, underFlags, exceptFlags, dummyWrong, strictDerHeight, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
     depends [Domain.Network, Domain.Policy]
     effects []
 
 record Rules
     payToScriptHash: Bool
+    strictDer: Bool
     checkLockTimeVerify: Bool
     checkSequenceVerify: Bool
     segWit: Bool
@@ -79,7 +81,7 @@ record Rules
 fn at(network: Network, height: Int) -> Rules
     ? "The rules a Block at this Height on this Network was mined under."
     witnessed = height >= segWitHeight(network)
-    Rules(payToScriptHash = height >= payToScriptHashHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = witnessed, nullDummy = witnessed, taproot = height >= taprootHeight(network), policy = Domain.Policy.none())
+    Rules(payToScriptHash = height >= payToScriptHashHeight(network), strictDer = height >= strictDerHeight(network), checkLockTimeVerify = height >= checkLockTimeVerifyHeight(network), checkSequenceVerify = height >= checkSequenceVerifyHeight(network), segWit = witnessed, nullDummy = witnessed, taproot = height >= taprootHeight(network), policy = Domain.Policy.none())
 
 verify at
     at(Network.Mainnet, 0).payToScriptHash => false
@@ -107,6 +109,11 @@ verify at
     at(Network.Mainnet, 709631).taproot => false
     at(Network.Mainnet, 709632).taproot => true
     at(Network.Mainnet, 481824).taproot => false
+    at(Network.Mainnet, 363724).strictDer => false
+    at(Network.Mainnet, 363725).strictDer => true
+    at(Network.Testnet, 330775).strictDer => false
+    at(Network.Testnet, 330776).strictDer => true
+    at(Network.Signet, 1).strictDer => true
     at(Network.Signet, 1).taproot => true
 
 fn stillNop(rules: Rules, code: Int) -> Bool
@@ -190,10 +197,11 @@ fn latest() -> Rules
       "What a Script corpus written today means, and what a caller checking a"
       "Script with no Block behind it should get. Core's own vectors are"
       "written against the current rules and are read that way."
-    Rules(payToScriptHash = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true, nullDummy = true, taproot = true, policy = Domain.Policy.none())
+    Rules(payToScriptHash = true, strictDer = true, checkLockTimeVerify = true, checkSequenceVerify = true, segWit = true, nullDummy = true, taproot = true, policy = Domain.Policy.none())
 
 verify latest
     latest().payToScriptHash => true
+    latest().strictDer => true
     latest().checkLockTimeVerify => true
     latest().segWit => true
     latest().taproot => true
@@ -264,7 +272,7 @@ fn underFlags(flags: List<String>) -> Rules
       "A flag Domain.Policy does not model leaves its rule off, which is"
       "lenient. A case that turns on one will therefore disagree with Core,"
       "and that disagreement is the honest record of the gap."
-    Rules(payToScriptHash = Bool.or(Domain.Policy.asks(flags, "P2SH"), Domain.Policy.asks(flags, "WITNESS")), checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY"), checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY"), segWit = Domain.Policy.asks(flags, "WITNESS"), nullDummy = Domain.Policy.asks(flags, "NULLDUMMY"), taproot = Domain.Policy.asks(flags, "TAPROOT"), policy = Domain.Policy.named(flags))
+    Rules(payToScriptHash = Bool.or(Domain.Policy.asks(flags, "P2SH"), Domain.Policy.asks(flags, "WITNESS")), strictDer = Domain.Policy.asks(flags, "DERSIG"), checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY"), checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY"), segWit = Domain.Policy.asks(flags, "WITNESS"), nullDummy = Domain.Policy.asks(flags, "NULLDUMMY"), taproot = Domain.Policy.asks(flags, "TAPROOT"), policy = Domain.Policy.named(flags))
 
 verify underFlags
     underFlags([]).payToScriptHash => false
@@ -278,6 +286,8 @@ verify underFlags
     underFlags(["P2SH", "WITNESS"]).segWit => true
     underFlags(["WITNESS"]).payToScriptHash => true
     underFlags(["P2SH", "WITNESS", "TAPROOT"]).taproot => true
+    underFlags(["DERSIG"]).strictDer => true
+    underFlags([]).strictDer => false
     underFlags(["NULLDUMMY"]).nullDummy => true
     underFlags(["P2SH", "WITNESS"]).nullDummy => false
     underFlags(["CHECKLOCKTIMEVERIFY"]).checkLockTimeVerify => true
@@ -293,7 +303,7 @@ fn exceptFlags(flags: List<String>) -> Rules
       "Core's TrimFlags then says P2SH off clears WITNESS, which is why SegWit"
       "asks about both names below."
     witnessed = withoutWitness(flags)
-    Rules(payToScriptHash = Domain.Policy.asks(flags, "P2SH") == false, checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY") == false, checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY") == false, segWit = witnessed, nullDummy = Domain.Policy.asks(flags, "NULLDUMMY") == false, taproot = Bool.and(Domain.Policy.asks(flags, "TAPROOT") == false, witnessed), policy = Domain.Policy.exceptNamed(flags))
+    Rules(payToScriptHash = Domain.Policy.asks(flags, "P2SH") == false, strictDer = Domain.Policy.asks(flags, "DERSIG") == false, checkLockTimeVerify = Domain.Policy.asks(flags, "CHECKLOCKTIMEVERIFY") == false, checkSequenceVerify = Domain.Policy.asks(flags, "CHECKSEQUENCEVERIFY") == false, segWit = witnessed, nullDummy = Domain.Policy.asks(flags, "NULLDUMMY") == false, taproot = Bool.and(Domain.Policy.asks(flags, "TAPROOT") == false, witnessed), policy = Domain.Policy.exceptNamed(flags))
 
 verify exceptFlags
     exceptFlags([]).payToScriptHash => true
@@ -307,6 +317,8 @@ verify exceptFlags
     exceptFlags(["WITNESS"]).segWit => false
     exceptFlags(["TAPROOT"]).taproot => false
     exceptFlags(["TAPROOT"]).segWit => true
+    exceptFlags(["DERSIG"]).strictDer => false
+    exceptFlags([]).strictDer => true
     exceptFlags(["NULLDUMMY"]).nullDummy => false
     exceptFlags(["NULLDUMMY"]).segWit => true
     exceptFlags(["CONST_SCRIPTCODE"]).policy => Domain.Policy.exceptNamed(["CONST_SCRIPTCODE"])
@@ -356,3 +368,24 @@ verify dummyNotEmpty
     dummyNotEmpty(latest(), [0]) => true
     dummyNotEmpty(latest(), [1]) => true
     dummyNotEmpty(underFlags([]), [1]) => false
+
+fn strictDerHeight(network: Network) -> Int
+    ? "BIP66 made strict DER a consensus rule at this Height."
+      "Below it a signature whose DER is loose is read by the lax parser the"
+      "chain that contains it was read by, and there are Blocks full of them."
+      "Above it the same bytes fail. n1bor/btc-listener#18 is the lax half and"
+      "this is where the laxity stops."
+      "Core's consensus.BIP66Height, and the comment beside the mainnet one"
+      "names Block 00000000000000000379eaa19dce8c9b722d46ae6a57c2f1a988119488b50931"
+      "-- which is the Block this directory holds at 363725, checked."
+    match network
+        Network.Mainnet -> 363725
+        Network.Testnet -> 330776
+        Network.Signet -> 1
+        Network.Regtest -> 1
+
+verify strictDerHeight
+    strictDerHeight(Network.Mainnet) => 363725
+    strictDerHeight(Network.Testnet) => 330776
+    strictDerHeight(Network.Signet) => 1
+    strictDerHeight(Network.Regtest) => 1

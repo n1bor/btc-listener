@@ -42,8 +42,8 @@ generated file:
 
 ```
 cases        213
-agree        210
-disagree      3
+agree        211
+disagree      2
 undecided     0  (this engine cannot answer; not a disagreement)
 ```
 
@@ -110,11 +110,11 @@ writes the real ones back and prints the agreement report, split by direction:
 
 ```
 cases        1118
-agree        1026
-disagree        8
-undecided      84  (this engine cannot answer; not a disagreement)
+agree        1048
+disagree        0
+undecided      70  (this engine cannot answer; not a disagreement)
 
-  we accept what Core refuses   8  (a rule not implemented)
+  we accept what Core refuses   0  (a rule not implemented)
   we refuse what Core accepts   0  (the direction a defect shows up in)
 ```
 

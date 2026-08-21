@@ -106,7 +106,7 @@ verify tapscriptSingle
 
 verify step
     step(172, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    step(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    step(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG signature is not strict DER")))
     step(174, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs a public key count")))
 
 fn single(code: Int, state: State, context: Context) -> Step
@@ -119,10 +119,22 @@ fn single(code: Int, state: State, context: Context) -> Step
 
 verify single
     single(172, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG needs two items")))
-    single(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    single(172, Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG signature is not strict DER")))
     single(172, Domain.ScriptState.holding([[2, 3], []]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
 
 fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
+    ? "BIP66 first: a signature whose DER the rules of the day refuse fails"
+      "the Script outright, before anything asks whether it checks. Core has"
+      "CheckSignatureEncoding above CheckECDSASignature for the same reason."
+    match Domain.Checkwork.encodingFault(two.second, Domain.SpendContext.rulesOf(context).strictDer)
+        Option.Some(why) -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} {why}")))
+        Option.None -> singleShaped(code, two, state, context)
+
+verify singleOn
+    singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.underFlags([]))) => Step.Continue(Domain.ScriptState.holding([[]]))
+    singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"]))) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG signature is not strict DER")))
+
+fn singleShaped(code: Int, two: Two, state: State, context: Context) -> Step
     ? "Decide it if it can be decided, and say what is missing if not."
       "A signature that fails for a reason needing no curve is refused first"
       "and never reaches the message, which is the order the reference client"
@@ -132,10 +144,10 @@ fn singleOn(code: Int, two: Two, state: State, context: Context) -> Step
         Option.Some(why) -> Domain.Checkwork.answeredWith(code, false, [two.second], two.rest, state, Domain.SpendContext.rulesOf(context).policy.nullFail)
         Option.None -> againstMessage(code, two, state, context)
 
-verify singleOn
-    singleOn(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
-    singleOn(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
-    singleOn(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
+verify singleShaped
+    singleShaped(172, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[]]))
+    singleShaped(172, Two(first = Domain.Checkwork.validKey(), second = [4, 5], rest = []), Domain.ScriptState.holding([[]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to"))
+    singleShaped(173, Two(first = [2, 3], second = [4, 5], rest = []), Domain.ScriptState.holding([[2, 3], [4, 5]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGVERIFY found a signature that does not check")))
 
 fn againstMessage(code: Int, two: Two, state: State, context: Context) -> Step
     ? "The signature, the key and the message it should have been taken over."

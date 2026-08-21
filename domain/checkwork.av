@@ -17,7 +17,7 @@ module Checkwork
         "Domain.Multisig came out of the same file for the same reason and"
         "reaches these too, which is what made the split pay for itself: two"
         "callers rather than one."
-    exposes [bytesOf, validKey, refusal, decided, answered, answeredWith, anySignature, oneIf]
+    exposes [bytesOf, validKey, refusal, decided, answered, answeredWith, anySignature, encodingFault, oneIf]
     depends [Bytes, Domain.Ecdsa, Domain.Opcode, Domain.ScriptState, Domain.ScriptStep, Domain.StackItem]
     effects []
 
@@ -138,3 +138,33 @@ verify presentOrNext
     presentOrNext([], []) => false
     presentOrNext([4], []) => true
     presentOrNext([], [[4]]) => true
+
+fn encodingFault(signature: List<Int>, strictDer: Bool) -> Option<String>
+    ? "BIP66: whether this signature's DER is refused by the rules in force."
+      "The empty push is exempt, and not as a special case: Core's"
+      "CheckSignatureEncoding returns true for it before it looks at anything"
+      "else. An empty signature is how a Script says it has none, and it goes"
+      "on to fail the check and push false rather than failing the Script."
+      "Everything else is measured against BIP66 and refused outright when it"
+      "does not measure up -- this is a refusal and not a false answer, which"
+      "is the difference between Core returning false from EvalScript and"
+      "Core pushing an empty item."
+    match signature
+        [] -> Option.None
+        [byte, ..more] -> derFault(signature, strictDer)
+
+verify encodingFault
+    encodingFault([], true) => Option.None
+    encodingFault([4, 5], false) => Option.None
+    encodingFault([4, 5], true) => Option.Some("signature is not strict DER")
+
+fn derFault(signature: List<Int>, strictDer: Bool) -> Option<String>
+    ? "The rule itself, once the empty case is out of the way."
+    match Bool.and(strictDer, Domain.Ecdsa.isValidEncoding(signature) == false)
+        true -> Option.Some("signature is not strict DER")
+        false -> Option.None
+
+verify derFault
+    derFault([4, 5], true) => Option.Some("signature is not strict DER")
+    derFault([4, 5], false) => Option.None
+    derFault(Bytes.toList(Bytes.fromHex("304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901")?), true) => Option.None
