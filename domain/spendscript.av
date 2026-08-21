@@ -46,7 +46,7 @@ verify check
     check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
-    check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
+    check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
     check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 170060))) => Outcome.Decided(Ending.Passed)
     check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
 
@@ -189,7 +189,7 @@ fn orRedeemed(outcome: Outcome, ops: List<Op>, state: State, outputScriptHex: St
       "question and this is where it gets asked."
     match redeemable(outcome, ops, outputScriptHex, context)
         false -> outcome
-        true -> redeemed(state, context)
+        true -> redeemed(ops, state, context)
 
 verify orRedeemed
     orRedeemed(Outcome.Decided(Ending.Passed), [Op.Code(81)], Domain.ScriptState.empty(), "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
@@ -274,18 +274,21 @@ verify isPush
     isPush(Op.Code(96)) => true
     isPush(Op.Code(97)) => false
 
-fn redeemed(state: State, context: Context) -> Outcome
+fn redeemed(ops: List<Op>, state: State, context: Context) -> Outcome
     ? "The redeem script is the last item the Input Script pushed, and it is"
       "run on the stack underneath it."
+      "The Input Script's Ops travel here as well, because the nested witness"
+      "form has a rule about the Input Script as a whole and not merely about"
+      "what it left on the stack."
     match state.stack
         [] -> Outcome.Decided(Ending.Failed("P2SH input script left nothing to redeem"))
-        [head, ..tail] -> redeemedWith(head, tail, context)
+        [head, ..tail] -> redeemedWith(ops, head, tail, context)
 
 verify redeemed
-    redeemed(Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("P2SH input script left nothing to redeem"))
-    redeemed(Domain.ScriptState.holding([[81]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    redeemed([], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("P2SH input script left nothing to redeem"))
+    redeemed([], Domain.ScriptState.holding([[81]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
 
-fn redeemedWith(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> Outcome
+fn redeemedWith(ops: List<Op>, redeem: List<Int>, rest: List<List<Int>>, context: Context) -> Outcome
     ? "A redeem script that is itself a witness program is refused, for the"
       "same reason the bare one is and with the same consequence if it is not."
       "BIP141 defines the nested forms so a wallet that could only send to a"
@@ -298,15 +301,57 @@ fn redeemedWith(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> O
       "with the wrong key\", which Core answers EVAL_FALSE and this engine"
       "answered Decided(Passed) until this arm was added."
     match Bool.and(context.rules.segWit, Domain.Script.isAnyWitnessProgram(hexOf(redeem)))
-        true -> Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
+        true -> nestedWitness(ops, redeem, context)
         false -> redeemRun(redeem, rest, context)
 
 verify redeemedWith
-    redeemedWith([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
-    redeemedWith([0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
-    redeemedWith([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
-    redeemedWith(nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
-    redeemedWith(nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481823))) => Outcome.Decided(Ending.Passed)
+    redeemedWith([], [81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    redeemedWith([], [0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    redeemedWith([], [2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
+    redeemedWith([], nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481823))) => Outcome.Decided(Ending.Passed)
+    redeemedWith(pushOfRedeem(), nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+    redeemedWith([], nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a nested witness program needs an input script of exactly one push of the redeem script"))
+
+fn pushOfRedeem() -> List<Op>
+    ? "The Input Script of a well formed nested spend: one push, of the"
+      "redeem script, and nothing else."
+    Result.withDefault(Domain.ScriptParse.parse(Domain.ScriptParse.minimalPush(nestedWitnessRedeem())), [])
+
+verify pushOfRedeem
+    List.len(pushOfRedeem()) => 1
+
+fn nestedWitness(ops: List<Op>, redeem: List<Int>, context: Context) -> Outcome
+    ? "A nested witness program, once the Input Script has been checked."
+      "The rule is not push-only and not ends-with-the-right-push: the Input"
+      "Script must be exactly one push of the redeem script and nothing else."
+      "Anything in front of it -- a spare OP_1, a second push nobody reads --"
+      "is malleability handed back, because a third party could add it without"
+      "touching a signature and the spend would still be valid. Core's error"
+      "is WITNESS_MALLEATED_P2SH and script_tests.json has the case:"
+      "scriptSig 11 0x16 0x0014..., a superfluous push in front, expected to"
+      "fail. An engine that only asked whether the last push was the redeem"
+      "script would let it through."
+    match onlyThePush(ops, redeem)
+        false -> Outcome.Decided(Ending.Failed("a nested witness program needs an input script of exactly one push of the redeem script"))
+        true -> Domain.Witness.nested(hexOf(redeem), context)
+
+verify nestedWitness
+    nestedWitness([], nestedWitnessRedeem(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a nested witness program needs an input script of exactly one push of the redeem script"))
+    nestedWitness(pushOfRedeem(), nestedWitnessRedeem(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+
+fn onlyThePush(ops: List<Op>, redeem: List<Int>) -> Bool
+    ? "Whether the Input Script is exactly the canonical push of these bytes."
+      "Compared as bytes rather than as a count of Ops, because the same data"
+      "pushed with a wider opcode is a different Input Script and Core rejects"
+      "it: its test is scriptSig == CScript() << redeemScript, which is the"
+      "minimal encoding. bytesOf keeps the opcode a push was written with, so"
+      "the two sides really are comparable."
+    Domain.ScriptParse.bytesOf(ops) == Domain.ScriptParse.minimalPush(redeem)
+
+verify onlyThePush
+    onlyThePush([], [81]) => false
+    onlyThePush(pushOfRedeem(), nestedWitnessRedeem()) => true
+    onlyThePush(pushOfRedeem(), [81]) => false
 
 fn nestedWitnessRedeem() -> List<Int>
     ? "The redeem script of Core's \"Basic P2SH(P2WPKH) with the wrong key\":"
