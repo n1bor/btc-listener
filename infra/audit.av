@@ -21,7 +21,7 @@ module Audit
         "instead, because parents are scattered and fetch would decode a whole"
         "Segment to use one Block out of it."
     exposes [Counts, run]
-    depends [Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Domain.Network, Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
     effects [
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -38,7 +38,7 @@ record Counts
     faults: Int
     scripts: Outcomes
 
-fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
+fn run(network: Network, dir: String, from: Int, to: Int) -> Result<Counts, String>
     ? "Walk the range, checking every Block and every Transaction in it."
     ! [
         Console.print,
@@ -48,7 +48,7 @@ fn run(dir: String, from: Int, to: Int) -> Result<Counts, String>
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    walk(store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), Infra.Pace.pacedFrom(Time.unixMs()))
+    walk(network, store, blocks, Option.None, from, to, Counts(blocks = 0, transactions = 0, resolved = 0, coinbase = 0, unresolved = 0, faults = 0, scripts = Domain.SpendScript.noOutcomes()), Infra.Pace.pacedFrom(Time.unixMs()))
 
 fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
     ? "The Block Id one Height down, which the parent check needs."
@@ -169,23 +169,23 @@ record Gathered
     next: Int
     ended: Bool
 
-fn walk(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
+fn walk(network: Network, store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "A batch of Heights at a time, keeping the Segment in hand between them."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match height > to
         true -> Result.Ok(counts)
-        false -> overBatch(store, blocks, loaded, height, to, counts, pace)
+        false -> overBatch(network, store, blocks, loaded, height, to, counts, pace)
 
-fn overBatch(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
+fn overBatch(network: Network, store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "Gather what the chain has to say, decide it away from the chain, then walk it."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     got = gathering(store, blocks, loaded, height, to, batchSize(), [])?
     prepared = Domain.BlockWork.preparedAcross(got.waiting)?
-    done = processed(store, blocks, prepared, counts, pace)?
+    done = processed(network, store, blocks, prepared, counts, pace)?
     match done
-        (settled, stepped) -> continued(store, blocks, got, height, to, settled, stepped)
+        (settled, stepped) -> continued(network, store, blocks, got, height, to, settled, stepped)
 
-fn continued(store: Store, blocks: BlockStore, got: Gathered, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
+fn continued(network: Network, store: Store, blocks: BlockStore, got: Gathered, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "Stop where the Index stopped naming Heights, or where a batch got nowhere."
       "The second is not reachable from the gathering below, which always moves"
       "on or ends, but a walk that could loop over the same Height forever is"
@@ -193,7 +193,7 @@ fn continued(store: Store, blocks: BlockStore, got: Gathered, height: Int, to: I
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match Bool.or(got.ended, got.next <= height)
         true -> Result.Ok(counts)
-        false -> walk(store, blocks, got.loaded, got.next, to, counts, pace)
+        false -> walk(network, store, blocks, got.loaded, got.next, to, counts, pace)
 
 fn gathering(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: Int, to: Int, left: Int, acc: List<Unchecked>) -> Result<Gathered, String>
     ? "Read up to left Blocks out of the chain, and nothing else."
@@ -229,25 +229,25 @@ fn readBlock(store: Store, blocks: BlockStore, loaded: Option<Loaded>, height: I
     parent = parentOf(store, height)?
     gathering(store, blocks, Option.Some(got.loaded), height + 1, to, left - 1, List.prepend(Domain.BlockWork.Unchecked(height = height, blockId = blockId, parentBlockId = parent, payload = got.payload), acc))
 
-fn processed(store: Store, blocks: BlockStore, prepared: List<Prepared>, counts: Counts, pace: Pace) -> Result<Tuple<Counts, Pace>, String>
+fn processed(network: Network, store: Store, blocks: BlockStore, prepared: List<Prepared>, counts: Counts, pace: Pace) -> Result<Tuple<Counts, Pace>, String>
     ? "Each prepared Block in turn: its spends resolved, then its Scripts run."
       "In order, because a spend can name an Output made in the Block before"
       "it, and because a report that jumped about would be unreadable."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     match prepared
         [] -> Result.Ok((counts, pace))
-        [head, ..tail] -> oneBlock(store, blocks, head, tail, counts, pace)
+        [head, ..tail] -> oneBlock(network, store, blocks, head, tail, counts, pace)
 
-fn oneBlock(store: Store, blocks: BlockStore, one: Prepared, rest: List<Prepared>, counts: Counts, pace: Pace) -> Result<Tuple<Counts, Pace>, String>
+fn oneBlock(network: Network, store: Store, blocks: BlockStore, one: Prepared, rest: List<Prepared>, counts: Counts, pace: Pace) -> Result<Tuple<Counts, Pace>, String>
     ? "One Block's findings counted, its spends resolved, its Scripts run."
     ! [Console.print, Disk.readText, Infra.Kv.get, Time.now, Time.unixMs]
     faults = faultsIn(one.findings, [])
     _said = reportFaults(one.height, faults)
     stepped = maybeReport(one.height, counts, pace)?
     counted = Counts(blocks = counts.blocks + 1, transactions = counts.transactions, resolved = counts.resolved, coinbase = counts.coinbase, unresolved = counts.unresolved, faults = counts.faults + List.len(faults), scripts = counts.scripts)
-    work = resolvedAll(store, blocks, one.transactions, Domain.Rules.at(one.height), [])?
-    answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(one.height), one.height, one.blockId)?
-    processed(store, blocks, rest, tallied(work, counted, answered, one.height, one.blockId), stepped)
+    work = resolvedAll(store, blocks, one.transactions, Domain.Rules.at(network, one.height), [])?
+    answered = Infra.Spends.scriptsAcross(work, Domain.Rules.at(network, one.height), one.height, one.blockId)?
+    processed(network, store, blocks, rest, tallied(work, counted, answered, one.height, one.blockId), stepped)
 
 fn resolvedAll(store: Store, blocks: BlockStore, transactions: List<Transaction>, rules: Rules, acc: List<Work>) -> Result<List<Work>, String>
     ? "Resolve every Input of every Transaction in the Block, in order."

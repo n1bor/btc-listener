@@ -11,7 +11,7 @@ module Maintain
         "still appending to the log while it copies would leave what it copied"
         "short of what the log holds."
     exposes [prune, txIndex, outputs, audit, migrate]
-    depends [Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
+    depends [Domain.Network, Domain.Index, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
@@ -192,8 +192,10 @@ fn outputsDone(dir: String, span: Span) -> Result<String, String>
     built = Infra.Outputs.build(store, blocks, span.from, span.to)?
     Result.Ok("{built.outputs} Outputs recorded from {built.blocks} Blocks")
 
-fn audit(rest: List<String>) -> Unit
+fn audit(network: Network, rest: List<String>) -> Unit
     ? "Checking a range needs no claim: it only reads."
+      "The Network comes from the caller because the rules a Block was mined"
+      "under depend on which chain it is on, not only how high up it is."
     ! [
         Console.error, Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText,
@@ -202,9 +204,9 @@ fn audit(rest: List<String>) -> Unit
     ]
     match rest
         [] -> Console.error("usage: <dir> <a> <b>")
-        [dir, ..more] -> auditRange(dir, more)
+        [dir, ..more] -> auditRange(network, dir, more)
 
-fn auditRange(dir: String, more: List<String>) -> Unit
+fn auditRange(network: Network, dir: String, more: List<String>) -> Unit
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
@@ -214,9 +216,9 @@ fn auditRange(dir: String, more: List<String>) -> Unit
     ]
     match heights(more)
         Option.None -> Console.error("usage: <dir> <a> <b>")
-        Option.Some(span) -> said(auditRun(dir, span))
+        Option.Some(span) -> said(auditRun(network, dir, span))
 
-fn auditRun(dir: String, span: Span) -> Result<String, String>
+fn auditRun(network: Network, dir: String, span: Span) -> Result<String, String>
     ? "Walk the range and report what it found."
     ! [
         Console.print,
@@ -224,7 +226,7 @@ fn auditRun(dir: String, span: Span) -> Result<String, String>
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]
-    counts = Infra.Audit.run(dir, span.from, span.to)?
+    counts = Infra.Audit.run(network, dir, span.from, span.to)?
     Result.Ok("blocks {counts.blocks}  transactions {counts.transactions}  spends resolved {counts.resolved}  coinbase {counts.coinbase}  unresolved {counts.unresolved}  scripts {counts.scripts.passed} passed / {counts.scripts.failed} failed / {counts.scripts.undecided} undecided  FAULTS {counts.faults}")
 
 fn heights(range: List<String>) -> Option<Span>

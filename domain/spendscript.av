@@ -24,7 +24,7 @@ module SpendScript
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
     exposes [check, Outcomes, noOutcomes, count, merged, noteOf]
-    depends [Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
+    depends [Domain.Network, Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext]
     effects []
 
 fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -47,8 +47,8 @@ verify check
     check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
     check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
     check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
-    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(170060))) => Outcome.Decided(Ending.Passed)
-    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
+    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 170060))) => Outcome.Decided(Ending.Passed)
+    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
 
 fn beforeBip16Input() -> String
     ? "One push of a 1-of-1 redeem Script and nothing else, from Block 170060."
@@ -103,12 +103,15 @@ fn notWitness(inputScriptHex: String, outputScriptHex: String, context: Context)
       "This was found by running three Blocks from 2023 and getting 6,363"
       "passes out of an engine that has never verified a signature. The number"
       "was real and meant nothing."
-    match Domain.Script.isAnyWitnessProgram(outputScriptHex)
+    match Bool.and(context.rules.segWit, Domain.Script.isAnyWitnessProgram(outputScriptHex))
         true -> Outcome.Undecided("output is a witness program and needs the witness evaluated")
         false -> parsed(inputScriptHex, outputScriptHex, context)
 
 verify notWitness
     notWitness("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481823))) => Outcome.Decided(Ending.Passed)
+    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481824))) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
+    notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.at(Network.Signet, 1))) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
     notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
     notWitness("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("output is a witness program and needs the witness evaluated")
     notWitness("51", "00", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
@@ -209,9 +212,9 @@ verify redeemable
     redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.latest())) => true
     redeemable(Outcome.Decided(Ending.Failed("no")), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.latest())) => false
     redeemable(Outcome.Decided(Ending.Passed), [Op.Code(118)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.latest())) => false
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(173805))) => true
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(173804))) => false
-    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(170060))) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173805))) => true
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173804))) => false
+    redeemable(Outcome.Decided(Ending.Passed), [Op.Code(81)], "a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 170060))) => false
 
 fn passed(outcome: Outcome) -> Bool
     ? "Whether a run came out passed, as a Bool for a caller that wants to ask"
@@ -294,7 +297,7 @@ fn redeemedWith(redeem: List<Int>, rest: List<List<Int>>, context: Context) -> O
       "Core's own vector for it is script_tests.json's \"Basic P2SH(P2WPKH)"
       "with the wrong key\", which Core answers EVAL_FALSE and this engine"
       "answered Decided(Passed) until this arm was added."
-    match Domain.Script.isAnyWitnessProgram(hexOf(redeem))
+    match Bool.and(context.rules.segWit, Domain.Script.isAnyWitnessProgram(hexOf(redeem)))
         true -> Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
         false -> redeemRun(redeem, rest, context)
 
@@ -303,6 +306,7 @@ verify redeemedWith
     redeemedWith([0], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
     redeemedWith([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("redeem script: push of 2 bytes runs past the end of the script"))
     redeemedWith(nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("redeem script is a witness program and needs the witness evaluated")
+    redeemedWith(nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481823))) => Outcome.Decided(Ending.Passed)
 
 fn nestedWitnessRedeem() -> List<Int>
     ? "The redeem script of Core's \"Basic P2SH(P2WPKH) with the wrong key\":"
