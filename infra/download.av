@@ -17,7 +17,7 @@ module Download
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
 
@@ -56,7 +56,7 @@ fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
     connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
@@ -76,7 +76,7 @@ fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddr
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
     _greeting = Infra.Peer.introduce(connection, network, address)?
@@ -140,7 +140,7 @@ fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have:
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     locator = locatorFor(network, store, have)?
     payload = Domain.Block.getHeadersPayload(locator)?
@@ -155,7 +155,7 @@ fn absorb(connection: Tcp.Connection, network: Network, store: Store, have: Int,
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     match decoded
         [] -> done(store, have)
@@ -175,7 +175,7 @@ fn stored(connection: Tcp.Connection, network: Network, store: Store, have: Int,
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     grown = Infra.Store.putAll(store, entriesFor(decoded, have, []))?
     reached = have + List.len(decoded)
@@ -307,20 +307,20 @@ verify wireOrder
 
 fn awaitFrame(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
     ? "Read until the wanted Message arrives, dealing with whatever else turns up."
-    ! [Tcp.readBytes, Tcp.writeBytes]
+    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     match budget <= 0
         true -> Result.Err("no {wanted} after {frameBudget()} messages")
         false -> matching(connection, network, wanted, budget)
 
 fn matching(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
     ? "One frame: the one wanted, or another turn of the loop."
-    ! [Tcp.readBytes, Tcp.writeBytes]
+    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     frame = Infra.Peer.readFrame(connection)?
     keepOrSkip(connection, network, wanted, budget, frame)
 
 fn keepOrSkip(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
     ? "Keep the frame if it is the one asked for."
-    ! [Tcp.readBytes, Tcp.writeBytes]
+    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     match frame.command == wanted
         true -> Result.Ok(frame)
         false -> skip(connection, network, wanted, budget, frame)
@@ -329,14 +329,14 @@ fn skip(connection: Tcp.Connection, network: Network, wanted: String, budget: In
     ? "A ping has to be answered even while waiting for something else."
       "A Peer drops a connection that stops answering, and fetching every Header"
       "takes long enough — some hundreds of round trips — that one will arrive."
-    ! [Tcp.readBytes, Tcp.writeBytes]
+    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     match frame.command
         "ping" -> pongThen(connection, network, wanted, budget, frame)
         _ -> awaitFrame(connection, network, wanted, budget - 1)
 
 fn pongThen(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
     ? "Echo the nonce back, then carry on waiting."
-    ! [Tcp.readBytes, Tcp.writeBytes]
+    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     payload = Bytes.fromList(frame.body)?
     _sent = Infra.Peer.send(connection, network, "pong", payload)?
     awaitFrame(connection, network, wanted, budget - 1)
@@ -348,7 +348,7 @@ fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockSto
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
     connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
@@ -368,7 +368,7 @@ fn bodySession(connection: Tcp.Connection, network: Network, address: PeerAddres
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
     _greeting = Infra.Peer.introduce(connection, network, address)?
@@ -387,7 +387,7 @@ fn walk(connection: Tcp.Connection, network: Network, progress: Progress, height
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     match height > to
         true -> Result.Ok(progress)
@@ -399,7 +399,7 @@ fn atHeight(connection: Tcp.Connection, network: Network, progress: Progress, he
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     named = Infra.Store.get(progress.store, Domain.Index.heightKey(height))?
     match named
@@ -412,7 +412,7 @@ fn maybeFetch(connection: Tcp.Connection, network: Network, progress: Progress, 
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     held = Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))?
     match held
@@ -425,7 +425,7 @@ fn fetch(connection: Tcp.Connection, network: Network, progress: Progress, heigh
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     wanted = wireOrder(blockId)?
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wanted])?
@@ -442,7 +442,7 @@ fn keep(connection: Tcp.Connection, network: Network, progress: Progress, height
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     payload = Bytes.fromList(frame.body)?
     appended = Infra.Blocks.append(progress.blocks, payload)?
@@ -463,7 +463,7 @@ fn announce(connection: Tcp.Connection, network: Network, progress: Progress, he
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     _said = Console.print("block {height}  {size} bytes  segment {Infra.Blocks.currentSegment(progress.blocks)}")
     walk(connection, network, progress, height + 1, to)

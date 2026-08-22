@@ -9,7 +9,7 @@ module Resolver
         "two bytes to learn the size, then read precisely that many."
     exposes [discover, seedsOf, resolverHost]
     depends [Bytes, Domain.Dns, Domain.Address, Domain.Network]
-    effects [Random.int, Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes]
+    effects [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
 
 fn resolverHost() -> String
     ? "The recursive resolver the seed question is put to."
@@ -58,7 +58,7 @@ verify mainnetSeeds
 fn discover(network: Network) -> Result<PeerAddress, String>
     ? "Ask a randomly chosen seed for Peers, and pick one of its answers."
       "A Network with no seeds is an answer, not a lookup that fails."
-    ! [Random.int, Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes]
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     match seedsOf(network)
         [] -> Result.Err("the {Domain.Network.nameOf(network)} Network has no DNS seeds")
         [head, ..rest] -> chooseAddress(lookup(pick(List.prepend(head, rest), head))?, Domain.Network.portOf(network))
@@ -93,7 +93,7 @@ verify octetsAt
 
 fn lookup(name: String) -> Result<List<List<Int>>, String>
     ? "Put the question to the resolver and read the addresses back."
-    ! [Random.int, Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes]
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     connection = Tcp.connect(resolverHost(), resolverPort())?
     answer = exchange(connection, name)
     closeAfter(connection, answer)
@@ -106,7 +106,7 @@ fn closeAfter(connection: Tcp.Connection, answer: Result<List<List<Int>>, String
 
 fn exchange(connection: Tcp.Connection, name: String) -> Result<List<List<Int>>, String>
     ? "Send the question, then read the length-prefixed answer."
-    ! [Random.int, Tcp.readBytes, Tcp.writeBytes]
+    ! [Random.int, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     question = Domain.Dns.question(name, Random.int(0, 65535))?
     framed = Bytes.fromList(List.concat(lengthPrefix(List.len(Bytes.toList(question))), Bytes.toList(question)))?
     _written = Tcp.writeBytes(connection, framed)?
@@ -122,10 +122,35 @@ verify lengthPrefix
 
 fn readAnswer(connection: Tcp.Connection) -> Result<List<List<Int>>, String>
     ? "Read the two size bytes, then exactly that many more."
-    ! [Tcp.readBytes]
+      "Behind a deadline, as Infra.Peer reads are: a resolver that never"
+      "answers would otherwise block the whole discovery forever, and DNS"
+      "answers in milliseconds or not at all."
+    ! [Tcp.poll, Tcp.readBytes]
+    ready = Tcp.poll(Map.fromList([(0, connection)]), answerDeadlineMs())?
+    _got = answered(List.len(ready) > 0)?
     size = Bytes.toList(Tcp.readBytes(connection, 2)?)
     body = Tcp.readBytes(connection, sizeOf(size))?
     Result.Ok(Domain.Dns.addressesOf(Bytes.toList(body)))
+
+fn answered(ready: Bool) -> Result<Unit, String>
+    ? "Whether the resolver had anything to say before the deadline."
+    match ready
+        true -> Result.Ok(Unit)
+        false -> Result.Err("the resolver said nothing for {Int.div(answerDeadlineMs(), 1000)} seconds")
+
+verify answered
+    answered(true) => Result.Ok(Unit)
+    answered(false) => Result.Err("the resolver said nothing for 15 seconds")
+
+fn answerDeadlineMs() -> Int
+    ? "How long the resolver's answer is waited for."
+      "Far shorter than Infra.Peer's idle deadline: a Peer may honestly have"
+      "nothing to say for minutes, but a resolver asked a question either"
+      "answers promptly or is not going to."
+    15000
+
+verify answerDeadlineMs
+    answerDeadlineMs() => 15000
 
 fn sizeOf(prefix: List<Int>) -> Int
     ? "The announced message size, read from its two big-endian bytes."

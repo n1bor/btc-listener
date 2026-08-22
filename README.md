@@ -110,13 +110,19 @@ until you stop it with Ctrl-C. The listen loop's recursive call is in tail
 position, so it runs indefinitely without growing the stack. On a busy mainnet
 peer expect a few transactions per second.
 
-It will also stop if a read fails. A session read has no deadline at all:
+It will also stop if a read fails, and if the peer falls silent. A session
+read still has no deadline of its own —
 [jasisz/aver#782](https://github.com/jasisz/aver/issues/782) was answered by
-removing one rather than making it configurable, on the grounds that timing out
-part way through a frame leaves the stream silently desynchronised, which is
-worse than waiting. So a peer that says nothing does not end the session — it
-stops the session making progress, and `Tcp.poll` is the operation that would
-notice. See [#55](https://github.com/n1bor/btc-listener/issues/55).
+removing one rather than making it configurable, on the grounds that timing
+out part way through a frame leaves the stream silently desynchronised — but
+every frame now starts with `Tcp.poll` at the message boundary, the one place
+a timeout abandons nothing
+([#55](https://github.com/n1bor/btc-listener/issues/55)). Bitcoin Core pings
+an otherwise-quiet connection every two minutes, so a Peer that has said
+nothing for two and a half is gone, and the session ends with `Peer said
+nothing for 150 seconds` instead of blocking while looking like it is
+working. A Peer that stalls *mid-frame* still blocks, deliberately; that
+residue waits for the event loop of #26.
 
 `aver compile` prints one warning per dependency module — 45 of them — each
 saying that module's verify blocks are not sampled and suggesting you move them

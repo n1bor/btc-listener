@@ -70,7 +70,7 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ask | upstream | gates |
 |---|---|---|
 | a concurrency direction | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) — **answered**: independent products plus poll-shaped effects; see [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md) | nothing any more |
-| ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads now have no deadline at all | not blocked — see n1bor/btc-listener#55 |
+| ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #26/#27 |
 | a readiness poll over connections | [jasisz/aver#1013](https://github.com/jasisz/aver/issues/1013) | Stage 5 |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
 | `Tcp.listen` / `Tcp.accept` | to be filed; same family as the poll | Stage 8 |
