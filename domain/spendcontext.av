@@ -412,16 +412,21 @@ fn withoutSignatures(context: Context, signatures: List<List<Int>>) -> Context
         SigVersion.Tapscript -> context
         SigVersion.Base -> deletedFrom(context, signatures)
 
+verify withoutSignatures
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]])) => "5152"
+    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [])) => "5101ab52"
+    scriptCodeOf(withoutSignatures(bare(Domain.Rules.latest()), [[171]])) => ""
+
 fn deletedFrom(context: Context, signatures: List<List<Int>>) -> Context
     ? "The deletion itself, on the legacy path where it applies."
     match Domain.ScriptParse.withoutPushes(scriptCodeOf(context), signatures)
         Result.Err(why) -> context
         Result.Ok(stripped) -> overScript(context, stripped)
 
-verify withoutSignatures
-    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]])) => "5152"
-    scriptCodeOf(withoutSignatures(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [])) => "5101ab52"
-    scriptCodeOf(withoutSignatures(bare(Domain.Rules.latest()), [[171]])) => ""
+verify deletedFrom
+    scriptCodeOf(deletedFrom(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [[171]])) => "5152"
+    scriptCodeOf(deletedFrom(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "5101ab52", []), [])) => "5101ab52"
+    scriptCodeOf(deletedFrom(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "4c", []), [[171]])) => "4c"
 
 fn deletes(context: Context, signatures: List<List<Int>>) -> Bool
     ? "Whether FindAndDelete would actually remove something."
@@ -505,11 +510,18 @@ fn messageOf(commitment: Commitment, hashType: Int) -> Option<String>
         SigVersion.WitnessV0 -> witnessMessage(commitment, hashType)
         SigVersion.Tapscript -> tapscriptMessage(commitment, hashType)
 
+verify messageOf
+    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+
 fn legacyMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "The pre-SegWit signature hash, quadratic in the size of the Transaction."
     match Domain.Sighash.legacy(commitment.transaction, commitment.inputIndex, commitment.scriptCode, hashType)
         Result.Err(why) -> Option.None
         Result.Ok(digest) -> Option.Some(digest)
+
+verify legacyMessage
+    legacyMessage(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+    legacyMessage(Commitment(transaction = signedTransaction(), inputIndex = 5, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 1) => Option.None
 
 fn tapscriptMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "BIP341's message with BIP342's extension: the leaf being run, the key"
@@ -518,11 +530,19 @@ fn tapscriptMessage(commitment: Commitment, hashType: Int) -> Option<String>
         Option.None -> Option.None
         Option.Some(tap) -> tapscriptMessageWith(commitment, hashType, tap)
 
+verify tapscriptMessage
+    tapscriptMessage(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, inputIndex = 0, amount = 1, scriptCode = "", witness = [], sigVersion = SigVersion.Tapscript, prevouts = [Spent(amount = 1, script = "51")], tap = Option.None), 0) => Option.None
+    String.len(Option.withDefault(tapscriptMessage(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, inputIndex = 0, amount = 1, scriptCode = "", witness = [], sigVersion = SigVersion.Tapscript, prevouts = [Spent(amount = 1, script = "51")], tap = Option.Some(TapContext(leafHash = "0000000000000000000000000000000000000000000000000000000000000000", annex = Option.None, codeSeparatorPosition = 4294967295))), 0), "")) => 64
+
 fn tapscriptMessageWith(commitment: Commitment, hashType: Int, tap: TapContext) -> Option<String>
     ? "The message, once the leaf is in hand."
     match Domain.Bip341.messageWith(commitment.transaction, commitment.inputIndex, commitment.prevouts, hashType, tap.annex, Option.Some(Domain.Bip341.Extension(leafHash = tap.leafHash, keyVersion = 0, codeSeparatorPosition = tap.codeSeparatorPosition)))
         Result.Err(why) -> Option.None
         Result.Ok(digest) -> Option.Some(digest)
+
+verify tapscriptMessageWith
+    String.len(Option.withDefault(tapscriptMessageWith(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, inputIndex = 0, amount = 1, scriptCode = "", witness = [], sigVersion = SigVersion.Tapscript, prevouts = [Spent(amount = 1, script = "51")], tap = Option.None), 0, TapContext(leafHash = "0000000000000000000000000000000000000000000000000000000000000000", annex = Option.None, codeSeparatorPosition = 4294967295)), "")) => 64
+    tapscriptMessageWith(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")?))?, inputIndex = 5, amount = 1, scriptCode = "", witness = [], sigVersion = SigVersion.Tapscript, prevouts = [Spent(amount = 1, script = "51")], tap = Option.None), 0, TapContext(leafHash = "0000000000000000000000000000000000000000000000000000000000000000", annex = Option.None, codeSeparatorPosition = 4294967295)) => Option.None
 
 fn witnessMessage(commitment: Commitment, hashType: Int) -> Option<String>
     ? "BIP143, which is where the amount earns its place in the record."
@@ -538,5 +558,6 @@ fn witnessMessage(commitment: Commitment, hashType: Int) -> Option<String>
         Result.Err(why) -> Option.None
         Result.Ok(digest) -> Option.Some(digest)
 
-verify messageOf
-    messageOf(Commitment(transaction = signedTransaction(), inputIndex = 0, amount = 0, scriptCode = signedScriptCode(), witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 1) => Option.Some("7a05c6145f10101e9d6325494245adf1297d80f8f38d4d576d57cdba220bcb19")
+verify witnessMessage
+    witnessMessage(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, inputIndex = 0, amount = 1000000000, scriptCode = "76a91479091972186c449eb1ded22b78e40d009bdf008988ac", witness = [], sigVersion = SigVersion.WitnessV0, prevouts = [], tap = Option.None), 1) => Option.Some("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    witnessMessage(Commitment(transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex("0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000")?))?, inputIndex = 1, amount = 1000, scriptCode = "51", witness = [], sigVersion = SigVersion.WitnessV0, prevouts = [], tap = Option.None), 1) => Option.None
