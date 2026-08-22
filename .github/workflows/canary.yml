@@ -1,8 +1,8 @@
 name: Aver canary
 
 # Builds the Aver toolchain from the CURRENT TIP of jasisz/aver — deliberately
-# unpinned — and runs the cheap gates against it. This is the early-warning
-# system for upstream CLI and semantics changes: a red canary means the next
+# unpinned — checked out at the dev path and installed from it, then runs the
+# cheap gates. Early warning for upstream changes: a red canary means the next
 # .aver-version bump will need work, and gates nothing today.
 #
 # Runs nightly, and on demand from the Actions tab (workflow_dispatch).
@@ -23,16 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Record which aver tip this run used
-        run: git ls-remote https://github.com/jasisz/aver refs/heads/main | tee aver-tip.txt
-      - name: Point aver-rt at the git tip (dev machines use a local path)
+      - name: Check out the Aver source at tip, at the dev path
         run: |
-          for f in providers/primitives/Cargo.toml providers/kv/Cargo.toml; do
-            sed -i "s#^aver-rt = { path = [^}]*}#aver-rt = { git = \"https://github.com/jasisz/aver\" }#" "$f"
-          done
-          rm -f providers/primitives/Cargo.lock providers/kv/Cargo.lock
-      - name: Install aver from tip
-        run: cargo install --git https://github.com/jasisz/aver aver-lang --locked
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver log --oneline -1
+      - name: Install aver from that source
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
       - name: Toolchain identity
         run: aver --version
       - name: Check

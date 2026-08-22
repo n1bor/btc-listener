@@ -1,9 +1,13 @@
 name: CI
 
-# The Aver toolchain is pinned to the commit SHA in .aver-version at the repo
-# root — CI builds exactly that revision of jasisz/aver, and moving the pin is
-# a one-line PR that the whole pipeline then tests. The canary workflow
-# (canary.yml) tracks Aver's current tip without gating anything.
+# CI recreates the dev environment: the Aver source is checked out at the
+# commit SHA pinned in .aver-version, AT THE SAME PATH the dev machines use
+# (/home/owensr/aver/aver), and the toolchain is installed from that path.
+# Everything the toolchain then generates — provider hosts, the compiled
+# project — resolves aver-rt and aver-lang from that one source, exactly as
+# it does locally. Moving the pin is a one-line PR that this whole pipeline
+# then tests. The canary workflow (canary.yml) tracks Aver's tip, gating
+# nothing.
 
 on:
   push:
@@ -21,15 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver checkout --quiet "$(cat .aver-version)"
       - name: Cache the aver toolchain
         id: aver-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Install aver at the pinned revision
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
       - name: Format check
         run: aver format . --check
 
@@ -40,15 +50,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver checkout --quiet "$(cat .aver-version)"
       - name: Cache the aver toolchain
         id: aver-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Install aver at the pinned revision
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
       - name: Check
         run: aver check . --module-root .
 
@@ -59,14 +75,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Point aver-rt at the pinned git source (dev machines use a local path)
+      - name: Check out the Aver source at the pinned revision, at the dev path
         run: |
-          REV=$(cat .aver-version)
-          for f in providers/primitives/Cargo.toml providers/kv/Cargo.toml; do
-            sed -i "s#^aver-rt = { path = [^}]*}#aver-rt = { git = \"https://github.com/jasisz/aver\", rev = \"$REV\" }#" "$f"
-          done
-          rm -f providers/primitives/Cargo.lock providers/kv/Cargo.lock
-          grep -H "aver-rt" providers/primitives/Cargo.toml providers/kv/Cargo.toml
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver checkout --quiet "$(cat .aver-version)"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -84,23 +98,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Point aver-rt at the pinned git source (dev machines use a local path)
+      - name: Check out the Aver source at the pinned revision, at the dev path
         run: |
-          REV=$(cat .aver-version)
-          for f in providers/primitives/Cargo.toml providers/kv/Cargo.toml; do
-            sed -i "s#^aver-rt = { path = [^}]*}#aver-rt = { git = \"https://github.com/jasisz/aver\", rev = \"$REV\" }#" "$f"
-          done
-          rm -f providers/primitives/Cargo.lock providers/kv/Cargo.lock
-          grep -H "aver-rt" providers/primitives/Cargo.toml providers/kv/Cargo.toml
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver checkout --quiet "$(cat .aver-version)"
       - name: Cache the aver toolchain
         id: aver-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Install aver at the pinned revision
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -119,23 +131,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Point aver-rt at the pinned git source (dev machines use a local path)
+      - name: Check out the Aver source at the pinned revision, at the dev path
         run: |
-          REV=$(cat .aver-version)
-          for f in providers/primitives/Cargo.toml providers/kv/Cargo.toml; do
-            sed -i "s#^aver-rt = { path = [^}]*}#aver-rt = { git = \"https://github.com/jasisz/aver\", rev = \"$REV\" }#" "$f"
-          done
-          rm -f providers/primitives/Cargo.lock providers/kv/Cargo.lock
-          grep -H "aver-rt" providers/primitives/Cargo.toml providers/kv/Cargo.toml
+          sudo mkdir -p /home/owensr/aver
+          sudo chown "$USER" /home/owensr/aver
+          git clone --quiet https://github.com/jasisz/aver /home/owensr/aver/aver
+          git -C /home/owensr/aver/aver checkout --quiet "$(cat .aver-version)"
       - name: Cache the aver toolchain
         id: aver-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Install aver at the pinned revision
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: build
