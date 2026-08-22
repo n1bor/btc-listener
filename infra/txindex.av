@@ -20,7 +20,7 @@ module TxIndex
         "Transactions and one near genesis holds one."
     exposes [Built, build]
     depends [Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store]
-    effects [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    effects [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
 
 record Built
     blocks: Int
@@ -47,7 +47,7 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
       "A Height whose body is absent is stepped over rather than refused: the"
       "range is what the caller asked for, and what is held inside it is what"
       "there is to index."
-    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     walked = walk(Walk(store = store, blocks = blocks, pending = [], waiting = 0, counted = Built(blocks = 0, transactions = 0)), from, to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
@@ -56,19 +56,19 @@ fn flushed(state: Walk) -> Result<Store, String>
     ? "Write whatever is still held back."
       "The accumulator is built by prepending, so it is turned round here rather"
       "than concatenated on every Block, which would cost the batch twice over."
-    ! [Disk.appendText, Infra.Kv.putAll]
+    ! [Infra.Kv.putAll]
     Infra.Store.putAll(state.store, List.reverse(state.pending))
 
 fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn."
-    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     match height > to
         true -> Result.Ok(state)
         false -> atHeight(state, height, to)
 
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
-    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
     match named
         Option.None -> Result.Ok(state)
@@ -76,7 +76,7 @@ fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 
 fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
     ? "A Block whose body is not held has no Transactions to record."
-    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
     match located
         Option.None -> walk(state, height + 1, to)
@@ -84,7 +84,7 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
 
 fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
-    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     location = Domain.Index.decodeLocation(text)?
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
@@ -96,14 +96,14 @@ fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -
 
 fn maybeWrite(state: Walk) -> Result<Walk, String>
     ? "Write the batch once it is big enough, and start a new one."
-    ! [Disk.appendText, Infra.Kv.putAll]
+    ! [Infra.Kv.putAll]
     match state.waiting >= batchSize()
         false -> Result.Ok(state)
         true -> written(state)
 
 fn written(state: Walk) -> Result<Walk, String>
     ? "One putAll for everything held back."
-    ! [Disk.appendText, Infra.Kv.putAll]
+    ! [Infra.Kv.putAll]
     grown = flushed(state)?
     Result.Ok(Walk(store = grown, blocks = state.blocks, pending = [], waiting = 0, counted = state.counted))
 

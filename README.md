@@ -36,7 +36,7 @@ those wrote and works offline.
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
-| `migrate <dir>` | [move](#the-index-and-its-backends) the Index from the log into a LevelDB, once | no |
+| `taproottest [n]` | run Core's script_assets corpus — 3,737 tapscript tests — or explain test n | no |
 | `help` | print the usage | no |
 
 The three fetching commands have to run in this order, because each needs what
@@ -614,34 +614,22 @@ no longer follow as unresolved rather than as faults.
 ## The Index and its backends
 
 The Index is a keyed store — Block Ids to Locations, Heights to Block Ids,
-Transaction Ids to sites — and `infra/store.av` offers it over three backends
+Transaction Ids to sites — and `infra/store.av` offers it over two backends
 behind one API. Callers cannot tell them apart: `Store` is opaque, so the same
 `get`, `putAll` and `deleteAll` reach whichever is there.
 
 | backend | what it is | where it comes from |
 |---|---|---|
-| Memory | a `Map`, holding exactly what it was handed | `Store.fixture`, used by 71 verify cases |
-| Logged | that `Map`, rebuilt on open from an append-only file | a directory with `index.log` and no `kv/` |
-| Database | a LevelDB, read a key at a time | a directory with a `kv/` in it |
+| Memory | a `Map`, holding exactly what it was handed | `Store.fixture`, used by the verify cases |
+| Database | a LevelDB, read a key at a time | a directory's `kv/`, made on first open |
 
-Which one a directory uses is a fact about the directory rather than about the
-invocation, because the data really is in one shape or the other. `migrate`
-makes the database and leaves the log alone, so going back is renaming a
-directory:
-
-```bash
-./target/release/main migrate ~/chain
-1454101 entries moved into ~/chain/kv; the log is still there
-```
-
-The log backend holds every entry in memory. Measured on the same 124 MB index,
-the same binary, and the same two ranges:
-
-| | log | database |
-|---|---|---|
-| `audit chain 1 4000` | 7.6 s, 615 MB | 4.0 s, 67 MB |
-| `audit chain 170000 172000` | 44.5 s, 615 MB | 49.4 s, 97 MB |
-| totals | identical | identical |
+There was a third: Logged, an append-only text file replayed into memory on
+every open — the format that came before the database, kept so the one-shot
+`migrate` command had something to move from. Both were retired together
+(#44): a text log cannot hold the binary keys the Index is moving to, and a
+directory is rebuilt from the network rather than migrated. A directory still
+holding an `index.log` and no `kv/` is refused by name, the same way a
+directory of hex Segments is.
 
 Memory is the point, not speed. 615 MB is the whole Index held open regardless
 of what is being read; 67 MB is what the audit itself needs. The sharpest
@@ -726,10 +714,8 @@ infra/  the network
   resolver.av download.av
 
 infra/  the disk
-  store.av          keyed store over three backends, one opaque API
-  storelog.av       the append-only log's record format and replay
+  store.av          keyed store over two backends, one opaque API
   kv.av             the key-value database capability contract
-  migrate.av        one-shot: the log into the database beside it
   blocks.av chain.av txindex.av lock.av prune.av
   spends.av audit.av
 ```

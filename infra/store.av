@@ -1,121 +1,89 @@
 module Store
     intent =
         "A keyed byte store: get, put, delete and batch, over a backend that is"
-        "either a Map held in memory or that same Map rebuilt from an append-only"
-        "log on disk."
-        "This module is a seam. When a real key-value database is reachable from"
-        "Aver it arrives as a third backend beside these two, and the signatures"
-        "here do not change. The Store is opaque, so the representation is"
+        "either a Map held in memory or a database in the directory it was"
+        "opened on."
+        "This module is a seam. The Store is opaque, so the representation is"
         "enforced rather than merely agreed: a caller cannot build one, read a"
         "field from it, or match on it, and every attempt is a compile error"
-        "rather than something a reviewer has to catch. That is what lets the sum"
-        "grow an arm without a caller noticing."
-        "Memory is not a lesser Store. It is what fixture returns, and 71 verify"
-        "blocks in four other modules are written against it, so it has to refuse"
-        "exactly what the log refuses or those blocks stop being evidence about"
-        "the real thing. It gets that for free: a write to a Memory Store encodes"
-        "the batch through Infra.StoreLog and throws the text away, so the two"
-        "backends cannot drift apart in what they accept."
-        "The reads return a Result although neither of these backends can fail,"
-        "and open is given a directory rather than a file name. Both are shaped"
-        "for the database rather than for the log. A caller written against a"
-        "total lookup or a known file name would have to be restructured when the"
-        "database arrives; written this way it only has to be recompiled."
-        "What is left to do at that point is declare the effects a read performs."
-        "Adding an effect is mechanical and the checker names every site; changing"
-        "a return type is not, which is why the Result is here already."
-        "There is no compact. The log grows tombstones a prune never reclaims"
-        "and the function to rewrite it existed from the first commit, exposed,"
-        "and was never once called by anything on any backend. A database"
-        "compacts itself, so the only backend it would still have meant work"
-        "for is the one being replaced. It can come back the day something"
-        "calls it."
-        "Appending one record per put and rebuilding on open is not a shortcut"
-        "around writing a real index. It is the shape a log-structured store"
-        "already has, which is why it can be swapped for one. Rewriting the whole"
-        "file on every put would work at a hundred entries and cost a terabyte of"
-        "writes at a million."
-        "Capacity, not capability, is what bounds both backends here: each holds"
-        "every entry in memory, so they suit the Index at around a million entries"
-        "and cannot back a UTXO set at two hundred million. Opening a log of"
-        "962268 entries takes 1.9 seconds and 414 MB; two hundred million would"
-        "want some eighty gigabytes. That is the reason for the third arm."
-        "Write in batches. A Map returned from a function is copied in Aver"
-        "0.28.1, and every mutation here hands back a Store holding one, so the"
-        "cost of a call is the size of the Store rather than the size of the"
-        "change. One putAll of 40000 entries takes 64 milliseconds; the same"
-        "40000 entries one put at a time take 35 seconds."
-        "That was jasisz/aver#890, which is now fixed -- a Map handed back by a"
-        "function is no longer copied. Batching still earns its keep for the"
-        "database arm, where one putAll is one LevelDB write batch and the cost"
-        "is round trips rather than copying, so the callers are unchanged. What"
-        "is no longer true is the reason: it was 52 milliseconds through one"
-        "putAll against 24404 one at a time, and that ratio was the Map and not"
-        "the database. Whether it still holds for the database alone has not"
-        "been measured since."
-    exposes [Entry, open, openLogged, heldBy, databaseHere, databasePath, get, has, size, put, putAll, delete, deleteAll, fixture]
+        "rather than something a reviewer has to catch. That is what let the sum"
+        "grow the database arm without a caller noticing, and what let the log"
+        "arm go the same way."
+        "There was a third backend. Logged replayed an append-only text log into"
+        "memory on every open -- the format that came before the database, kept"
+        "so migrate had something to move from. Nothing read it any more, a text"
+        "log cannot hold the binary keys #45 wants, and the directory is rebuilt"
+        "from the network rather than migrated (#42), so #44 retired it: the"
+        "arm, openLogged, heldBy, Infra.StoreLog and the migrate command are"
+        "gone, and a directory still holding only a log is refused by name, as"
+        "Infra.Blocks refuses a directory of hex Segments."
+        "Memory is not a lesser Store. It is what fixture returns, and the"
+        "verify blocks of four other modules are written against it, so it has"
+        "to refuse exactly what the database backend refuses or those blocks"
+        "stop being evidence about the real thing. Both backends pass every"
+        "write through the one gate, acceptable."
+        "The key rules -- no empty key, no tab or newline in a key or a value --"
+        "are inherited from the log format, and the database could hold what"
+        "they refuse. They stay anyway: every key the Index writes is"
+        "hexadecimal, digits or a colon, so the rules refuse nothing the"
+        "program produces, and they keep a fixture and the database in"
+        "agreement until #45 moves keys to bytes and the rules are rewritten"
+        "rather than quietly relaxed."
+        "The reads return a Result although the Memory backend cannot fail, and"
+        "open is given a directory rather than a file name. Both are shaped for"
+        "the database: a read from it can fail for reasons a Map has not got,"
+        "and what a Store keeps inside its directory is the Store's business."
+        "Write in batches. One putAll is one LevelDB write batch, so the cost"
+        "of a write is round trips rather than copying, and a loop over put"
+        "hands back a Store per call where putAll hands back one."
+    exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, fixture]
     exposes opaque [Store]
-    depends [Domain.Text, Infra.Kv, Infra.StoreLog]
+    depends [Infra.Kv]
     effects [
-        Disk.appendText, Disk.exists, Disk.makeDir, Disk.readText,
+        Disk.exists, Disk.makeDir,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
 
 type Store
     Memory(Map<String, String>)
-    Logged(String, Map<String, String>)
     Database(Infra.Kv.Handle)
 
+record Entry
+    key: String
+    value: String
+
 fn open(dir: String) -> Result<Store, String>
-    ? "Rebuild a Store from what is in a directory, or start an empty one."
-      "A directory rather than a file, because what a Store keeps inside it is the"
-      "Store's business. This one keeps a single log; a database would keep a"
-      "directory of its own, and no caller would have to be told."
-      "The directory is created if absent, so a caller never has to know that this"
-      "implementation appends to a file and will not make the folder holding it."
-    ! [Disk.exists, Disk.makeDir, Disk.readText, Infra.Kv.open]
+    ? "Open the database in a directory, creating either if it is absent."
+      "A directory rather than a file, because what a Store keeps inside it is"
+      "the Store's business. This one keeps a LevelDB in kv; no caller has to"
+      "be told."
+      "The directory is created if absent, and so is the database: since #44"
+      "there is nothing else a directory could hold, so a fresh one starts as"
+      "a database rather than waiting for a migration to make it one."
+    ! [Disk.exists, Disk.makeDir, Infra.Kv.open]
     _made = Disk.makeDir(dir)?
     openBacking(dir, Disk.exists(databaseMark(dir)))
 
-fn openLogged(dir: String) -> Result<Store, String>
-    ? "Open this directory's log, whatever else the directory may also hold."
-      "open decides by what is on disk, which is right for every caller but one:"
-      "the migration has to read the log precisely when a database exists beside"
-      "it, because making that database is what it is doing."
-    ! [Disk.exists, Disk.makeDir, Disk.readText]
-    _made = Disk.makeDir(dir)?
-    openLog(logPath(dir))
-
-fn heldBy(store: Store) -> Result<List<Tuple<String, String>>, String>
-    ? "Everything a Store holds in memory, which only the two file backends do."
-      "Not a general listing. A database would have to walk its whole keyspace"
-      "to answer and no caller wants that; the one caller is the migration,"
-      "which is reading a log by construction."
-    match store
-        Store.Memory(held) -> Result.Ok(Map.entries(held))
-        Store.Logged(path, held) -> Result.Ok(Map.entries(held))
-        Store.Database(handle) -> Result.Err("a database does not list itself")
-
-verify heldBy
-    heldBy(Store.Memory(Map.fromList([("a", "b")]))) => Result.Ok([("a", "b")])
-    heldBy(Store.Memory(Map.fromList([]))) => Result.Ok([])
-    heldBy(Store.Logged("s.log", Map.fromList([("a", "b")]))) => Result.Ok([("a", "b")])
-
-fn databaseHere(dir: String) -> Result<Bool, String>
-    ? "Whether this directory already holds a database."
-    ! [Disk.exists]
-    Result.Ok(Disk.exists(databaseMark(dir)))
-
 fn openBacking(dir: String, database: Bool) -> Result<Store, String>
-    ? "A directory that has a database in it is opened as one; otherwise the log."
-      "The backend is a property of the directory rather than of the invocation,"
-      "which is the only place it could honestly live: the data is in one shape"
-      "or the other and no flag changes that. main migrate makes the database,"
-      "so moving is a command and moving back is renaming a directory."
-    ! [Disk.exists, Disk.readText, Infra.Kv.open]
+    ? "Open the database that is here, or decide what its absence means."
+    ! [Disk.exists, Infra.Kv.open]
     match database
         true -> holding(Infra.Kv.open(databasePath(dir)))
-        false -> openLog(logPath(dir))
+        false -> openFresh(dir, Disk.exists(logPath(dir)))
+
+fn openFresh(dir: String, logHere: Bool) -> Result<Store, String>
+    ? "No database yet: a leftover log is refused by name, anything else starts one."
+      "A directory holding index.log and no database was written by the log"
+      "backend this module no longer has. Opening it as an empty database would"
+      "silently ignore every entry the log holds, so it is refused the way"
+      "Infra.Blocks refuses a directory of hex Segments: the data is in a shape"
+      "this program no longer reads, and the directory is rebuilt from the"
+      "network (#42). A log left beside an existing database is dead weight"
+      "from before #44 and does not refuse anything -- the database wins."
+    ! [Infra.Kv.open]
+    match logHere
+        true -> Result.Err("{logPath(dir)} holds a log-backed Index, the format before the database; rebuild the directory from the network")
+        false -> holding(Infra.Kv.open(databasePath(dir)))
 
 fn holding(opened: Result<Infra.Kv.Handle, String>) -> Result<Store, String>
     ? "A database that opened is a Store; one that did not is the reason it did not."
@@ -132,38 +100,20 @@ verify databasePath
 fn databaseMark(dir: String) -> String
     ? "The file LevelDB always writes, and so the sign that there is a database."
       "Asking for the directory would not do: open makes the directory it is"
-      "given, and a half-made one holding no database has to read as the log."
+      "given, and a half-made one holding no database still has to be told from"
+      "one holding a leftover log."
     "{databasePath(dir)}/CURRENT"
 
 verify databaseMark
     databaseMark("chain") => "chain/kv/CURRENT"
 
 fn logPath(dir: String) -> String
-    ? "Where this implementation keeps its records inside the directory it is given."
+    ? "Where the retired log backend kept its records, checked only to refuse it."
     "{dir}/index.log"
 
 verify logPath
     logPath("chain") => "chain/index.log"
     logPath("/tmp/chain") => "/tmp/chain/index.log"
-
-fn openLog(path: String) -> Result<Store, String>
-    ? "Replay the log if it is there, otherwise start empty."
-    ! [Disk.exists, Disk.readText]
-    match Disk.exists(path)
-        false -> Result.Ok(Store.Logged(path, empty()))
-        true -> reopen(path, Disk.readText(path))
-
-fn reopen(path: String, contents: Result<String, String>) -> Result<Store, String>
-    ? "Replay a log that was read, or report why it could not be."
-    log = contents?
-    entries = Infra.StoreLog.replayed(Domain.Text.completeLines(log), empty())?
-    Result.Ok(Store.Logged(path, entries))
-
-verify reopen
-    reopen("s.log", Result.Ok("+a\tb\n")) => Result.Ok(Store.Logged("s.log", Map.set(Map.fromList([]), "a", "b")))
-    reopen("s.log", Result.Ok("")) => Result.Ok(Store.Logged("s.log", Map.fromList([])))
-    reopen("s.log", Result.Err("no such file")) => Result.Err("no such file")
-    reopen("s.log", Result.Ok("?bad\n")) => Result.Err("Store log record is neither a put nor a delete: '?bad'")
 
 fn empty() -> Map<String, String>
     ? "A Store with nothing in it."
@@ -174,17 +124,14 @@ verify empty
 
 fn get(store: Store, key: String) -> Result<Option<String>, String>
     ? "What is stored under a key, if anything."
-      "A key the log format could not have written is refused rather than answered"
-      "with None. The two are not the same thing: absent is a fact about the data,"
-      "a malformed key is a fault in the question, and reporting the second as the"
-      "first hides a caller's bug behind ordinary-looking data. put has always"
-      "enforced this; reads enforcing it too is what makes it a contract."
-      "That is also what the seam needs. A read from a real database can fail for"
-      "reasons this one has not got, and a caller written against a total lookup"
-      "would have to be restructured rather than recompiled when one arrives."
+      "A key the rules refuse is refused rather than answered with None. The two"
+      "are not the same thing: absent is a fact about the data, a malformed key"
+      "is a fault in the question, and reporting the second as the first hides a"
+      "caller's bug behind ordinary-looking data. put has always enforced this;"
+      "reads enforcing it too is what makes it a contract."
     ! [Infra.Kv.get]
-    match Infra.StoreLog.usableKey(key)
-        false -> Result.Err(Infra.StoreLog.keyRefused(key))
+    match usableKey(key)
+        false -> Result.Err(keyRefused(key))
         true -> looked(store, key)
 
 verify get
@@ -198,19 +145,17 @@ fn looked(store: Store, key: String) -> Result<Option<String>, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.get(held, key))
-        Store.Logged(path, held) -> Result.Ok(Map.get(held, key))
         Store.Database(handle) -> Infra.Kv.get(handle, key)
 
 verify looked
     looked(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
     looked(Store.Memory(Map.fromList([])), "a") => Result.Ok(Option.None)
-    looked(Store.Logged("s.log", Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
 
 fn has(store: Store, key: String) -> Result<Bool, String>
     ? "Whether a key is present, refusing one that could never have been stored."
     ! [Infra.Kv.get]
-    match Infra.StoreLog.usableKey(key)
-        false -> Result.Err(Infra.StoreLog.keyRefused(key))
+    match usableKey(key)
+        false -> Result.Err(keyRefused(key))
         true -> present(store, key)
 
 verify has
@@ -223,13 +168,11 @@ fn present(store: Store, key: String) -> Result<Bool, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.has(held, key))
-        Store.Logged(path, held) -> Result.Ok(Map.has(held, key))
         Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
 
 verify present
     present(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(true)
     present(Store.Memory(Map.fromList([])), "a") => Result.Ok(false)
-    present(Store.Logged("s.log", Map.fromList([("a", "b")])), "a") => Result.Ok(true)
 
 fn wasFound(found: Result<Option<String>, String>) -> Result<Bool, String>
     ? "Whether a lookup found anything."
@@ -254,16 +197,12 @@ verify anything
 
 fn size(store: Store) -> Result<Int, String>
     ? "How many keys the Store holds."
-      "This was an Int and is now a Result, which is the change its own note"
-      "predicted: a database makes it fallible, it had one caller, and that"
-      "caller already sat inside a Result, so the move cost one line there."
       "It costs the database a walk of the keyspace. LevelDB keeps no count and"
       "keeping one would mean a second write on every batch; the single caller"
       "asks once, at the end of a build, so the walk is paid once."
     ! [Infra.Kv.count]
     match store
         Store.Memory(held) -> Result.Ok(Map.len(held))
-        Store.Logged(path, held) -> Result.Ok(Map.len(held))
         Store.Database(handle) -> Infra.Kv.count(handle)
 
 fn fixture(pairs: List<Tuple<String, String>>) -> Store
@@ -271,10 +210,9 @@ fn fixture(pairs: List<Tuple<String, String>>) -> Store
       "An opaque Store cannot be built from outside, and functions elsewhere that"
       "take one still have to be checked, so the seam supplies the fixture rather"
       "than leaving each caller to invent a representation it should not know."
-      "It touches no disk, and now says so in the type rather than by carrying an"
-      "empty path a write would have appended to. A Store made this way refuses"
-      "the same keys the log does and can be written to; what it cannot do is"
-      "outlive the call."
+      "It touches no disk, and says so in the type. A Store made this way refuses"
+      "the same keys the database does and can be written to; what it cannot do"
+      "is outlive the call."
     Store.Memory(Map.fromList(pairs))
 
 verify fixture
@@ -283,22 +221,18 @@ verify fixture
     fixture([("a", "b"), ("c", "d")]) => Store.Memory(Map.fromList([("a", "b"), ("c", "d")]))
 
 fn put(store: Store, key: String, value: String) -> Result<Store, String>
-    ? "Record one key, appending to the log before believing it in memory."
+    ? "Record one key."
       "Convenience for a single change. Anything in bulk should go through"
-      "putAll: this returns a Store, and returning one costs a copy of every"
-      "entry it holds, so a loop over put is quadratic in the size of the Store."
-    ! [Disk.appendText, Infra.Kv.putAll]
+      "putAll: one putAll is one write batch, and a loop over put pays a round"
+      "trip per key."
+    ! [Infra.Kv.putAll]
     putAll(store, [Entry(key = key, value = value)])
 
 fn putAll(store: Store, entries: List<Entry>) -> Result<Store, String>
-    ? "Record several keys in one append, which is as close to atomic as Disk gets."
-      "Aver cannot flush or fence, so a batch is one appendText call rather than a"
-      "transaction: it either reaches the file or it does not, and a torn tail is"
-      "discarded on the next open."
-    ! [Disk.appendText, Infra.Kv.putAll]
+    ? "Record several keys in one batch, which the database makes atomic."
+    ! [Infra.Kv.putAll]
     match store
         Store.Memory(held) -> heldPut(held, entries)
-        Store.Logged(path, logged) -> loggedPut(path, logged, entries)
         Store.Database(handle) -> storedPut(handle, entries)
 
 fn storedPut(handle: Infra.Kv.Handle, entries: List<Entry>) -> Result<Store, String>
@@ -306,7 +240,7 @@ fn storedPut(handle: Infra.Kv.Handle, entries: List<Entry>) -> Result<Store, Str
       "No Map comes back, which is the whole point: this is the only backend"
       "whose Store does not grow with what has been written to it."
     ! [Infra.Kv.putAll]
-    _checked = Infra.StoreLog.acceptable(entries)?
+    _checked = acceptable(entries)?
     _written = Infra.Kv.putAll(handle, asPairs(entries, []))?
     Result.Ok(Store.Database(handle))
 
@@ -322,11 +256,11 @@ verify asPairs
     asPairs([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")], []) => [("a", "b"), ("c", "d")]
 
 fn heldPut(held: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
-    ? "Absorb a batch into memory, having first encoded it and thrown the text away."
-      "The encoding is the check. Memory has no log to refuse a key, so it borrows"
-      "the log's refusal rather than repeating the rule, which is what keeps a"
-      "fixture evidence about the Store the program actually runs on."
-    _checked = Infra.StoreLog.acceptable(entries)?
+    ? "Absorb a batch into memory, having first passed it through the same gate."
+      "Memory has no database to refuse a key, so it borrows the refusal rather"
+      "than repeating the rule, which is what keeps a fixture evidence about the"
+      "Store the program actually runs on."
+    _checked = acceptable(entries)?
     Result.Ok(Store.Memory(absorbAll(entries, held)))
 
 verify heldPut
@@ -334,61 +268,41 @@ verify heldPut
     heldPut(empty(), [Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
     heldPut(empty(), [Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
 
-fn loggedPut(path: String, logged: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
-    ? "Append the batch to the log, and believe it only once the disk has it."
-    ! [Disk.appendText]
-    records = Infra.StoreLog.recordsFor(entries)?
-    _written = appended(path, records)?
-    Result.Ok(Store.Logged(path, absorbAll(entries, logged)))
-
 fn delete(store: Store, key: String) -> Result<Store, String>
-    ? "Forget one key, leaving a tombstone in the log so a replay forgets it too."
+    ? "Forget one key."
       "Pruning needs this: a Block whose Segment was deleted must have no Location"
       "entry, or the Prune Watermark could not tell a discarded Block from one"
       "that never arrived."
-    ! [Disk.appendText, Infra.Kv.deleteAll]
+    ! [Infra.Kv.deleteAll]
     deleteAll(store, [key])
 
 fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
-    ? "Forget several keys in one append, as putAll records several in one."
+    ? "Forget several keys in one batch, as putAll records several in one."
       "Pruning drops the Location of every Block in a deleted Segment, which is"
-      "tens of thousands of keys at once. delete hands back a Store and handing"
-      "one back copies every entry it holds, so a loop over delete is quadratic"
-      "in the size of the Store rather than in the size of the change."
-    ! [Disk.appendText, Infra.Kv.deleteAll]
+      "tens of thousands of keys at once, and one batch is one round trip."
+    ! [Infra.Kv.deleteAll]
     match store
         Store.Memory(held) -> heldDelete(held, keys)
-        Store.Logged(path, logged) -> loggedDelete(path, logged, keys)
         Store.Database(handle) -> storedDelete(handle, keys)
 
 fn storedDelete(handle: Infra.Kv.Handle, keys: List<String>) -> Result<Store, String>
-    ? "Ask the database to forget the keys, in one batch as the log does."
+    ? "Ask the database to forget the keys, in one batch."
     ! [Infra.Kv.deleteAll]
-    _checked = Infra.StoreLog.acceptableKeys(keys)?
+    _checked = acceptableKeys(keys)?
     _removed = Infra.Kv.deleteAll(handle, keys)?
     Result.Ok(Store.Database(handle))
 
 fn heldDelete(held: Map<String, String>, keys: List<String>) -> Result<Store, String>
-    ? "Forget the keys in memory, refusing any the log could not have tombstoned."
-    _checked = Infra.StoreLog.acceptableKeys(keys)?
+    ? "Forget the keys in memory, refusing any the Store could never have held."
+    _checked = acceptableKeys(keys)?
     Result.Ok(Store.Memory(forgetAll(keys, held)))
 
 verify heldDelete
     heldDelete(Map.set(empty(), "a", "b"), ["a"]) => Result.Ok(Store.Memory(empty()))
     heldDelete(empty(), [""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
 
-fn loggedDelete(path: String, logged: Map<String, String>, keys: List<String>) -> Result<Store, String>
-    ? "Append the tombstones, then forget the keys in memory."
-    ! [Disk.appendText]
-    records = Infra.StoreLog.deleteRecordsFor(keys)?
-    _written = appended(path, records)?
-    Result.Ok(Store.Logged(path, forgetAll(keys, logged)))
-
 fn forgetAll(keys: List<String>, into: Map<String, String>) -> Map<String, String>
     ? "Remove the same keys from the in-memory map."
-      "Map.remove appears in the recursive call rather than behind a helper, for"
-      "the reason Infra.StoreLog.replayApplied gives: a Map handed back from a"
-      "function is copied."
     match keys
         [] -> into
         [head, ..tail] -> forgetAll(tail, Map.remove(into, head))
@@ -398,13 +312,8 @@ verify forgetAll
     forgetAll(["a"], Map.set(empty(), "a", "b")) => empty()
     Map.len(forgetAll(["a"], Map.set(Map.set(empty(), "a", "b"), "c", "d"))) => 1
 
-fn appended(path: String, records: String) -> Result<Unit, String>
-    ? "Put the records on the end of the log."
-    ! [Disk.appendText]
-    Disk.appendText(path, records)
-
 fn absorbAll(entries: List<Entry>, into: Map<String, String>) -> Map<String, String>
-    ? "Apply the same entries to the in-memory map, in the order they were logged."
+    ? "Apply the same entries to the in-memory map, in the order they were given."
     match entries
         [] -> into
         [head, ..tail] -> absorbAll(tail, Map.set(into, head.key, head.value))
@@ -413,3 +322,103 @@ verify absorbAll
     absorbAll([], empty()) => empty()
     absorbAll([Entry(key = "a", value = "b")], empty()) => Map.set(empty(), "a", "b")
     Map.get(absorbAll([Entry(key = "a", value = "b"), Entry(key = "a", value = "c")], empty()), "a") => Option.Some("c")
+
+fn keyRefused(key: String) -> String
+    ? "Why a key cannot be used, in the one wording every entry point gives."
+      "Reads and writes reject the same keys, so they say so the same way; a"
+      "caller that learns the rule from a put should recognise it from a get."
+    "Store key must not be empty or contain a tab or newline, got '{key}'"
+
+verify keyRefused
+    keyRefused("") => "Store key must not be empty or contain a tab or newline, got ''"
+    keyRefused("a\tb") => "Store key must not be empty or contain a tab or newline, got 'a\tb'"
+
+fn valueRefused(value: String) -> String
+    ? "Why a value cannot be stored, in the one wording every entry point gives."
+    "Store value must not contain a tab or newline, got '{value}'"
+
+verify valueRefused
+    valueRefused("a\tb") => "Store value must not contain a tab or newline, got 'a\tb'"
+    valueRefused("a\nb") => "Store value must not contain a tab or newline, got 'a\nb'"
+
+fn acceptable(entries: List<Entry>) -> Result<Unit, String>
+    ? "Whether a whole batch could be stored, naming the first entry that could not."
+      "The one gate both backends pass every write through, so a fixture and the"
+      "database cannot drift apart in what they accept."
+    match entries
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> acceptableNext(head, tail)
+
+verify acceptable
+    acceptable([]) => Result.Ok(Unit)
+    acceptable([Entry(key = "a", value = "b")]) => Result.Ok(Unit)
+    acceptable([Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
+    acceptable([Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
+
+fn acceptableNext(head: Entry, tail: List<Entry>) -> Result<Unit, String>
+    ? "Refuse this entry's key, then its value, then carry on with the rest."
+    match usableKey(head.key)
+        false -> Result.Err(keyRefused(head.key))
+        true -> acceptableValue(head.value, tail)
+
+verify acceptableNext
+    acceptableNext(Entry(key = "a", value = "b"), []) => Result.Ok(Unit)
+    acceptableNext(Entry(key = "", value = "b"), []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn acceptableValue(value: String, tail: List<Entry>) -> Result<Unit, String>
+    ? "The key was usable; the value still has to be."
+    match usableValue(value)
+        false -> Result.Err(valueRefused(value))
+        true -> acceptable(tail)
+
+verify acceptableValue
+    acceptableValue("b", []) => Result.Ok(Unit)
+    acceptableValue("b\tc", []) => Result.Err("Store value must not contain a tab or newline, got 'b\tc'")
+
+fn acceptableKeys(keys: List<String>) -> Result<Unit, String>
+    ? "Whether every key in a batch could have been stored."
+    match keys
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> acceptableKeyNext(head, tail)
+
+verify acceptableKeys
+    acceptableKeys([]) => Result.Ok(Unit)
+    acceptableKeys(["a", "b"]) => Result.Ok(Unit)
+    acceptableKeys(["a", ""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn acceptableKeyNext(head: String, tail: List<String>) -> Result<Unit, String>
+    ? "Refuse this key, then carry on with the rest."
+    match usableKey(head)
+        false -> Result.Err(keyRefused(head))
+        true -> acceptableKeys(tail)
+
+verify acceptableKeyNext
+    acceptableKeyNext("a", []) => Result.Ok(Unit)
+    acceptableKeyNext("", []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+
+fn usableKey(key: String) -> Bool
+    ? "A key must be present and must satisfy the same rules as a value."
+    match String.len(key) > 0
+        false -> false
+        true -> usableValue(key)
+
+verify usableKey
+    usableKey("b:aa") => true
+    usableKey("") => false
+    usableKey("a\tb") => false
+    usableKey("a\nb") => false
+
+fn usableValue(value: String) -> Bool
+    ? "No tab or newline, the rule inherited from the log format and kept until"
+      "#45 moves keys and values to bytes. Every key and value the Index uses is"
+      "hexadecimal, digits or a colon, so this rejects nothing the program"
+      "itself produces."
+    match String.contains(value, "\t")
+        true -> false
+        false -> String.contains(value, "\n") == false
+
+verify usableValue
+    usableValue("7:1234") => true
+    usableValue("") => true
+    usableValue("a\tb") => false
+    usableValue("a\nb") => false

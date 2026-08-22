@@ -63,7 +63,7 @@ Three flags are load-bearing and easy to drop:
   every case that reaches the curve fails.
 
 The twelve CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
-`tx`, `spend`, `audit`, `prune`, `migrate`, listen, `help`), their ordering
+`tx`, `spend`, `audit`, `prune`, `taproottest`, listen, `help`), their ordering
 constraints and their output formats are documented in README.md.
 
 ## Architecture
@@ -87,10 +87,10 @@ supplied at run time by Rust crates named in `aver.toml`:
 The providers carry their own Rust tests; everything else is tested from Aver.
 
 **The Store and the Index** (`infra/store.av`): one opaque keyed-store API over
-three backends — Memory (fixtures), Logged (append-only `index.log`, whole
-index in RAM), Database (LevelDB in `kv/`). Which backend a chain directory
-uses is a fact about the directory's contents, not a flag. `migrate` moves log
-→ database one way. Key prefixes: `b:` Block Id → Location, `h:` Height →
+two backends — Memory (fixtures), Database (LevelDB in `kv/`, made on first
+open). The log backend and `migrate` are gone (#44); a directory holding an
+`index.log` and no `kv/` is refused, and is rebuilt from the network instead.
+Key prefixes: `b:` Block Id → Location, `h:` Height →
 Block Id, `t:` Transaction Id → site, `o:<txid>:<index>` → Output (what lets a
 spend resolve in one lookup).
 

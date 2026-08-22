@@ -4,17 +4,11 @@ module Maintain
         "prune discards Blocks below a Height, txindex records where Transactions"
         "sit, and audit checks a range against everything we know how to check."
         "The first two write and claim the directory; audit only reads."
-        "migrate is the odd one. It is run once, it moves the Index from the"
-        "log into the database beside it, and after it nothing else behaves"
-        "differently: the same commands read the same keys through the same"
-        "Store. It takes the directory claim like any writer, because a peer"
-        "still appending to the log while it copies would leave what it copied"
-        "short of what the log holds."
-    exposes [prune, txIndex, outputs, audit, migrate]
-    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Migrate, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
+    exposes [prune, txIndex, outputs, audit]
+    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
@@ -27,7 +21,7 @@ fn prune(rest: List<String>) -> Unit
     ? "Pruning is local: a directory and the Height to prune below, no Peer."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
@@ -38,7 +32,7 @@ fn pruneHeight(dir: String, more: List<String>) -> Unit
     ? "Take the Height that follows the directory."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match more
@@ -49,7 +43,7 @@ fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
     ? "Prune, or show the usage if the Height was not a whole number."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match parsed
@@ -59,7 +53,7 @@ fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
 fn pruneRun(dir: String, below: Int) -> Result<String, String>
     ? "Open the Index and the Segments, then discard what is below the Height."
     ! [
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     _claimed = Infra.Lock.claim(dir, "prune")?
@@ -68,7 +62,7 @@ fn pruneRun(dir: String, below: Int) -> Result<String, String>
 fn pruneDone(dir: String, below: Int) -> Result<String, String>
     ? "Discard the Blocks, with the claim already taken."
     ! [
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     store = Infra.Store.open(dir)?
@@ -76,37 +70,11 @@ fn pruneDone(dir: String, below: Int) -> Result<String, String>
     pruned = Infra.Prune.run(store, blocks, below)?
     Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
 
-fn migrate(rest: List<String>) -> Unit
-    ? "Migrating is local: a directory, and nothing else to choose."
-    ! [
-        Console.error, Console.print,
-        Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
-        Infra.Kv.open, Infra.Kv.putAll,
-    ]
-    match rest
-        [] -> Console.error("usage: <dir>")
-        [dir, ..extra] -> said(migrateRun(dir))
-
-fn migrateRun(dir: String) -> Result<String, String>
-    ? "Take the directory claim, then move the Index."
-    ! [
-        Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText,
-        Infra.Kv.open, Infra.Kv.putAll,
-    ]
-    _claimed = Infra.Lock.claim(dir, "migrate")?
-    Infra.Lock.releasingAfter(dir, migrateDone(dir))
-
-fn migrateDone(dir: String) -> Result<String, String>
-    ? "Copy the log into the database, with the claim already taken."
-    ! [Disk.exists, Disk.makeDir, Disk.readText, Infra.Kv.open, Infra.Kv.putAll]
-    moved = Infra.Migrate.migrate(dir)?
-    Result.Ok("{moved} entries moved into {Infra.Store.databasePath(dir)}; the log is still there")
-
 fn txIndex(rest: List<String>) -> Unit
     ? "Indexing is local: a directory and a range of Heights."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
@@ -117,7 +85,7 @@ fn txIndexRange(dir: String, more: List<String>) -> Unit
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match heights(more)
@@ -127,7 +95,7 @@ fn txIndexRange(dir: String, more: List<String>) -> Unit
 fn txIndexRun(dir: String, span: Span) -> Result<String, String>
     ? "Record where every Transaction in the range sits."
     ! [
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     _claimed = Infra.Lock.claim(dir, "txindex")?
@@ -136,7 +104,7 @@ fn txIndexRun(dir: String, span: Span) -> Result<String, String>
 fn txIndexDone(dir: String, span: Span) -> Result<String, String>
     ? "Record the Transactions, with the claim already taken."
     ! [
-        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     store = Infra.Store.open(dir)?
@@ -148,7 +116,7 @@ fn outputs(rest: List<String>) -> Unit
     ? "Indexing Outputs is local: a directory and a range of Heights."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
@@ -160,7 +128,7 @@ fn outputsRange(dir: String, more: List<String>) -> Unit
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
@@ -172,7 +140,7 @@ fn outputsRun(dir: String, span: Span) -> Result<String, String>
     ? "Record every Output in the range against the name an Input calls it by."
     ! [
         Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
@@ -183,7 +151,7 @@ fn outputsDone(dir: String, span: Span) -> Result<String, String>
     ? "Record the Outputs, with the claim already taken."
     ! [
         Console.print,
-        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
@@ -198,7 +166,7 @@ fn audit(network: Network, rest: List<String>) -> Unit
       "under depend on which chain it is on, not only how high up it is."
     ! [
         Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]
@@ -210,7 +178,7 @@ fn auditRange(network: Network, dir: String, more: List<String>) -> Unit
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]
@@ -222,7 +190,7 @@ fn auditRun(network: Network, dir: String, span: Span) -> Result<String, String>
     ? "Walk the range and report what it found."
     ! [
         Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]

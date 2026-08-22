@@ -102,3 +102,15 @@ are gone and the warning count is back to its long-standing 26.
 
 The next thing this makes possible is the one it was for: an output keyspace, at
 two hundred million entries, which no arrangement of the log could have held.
+
+## Amended, 23 August 2026
+
+"Keep all three backends" held for as long as its reasons did. They ran out:
+every directory this project keeps had crossed to the database, the database
+arm had since done every command over two full chains including the downloads
+it had not yet done above, and a text log cannot hold the binary keys the
+Index is moving to (#42). [#44](https://github.com/N1bor/btc-listener/issues/44)
+retired the Logged backend, `Infra.StoreLog` and `migrate` together; a
+directory holding only an `index.log` is refused by name rather than read,
+and is rebuilt from the network. Memory stays, for exactly the reason given
+above. The title's "keep the log" is the part this amendment ends.

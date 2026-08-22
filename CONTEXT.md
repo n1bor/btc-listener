@@ -126,10 +126,11 @@ _Avoid_: standardness (that is one Policy, not the boundary), relay rules
 ### What we store
 
 **Store**:
-A keyed byte store offering get, put, delete and batch. One API over three
-**backends**: Memory, which fixtures return; Logged, an append-only file; and
-Database, a LevelDB behind the `Infra.Kv` capability. Which one a directory
-uses is decided by what is in it, not by a flag.
+A keyed byte store offering get, put, delete and batch. One API over two
+**backends**: Memory, which fixtures return, and Database, a LevelDB behind
+the `Infra.Kv` capability. A third, Logged — an append-only file — was
+retired with `migrate` (#44); a directory holding only its `index.log` is
+refused rather than read.
 _Avoid_: database, cache, map, persistence
 
 **Index**:
