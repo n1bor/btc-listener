@@ -42,7 +42,7 @@ verify pushed
     pushed(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
     pushed(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
     pushed(76, Domain.ScriptState.zeros(521), Domain.ScriptState.empty(), false) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
-    pushed(76, Domain.ScriptState.zeros(521), State(stack = [], alt = [], conditions = [false], opCount = 0), false) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
+    pushed(76, Domain.ScriptState.zeros(521), State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0), false) => Step.Stop(Outcome.Decided(Ending.Failed("push of 521 bytes is over the 520 byte limit")))
 
 fn pushedIfExecuting(code: Int, data: List<Int>, state: State, minimal: Bool) -> Step
     ? "Otherwise a push only happens in a branch being executed."
@@ -56,7 +56,7 @@ fn pushedIfExecuting(code: Int, data: List<Int>, state: State, minimal: Bool) ->
 verify pushedIfExecuting
     pushedIfExecuting(1, [1], Domain.ScriptState.empty(), false) => Step.Continue(Domain.ScriptState.holding([[1]]))
     pushedIfExecuting(1, [1], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("push is not written the shortest way it could be")))
-    pushedIfExecuting(1, [1], State(stack = [], alt = [], conditions = [false], opCount = 0), true) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    pushedIfExecuting(1, [1], State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0), true) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0))
     pushedIfExecuting(1, [17], Domain.ScriptState.holding(Domain.ScriptState.repeated(1000, [2])), true) => Step.Stop(Outcome.Decided(Ending.Failed("stack is over the 1000 item limit")))
 
 fn coded(code: Int, state: State, context: Context) -> Step
@@ -64,14 +64,35 @@ fn coded(code: Int, state: State, context: Context) -> Step
       "the charge comes before every other refusal -- which is the order the"
       "reference client uses, so a Script that is both too long and disabled"
       "gets told the same thing by both."
+      "Tapscript has no such limit. BIP342 removed it and put the validation"
+      "weight budget in its place, which charges for the expensive thing --"
+      "signature checks -- rather than for opcodes that mostly cost nothing."
+      "A tapscript of ten thousand OP_DUPs is allowed and is cheap; the same"
+      "Script with two hundred signature checks is not, and the budget is what"
+      "says so. Leaving the old limit on as well would refuse Scripts the"
+      "chain accepts."
     limit = Domain.ScriptState.maxOps()
-    match Bool.and(code > 96, state.opCount + 1 > limit)
+    match Bool.and(countsOpcodes(context), Bool.and(code > 96, state.opCount + 1 > limit))
         true -> Step.Stop(Outcome.Decided(Ending.Failed("script uses more than {limit} opcodes")))
         false -> disabled(code, Domain.ScriptState.spent(state, code), context)
 
 verify coded
-    coded(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [], opCount = 1))
-    coded(97, State(stack = [], alt = [], conditions = [], opCount = 201), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("script uses more than 201 opcodes")))
+    coded(97, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [], opCount = 1, weightLeft = 0))
+    coded(97, State(stack = [], alt = [], conditions = [], opCount = 201, weightLeft = 0), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("script uses more than 201 opcodes")))
+
+fn countsOpcodes(context: Context) -> Bool
+    ? "Whether the two hundred and one opcode limit applies at all."
+      "Everything but tapscript. The count is still kept there -- it costs"
+      "nothing and Domain.ScriptState.spent does not know the version -- but"
+      "nothing is refused for it."
+    match Domain.SpendContext.sigVersionOf(context)
+        Domain.SpendContext.SigVersion.Tapscript -> false
+        Domain.SpendContext.SigVersion.Base -> true
+        Domain.SpendContext.SigVersion.WitnessV0 -> true
+
+verify countsOpcodes
+    countsOpcodes(Domain.SpendContext.bare(Domain.Rules.latest())) => true
+    countsOpcodes(Domain.SpendContext.inTapscript(Domain.SpendContext.committed(Domain.Rules.latest(), Domain.SpendContext.emptyTransaction(), 0, 0, "", []), Domain.SpendContext.TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 0))) => false
 
 fn disabled(code: Int, state: State, context: Context) -> Step
     ? "A disabled opcode fails a Script wherever it appears, including in a"
@@ -117,7 +138,7 @@ fn opened(code: Int, state: State, context: Context) -> Step
         true -> openedNow(code, state, context)
 
 verify opened
-    opened(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    opened(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0))
     opened(99, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
 
 fn openedNow(code: Int, state: State, context: Context) -> Step
@@ -129,8 +150,8 @@ fn openedNow(code: Int, state: State, context: Context) -> Step
 verify openedNow
     openedNow(99, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF on an empty stack")))
     openedNow(100, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_NOTIF on an empty stack")))
-    openedNow(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
-    openedNow(100, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    openedNow(99, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0))
+    openedNow(100, Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0))
 
 fn openedOn(code: Int, head: List<Int>, tail: List<List<Int>>, state: State, context: Context) -> Step
     ? "The condition, once it is known there is one."
@@ -140,11 +161,11 @@ fn openedOn(code: Int, head: List<Int>, tail: List<List<Int>>, state: State, con
       "Domain.StackItem says whether the item satisfies it."
     match Bool.and(Domain.SpendContext.minimalConditions(context), Domain.StackItem.isConditionMinimal(head) == false)
         true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} takes an argument that is not exactly true or false")))
-        false -> Step.Continue(State(stack = tail, alt = state.alt, conditions = List.prepend(Domain.ScriptState.taken(Domain.StackItem.isTruthy(head), code), state.conditions), opCount = state.opCount))
+        false -> Step.Continue(State(stack = tail, alt = state.alt, conditions = List.prepend(Domain.ScriptState.taken(Domain.StackItem.isTruthy(head), code), state.conditions), opCount = state.opCount, weightLeft = state.weightLeft))
 
 verify openedOn
-    openedOn(99, [1], [], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
-    openedOn(99, [2], [], Domain.ScriptState.holding([[2]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    openedOn(99, [1], [], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0))
+    openedOn(99, [2], [], Domain.ScriptState.holding([[2]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0))
     openedOn(99, [2], [], Domain.ScriptState.holding([[2]]), Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["P2SH", "WITNESS", "MINIMALIF"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => Step.Stop(Outcome.Decided(Ending.Failed("OP_IF takes an argument that is not exactly true or false")))
 
 fn switched(state: State) -> Step
@@ -155,7 +176,7 @@ fn switched(state: State) -> Step
 
 verify switched
     switched(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ELSE outside an OP_IF")))
-    switched(State(stack = [], alt = [], conditions = [false], opCount = 0)) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0))
+    switched(State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0)) => Step.Continue(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0))
 
 fn closed(state: State) -> Step
     ? "OP_ENDIF closes it."
@@ -165,7 +186,7 @@ fn closed(state: State) -> Step
 
 verify closed
     closed(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_ENDIF outside an OP_IF")))
-    closed(State(stack = [], alt = [], conditions = [true], opCount = 0)) => Step.Continue(Domain.ScriptState.empty())
+    closed(State(stack = [], alt = [], conditions = [true], opCount = 0, weightLeft = 0)) => Step.Continue(Domain.ScriptState.empty())
 
 fn whenExecuting(code: Int, state: State, context: Context) -> Step
     ? "Everything else is skipped inside a branch not being taken."
@@ -174,7 +195,7 @@ fn whenExecuting(code: Int, state: State, context: Context) -> Step
         true -> operated(code, state, context)
 
 verify whenExecuting
-    whenExecuting(106, State(stack = [], alt = [], conditions = [false], opCount = 0), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0))
+    whenExecuting(106, State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [], alt = [], conditions = [false], opCount = 0, weightLeft = 0))
     whenExecuting(106, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
 fn operated(code: Int, state: State, context: Context) -> Step
@@ -276,21 +297,21 @@ fn toAlt(state: State) -> Step
     ? "OP_TOALTSTACK moves the top item across."
     match state.stack
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("OP_TOALTSTACK needs an item")))
-        [head, ..tail] -> Step.Continue(State(stack = tail, alt = List.prepend(head, state.alt), conditions = state.conditions, opCount = state.opCount))
+        [head, ..tail] -> Step.Continue(State(stack = tail, alt = List.prepend(head, state.alt), conditions = state.conditions, opCount = state.opCount, weightLeft = state.weightLeft))
 
 verify toAlt
     toAlt(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_TOALTSTACK needs an item")))
-    toAlt(Domain.ScriptState.holding([[1]])) => Step.Continue(State(stack = [], alt = [[1]], conditions = [], opCount = 0))
+    toAlt(Domain.ScriptState.holding([[1]])) => Step.Continue(State(stack = [], alt = [[1]], conditions = [], opCount = 0, weightLeft = 0))
 
 fn fromAlt(state: State) -> Step
     ? "OP_FROMALTSTACK moves it back."
     match state.alt
         [] -> Step.Stop(Outcome.Decided(Ending.Failed("OP_FROMALTSTACK needs an item on the alt stack")))
-        [head, ..tail] -> Step.Continue(State(stack = List.prepend(head, state.stack), alt = tail, conditions = state.conditions, opCount = state.opCount))
+        [head, ..tail] -> Step.Continue(State(stack = List.prepend(head, state.stack), alt = tail, conditions = state.conditions, opCount = state.opCount, weightLeft = state.weightLeft))
 
 verify fromAlt
     fromAlt(Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_FROMALTSTACK needs an item on the alt stack")))
-    fromAlt(State(stack = [], alt = [[1]], conditions = [], opCount = 0)) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    fromAlt(State(stack = [], alt = [[1]], conditions = [], opCount = 0, weightLeft = 0)) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn ifDup(state: State) -> Step
     ? "OP_IFDUP copies the top item only when it is true, which is why it is"

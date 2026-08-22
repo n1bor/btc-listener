@@ -21,7 +21,7 @@ module ScriptState
         "reaching two or three items deep otherwise means a chain of functions"
         "each of which can only check one item and none of which has a name"
         "worth reading."
-    exposes [Ending, Outcome, State, Step, Two, Three, missing, itemsWord, maxScript, longScript, taken, remaining, empty, holding, maxOps, maxItem, maxStack, withStack, withConditions, spent, executing, settled, topTwo, topThree, itemAt, rearranged, zeros, repeated]
+    exposes [withBudget, spentOnSigop, overspent, budgetOffset, sigopCost, Ending, Outcome, State, Step, Two, Three, missing, itemsWord, maxScript, longScript, taken, remaining, empty, holding, maxOps, maxItem, maxStack, withStack, withConditions, spent, executing, settled, topTwo, topThree, itemAt, rearranged, zeros, repeated]
     depends [Domain.Opcode, Domain.StackItem]
     effects []
 
@@ -42,6 +42,7 @@ record State
     alt: List<List<Int>>
     conditions: List<Bool>
     opCount: Int
+    weightLeft: Int
 
 record Two
     first: List<Int>
@@ -107,7 +108,7 @@ verify maxStack
 
 fn empty() -> State
     ? "Nothing on either stack, no branch open, no opcode spent."
-    State(stack = [], alt = [], conditions = [], opCount = 0)
+    State(stack = [], alt = [], conditions = [], opCount = 0, weightLeft = 0)
 
 verify empty
     List.len(empty().stack) => 0
@@ -115,15 +116,69 @@ verify empty
 
 fn holding(items: List<List<Int>>) -> State
     ? "A State with these items on the data stack and nothing else."
-    State(stack = items, alt = [], conditions = [], opCount = 0)
+    State(stack = items, alt = [], conditions = [], opCount = 0, weightLeft = 0)
 
 verify holding
     List.len(holding([[1]]).stack) => 1
     holding([[1]]).opCount => 0
 
+fn withBudget(state: State, budget: Int) -> State
+    ? "The same machine with a validation weight budget in force."
+      "BIP342 gives a tapscript a budget rather than an opcode limit: the"
+      "serialised size of its Witness plus fifty, spent fifty at a time by"
+      "every signature check that actually checks something. A Script that"
+      "runs out is invalid."
+      "Zero is what every other Script version carries and means the budget is"
+      "not in force rather than exhausted -- nothing outside a tapscript ever"
+      "reads it. Domain.Tapsig is the only place that spends it and the only"
+      "place that asks."
+    State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount, weightLeft = budget)
+
+verify withBudget
+    withBudget(empty(), 100).weightLeft => 100
+    withBudget(holding([[1]]), 100).stack => [[1]]
+    withBudget(empty(), 0).weightLeft => 0
+
+fn spentOnSigop(state: State) -> State
+    ? "Fifty of the budget, gone."
+      "Charged once per signature check that reached the curve. An empty"
+      "signature costs nothing, which is what makes an unspendable branch"
+      "cheap enough to keep in a Script."
+    State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount, weightLeft = state.weightLeft - sigopCost())
+
+verify spentOnSigop
+    spentOnSigop(withBudget(empty(), 100)).weightLeft => 50
+    spentOnSigop(withBudget(empty(), 50)).weightLeft => 0
+    spentOnSigop(withBudget(empty(), 0)).weightLeft => 0 - 50
+
+fn sigopCost() -> Int
+    ? "What one signature check costs the budget."
+    50
+
+verify sigopCost
+    sigopCost() => 50
+
+fn budgetOffset() -> Int
+    ? "The head start every tapscript gets over its Witness size."
+      "Fifty, which is exactly one signature check -- so a Witness carrying"
+      "one signature and nothing else can always afford to check it."
+    50
+
+verify budgetOffset
+    budgetOffset() => 50
+
+fn overspent(state: State) -> Bool
+    ? "Whether the budget has gone below zero."
+    state.weightLeft < 0
+
+verify overspent
+    overspent(withBudget(empty(), 0)) => false
+    overspent(spentOnSigop(withBudget(empty(), 0))) => true
+    overspent(spentOnSigop(withBudget(empty(), 50))) => false
+
 fn withStack(state: State, stack: List<List<Int>>) -> State
     ? "The same State with a different data stack."
-    State(stack = stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount)
+    State(stack = stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount, weightLeft = state.weightLeft)
 
 verify withStack
     List.len(withStack(empty(), [[1]]).stack) => 1
@@ -131,7 +186,7 @@ verify withStack
 
 fn withConditions(state: State, conditions: List<Bool>) -> State
     ? "The same State with a different condition stack."
-    State(stack = state.stack, alt = state.alt, conditions = conditions, opCount = state.opCount)
+    State(stack = state.stack, alt = state.alt, conditions = conditions, opCount = state.opCount, weightLeft = state.weightLeft)
 
 verify withConditions
     List.len(withConditions(empty(), [true]).conditions) => 1
@@ -142,7 +197,7 @@ fn spent(state: State, code: Int) -> State
       "Pushes and OP_0 through OP_16 are free, which is why a Script can be"
       "thousands of bytes of data and still be inside the two hundred and one."
     match code > 96
-        true -> State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount + 1)
+        true -> State(stack = state.stack, alt = state.alt, conditions = state.conditions, opCount = state.opCount + 1, weightLeft = state.weightLeft)
         false -> state
 
 verify spent
@@ -181,7 +236,7 @@ fn settled(state: State) -> Ending
 verify settled
     settled(empty()) => Ending.Failed("script left nothing on the stack")
     settled(holding([[1]])) => Ending.Passed
-    settled(State(stack = [[1]], alt = [], conditions = [true], opCount = 0)) => Ending.Failed("script ended inside an unclosed OP_IF")
+    settled(State(stack = [[1]], alt = [], conditions = [true], opCount = 0, weightLeft = 0)) => Ending.Failed("script ended inside an unclosed OP_IF")
 
 fn topOf(stack: List<List<Int>>) -> Ending
     ? "The final answer is whether the top of the stack is true."

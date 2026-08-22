@@ -33,7 +33,7 @@ fn checked(code: Int, two: Two, state: State, context: Context) -> Step
     ? "OP_CHECKSIG and OP_CHECKSIGVERIFY under tapscript."
       "The top of the stack is the public key and the one below it is the"
       "signature, the same order as legacy."
-    settled(code, ruling(code, two.second, two.first, context), two.rest, state)
+    charged(code, two.second, two.first, two.rest, state, context, false, [])
 
 verify checked
     checked(172, Two(first = [], second = [], rest = []), Domain.ScriptState.holding([[], []]), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIG was given a public key of no bytes at all")))
@@ -73,10 +73,7 @@ verify readCount
 
 fn counted(three: Three, state: State, context: Context) -> Step
     ? "The key on top, the count under it, the signature under that."
-    match ruling(186, three.third, three.first, context)
-        Answer.Fails(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
-        Answer.Undecided(why) -> Step.Stop(Outcome.Undecided(why))
-        Answer.Answered(passed) -> Step.Continue(Domain.ScriptState.withStack(state, List.prepend(sum(three.second, passed), three.rest)))
+    charged(186, three.third, three.first, three.rest, state, context, true, three.second)
 
 verify counted
     counted(Three(first = [], second = [], third = [], rest = []), Domain.ScriptState.empty(), spending()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD was given a public key of no bytes at all")))
@@ -106,6 +103,52 @@ type Answer
     Answered(Bool)
     Fails(String)
     Undecided(String)
+
+fn charged(code: Int, signature: List<Int>, publicKey: List<Int>, rest: List<List<Int>>, state: State, context: Context, adding: Bool, count: List<Int>) -> Step
+    ? "BIP342's validation weight, spent before anything else happens."
+      "Fifty per signature check that has a signature to check. An empty one"
+      "costs nothing, which is what makes an unspendable branch cheap enough"
+      "to leave in a Script."
+      "Before the public key is even looked at, which is Core's order and is"
+      "load-bearing: a spend that is out of budget and also has an empty key"
+      "fails for the budget, not for the key."
+    match List.len(signature) == 0
+        true -> answered(code, signature, publicKey, rest, state, context, adding, count)
+        false -> afterCharge(code, signature, publicKey, rest, Domain.ScriptState.spentOnSigop(state), context, adding, count)
+
+verify charged
+    charged(172, [], Domain.ScriptState.zeros(32), [], Domain.ScriptState.holding([[], []]), spending(), false, []) => Step.Continue(Domain.ScriptState.holding([[]]))
+    charged(172, [9], Domain.ScriptState.zeros(32), [], Domain.ScriptState.withBudget(Domain.ScriptState.holding([[], []]), 0), spending(), false, []) => Step.Stop(Outcome.Decided(Ending.Failed("tapscript ran out of validation weight, -50 left")))
+
+fn afterCharge(code: Int, signature: List<Int>, publicKey: List<Int>, rest: List<List<Int>>, state: State, context: Context, adding: Bool, count: List<Int>) -> Step
+    ? "A Script that has spent more weight than it was given is invalid."
+    match Domain.ScriptState.overspent(state)
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("tapscript ran out of validation weight, {state.weightLeft} left")))
+        false -> answered(code, signature, publicKey, rest, state, context, adding, count)
+
+verify afterCharge
+    afterCharge(172, [9], Domain.ScriptState.zeros(32), [], Domain.ScriptState.withBudget(Domain.ScriptState.holding([[], []]), 0 - 1), spending(), false, []) => Step.Stop(Outcome.Decided(Ending.Failed("tapscript ran out of validation weight, -1 left")))
+
+fn answered(code: Int, signature: List<Int>, publicKey: List<Int>, rest: List<List<Int>>, state: State, context: Context, adding: Bool, count: List<Int>) -> Step
+    ? "The budget is paid; now the signature itself."
+      "OP_CHECKSIGADD puts a sum where the other two put a Bool, which is the"
+      "only thing that differs once the weight is spent."
+    match adding
+        false -> settled(code, ruling(code, signature, publicKey, context), rest, state)
+        true -> summed(ruling(code, signature, publicKey, context), count, rest, state)
+
+verify answered
+    answered(172, [], Domain.ScriptState.zeros(32), [], Domain.ScriptState.holding([[], []]), spending(), false, []) => Step.Continue(Domain.ScriptState.holding([[]]))
+
+fn summed(ruled: Answer, count: List<Int>, rest: List<List<Int>>, state: State) -> Step
+    ? "OP_CHECKSIGADD adds one to the count when the signature checked."
+    match ruled
+        Answer.Fails(why) -> Step.Stop(Outcome.Decided(Ending.Failed(why)))
+        Answer.Undecided(why) -> Step.Stop(Outcome.Undecided(why))
+        Answer.Answered(passed) -> Step.Continue(Domain.ScriptState.withStack(state, List.prepend(sum(count, passed), rest)))
+
+verify summed
+    summed(Answer.Fails("no"), [], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
 
 fn ruling(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
     ? "BIP342's order, which Core's own comment calls consensus critical."

@@ -115,10 +115,56 @@ verify parsedLeaf
 fn ranLeaf(ops: List<Op>, control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
     ? "The leaf, over the Witness stack, under BIP341's message with BIP342's"
       "extension. The same cleanstack rule as version zero applies."
-    cleanly(Domain.Interp.reach(ops, Domain.ScriptState.holding(stackOf(stack, [])), Domain.SpendContext.inTapscript(context, Domain.SpendContext.TapContext(leafHash = hexOf(leafHashOf(leafVersionOf(control), leaf)), annex = annex, codeSeparatorPosition = 4294967295))))
+    cleanly(Domain.Interp.reach(ops, Domain.ScriptState.withBudget(Domain.ScriptState.holding(stackOf(stack, [])), budgetFor(context)), Domain.SpendContext.inTapscript(context, Domain.SpendContext.TapContext(leafHash = hexOf(leafHashOf(leafVersionOf(control), leaf)), annex = annex, codeSeparatorPosition = 4294967295))))
 
 verify ranLeaf
     ranLeaf([], "c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("a tapscript must leave exactly one item, not 0"))
+
+fn budgetFor(context: Context) -> Int
+    ? "BIP342's validation weight budget for this spend."
+      "The serialised size of the whole Witness plus fifty. The whole Witness,"
+      "not the stack the leaf runs over: the leaf itself, the control block"
+      "and the annex are all in it and all paid for, which is what makes a"
+      "deep Merkle proof cost something."
+      "Fifty is one signature check, so a Witness carrying one signature can"
+      "always afford to check it. Everything beyond that has to be bought with"
+      "Witness bytes, which is the whole design -- it ties the cost of"
+      "verifying a spend to the size of the thing being relayed."
+    witnessSize(Domain.SpendContext.witnessOf(context), 0) + Domain.ScriptState.budgetOffset()
+
+verify budgetFor
+    budgetFor(spending([])) => 51
+    budgetFor(Domain.SpendContext.committed(Domain.Rules.latest(), Domain.SpendContext.emptyTransaction(), 0, 0, "", ["aabb"])) => 54
+
+fn witnessSize(items: List<String>, acc: Int) -> Int
+    ? "How many bytes the Witness takes on the wire."
+      "A CompactSize count in front, then each item with its own CompactSize"
+      "length. Core measures it with GetSerializeSize over the stack, which is"
+      "the same thing."
+    List.len(Domain.CompactSize.encode(List.len(items))) + itemsSize(items, acc)
+
+verify witnessSize
+    witnessSize([], 0) => 1
+    witnessSize(["aabb"], 0) => 4
+    witnessSize(["aabb", "cc"], 0) => 6
+
+fn itemsSize(items: List<String>, acc: Int) -> Int
+    ? "Each item: its length, and a CompactSize saying so."
+    match items
+        [] -> acc
+        [head, ..tail] -> itemsSize(tail, acc + List.len(Domain.CompactSize.encode(byteWidth(head))) + byteWidth(head))
+
+verify itemsSize
+    itemsSize([], 7) => 7
+    itemsSize(["aabb"], 0) => 3
+
+fn byteWidth(hex: String) -> Int
+    ? "How many bytes a hexadecimal item stands for."
+    Int.div(String.len(hex), 2)
+
+verify byteWidth
+    byteWidth("aabb") => 2
+    byteWidth("") => 0
 
 fn stackOf(hexes: List<String>, acc: List<List<Int>>) -> List<List<Int>>
     ? "The Witness items as bytes, top of stack first, as version zero does."
@@ -151,20 +197,117 @@ verify onlyOne
     onlyOne(Domain.ScriptState.holding([[0]])) => Outcome.Decided(Ending.Failed("script left a false value on top"))
 
 fn hasSuccessOpcode(script: List<Int>) -> Bool
-    ? "Whether any byte of the Script is an OP_SUCCESS."
-      "Scanned as raw bytes rather than as parsed Ops, because BIP342 says a"
-      "Script containing one succeeds even if it does not parse -- the whole"
-      "point is that a future soft fork may give these opcodes operands this"
-      "parser has never heard of."
+    ? "Whether the Script contains an OP_SUCCESS opcode."
+      "Decoded, not scanned. A byte inside a push is data and not an opcode,"
+      "and reading it as one is the difference between a Script that succeeds"
+      "without running and a Script that runs -- so a 32 byte public key with"
+      "an 0xea in it would make every Script holding one succeed."
+      "Core walks with GetOp and asks IsOpSuccess of each opcode it decodes."
+      "A push that runs past the end stops the walk and the Script is refused,"
+      "which is why BIP342's an OP_SUCCESS makes an undecodable Script succeed"
+      "only when it comes before the part that will not decode. Core's own"
+      "comment says as much: the bad-opcode branch is not reached if an"
+      "unknown OP_SUCCESSx was found."
     match script
         [] -> false
-        [head, ..tail] -> Bool.or(isSuccessOpcode(head), hasSuccessOpcode(tail))
+        [head, ..tail] -> successAt(head, tail)
 
 verify hasSuccessOpcode
     hasSuccessOpcode([]) => false
     hasSuccessOpcode([81, 82]) => false
     hasSuccessOpcode([81, 80]) => true
     hasSuccessOpcode([187]) => true
+    hasSuccessOpcode([1, 187]) => false
+    hasSuccessOpcode([1, 187, 187]) => true
+    hasSuccessOpcode([32, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234, 234]) => false
+    hasSuccessOpcode([187, 1]) => true
+    hasSuccessOpcode([1]) => false
+
+fn successAt(head: Int, tail: List<Int>) -> Bool
+    ? "This opcode, or the one after whatever data it carries."
+    match isSuccessOpcode(head)
+        true -> true
+        false -> pastData(head, tail)
+
+verify successAt
+    successAt(187, []) => true
+    successAt(81, [187]) => true
+    successAt(1, [187]) => false
+
+fn pastData(head: Int, tail: List<Int>) -> Bool
+    ? "Step over a push's data before looking at the next opcode."
+      "A push that does not fit is where the walk stops. Nothing after it is"
+      "an opcode, because there is no way to know where the next one starts."
+    match pushWidth(head, tail)
+        Option.None -> false
+        Option.Some(skip) -> hasSuccessOpcode(List.drop(tail, skip))
+
+verify pastData
+    pastData(1, [187]) => false
+    pastData(1, [187, 187]) => true
+    pastData(81, [187]) => true
+    pastData(1, []) => false
+
+fn pushWidth(head: Int, tail: List<Int>) -> Option<Int>
+    ? "How many bytes of what follows this opcode are its data."
+      "Nothing for an opcode that is not a push, its own value for a direct"
+      "push, and a counted length for the three OP_PUSHDATA forms."
+    match head
+        76 -> countedWidth(tail, 1)
+        77 -> countedWidth(tail, 2)
+        78 -> countedWidth(tail, 4)
+        _ -> directWidth(head, tail)
+
+verify pushWidth
+    pushWidth(81, []) => Option.Some(0)
+    pushWidth(1, [7]) => Option.Some(1)
+    pushWidth(1, []) => Option.None
+    pushWidth(76, [1, 7]) => Option.Some(2)
+    pushWidth(76, []) => Option.None
+
+fn directWidth(head: Int, tail: List<Int>) -> Option<Int>
+    ? "A byte from one to seventy-five pushes that many bytes."
+    match Bool.and(head >= 1, head <= 75)
+        false -> Option.Some(0)
+        true -> enough(tail, head, head)
+
+verify directWidth
+    directWidth(81, []) => Option.Some(0)
+    directWidth(1, [7]) => Option.Some(1)
+    directWidth(2, [7]) => Option.None
+
+fn countedWidth(tail: List<Int>, width: Int) -> Option<Int>
+    ? "OP_PUSHDATA1, 2 and 4 carry their length in the next one, two or four"
+      "bytes, little-endian."
+    match List.len(tail) < width
+        true -> Option.None
+        false -> enough(tail, width + littleEndian(List.take(tail, width), 0, 1), width + littleEndian(List.take(tail, width), 0, 1))
+
+verify countedWidth
+    countedWidth([1, 7], 1) => Option.Some(2)
+    countedWidth([], 1) => Option.None
+    countedWidth([2, 7], 1) => Option.None
+
+fn enough(tail: List<Int>, needed: Int, answer: Int) -> Option<Int>
+    ? "The answer, unless the Script is shorter than the push says."
+    match List.len(tail) < needed
+        true -> Option.None
+        false -> Option.Some(answer)
+
+verify enough
+    enough([1], 1, 1) => Option.Some(1)
+    enough([], 1, 1) => Option.None
+
+fn littleEndian(bytes: List<Int>, acc: Int, place: Int) -> Int
+    ? "Bytes as a number, least significant first."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> littleEndian(tail, acc + head * place, place * 256)
+
+verify littleEndian
+    littleEndian([1], 0, 1) => 1
+    littleEndian([0, 1], 0, 1) => 256
+    littleEndian([], 5, 1) => 5
 
 fn isSuccessOpcode(code: Int) -> Bool
     ? "BIP342's OP_SUCCESS set: 80, 98, 126 to 129, 131 to 134, 137 and 138,"
