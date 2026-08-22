@@ -480,7 +480,7 @@ comes out true. Witness programs are refused before they are run now, and those
 Blocks read `0 passed / 0 failed / 6493 undecided`.
 
 Bitcoin Core's own test data is the adversarial test, and nothing written here
-would be half as unkind. Eight files are read, 2,199 cases between them, and
+would be half as unkind. Nine files are read, 5,938 cases between them, and
 every Script case carries the verification flags Core ran it under:
 
 | corpus | cases | agree | disagree | undecided |
@@ -493,6 +493,7 @@ every Script case carries the verification flags Core ran it under:
 | `key_io_invalid.json` | 70 | 70 | 0 | 0 |
 | `base58_encode_decode.json`, both directions | 42 | 42 | 0 | 0 |
 | BIP341 `wallet-test-vectors.json` | 39 | 39 | 0 | 0 |
+| `script_assets_test.json`, run by `taproottest` | 3737 | 3737 | 0 | 0 |
 
 **Nothing disagrees, in either direction.** The seventy undecided are Script
 pairs whose answer needs a Transaction the row does not carry, which is the
@@ -506,7 +507,15 @@ module's `intent` with the answer they gave, because a case left out silently
 is a case nobody sees. Raising that budget needs a flag `aver verify` does not
 have; asked for as [jasisz/aver#1071](https://github.com/jasisz/aver/issues/1071).
 
-Three of those files are read **both ways**, which matters more than the case
+`script_assets_test.json` is the odd one out: nine megabytes and 3,737 tests,
+too large to check in as verify cases, so it is fetched and run by a command —
+`main taproottest`, and `main taproottest <n>` to ask about one test. It is the
+only published corpus that tests tapscript execution, and reading it found
+**seven consensus faults**, every one of them lax: this engine accepting what
+Core refuses. The largest made any Script holding a 32-byte public key with an
+`0xea` in it succeed without running a single opcode.
+
+Three of the others are read **both ways**, which matters more than the case
 count suggests. An encoder only ever asked to produce output agrees with itself
 forever; `key_io_invalid.json` is 70 strings that must not decode, and on its
 own a decoder that refused everything would pass all of them. It is worth

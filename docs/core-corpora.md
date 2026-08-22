@@ -18,8 +18,9 @@ blocks each one.
 | `key_io_valid.json` | `domain/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
 | `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
 | `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
+| `script_assets_test.json` | not a file — `main taproottest` | 3737 | fetched and run at run time |
 
-Between them **2,199 verify cases**, and every entry these files hold is either
+Between them **2,201 verify cases**, and 3,737 more run by `main taproottest`, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
 
 | file | entries | read | left out |
