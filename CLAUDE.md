@@ -29,18 +29,18 @@ and will not compile, or the VM and the compiled binary disagree, check
 ## Commands
 
 ```bash
-aver audit  . --providers                            # check + verify + format, the CI gate
+aver audit  .                                       # check + verify + format, the CI gate
 aver check  . --module-root . --deps                 # contracts, coverage, lints
-aver verify . --module-root . --providers --deps     # all verify cases (~3,900)
-aver verify domain/script.av --module-root . --providers   # one file's cases
+aver verify . --module-root . --deps                 # all verify cases (~6,000)
+aver verify domain/script.av --module-root .         # one file's cases
 aver format . --check
 ```
 
-Run interpreted (needs `--providers` to build the provider host; plain
+Run interpreted (the provider host is built automatically now; plain
 `aver run` cannot start this program):
 
 ```bash
-aver run main.av --module-root . --providers -- [args...]
+aver run main.av --module-root . -- [args...]
 ```
 
 Compile (what the long-running commands should use — several times faster):
@@ -56,8 +56,11 @@ Three flags are load-bearing and easy to drop:
 
 - `--module-root .` — without it no `depends [...]` resolves.
 - `--` before program args under `aver run` — without it `aver` eats them.
-- `--providers` on `verify`/`audit`/`run` — the crypto and LevelDB come from
-  Rust providers (see below); without it 50 verify cases fail, correctly.
+- The provider host is no longer asked for. `--providers` is gone from
+  `verify`, `audit` and `run` as of aver 0.29: the bindings in `aver.toml`
+  are built and installed automatically. A probe project copied to /tmp
+  still needs its own `aver.toml` with an **absolute** provider path, or
+  every case that reaches the curve fails.
 
 The twelve CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
 `tx`, `spend`, `audit`, `prune`, `migrate`, listen, `help`), their ordering

@@ -57,17 +57,17 @@ VM_SCRIPT_LIMIT = 1000
 
 
 def too_slow_to_verify(sig, pubkey):
-    """Whether the verify VM can be expected to finish this case.
+    """Nothing is, any more.
 
-    The band matters, not the threshold.  A Script *over* the consensus limit
-    is refused on its size before any opcode runs, so it is as cheap as an
-    empty one -- the 10001 byte SCRIPT_SIZE case was excluded for years by a
-    plain length test and answers in milliseconds.  What is expensive is a
-    Script that is long *and* executed, which is the band between the VM's
-    reach and the consensus limit.
+    `aver verify` takes a per-function step budget from aver.toml as of
+    jasisz/aver#1071, and this project raises it for the two corpus `case`
+    functions.  The band this used to exclude -- a Script long enough to be
+    expensive and short enough to be executed rather than refused on size --
+    now runs like any other case.  Kept as a function rather than deleted
+    because the shape of the question is worth keeping if a budget ever
+    binds again.
     """
-    longest = max(len(sig), len(pubkey)) // 2
-    return VM_SCRIPT_LIMIT < longest <= CONSENSUS_SCRIPT_LIMIT
+    return False
 
 
 def fetch():

@@ -9,7 +9,7 @@ module TaprootTest
         "repository, and the verify VM would refuse the larger cases anyway"
         "(n1bor/btc-listener#75)."
         "Fetched once and kept. A second run costs nothing: the held file's"
-        "size is compared against what GitHub's contents API reports and the"
+        "size is compared against what a HEAD of its URL reports and the"
         "download is skipped when they agree. Size rather than a hash because"
         "the point is to notice a truncated or replaced file, not to defend"
         "against anybody."
@@ -21,7 +21,7 @@ module TaprootTest
     effects [
         Console.error, Console.print,
         Disk.exists, Disk.readText, Disk.size, Disk.writeText,
-        Http.get,
+        Http.get, Http.head,
     ]
 
 fn url() -> String
@@ -46,13 +46,17 @@ fn run(rest: List<String>) -> Unit
     ! [
         Console.error, Console.print,
         Disk.exists, Disk.readText, Disk.size, Disk.writeText,
-        Http.get,
+        Http.get, Http.head,
     ]
     said(loaded(rest))
 
 fn loaded(rest: List<String>) -> Result<List<String>, String>
     ? "Make sure the file is here, read it, and do what was asked."
-    ! [Console.print, Disk.exists, Disk.readText, Disk.size, Disk.writeText, Http.get]
+    ! [
+        Console.error, Console.print,
+        Disk.exists, Disk.readText, Disk.size, Disk.writeText,
+        Http.get, Http.head,
+    ]
     _fetched = ensured()?
     raw = Disk.readText(cachePath())?
     parsed = Domain.Json.fromString(raw)?
@@ -61,18 +65,18 @@ fn loaded(rest: List<String>) -> Result<List<String>, String>
 
 fn ensured() -> Result<Unit, String>
     ? "Fetch the corpus unless a copy of the right size is already here."
-    ! [Console.print, Disk.exists, Disk.size, Disk.writeText, Http.get]
+    ! [Console.print, Disk.exists, Disk.size, Disk.writeText, Http.get, Http.head]
     match Disk.exists(cachePath())
         false -> fetched("no copy held")
         true -> sizeChecked()
 
 fn sizeChecked() -> Result<Unit, String>
     ? "A held copy is kept only if it is the size the server reports."
-      "A GET rather than a HEAD, because aver-rt's Http.head fails reading a"
-      "body that a HEAD response does not have -- jasisz/aver#1077. So this"
-      "asks GitHub's contents API, which answers with a small JSON document"
-      "naming the size, rather than fetching nine megabytes to measure it."
-    ! [Console.print, Disk.size, Disk.writeText, Http.get]
+      "A HEAD, which is what HEAD is for: the headers of the GET without the"
+      "nine megabytes under them. It asks the file's own URL rather than a"
+      "metadata endpoint, so it works against any server rather than only"
+      "against one that happens to offer one."
+    ! [Console.print, Disk.size, Disk.writeText, Http.get, Http.head]
     held = Disk.size(cachePath())?
     remote = remoteSize()
     compared(held, remote)
@@ -126,48 +130,58 @@ verify bodyOf
     bodyOf(404, "") => Result.Err("fetching the corpus gave HTTP 404")
 
 fn remoteSize() -> Option<Int>
-    ? "What GitHub's contents API says the file weighs."
-    ! [Http.get]
-    match Http.get(sizeUrl())
+    ? "What the server says the file weighs, from a HEAD of its own URL."
+      "Nothing means the server would not say, which is not a reason to throw"
+      "away a copy that is already here."
+    ! [Http.head]
+    match Http.head(url())
         Result.Err(why) -> Option.None
-        Result.Ok(response) -> sizeIn(response.status, response.body)
+        Result.Ok(response) -> lengthIn(response.status, Map.get(response.headers, "content-length"))
 
-fn sizeUrl() -> String
-    ? "The contents API for the one file, which answers with its size."
-    "https://api.github.com/repos/bitcoin-core/qa-assets/contents/unit_test_data/script_assets_test.json"
-
-verify sizeUrl
-    String.startsWith(sizeUrl(), "https://api.github.com/") => true
-
-fn sizeIn(status: Int, body: String) -> Option<Int>
-    ? "The size field of the API's answer."
+fn lengthIn(status: Int, values: Option<List<String>>) -> Option<Int>
+    ? "The content-length of a two hundred, if it said one."
+      "On a HEAD it describes the body the GET would return, which is the"
+      "number wanted here. The header is looked up by the caller so this stays"
+      "a question about two plain values."
     match status == 200
         false -> Option.None
-        true -> sizeField(Domain.Json.fromString(body))
+        true -> firstNumber(values)
 
-verify sizeIn
-    sizeIn(404, "") => Option.None
-    sizeIn(200, "not json") => Option.None
+verify lengthIn
+    lengthIn(200, Option.Some(["7"])) => Option.Some(7)
+    lengthIn(404, Option.Some(["7"])) => Option.None
+    lengthIn(200, Option.None) => Option.None
 
-fn sizeField(parsed: Result<Json, String>) -> Option<Int>
-    ? "Read the size out, if the answer parsed."
-    match parsed
-        Result.Err(why) -> Option.None
-        Result.Ok(json) -> numberField(json, "size")
-
-verify sizeField
-    sizeField(Result.Err("no")) => Option.None
-    sizeField(Result.Ok(Json.JsonObject([Domain.Json.Pair(key = "size", held = Json.JsonInt(7))]))) => Option.Some(7)
-
-fn numberField(json: Json, name: String) -> Option<Int>
-    ? "One numeric field of an object."
-    match Domain.Json.field(json, name)
+fn firstNumber(values: Option<List<String>>) -> Option<Int>
+    ? "A header may be repeated; the first is the one that counts."
+    match values
         Option.None -> Option.None
-        Option.Some(held) -> Domain.Json.intOf(held)
+        Option.Some(found) -> numberOfFirst(found)
 
-verify numberField
-    numberField(Json.JsonObject([Domain.Json.Pair(key = "size", held = Json.JsonInt(7))]), "size") => Option.Some(7)
-    numberField(Json.JsonObject([]), "size") => Option.None
+verify firstNumber
+    firstNumber(Option.None) => Option.None
+    firstNumber(Option.Some(["7"])) => Option.Some(7)
+    firstNumber(Option.Some([])) => Option.None
+
+fn numberOfFirst(values: List<String>) -> Option<Int>
+    ? "The first value as a whole number, if it is one."
+    match values
+        [] -> Option.None
+        [head, ..tail] -> wholeNumber(head)
+
+verify numberOfFirst
+    numberOfFirst([]) => Option.None
+    numberOfFirst(["7"]) => Option.Some(7)
+
+fn wholeNumber(text: String) -> Option<Int>
+    ? "A header value is text and may be anything."
+    match Int.fromString(text)
+        Result.Err(why) -> Option.None
+        Result.Ok(n) -> Option.Some(n)
+
+verify wholeNumber
+    wholeNumber("7") => Option.Some(7)
+    wholeNumber("x") => Option.None
 
 fn said(outcome: Result<List<String>, String>) -> Unit
     ? "Print the lines, or the reason there are none."

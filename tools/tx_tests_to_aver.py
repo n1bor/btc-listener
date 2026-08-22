@@ -201,8 +201,8 @@ VM_TX_LIMIT = 1000
 
 
 def too_slow_to_verify(raw):
-    """Whether the verify VM can be expected to finish this case."""
-    return len(raw) // 2 > VM_TX_LIMIT
+    """Nothing is, any more -- see the same function in the Script tool."""
+    return False
 
 
 def verifiable(row):

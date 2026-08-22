@@ -133,7 +133,7 @@ Same three steps as the Transaction corpus below, and the same probe project:
 ```
 python3 tools/script_tests_to_aver.py --fetch
 python3 tools/script_tests_to_aver.py --probe /tmp/p/main.av
-cd /tmp/p && aver run main.av --module-root . --providers > /tmp/answers.txt
+cd /tmp/p && aver run main.av --module-root . > /tmp/answers.txt
 python3 tools/script_tests_to_aver.py --answers /tmp/answers.txt
 ```
 
@@ -214,7 +214,7 @@ package = "btc-listener-primitives"
 path = "/absolute/path/to/btc-listener/providers/primitives"
 factory = "primitives_binding"
 TOML
-cd /tmp/p && aver run main.av --module-root . --providers > /tmp/answers.txt
+cd /tmp/p && aver run main.av --module-root . > /tmp/answers.txt
 
 python3 tools/tx_tests_to_aver.py --answers /tmp/answers.txt
 ```
