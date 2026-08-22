@@ -480,7 +480,7 @@ comes out true. Witness programs are refused before they are run now, and those
 Blocks read `0 passed / 0 failed / 6493 undecided`.
 
 Bitcoin Core's own test data is the adversarial test, and nothing written here
-would be half as unkind. Five files are read, 2,000 cases between them, and
+would be half as unkind. Eight files are read, 2,198 cases between them, and
 every Script case carries the verification flags Core ran it under:
 
 | corpus | cases | agree | disagree | undecided |
@@ -489,12 +489,22 @@ every Script case carries the verification flags Core ran it under:
 | `script_tests.json` Witness rows | 108 | 108 | 0 | 0 |
 | `tx_valid` + `tx_invalid` | 213 | 213 | 0 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
-| `key_io_valid.json` | 54 | 54 | 0 | 0 |
+| `key_io_valid.json`, both directions | 108 | 108 | 0 | 0 |
+| `key_io_invalid.json` | 70 | 70 | 0 | 0 |
+| `base58_encode_decode.json`, both directions | 42 | 42 | 0 | 0 |
+| BIP341 `wallet-test-vectors.json` | 39 | 39 | 0 | 0 |
 
 **Nothing disagrees, in either direction.** The seventy undecided are Script
 pairs whose answer needs a Transaction the row does not carry, which is the
 honest answer rather than a disagreement — and the direction that would matter,
-refusing what Core accepts, is nought and has always been nought. See
+refusing what Core accepts, is nought and has always been nought.
+
+Three of those files are read **both ways**, which matters more than the case
+count suggests. An encoder only ever asked to produce output agrees with itself
+forever; `key_io_invalid.json` is 70 strings that must not decode, and on its
+own a decoder that refused everything would pass all of them. It is worth
+something only because the same function has to succeed 54 times next door and
+return the exact Script Core records. See
 [ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md) and
 [docs/core-corpora.md](docs/core-corpora.md).
 
