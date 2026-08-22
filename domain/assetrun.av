@@ -1,0 +1,63 @@
+module AssetRun
+    intent =
+        "Which of Core's script_assets_test.json entries to run: all, or one."
+        "The pure half of the taproottest command's dispatch. Nothing here"
+        "touches a disk or a network; App.TaprootTest fetches the file and"
+        "prints what this returns."
+        "A number asks about one test and prints everything known about it."
+        "That is the whole debugging loop: run everything, get a number, ask"
+        "about the number."
+    exposes [chosen, arrayOf]
+    depends [Domain.AssetSweep, Domain.Json, Domain.ScriptAssets]
+    effects []
+
+fn arrayOf(parsed: Json) -> Result<List<Json>, String>
+    ? "The document has to be an array of entries."
+    match Domain.Json.listOf(parsed)
+        Option.None -> Result.Err("the corpus is {Domain.Json.kindOf(parsed)}, not an array")
+        Option.Some(entries) -> Result.Ok(entries)
+
+verify arrayOf
+    arrayOf(Json.JsonList([])) => Result.Ok([])
+    arrayOf(Json.JsonNull) => Result.Err("the corpus is null, not an array")
+
+fn chosen(entries: List<Json>, rest: List<String>) -> Result<List<String>, String>
+    ? "A number asks about one test; nothing asks about all of them."
+    match rest
+        [] -> Result.Ok(Domain.AssetSweep.everyEntry(entries, 0, Domain.AssetSweep.Tally(passed = 0, failed = 0, undecided = 0), []))
+        [head, ..tail] -> byNumber(entries, head)
+
+verify chosen
+    chosen([], []) => Result.Ok(["", "tests 0  passed 0  failed 0  undecided 0  CLEAN"])
+    chosen([], ["x"]) => Result.Err("'x' is not a test number")
+
+fn byNumber(entries: List<Json>, text: String) -> Result<List<String>, String>
+    ? "The argument has to be a whole number."
+    match Int.fromString(text)
+        Result.Err(why) -> Result.Err("'{text}' is not a test number")
+        Result.Ok(n) -> oneEntry(entries, n)
+
+verify byNumber
+    byNumber([], "x") => Result.Err("'x' is not a test number")
+    byNumber([], "0") => Result.Err("there is no test 0; the corpus holds 0")
+
+fn oneEntry(entries: List<Json>, wanted: Int) -> Result<List<String>, String>
+    ? "Everything about one test: what the file said, and what happened."
+    match entryAt(entries, wanted)
+        Option.None -> Result.Err("there is no test {wanted}; the corpus holds {List.len(entries)}")
+        Option.Some(entry) -> Domain.AssetSweep.detailed(entry, wanted)
+
+verify oneEntry
+    oneEntry([], 0) => Result.Err("there is no test 0; the corpus holds 0")
+    oneEntry([Json.JsonNull], 0) => Result.Err("entry has no 'tx' field")
+
+fn entryAt(entries: List<Json>, index: Int) -> Option<Json>
+    ? "One entry by position."
+    match List.take(List.drop(entries, index), 1)
+        [] -> Option.None
+        [head, ..tail] -> Option.Some(head)
+
+verify entryAt
+    entryAt([], 0) => Option.None
+    entryAt([Json.JsonNull], 0) => Option.Some(Json.JsonNull)
+    entryAt([Json.JsonNull], 1) => Option.None

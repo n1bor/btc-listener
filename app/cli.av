@@ -4,11 +4,12 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [App.Lookup, App.Maintain, App.Show, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [App.Lookup, App.Maintain, App.Show, App.TaprootTest, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -33,7 +34,8 @@ fn runCli() -> Unit
     ! [
         Args.get,
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -45,7 +47,8 @@ fn run(args: List<String>) -> Unit
     ? "Dispatch on the arguments given after `--`."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -59,7 +62,8 @@ fn maybeNetwork(head: String, rest: List<String>) -> Unit
     ? "A leading `signet` chooses the Network; anything else is mainnet as before."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -73,7 +77,8 @@ fn onNetwork(network: Network, args: List<String>) -> Unit
     ? "The arguments after the Network was chosen: same grammar, different wire."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -87,7 +92,8 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
     ? "A leading subcommand, or an address for the listener as before."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -104,6 +110,7 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
         "tx" -> App.Lookup.byTxid(network, rest, false)
         "spend" -> App.Lookup.byTxid(network, rest, true)
         "show" -> needShow(rest)
+        "taproottest" -> App.TaprootTest.run(rest)
         "help" -> App.Usage.print()
         _ -> runWithAddress(network, command, rest)
 
@@ -184,7 +191,8 @@ fn needFour(network: Network, rest: List<String>) -> Unit
     ? "The body phase wants an address, a directory and two Heights."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -198,7 +206,8 @@ fn bodyDir(network: Network, address: String, more: List<String>) -> Unit
     ? "Take the directory, then the range."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -212,7 +221,8 @@ fn bodyRange(network: Network, address: String, dir: String, range: List<String>
     ? "Both Heights must be given; there is no sensible default for either."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -268,7 +278,8 @@ fn startBodies(network: Network, parsed: Result<PeerAddress, String>, dir: Strin
     ? "Fetch the Blocks, or say why the address was rejected."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,
@@ -282,7 +293,8 @@ fn bodyRun(network: Network, address: PeerAddress, dir: String, span: Span) -> R
     ? "Open the Index and the Segments, then fill the range."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.writeText,
+        Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
+        Http.get,
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.readBytes, Tcp.writeBytes,

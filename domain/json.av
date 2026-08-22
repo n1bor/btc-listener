@@ -1,0 +1,617 @@
+module Json
+    intent =
+        "Reading JSON, for the one thing in this project that arrives as JSON."
+        "Bitcoin Core's script_assets_test.json is nine megabytes of tapscript"
+        "cases and the only published corpus that tests them. Every other"
+        "corpus is turned into Aver by a Python tool and checked in; this one"
+        "is too large for that, so it is fetched and read at run time, and"
+        "reading it means a parser."
+        "Recursive descent over the characters, threading the rest of the"
+        "input through each step. That is the shape the compiler's chars"
+        "fusion recognises -- String.chars matched as [head, ..tail] becomes a"
+        "cursor over the string rather than a nine million element list."
+        "An object keeps its pairs as a list rather than a Map. The order the"
+        "file wrote them in is worth keeping when the point of the exercise is"
+        "to print a failing case back to a person, and lookup is over a"
+        "handful of keys."
+        "Not a general-purpose JSON library, and it says no rather than"
+        "guessing. There are no floats, and the escapes Aver cannot spell in a"
+        "string literal are refused rather than half-decoded -- a corpus that"
+        "silently mis-reads one case is worse than one that will not read."
+    exposes [Json, Pair, fromString, field, stringOf, intOf, boolOf, listOf, kindOf]
+    depends []
+    effects []
+
+record Pair
+    key: String
+    held: Json
+
+type Json
+    JsonString(String)
+    JsonInt(Int)
+    JsonBool(Bool)
+    JsonList(List<Json>)
+    JsonObject(List<Pair>)
+    JsonNull
+
+record Parsed
+    value: Json
+    rest: List<String>
+
+fn fromString(text: String) -> Result<Json, String>
+    ? "A whole JSON document, or the reason it is not one."
+      "Trailing content is an error rather than ignored. A document that"
+      "parses and then has something after it is not the document anyone"
+      "meant."
+    parsed = value(skipSpace(String.chars(text)))?
+    ended(parsed)
+
+verify fromString
+    fromString("1") => Result.Ok(Json.JsonInt(1))
+    fromString("  true ") => Result.Ok(Json.JsonBool(true))
+    fromString("null") => Result.Ok(Json.JsonNull)
+    fromString("[]") => Result.Ok(Json.JsonList([]))
+    fromString("[1,2]") => Result.Ok(Json.JsonList([Json.JsonInt(1), Json.JsonInt(2)]))
+    fromString("{{}}") => Result.Ok(Json.JsonObject([]))
+    fromString("1 2") => Result.Err("trailing content after the document")
+    fromString("") => Result.Err("a value was expected and the input ended")
+    fromString("[1,]") => Result.Err("a value was expected, and ']' is not one")
+
+fn ended(parsed: Parsed) -> Result<Json, String>
+    ? "Nothing but blank space may follow the document."
+    match skipSpace(parsed.rest)
+        [] -> Result.Ok(parsed.value)
+        [head, ..tail] -> Result.Err("trailing content after the document")
+
+verify ended
+    ended(Parsed(value = Json.JsonNull, rest = [])) => Result.Ok(Json.JsonNull)
+    ended(Parsed(value = Json.JsonNull, rest = [" "])) => Result.Ok(Json.JsonNull)
+    ended(Parsed(value = Json.JsonNull, rest = ["x"])) => Result.Err("trailing content after the document")
+
+fn skipSpace(chars: List<String>) -> List<String>
+    ? "Step over spaces, tabs, carriage returns and newlines."
+    match chars
+        [] -> []
+        [head, ..tail] -> spaceOrNot(head, tail, chars)
+
+verify skipSpace
+    skipSpace([]) => []
+    skipSpace([" ", " ", "1"]) => ["1"]
+    skipSpace(["1", " "]) => ["1", " "]
+
+fn spaceOrNot(head: String, tail: List<String>, whole: List<String>) -> List<String>
+    ? "Keep skipping while the character is blank."
+    match isSpace(head)
+        true -> skipSpace(tail)
+        false -> whole
+
+verify spaceOrNot
+    spaceOrNot(" ", ["1"], [" ", "1"]) => ["1"]
+    spaceOrNot("1", [], ["1"]) => ["1"]
+
+fn isSpace(character: String) -> Bool
+    ? "The four characters JSON allows between tokens."
+      "Never asked about an empty string: every caller has taken this"
+      "character off the front of a list, and Char.toCode of nothing faults."
+    Bool.or(character == " ", Bool.or(Char.toCode(character) == 10, Bool.or(Char.toCode(character) == 9, Char.toCode(character) == 13)))
+
+verify isSpace
+    isSpace(" ") => true
+    isSpace("1") => false
+    isSpace("z") => false
+
+fn value(chars: List<String>) -> Result<Parsed, String>
+    ? "One value, whatever kind it turns out to be."
+      "The first character decides, which is what makes JSON cheap to read:"
+      "there is no backtracking anywhere in this module."
+    match chars
+        [] -> Result.Err("a value was expected and the input ended")
+        [head, ..tail] -> byFirst(head, tail, chars)
+
+verify value
+    value([]) => Result.Err("a value was expected and the input ended")
+    value(["]"]) => Result.Err("a value was expected, and ']' is not one")
+
+fn byFirst(head: String, tail: List<String>, whole: List<String>) -> Result<Parsed, String>
+    ? "Dispatch on the first character."
+      "By code rather than by character, because a match pattern may not be a"
+      "string carrying an escape and a quote is one. 34 is a double quote, 91"
+      "an opening bracket, 123 an opening brace, and 116, 102 and 110 are t,"
+      "f and n -- the first letters of the three bare words."
+    match Char.toCode(head)
+        34 -> asString(tail)
+        91 -> asList(skipSpace(tail))
+        123 -> asObject(skipSpace(tail))
+        116 -> literal(whole, "true", Json.JsonBool(true))
+        102 -> literal(whole, "false", Json.JsonBool(false))
+        110 -> literal(whole, "null", Json.JsonNull)
+        _ -> asNumber(head, tail, whole)
+
+verify byFirst
+    byFirst("t", ["r", "u", "e"], ["t", "r", "u", "e"]) => Result.Ok(Parsed(value = Json.JsonBool(true), rest = []))
+    byFirst("]", [], ["]"]) => Result.Err("a value was expected, and ']' is not one")
+
+fn literal(whole: List<String>, word: String, made: Json) -> Result<Parsed, String>
+    ? "One of the three bare words."
+    match startsWith(whole, String.chars(word))
+        false -> Result.Err("a value was expected, and '{firstOf(whole)}' is not one")
+        true -> Result.Ok(Parsed(value = made, rest = List.drop(whole, String.len(word))))
+
+verify literal
+    literal(["t", "r", "u", "e"], "true", Json.JsonBool(true)) => Result.Ok(Parsed(value = Json.JsonBool(true), rest = []))
+    literal(["t", "r", "u", "x"], "true", Json.JsonBool(true)) => Result.Err("a value was expected, and 't' is not one")
+
+fn startsWith(chars: List<String>, word: List<String>) -> Bool
+    ? "Whether the input begins with these characters."
+    match word
+        [] -> true
+        [head, ..tail] -> sameHead(chars, head, tail)
+
+verify startsWith
+    startsWith(["t", "r"], ["t"]) => true
+    startsWith(["t", "r"], ["t", "r"]) => true
+    startsWith(["t"], ["t", "r"]) => false
+    startsWith(["x"], ["t"]) => false
+
+fn sameHead(chars: List<String>, want: String, rest: List<String>) -> Bool
+    ? "This character has to match, then the rest."
+    match chars
+        [] -> false
+        [head, ..tail] -> matchOrNot(head, tail, want, rest)
+
+verify sameHead
+    sameHead(["t"], "t", []) => true
+    sameHead([], "t", []) => false
+
+fn matchOrNot(head: String, tail: List<String>, want: String, rest: List<String>) -> Bool
+    ? "Compare and continue."
+    match head == want
+        false -> false
+        true -> startsWith(tail, rest)
+
+verify matchOrNot
+    matchOrNot("t", [], "t", []) => true
+    matchOrNot("x", [], "t", []) => false
+
+fn firstOf(chars: List<String>) -> String
+    ? "The first character, for an error message."
+    match chars
+        [] -> ""
+        [head, ..tail] -> head
+
+verify firstOf
+    firstOf(["a", "b"]) => "a"
+    firstOf([]) => ""
+
+fn asString(chars: List<String>) -> Result<Parsed, String>
+    ? "A string, the opening quote already stepped over."
+    stringFrom(chars, "")
+
+verify asString
+    asString(["a", "\""]) => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
+    asString(["\""]) => Result.Ok(Parsed(value = Json.JsonString(""), rest = []))
+    asString(["a"]) => Result.Err("a string was not closed")
+
+fn stringFrom(chars: List<String>, acc: String) -> Result<Parsed, String>
+    ? "Characters until the closing quote."
+    match chars
+        [] -> Result.Err("a string was not closed")
+        [head, ..tail] -> stringStep(head, tail, acc)
+
+verify stringFrom
+    stringFrom([], "") => Result.Err("a string was not closed")
+    stringFrom(["\""], "x") => Result.Ok(Parsed(value = Json.JsonString("x"), rest = []))
+
+fn stringStep(head: String, tail: List<String>, acc: String) -> Result<Parsed, String>
+    ? "A quote ends it, a backslash escapes, anything else accumulates."
+      "34 is a double quote and 92 a backslash; see byFirst for why these are"
+      "codes."
+    match Char.toCode(head)
+        34 -> Result.Ok(Parsed(value = Json.JsonString(acc), rest = tail))
+        92 -> escaped(tail, acc)
+        _ -> stringFrom(tail, acc + head)
+
+verify stringStep
+    stringStep("\"", ["x"], "a") => Result.Ok(Parsed(value = Json.JsonString("a"), rest = ["x"]))
+    stringStep("a", ["\""], "") => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
+
+fn escaped(chars: List<String>, acc: String) -> Result<Parsed, String>
+    ? "What follows a backslash."
+    match chars
+        [] -> Result.Err("a string was not closed")
+        [head, ..tail] -> escapeStep(head, tail, acc)
+
+verify escaped
+    escaped([], "") => Result.Err("a string was not closed")
+    escaped(["n", "\""], "") => Result.Ok(Parsed(value = Json.JsonString("\n"), rest = []))
+
+fn escapeStep(head: String, tail: List<String>, acc: String) -> Result<Parsed, String>
+    ? "The escapes this reader knows, and a refusal for the rest."
+      "Backspace, form feed and \\u are refused rather than half-decoded."
+      "Nothing in the corpus this module exists to read carries an escape of"
+      "any kind, and a parser that quietly produced the wrong character for a"
+      "case would be worse than one that stopped."
+    match Char.toCode(head)
+        34 -> stringFrom(tail, acc + "\"")
+        92 -> stringFrom(tail, acc + "\\")
+        47 -> stringFrom(tail, acc + "/")
+        110 -> stringFrom(tail, acc + "\n")
+        116 -> stringFrom(tail, acc + "\t")
+        114 -> stringFrom(tail, acc + "\r")
+        _ -> Result.Err("'{head}' is not an escape this reader knows")
+
+verify escapeStep
+    escapeStep("n", ["\""], "") => Result.Ok(Parsed(value = Json.JsonString("\n"), rest = []))
+    escapeStep("u", ["\""], "") => Result.Err("'u' is not an escape this reader knows")
+
+fn asNumber(head: String, tail: List<String>, whole: List<String>) -> Result<Parsed, String>
+    ? "A whole number, positive or negative."
+      "No floats. JSON has them and this reader does not, because the corpus"
+      "it exists for has none and a satoshi amount that arrived as a Float"
+      "would be a bug worth refusing rather than rounding."
+    match Bool.or(head == "-", isDigit(head))
+        false -> Result.Err("a value was expected, and '{head}' is not one")
+        true -> digitsFrom(whole)
+
+verify asNumber
+    asNumber("1", [], ["1"]) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
+    asNumber("x", [], ["x"]) => Result.Err("a value was expected, and 'x' is not one")
+
+fn digitsFrom(chars: List<String>) -> Result<Parsed, String>
+    ? "Take the sign, then the digits."
+    match chars
+        [] -> Result.Err("a value was expected and the input ended")
+        [head, ..tail] -> signThen(head, tail)
+
+verify digitsFrom
+    digitsFrom(["1"]) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
+    digitsFrom(["-", "1"]) => Result.Ok(Parsed(value = Json.JsonInt(0 - 1), rest = []))
+
+fn signThen(head: String, tail: List<String>) -> Result<Parsed, String>
+    ? "A leading minus negates what follows it."
+    match head == "-"
+        true -> negated(digitsInto(tail, "", false))
+        false -> digitsInto(List.prepend(head, tail), "", false)
+
+verify signThen
+    signThen("-", ["2"]) => Result.Ok(Parsed(value = Json.JsonInt(0 - 2), rest = []))
+    signThen("2", []) => Result.Ok(Parsed(value = Json.JsonInt(2), rest = []))
+
+fn negated(parsed: Result<Parsed, String>) -> Result<Parsed, String>
+    ? "Flip the sign of a number that parsed."
+    match parsed
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(got) -> Result.Ok(Parsed(value = flipped(got.value), rest = got.rest))
+
+verify negated
+    negated(Result.Ok(Parsed(value = Json.JsonInt(2), rest = []))) => Result.Ok(Parsed(value = Json.JsonInt(0 - 2), rest = []))
+    negated(Result.Err("no")) => Result.Err("no")
+
+fn flipped(json: Json) -> Json
+    ? "Negate a number; anything else is unreachable and left alone."
+    match json
+        Json.JsonInt(n) -> Json.JsonInt(0 - n)
+        Json.JsonString(s) -> json
+        Json.JsonBool(b) -> json
+        Json.JsonList(items) -> json
+        Json.JsonObject(pairs) -> json
+        Json.JsonNull -> json
+
+verify flipped
+    flipped(Json.JsonInt(2)) => Json.JsonInt(0 - 2)
+    flipped(Json.JsonNull) => Json.JsonNull
+
+fn digitsInto(chars: List<String>, acc: String, any: Bool) -> Result<Parsed, String>
+    ? "Digits, and at least one of them."
+    match chars
+        [] -> finishedNumber(acc, any, [])
+        [head, ..tail] -> digitStep(head, tail, acc, any)
+
+verify digitsInto
+    digitsInto(["1"], "", false) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
+    digitsInto([], "", false) => Result.Err("a number had no digits")
+    digitsInto(["1", "]"], "", false) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = ["]"]))
+
+fn digitStep(head: String, tail: List<String>, acc: String, any: Bool) -> Result<Parsed, String>
+    ? "One more digit, or the end of the number."
+    match isDigit(head)
+        true -> digitsInto(tail, acc + head, true)
+        false -> finishedNumber(acc, any, List.prepend(head, tail))
+
+verify digitStep
+    digitStep("1", [], "", false) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
+    digitStep("]", [], "1", true) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = ["]"]))
+
+fn finishedNumber(acc: String, any: Bool, rest: List<String>) -> Result<Parsed, String>
+    ? "A number needs at least one digit, and has to fit an Int."
+    match any
+        false -> Result.Err("a number had no digits")
+        true -> numbered(acc, rest)
+
+verify finishedNumber
+    finishedNumber("", false, []) => Result.Err("a number had no digits")
+    finishedNumber("7", true, []) => Result.Ok(Parsed(value = Json.JsonInt(7), rest = []))
+
+fn numbered(acc: String, rest: List<String>) -> Result<Parsed, String>
+    ? "Read the digits as an Int."
+    match Int.fromString(acc)
+        Result.Err(why) -> Result.Err("'{acc}' is not a whole number this reader can hold")
+        Result.Ok(n) -> Result.Ok(Parsed(value = Json.JsonInt(n), rest = rest))
+
+verify numbered
+    numbered("7", []) => Result.Ok(Parsed(value = Json.JsonInt(7), rest = []))
+    numbered("", []) => Result.Err("'' is not a whole number this reader can hold")
+
+fn isDigit(character: String) -> Bool
+    ? "Nought to nine."
+    Bool.and(Char.toCode(character) >= 48, Char.toCode(character) <= 57)
+
+verify isDigit
+    isDigit("0") => true
+    isDigit("9") => true
+    isDigit("a") => false
+    isDigit("-") => false
+
+fn asList(chars: List<String>) -> Result<Parsed, String>
+    ? "An array, the opening bracket already stepped over."
+    match chars
+        [] -> Result.Err("an array was not closed")
+        [head, ..tail] -> emptyOrItems(head, tail, chars)
+
+verify asList
+    asList(["]"]) => Result.Ok(Parsed(value = Json.JsonList([]), rest = []))
+    asList([]) => Result.Err("an array was not closed")
+
+fn emptyOrItems(head: String, tail: List<String>, whole: List<String>) -> Result<Parsed, String>
+    ? "A closing bracket straight away is the empty array."
+    match head == "]"
+        true -> Result.Ok(Parsed(value = Json.JsonList([]), rest = tail))
+        false -> arrayItems(whole, [])
+
+verify emptyOrItems
+    emptyOrItems("]", [], ["]"]) => Result.Ok(Parsed(value = Json.JsonList([]), rest = []))
+    emptyOrItems("1", ["]"], ["1", "]"]) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
+
+fn arrayItems(chars: List<String>, acc: List<Json>) -> Result<Parsed, String>
+    ? "One value, then a comma or the closing bracket."
+    got = value(chars)?
+    afterItem(skipSpace(got.rest), List.prepend(got.value, acc))
+
+verify arrayItems
+    arrayItems(["1", "]"], []) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
+    arrayItems(["1", ",", "2", "]"], []) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1), Json.JsonInt(2)]), rest = []))
+
+fn afterItem(chars: List<String>, acc: List<Json>) -> Result<Parsed, String>
+    ? "What may follow an array element."
+    match chars
+        [] -> Result.Err("an array was not closed")
+        [head, ..tail] -> itemStep(head, tail, acc)
+
+verify afterItem
+    afterItem([], []) => Result.Err("an array was not closed")
+    afterItem(["]"], [Json.JsonInt(1)]) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
+
+fn itemStep(head: String, tail: List<String>, acc: List<Json>) -> Result<Parsed, String>
+    ? "A comma means another element; a bracket ends the array."
+    match head
+        "," -> arrayItems(skipSpace(tail), acc)
+        "]" -> Result.Ok(Parsed(value = Json.JsonList(List.reverse(acc)), rest = tail))
+        _ -> Result.Err("'{head}' is not a comma or a closing bracket")
+
+verify itemStep
+    itemStep("]", [], [Json.JsonInt(1)]) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
+    itemStep("x", [], []) => Result.Err("'x' is not a comma or a closing bracket")
+
+fn asObject(chars: List<String>) -> Result<Parsed, String>
+    ? "An object, the opening brace already stepped over."
+    match chars
+        [] -> Result.Err("an object was not closed")
+        [head, ..tail] -> emptyOrPairs(head, tail, chars)
+
+verify asObject
+    asObject(["}"]) => Result.Ok(Parsed(value = Json.JsonObject([]), rest = []))
+    asObject([]) => Result.Err("an object was not closed")
+
+fn emptyOrPairs(head: String, tail: List<String>, whole: List<String>) -> Result<Parsed, String>
+    ? "A closing brace straight away is the empty object."
+    match head == "}"
+        true -> Result.Ok(Parsed(value = Json.JsonObject([]), rest = tail))
+        false -> objectPairs(whole, [])
+
+verify emptyOrPairs
+    emptyOrPairs("}", [], ["}"]) => Result.Ok(Parsed(value = Json.JsonObject([]), rest = []))
+    emptyOrPairs("\"", ["a", "\"", ":", "1", "}"], ["\"", "a", "\"", ":", "1", "}"]) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+
+fn objectPairs(chars: List<String>, acc: List<Pair>) -> Result<Parsed, String>
+    ? "A key, a colon, a value, then a comma or the closing brace."
+    key = objectKey(chars)?
+    body = afterColon(skipSpace(key.rest))?
+    got = value(skipSpace(body))?
+    afterPair(skipSpace(got.rest), List.prepend(Pair(key = keyText(key.value), held = got.value), acc))
+
+verify objectPairs
+    objectPairs(["\"", "a", "\"", ":", "1", "}"], []) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+
+fn objectKey(chars: List<String>) -> Result<Parsed, String>
+    ? "An object key has to be a string."
+    match chars
+        [] -> Result.Err("an object was not closed")
+        [head, ..tail] -> keyStep(head, tail)
+
+verify objectKey
+    objectKey(["\"", "a", "\""]) => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
+    objectKey(["1"]) => Result.Err("an object key must be a string")
+
+fn keyStep(head: String, tail: List<String>) -> Result<Parsed, String>
+    ? "Only a quote will do."
+    match head == "\""
+        true -> asString(tail)
+        false -> Result.Err("an object key must be a string")
+
+verify keyStep
+    keyStep("\"", ["a", "\""]) => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
+    keyStep("1", []) => Result.Err("an object key must be a string")
+
+fn keyText(json: Json) -> String
+    ? "The text of a key that has already been parsed as a string."
+    match stringOf(json)
+        Option.None -> ""
+        Option.Some(text) -> text
+
+verify keyText
+    keyText(Json.JsonString("a")) => "a"
+    keyText(Json.JsonInt(1)) => ""
+
+fn afterColon(chars: List<String>) -> Result<List<String>, String>
+    ? "The colon between a key and its value."
+    match chars
+        [] -> Result.Err("an object was not closed")
+        [head, ..tail] -> colonStep(head, tail)
+
+verify afterColon
+    afterColon([":", "1"]) => Result.Ok(["1"])
+    afterColon(["1"]) => Result.Err("'1' is not the colon after an object key")
+
+fn colonStep(head: String, tail: List<String>) -> Result<List<String>, String>
+    ? "It has to be a colon."
+    match head == ":"
+        true -> Result.Ok(tail)
+        false -> Result.Err("'{head}' is not the colon after an object key")
+
+verify colonStep
+    colonStep(":", ["1"]) => Result.Ok(["1"])
+    colonStep("1", []) => Result.Err("'1' is not the colon after an object key")
+
+fn afterPair(chars: List<String>, acc: List<Pair>) -> Result<Parsed, String>
+    ? "What may follow a key and value."
+    match chars
+        [] -> Result.Err("an object was not closed")
+        [head, ..tail] -> pairStep(head, tail, acc)
+
+verify afterPair
+    afterPair([], []) => Result.Err("an object was not closed")
+    afterPair(["}"], [Pair(key = "a", held = Json.JsonInt(1))]) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+
+fn pairStep(head: String, tail: List<String>, acc: List<Pair>) -> Result<Parsed, String>
+    ? "A comma means another pair; a brace ends the object."
+    match head
+        "," -> objectPairs(skipSpace(tail), acc)
+        "}" -> Result.Ok(Parsed(value = Json.JsonObject(List.reverse(acc)), rest = tail))
+        _ -> Result.Err("'{head}' is not a comma or a closing brace")
+
+verify pairStep
+    pairStep("}", [], [Pair(key = "a", held = Json.JsonInt(1))]) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+    pairStep("x", [], []) => Result.Err("'x' is not a comma or a closing brace")
+
+fn field(json: Json, name: String) -> Option<Json>
+    ? "The value of one key of an object, if it is an object and has one."
+    match json
+        Json.JsonObject(pairs) -> lookup(pairs, name)
+        Json.JsonString(s) -> Option.None
+        Json.JsonInt(n) -> Option.None
+        Json.JsonBool(b) -> Option.None
+        Json.JsonList(items) -> Option.None
+        Json.JsonNull -> Option.None
+
+verify field
+    field(Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), "a") => Option.Some(Json.JsonInt(1))
+    field(Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), "b") => Option.None
+    field(Json.JsonInt(1), "a") => Option.None
+
+fn lookup(pairs: List<Pair>, name: String) -> Option<Json>
+    ? "Walk the pairs looking for the key."
+    match pairs
+        [] -> Option.None
+        [head, ..tail] -> thisPairOrNext(head, tail, name)
+
+verify lookup
+    lookup([], "a") => Option.None
+    lookup([Pair(key = "a", held = Json.JsonNull)], "a") => Option.Some(Json.JsonNull)
+
+fn thisPairOrNext(pair: Pair, rest: List<Pair>, name: String) -> Option<Json>
+    ? "This pair, or keep looking."
+    keptOrOn(pair.key, pair.held, rest, name)
+
+verify thisPairOrNext
+    thisPairOrNext(Pair(key = "a", held = Json.JsonNull), [], "a") => Option.Some(Json.JsonNull)
+    thisPairOrNext(Pair(key = "a", held = Json.JsonNull), [], "b") => Option.None
+
+fn keptOrOn(key: String, held: Json, rest: List<Pair>, name: String) -> Option<Json>
+    ? "Compare the key."
+    match key == name
+        true -> Option.Some(held)
+        false -> lookup(rest, name)
+
+verify keptOrOn
+    keptOrOn("a", Json.JsonNull, [], "a") => Option.Some(Json.JsonNull)
+    keptOrOn("a", Json.JsonNull, [], "b") => Option.None
+
+fn stringOf(json: Json) -> Option<String>
+    ? "The text of a string, or nothing if it is not one."
+    match json
+        Json.JsonString(text) -> Option.Some(text)
+        Json.JsonInt(n) -> Option.None
+        Json.JsonBool(b) -> Option.None
+        Json.JsonList(items) -> Option.None
+        Json.JsonObject(pairs) -> Option.None
+        Json.JsonNull -> Option.None
+
+verify stringOf
+    stringOf(Json.JsonString("a")) => Option.Some("a")
+    stringOf(Json.JsonInt(1)) => Option.None
+
+fn intOf(json: Json) -> Option<Int>
+    ? "The value of a number, or nothing if it is not one."
+    match json
+        Json.JsonInt(n) -> Option.Some(n)
+        Json.JsonString(text) -> Option.None
+        Json.JsonBool(b) -> Option.None
+        Json.JsonList(items) -> Option.None
+        Json.JsonObject(pairs) -> Option.None
+        Json.JsonNull -> Option.None
+
+verify intOf
+    intOf(Json.JsonInt(1)) => Option.Some(1)
+    intOf(Json.JsonString("1")) => Option.None
+
+fn boolOf(json: Json) -> Option<Bool>
+    ? "The value of a boolean, or nothing if it is not one."
+    match json
+        Json.JsonBool(b) -> Option.Some(b)
+        Json.JsonInt(n) -> Option.None
+        Json.JsonString(text) -> Option.None
+        Json.JsonList(items) -> Option.None
+        Json.JsonObject(pairs) -> Option.None
+        Json.JsonNull -> Option.None
+
+verify boolOf
+    boolOf(Json.JsonBool(true)) => Option.Some(true)
+    boolOf(Json.JsonInt(1)) => Option.None
+
+fn listOf(json: Json) -> Option<List<Json>>
+    ? "The elements of an array, or nothing if it is not one."
+    match json
+        Json.JsonList(items) -> Option.Some(items)
+        Json.JsonInt(n) -> Option.None
+        Json.JsonString(text) -> Option.None
+        Json.JsonBool(b) -> Option.None
+        Json.JsonObject(pairs) -> Option.None
+        Json.JsonNull -> Option.None
+
+verify listOf
+    listOf(Json.JsonList([])) => Option.Some([])
+    listOf(Json.JsonInt(1)) => Option.None
+
+fn kindOf(json: Json) -> String
+    ? "What kind of value this is, for an error message."
+    match json
+        Json.JsonString(text) -> "a string"
+        Json.JsonInt(n) -> "a number"
+        Json.JsonBool(b) -> "a boolean"
+        Json.JsonList(items) -> "an array"
+        Json.JsonObject(pairs) -> "an object"
+        Json.JsonNull -> "null"
+
+verify kindOf
+    kindOf(Json.JsonNull) => "null"
+    kindOf(Json.JsonInt(1)) => "a number"

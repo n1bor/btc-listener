@@ -1,0 +1,285 @@
+module AssetSweep
+    intent =
+        "Every entry of Core's script_assets_test.json, run and counted, and"
+        "any one of them written out in full."
+        "Two spenders per entry and they are opposite claims: `success` must"
+        "pass and `failure` must fail. An engine that accepted everything"
+        "would pass half the file and one that refused everything the other"
+        "half, so both go through the same tally and the same verdict."
+        "A passing test prints nothing. Three thousand lines of PASS is not a"
+        "report; the number of a failure is the thing worth having, because it"
+        "is what takes you back to the case with `taproottest <n>`."
+        "Undecided is its own answer and not a failure. This engine says so"
+        "when it cannot judge, and an entry it cannot judge is a gap rather"
+        "than a disagreement with Core."
+        "One module rather than two, which is not a preference. Split in two,"
+        "with one calling the other, the Rust backend fails to render twenty"
+        "functions in Domain.Taproot and Domain.Tapsig -- functions this"
+        "module never mentions. jasisz/aver#1073."
+    exposes [Tally, everyEntry, counted, standing, totals, verdict, shown, expectation, detailed, spenderLines, shownFlags]
+    depends [Domain.Json, Domain.ScriptAssets, Domain.ScriptState, Domain.Transaction]
+    effects []
+
+fn detailed(entry: Json, number: Int) -> Result<List<String>, String>
+    ? "One test in full, for someone looking at a failure."
+    one = Domain.ScriptAssets.caseFrom(entry)?
+    Result.Ok(List.concat(List.concat(["test {number}"], Domain.ScriptAssets.describe(one)), List.concat(spenderLines("success", one.success, one, true), failureLines(one))))
+
+verify detailed
+    detailed(Json.JsonNull, 3) => Result.Err("entry has no 'tx' field")
+
+fn spenderLines(name: String, spender: Spender, one: Case, mustPass: Bool) -> List<String>
+    ? "What the spender carried, what the engine made of it, and the verdict."
+    outcome = Domain.ScriptAssets.run(one, spender)
+    List.concat(List.concat([
+        "",
+        "{name}  scriptSig {emptyOr(spender.scriptSig)}",
+    ], witnessLines(spender.witness, 0, [], name)), [
+        "{name}  engine    {shown(outcome)}",
+        "{name}  expected  {expectation(mustPass)}",
+        "{name}  VERDICT   {verdict(outcome, mustPass)}",
+    ])
+
+verify spenderLines
+    List.take(spenderLines("success", Domain.ScriptAssets.Spender(scriptSig = "", witness = []), sampleCase(), true), 2) => ["", "success  scriptSig (empty)"]
+    List.len(spenderLines("success", Domain.ScriptAssets.Spender(scriptSig = "", witness = []), sampleCase(), true)) => 6
+
+fn emptyOr(text: String) -> String
+    ? "Say so when a Script is empty rather than printing nothing."
+    match String.len(text) == 0
+        true -> "(empty)"
+        false -> text
+
+verify emptyOr
+    emptyOr("") => "(empty)"
+    emptyOr("51") => "51"
+
+fn witnessLines(items: List<String>, position: Int, acc: List<String>, name: String) -> List<String>
+    ? "One line per witness item, with its position and width."
+    match items
+        [] -> emptyWitness(acc, name)
+        [head, ..tail] -> witnessLines(tail, position + 1, List.prepend("{name}  witness   {position}: {widthOf(head)} bytes  {emptyOr(head)}", acc), name)
+
+verify witnessLines
+    witnessLines([], 0, [], "success") => ["success  witness   (none)"]
+    witnessLines(["aabb"], 0, [], "success") => ["success  witness   0: 2 bytes  aabb"]
+
+fn emptyWitness(acc: List<String>, name: String) -> List<String>
+    ? "A spend with no witness says so."
+    match acc
+        [] -> ["{name}  witness   (none)"]
+        [head, ..tail] -> List.reverse(acc)
+
+verify emptyWitness
+    emptyWitness([], "success") => ["success  witness   (none)"]
+
+fn widthOf(hex: String) -> Int
+    ? "How many bytes a hex string stands for."
+    Int.div(String.len(hex), 2)
+
+verify widthOf
+    widthOf("aabb") => 2
+    widthOf("") => 0
+
+fn failureLines(one: Case) -> List<String>
+    ? "The failing spender, where the entry carries one."
+    match one.failure
+        Option.None -> ["", "failure  (this entry has none)"]
+        Option.Some(spender) -> spenderLines("failure", spender, one, false)
+
+verify failureLines
+    failureLines(sampleCase()) => ["", "failure  (this entry has none)"]
+
+fn expectation(mustPass: Bool) -> String
+    ? "Which way this spender is supposed to go."
+    match mustPass
+        true -> "pass"
+        false -> "fail"
+
+verify expectation
+    expectation(true) => "pass"
+    expectation(false) => "fail"
+
+fn shown(outcome: Outcome) -> String
+    ? "What the engine said, in full."
+    match outcome
+        Outcome.Undecided(why) -> "undecided: {why}"
+        Outcome.Decided(ending) -> shownEnding(ending)
+
+verify shown
+    shown(Outcome.Undecided("no")) => "undecided: no"
+    shown(Outcome.Decided(Ending.Passed)) => "passed"
+
+fn shownEnding(ending: Ending) -> String
+    ? "Passed has nothing to say; failed says why."
+    match ending
+        Ending.Passed -> "passed"
+        Ending.Failed(why) -> "failed: {why}"
+
+verify shownEnding
+    shownEnding(Ending.Passed) => "passed"
+    shownEnding(Ending.Failed("no")) => "failed: no"
+
+fn verdict(outcome: Outcome, mustPass: Bool) -> String
+    ? "Whether the engine did what the file says it should."
+      "Undecided is its own answer and is not counted as a failure. This"
+      "engine says so when it cannot judge, and a corpus entry it cannot"
+      "judge is a gap rather than a disagreement."
+    match outcome
+        Outcome.Undecided(why) -> "UNDECIDED"
+        Outcome.Decided(ending) -> agreed(ending, mustPass)
+
+verify verdict
+    verdict(Outcome.Undecided("no"), true) => "UNDECIDED"
+    verdict(Outcome.Decided(Ending.Passed), true) => "PASS"
+    verdict(Outcome.Decided(Ending.Passed), false) => "FAIL"
+    verdict(Outcome.Decided(Ending.Failed("no")), false) => "PASS"
+    verdict(Outcome.Decided(Ending.Failed("no")), true) => "FAIL"
+
+fn agreed(ending: Ending, mustPass: Bool) -> String
+    ? "Compare what happened with what was meant to."
+    match passedOf(ending) == mustPass
+        true -> "PASS"
+        false -> "FAIL"
+
+verify agreed
+    agreed(Ending.Passed, true) => "PASS"
+    agreed(Ending.Passed, false) => "FAIL"
+
+fn passedOf(ending: Ending) -> Bool
+    ? "Whether the Script ran to a true stack."
+    match ending
+        Ending.Passed -> true
+        Ending.Failed(why) -> false
+
+verify passedOf
+    passedOf(Ending.Passed) => true
+    passedOf(Ending.Failed("no")) => false
+
+fn shownFlags(flags: List<String>) -> String
+    ? "The flags as Core wrote them."
+    String.join(flags, ",")
+
+verify shownFlags
+    shownFlags(["A", "B"]) => "A,B"
+
+fn sampleCase() -> Case
+    ? "A Case with one Input and no prevouts, for the cases here."
+      "It has no prevout at its index, so running it fails -- which is what"
+      "the cases below assert about the plumbing rather than about the engine."
+    Domain.ScriptAssets.Case(comment = "sample", flags = [], index = 0, transaction = Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), prevouts = [], success = Domain.ScriptAssets.Spender(scriptSig = "", witness = []), failure = Option.None)
+
+verify sampleCase
+    sampleCase().index => 0
+
+record Tally
+    passed: Int
+    failed: Int
+    undecided: Int
+
+fn everyEntry(entries: List<Json>, number: Int, tally: Tally, acc: List<String>) -> List<String>
+    ? "Every entry in turn, keeping only what failed."
+      "A passing test prints nothing. Three thousand lines of PASS is not a"
+      "report, and the number of a failure is the thing worth having --"
+      "`taproottest <n>` takes it straight back to the case."
+    match entries
+        [] -> List.concat(List.reverse(acc), totals(tally))
+        [head, ..tail] -> oneEntryThen(head, tail, number, tally, acc)
+
+verify everyEntry
+    everyEntry([], 0, Tally(passed = 0, failed = 0, undecided = 0), []) => ["", "tests 0  passed 0  failed 0  undecided 0  CLEAN"]
+    List.len(everyEntry([Json.JsonNull], 0, Tally(passed = 0, failed = 0, undecided = 0), [])) => 3
+
+
+
+
+
+fn faultLine(word: String, one: Case, mustPass: Bool, outcome: Outcome, number: Int) -> String
+    ? "One line with everything needed to find the case again."
+    "test {number}  {word}  [{one.comment}]  expected {expectation(mustPass)}, engine {shown(outcome)}  flags {shownFlags(one.flags)}"
+
+
+fn counted(tally: Tally, word: String) -> Tally
+    ? "Add one to whichever count this verdict belongs in."
+    match word
+        "PASS" -> Tally(passed = tally.passed + 1, failed = tally.failed, undecided = tally.undecided)
+        "UNDECIDED" -> Tally(passed = tally.passed, failed = tally.failed, undecided = tally.undecided + 1)
+        _ -> Tally(passed = tally.passed, failed = tally.failed + 1, undecided = tally.undecided)
+
+verify counted
+    counted(Tally(passed = 0, failed = 0, undecided = 0), "PASS") => Tally(passed = 1, failed = 0, undecided = 0)
+    counted(Tally(passed = 0, failed = 0, undecided = 0), "FAIL") => Tally(passed = 0, failed = 1, undecided = 0)
+    counted(Tally(passed = 0, failed = 0, undecided = 0), "UNDECIDED") => Tally(passed = 0, failed = 0, undecided = 1)
+
+fn totals(tally: Tally) -> List<String>
+    ? "The last two lines: the counts, and one word for whether it was clean."
+    [
+        "",
+        "tests {tally.passed + tally.failed + tally.undecided}  passed {tally.passed}  failed {tally.failed}  undecided {tally.undecided}  {standing(tally)}",
+    ]
+
+verify totals
+    List.len(totals(Tally(passed = 1, failed = 0, undecided = 0))) => 2
+
+fn standing(tally: Tally) -> String
+    ? "One word, so a run can be read without counting."
+      "Undecided does not spoil it. This engine says so when it cannot judge,"
+      "and that is an honest answer rather than a disagreement with Core."
+    match tally.failed == 0
+        true -> "CLEAN"
+        false -> "FAILED"
+
+verify standing
+    standing(Tally(passed = 1, failed = 0, undecided = 3)) => "CLEAN"
+    standing(Tally(passed = 1, failed = 1, undecided = 0)) => "FAILED"
+
+fn oneEntryThen(entry: Json, rest: List<Json>, number: Int, tally: Tally, acc: List<String>) -> List<String>
+    ? "One entry, then the rest."
+      "An entry that will not read at all is a failure of the corpus reader"
+      "rather than of the engine, and says so in those words."
+    match Domain.ScriptAssets.caseFrom(entry)
+        Result.Err(why) -> everyEntry(rest, number + 1, counted(tally, "FAIL"), List.prepend("test {number}  UNREADABLE  {why}", acc))
+        Result.Ok(one) -> onSuccess(one, rest, number, tally, acc)
+
+verify oneEntryThen
+    List.len(oneEntryThen(Json.JsonNull, [], 0, Tally(passed = 0, failed = 0, undecided = 0), [])) => 3
+
+fn onSuccess(one: Case, rest: List<Json>, number: Int, tally: Tally, acc: List<String>) -> List<String>
+    ? "The spender that must pass."
+    afterSuccess(one, rest, number, tally, acc, Domain.ScriptAssets.run(one, one.success))
+
+verify onSuccess
+    List.len(onSuccess(sampleCase(), [], 0, Tally(passed = 0, failed = 0, undecided = 0), [])) => 3
+
+fn afterSuccess(one: Case, rest: List<Json>, number: Int, tally: Tally, acc: List<String>, outcome: Outcome) -> List<String>
+    ? "Record what the passing spender did, then take the failing one."
+    onFailure(one, rest, number, counted(tally, verdict(outcome, true)), noted(verdict(outcome, true), one, true, outcome, number, acc))
+
+verify afterSuccess
+    List.len(afterSuccess(sampleCase(), [], 0, Tally(passed = 0, failed = 0, undecided = 0), [], Outcome.Decided(Ending.Passed))) => 2
+
+fn onFailure(one: Case, rest: List<Json>, number: Int, tally: Tally, acc: List<String>) -> List<String>
+    ? "The spender that must fail, where the entry carries one."
+    match one.failure
+        Option.None -> everyEntry(rest, number + 1, tally, acc)
+        Option.Some(spender) -> afterFailure(one, rest, number, tally, acc, Domain.ScriptAssets.run(one, spender))
+
+verify onFailure
+    List.len(onFailure(sampleCase(), [], 0, Tally(passed = 0, failed = 0, undecided = 0), [])) => 2
+
+fn afterFailure(one: Case, rest: List<Json>, number: Int, tally: Tally, acc: List<String>, outcome: Outcome) -> List<String>
+    ? "Record what the failing spender did, then go on."
+    everyEntry(rest, number + 1, counted(tally, verdict(outcome, false)), noted(verdict(outcome, false), one, false, outcome, number, acc))
+
+verify afterFailure
+    List.len(afterFailure(sampleCase(), [], 0, Tally(passed = 0, failed = 0, undecided = 0), [], Outcome.Decided(Ending.Failed("no")))) => 2
+
+fn noted(word: String, one: Case, mustPass: Bool, outcome: Outcome, number: Int, acc: List<String>) -> List<String>
+    ? "A pass is silent; anything else says which test and why."
+    match word == "PASS"
+        true -> acc
+        false -> List.prepend(faultLine(word, one, mustPass, outcome, number), acc)
+
+verify noted
+    noted("PASS", sampleCase(), true, Outcome.Decided(Ending.Passed), 0, []) => []
+    List.len(noted("FAIL", sampleCase(), true, Outcome.Decided(Ending.Passed), 0, [])) => 1

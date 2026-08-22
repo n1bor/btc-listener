@@ -1,0 +1,182 @@
+module TaprootTest
+    intent =
+        "The taproottest command: fetch Core's script_assets_test.json and run"
+        "it."
+        "The only published corpus that tests tapscript execution, and a"
+        "command rather than a generated corpus because of its size. The other"
+        "eight files are turned into verify cases by a Python tool and checked"
+        "in; this one is nine megabytes and 3,737 tests, which would dwarf the"
+        "repository, and the verify VM would refuse the larger cases anyway"
+        "(n1bor/btc-listener#75)."
+        "Fetched once and kept. A second run costs nothing: the held file's"
+        "size is compared against what GitHub's contents API reports and the"
+        "download is skipped when they agree. Size rather than a hash because"
+        "the point is to notice a truncated or replaced file, not to defend"
+        "against anybody."
+        "Everything here touches a disk or a network and nothing here decides"
+        "anything. The deciding is Domain.AssetRun, Domain.AssetSweep and"
+        "Domain.AssetReport, which is where the verify cases are."
+    exposes [run]
+    depends [Domain.AssetRun, Domain.Json]
+    effects [Console.error, Console.print, Disk.exists, Disk.readText, Disk.size, Disk.writeText, Http.get]
+
+fn url() -> String
+    ? "Where the corpus lives."
+      "bitcoin-core/qa-assets rather than bitcoin/bitcoin. Core keeps its"
+      "generated test data in a separate repository so the main one is not"
+      "carrying megabytes of fuzz output in its history."
+    "https://raw.githubusercontent.com/bitcoin-core/qa-assets/main/unit_test_data/script_assets_test.json"
+
+verify url
+    String.startsWith(url(), "https://") => true
+
+fn cachePath() -> String
+    ? "Where the fetched copy is kept between runs."
+    "/tmp/btc-listener-script-assets.json"
+
+verify cachePath
+    String.endsWith(cachePath(), ".json") => true
+
+fn run(rest: List<String>) -> Unit
+    ? "Every test, or the one whose number was given."
+    ! [Console.error, Console.print, Disk.exists, Disk.readText, Disk.size, Disk.writeText, Http.get]
+    said(loaded(rest))
+
+fn loaded(rest: List<String>) -> Result<List<String>, String>
+    ? "Make sure the file is here, read it, and do what was asked."
+    ! [Console.error, Console.print, Disk.exists, Disk.readText, Disk.size, Disk.writeText, Http.get]
+    _fetched = ensured()?
+    raw = Disk.readText(cachePath())?
+    parsed = Domain.Json.fromString(raw)?
+    entries = Domain.AssetRun.arrayOf(parsed)?
+    Domain.AssetRun.chosen(entries, rest)
+
+fn ensured() -> Result<Unit, String>
+    ? "Fetch the corpus unless a copy of the right size is already here."
+    ! [Console.print, Disk.exists, Disk.size, Disk.writeText, Http.get]
+    match Disk.exists(cachePath())
+        false -> fetched("no copy held")
+        true -> sizeChecked()
+
+fn sizeChecked() -> Result<Unit, String>
+    ? "A held copy is kept only if it is the size the server reports."
+      "A GET rather than a HEAD, because aver-rt's Http.head fails reading a"
+      "body that a HEAD response does not have -- jasisz/aver#1072. So this"
+      "asks GitHub's contents API, which answers with a small JSON document"
+      "naming the size, rather than fetching nine megabytes to measure it."
+    ! [Console.print, Disk.size, Disk.writeText, Http.get]
+    held = Disk.size(cachePath())?
+    remote = remoteSize()
+    compared(held, remote)
+
+fn compared(held: Int, remote: Option<Int>) -> Result<Unit, String>
+    ? "Keep the copy when the sizes agree, and when the size cannot be asked."
+      "A server that will not answer is not a reason to throw away a corpus"
+      "that is already here. The run says which it used."
+    ! [Console.print, Disk.writeText, Http.get]
+    match remote
+        Option.None -> keptUnchecked(held)
+        Option.Some(size) -> sameSize(held, size)
+
+fn keptUnchecked(held: Int) -> Result<Unit, String>
+    ? "The held copy, with the size unverified."
+    ! [Console.print]
+    _said = Console.print("corpus  {held} bytes held, size not checked (the server did not say)")
+    Result.Ok(Unit)
+
+fn sameSize(held: Int, size: Int) -> Result<Unit, String>
+    ? "Refetch when the sizes differ."
+    ! [Console.print, Disk.writeText, Http.get]
+    match held == size
+        true -> keptChecked(held)
+        false -> fetched("held {held} bytes, server says {size}")
+
+fn keptChecked(held: Int) -> Result<Unit, String>
+    ? "The held copy, size confirmed."
+    ! [Console.print]
+    _said = Console.print("corpus  {held} bytes held, size matches; not fetching again")
+    Result.Ok(Unit)
+
+fn fetched(why: String) -> Result<Unit, String>
+    ? "Download the corpus and keep it."
+    ! [Console.print, Disk.writeText, Http.get]
+    _said = Console.print("corpus  fetching ({why})")
+    response = Http.get(url())?
+    body = bodyOf(response.status, response.body)?
+    _written = Disk.writeText(cachePath(), body)?
+    Console.print("corpus  {String.len(body)} bytes written to {cachePath()}")
+    Result.Ok(Unit)
+
+fn bodyOf(status: Int, body: String) -> Result<String, String>
+    ? "A 200 and its body, or the status that came instead."
+    match status == 200
+        false -> Result.Err("fetching the corpus gave HTTP {status}")
+        true -> Result.Ok(body)
+
+verify bodyOf
+    bodyOf(200, "x") => Result.Ok("x")
+    bodyOf(404, "") => Result.Err("fetching the corpus gave HTTP 404")
+
+fn remoteSize() -> Option<Int>
+    ? "What GitHub's contents API says the file weighs."
+    ! [Http.get]
+    match Http.get(sizeUrl())
+        Result.Err(why) -> Option.None
+        Result.Ok(response) -> sizeIn(response.status, response.body)
+
+fn sizeUrl() -> String
+    ? "The contents API for the one file, which answers with its size."
+    "https://api.github.com/repos/bitcoin-core/qa-assets/contents/unit_test_data/script_assets_test.json"
+
+verify sizeUrl
+    String.startsWith(sizeUrl(), "https://api.github.com/") => true
+
+fn sizeIn(status: Int, body: String) -> Option<Int>
+    ? "The size field of the API's answer."
+    match status == 200
+        false -> Option.None
+        true -> sizeField(Domain.Json.fromString(body))
+
+verify sizeIn
+    sizeIn(404, "") => Option.None
+    sizeIn(200, "not json") => Option.None
+
+fn sizeField(parsed: Result<Json, String>) -> Option<Int>
+    ? "Read the size out, if the answer parsed."
+    match parsed
+        Result.Err(why) -> Option.None
+        Result.Ok(json) -> numberField(json, "size")
+
+verify sizeField
+    sizeField(Result.Err("no")) => Option.None
+    sizeField(Result.Ok(Json.JsonObject([Domain.Json.Pair(key = "size", held = Json.JsonInt(7))]))) => Option.Some(7)
+
+fn numberField(json: Json, name: String) -> Option<Int>
+    ? "One numeric field of an object."
+    match Domain.Json.field(json, name)
+        Option.None -> Option.None
+        Option.Some(held) -> Domain.Json.intOf(held)
+
+verify numberField
+    numberField(Json.JsonObject([Domain.Json.Pair(key = "size", held = Json.JsonInt(7))]), "size") => Option.Some(7)
+    numberField(Json.JsonObject([]), "size") => Option.None
+
+fn said(outcome: Result<List<String>, String>) -> Unit
+    ? "Print the lines, or the reason there are none."
+    ! [Console.error, Console.print]
+    match outcome
+        Result.Ok(lines) -> printLines(lines)
+        Result.Err(message) -> Console.error("error: {message}")
+
+fn printLines(lines: List<String>) -> Unit
+    ? "Print each line in turn."
+    ! [Console.print]
+    match lines
+        [] -> Unit
+        [head, ..tail] -> printThen(head, tail)
+
+fn printThen(line: String, rest: List<String>) -> Unit
+    ? "Print one line, then continue with the rest."
+    ! [Console.print]
+    _printed = Console.print(line)
+    printLines(rest)

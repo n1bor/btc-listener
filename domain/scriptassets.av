@@ -1,0 +1,409 @@
+module ScriptAssets
+    intent =
+        "One entry of Bitcoin Core's script_assets_test.json, made runnable."
+        "The only published corpus that tests tapscript execution. Core's own"
+        "harness is src/test/script_tests.cpp, and what it does with an entry"
+        "is short: take the Transaction the entry carries, put the spender's"
+        "scriptSig and witness into the one Input the entry names, and run"
+        "that Input against the Output the prevouts give for it."
+        "Two spenders per entry, and they are opposite claims. `success` must"
+        "pass and `failure`, where there is one, must fail. An engine that"
+        "accepted everything would pass half the file and an engine that"
+        "refused everything would pass the other half, so a run that reports"
+        "both directions is the only kind worth reading."
+        "The prevouts are positional, not looked up by outpoint: entry n of"
+        "the array is what Input n spends, and the file does not trouble to"
+        "make the outpoints match. That is why this does not go through"
+        "Domain.TxCase, which finds a Prevout by the txid an Input names."
+        "The Transaction is rebuilt rather than re-serialised. Every hash this"
+        "engine computes is built from the record's own fields, so putting a"
+        "different Input in the list is enough -- there is no raw form to keep"
+        "in step with it."
+    exposes [Case, Spender, caseFrom, run, describe]
+    depends [Bytes, Domain.Bip341, Domain.Json, Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
+    effects []
+
+record Spender
+    scriptSig: String
+    witness: List<String>
+
+record Case
+    comment: String
+    flags: List<String>
+    index: Int
+    transaction: Transaction
+    prevouts: List<Spent>
+    success: Spender
+    failure: Option<Spender>
+
+fn caseFrom(entry: Json) -> Result<Case, String>
+    ? "One entry of the file as something that can be run."
+      "Every field is required except `failure`, which many entries have no"
+      "opinion about."
+    raw = textField(entry, "tx")?
+    transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex(raw)?))?
+    index = intField(entry, "index")?
+    prevouts = spentFrom(listField(entry, "prevouts")?, [])?
+    success = spenderFrom(entry, "success")?
+    Result.Ok(Case(comment = textOr(entry, "comment", "(no comment)"), flags = splitFlags(textField(entry, "flags")?), index = index, transaction = transaction, prevouts = prevouts, success = success, failure = optionalSpender(entry)))
+
+verify caseFrom
+    caseFrom(Json.JsonNull) => Result.Err("entry has no 'tx' field")
+    caseFrom(Json.JsonObject([Domain.Json.Pair(key = "tx", held = Json.JsonString("zz"))])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn textField(entry: Json, name: String) -> Result<String, String>
+    ? "A required string field."
+    match Domain.Json.field(entry, name)
+        Option.None -> Result.Err("entry has no '{name}' field")
+        Option.Some(json) -> asText(json, name)
+
+verify textField
+    textField(Json.JsonObject([Domain.Json.Pair(key = "a", held = Json.JsonString("x"))]), "a") => Result.Ok("x")
+    textField(Json.JsonObject([]), "a") => Result.Err("entry has no 'a' field")
+    textField(Json.JsonObject([Domain.Json.Pair(key = "a", held = Json.JsonInt(1))]), "a") => Result.Err("entry's 'a' is a number, not a string")
+
+fn asText(json: Json, name: String) -> Result<String, String>
+    ? "It has to be a string."
+    match Domain.Json.stringOf(json)
+        Option.None -> Result.Err("entry's '{name}' is {Domain.Json.kindOf(json)}, not a string")
+        Option.Some(text) -> Result.Ok(text)
+
+verify asText
+    asText(Json.JsonString("x"), "a") => Result.Ok("x")
+    asText(Json.JsonNull, "a") => Result.Err("entry's 'a' is null, not a string")
+
+fn textOr(entry: Json, name: String, fallback: String) -> String
+    ? "A string field that may be absent."
+    match textField(entry, name)
+        Result.Err(why) -> fallback
+        Result.Ok(text) -> text
+
+verify textOr
+    textOr(Json.JsonObject([Domain.Json.Pair(key = "a", held = Json.JsonString("x"))]), "a", "z") => "x"
+    textOr(Json.JsonObject([]), "a", "z") => "z"
+
+fn intField(entry: Json, name: String) -> Result<Int, String>
+    ? "A required number field."
+    match Domain.Json.field(entry, name)
+        Option.None -> Result.Err("entry has no '{name}' field")
+        Option.Some(json) -> asNumber(json, name)
+
+verify intField
+    intField(Json.JsonObject([Domain.Json.Pair(key = "a", held = Json.JsonInt(3))]), "a") => Result.Ok(3)
+    intField(Json.JsonObject([]), "a") => Result.Err("entry has no 'a' field")
+
+fn asNumber(json: Json, name: String) -> Result<Int, String>
+    ? "It has to be a number."
+    match Domain.Json.intOf(json)
+        Option.None -> Result.Err("entry's '{name}' is {Domain.Json.kindOf(json)}, not a number")
+        Option.Some(n) -> Result.Ok(n)
+
+verify asNumber
+    asNumber(Json.JsonInt(3), "a") => Result.Ok(3)
+    asNumber(Json.JsonNull, "a") => Result.Err("entry's 'a' is null, not a number")
+
+fn listField(entry: Json, name: String) -> Result<List<Json>, String>
+    ? "A required array field."
+    match Domain.Json.field(entry, name)
+        Option.None -> Result.Err("entry has no '{name}' field")
+        Option.Some(json) -> asArray(json, name)
+
+verify listField
+    listField(Json.JsonObject([Domain.Json.Pair(key = "a", held = Json.JsonList([]))]), "a") => Result.Ok([])
+    listField(Json.JsonObject([]), "a") => Result.Err("entry has no 'a' field")
+
+fn asArray(json: Json, name: String) -> Result<List<Json>, String>
+    ? "It has to be an array."
+    match Domain.Json.listOf(json)
+        Option.None -> Result.Err("entry's '{name}' is {Domain.Json.kindOf(json)}, not an array")
+        Option.Some(items) -> Result.Ok(items)
+
+verify asArray
+    asArray(Json.JsonList([]), "a") => Result.Ok([])
+    asArray(Json.JsonNull, "a") => Result.Err("entry's 'a' is null, not an array")
+
+fn splitFlags(text: String) -> List<String>
+    ? "Core writes its verification flags comma-separated in one string."
+      "NONE is spelled as the empty string, which splits to one empty name,"
+      "and Domain.Rules.underFlags knows nothing by that name -- so it turns"
+      "every flag off, which is what NONE means."
+    String.split(text, ",")
+
+verify splitFlags
+    splitFlags("P2SH,WITNESS") => ["P2SH", "WITNESS"]
+    splitFlags("P2SH") => ["P2SH"]
+
+fn spentFrom(items: List<Json>, acc: List<Spent>) -> Result<List<Spent>, String>
+    ? "Every prevout, in the order the file gives them."
+    match items
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> oneSpent(head, tail, acc)
+
+verify spentFrom
+    spentFrom([], []) => Result.Ok([])
+    spentFrom([Json.JsonNull], []) => Result.Err("a prevout is null, not a string")
+
+fn oneSpent(head: Json, tail: List<Json>, acc: List<Spent>) -> Result<List<Spent>, String>
+    ? "One prevout, then the rest."
+    text = prevoutText(head)?
+    parsed = spentOf(text)?
+    spentFrom(tail, List.prepend(parsed, acc))
+
+verify oneSpent
+    oneSpent(Json.JsonNull, [], []) => Result.Err("a prevout is null, not a string")
+
+fn prevoutText(json: Json) -> Result<String, String>
+    ? "A prevout is a hex string."
+    match Domain.Json.stringOf(json)
+        Option.None -> Result.Err("a prevout is {Domain.Json.kindOf(json)}, not a string")
+        Option.Some(text) -> Result.Ok(text)
+
+verify prevoutText
+    prevoutText(Json.JsonString("x")) => Result.Ok("x")
+    prevoutText(Json.JsonNull) => Result.Err("a prevout is null, not a string")
+
+fn spentOf(text: String) -> Result<Spent, String>
+    ? "A serialised Output: eight bytes of amount, then the Script with its"
+      "length in front."
+      "The length is a CompactSize in Bitcoin and a single byte for every"
+      "Output in this file, none of whose Scripts reach 253 bytes. Anything"
+      "wider is refused rather than mis-read."
+    bytes = Bytes.toList(Bytes.fromHex(text)?)
+    sized(bytes, text)
+
+verify spentOf
+    spentOf("") => Result.Err("a prevout is shorter than an amount and a length: ''")
+    spentOf("01000000000000000151") => Result.Ok(Spent(amount = 1, script = "51"))
+
+fn sized(bytes: List<Int>, text: String) -> Result<Spent, String>
+    ? "Nine bytes at least: eight of amount and one of length."
+    match List.len(bytes) < 9
+        true -> Result.Err("a prevout is shorter than an amount and a length: '{text}'")
+        false -> measured(bytes, text)
+
+verify sized
+    sized([], "") => Result.Err("a prevout is shorter than an amount and a length: ''")
+
+fn measured(bytes: List<Int>, text: String) -> Result<Spent, String>
+    ? "The length byte has to account for exactly what follows it."
+    length = byteAt(bytes, 8)
+    checkedLength(bytes, text, length)
+
+verify measured
+    measured([1, 0, 0, 0, 0, 0, 0, 0, 1, 81], "x") => Result.Ok(Spent(amount = 1, script = "51"))
+
+fn checkedLength(bytes: List<Int>, text: String, length: Int) -> Result<Spent, String>
+    ? "Refuse a wide CompactSize and a length that does not fit the rest."
+    match Bool.or(length >= 253, List.len(bytes) - 9 != length)
+        true -> Result.Err("a prevout's script length does not match its bytes: '{text}'")
+        false -> Result.Ok(Spent(amount = amountOf(List.take(bytes, 8), 0, 1), script = hexOf(List.drop(bytes, 9))))
+
+verify checkedLength
+    checkedLength([1, 0, 0, 0, 0, 0, 0, 0, 1, 81], "x", 1) => Result.Ok(Spent(amount = 1, script = "51"))
+    checkedLength([1, 0, 0, 0, 0, 0, 0, 0, 2, 81], "x", 2) => Result.Err("a prevout's script length does not match its bytes: 'x'")
+
+fn amountOf(bytes: List<Int>, acc: Int, place: Int) -> Int
+    ? "Eight bytes, little-endian, as satoshis."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> amountOf(tail, acc + head * place, place * 256)
+
+verify amountOf
+    amountOf([1, 0, 0, 0, 0, 0, 0, 0], 0, 1) => 1
+    amountOf([0, 1], 0, 1) => 256
+    amountOf([], 7, 1) => 7
+
+fn spenderFrom(entry: Json, name: String) -> Result<Spender, String>
+    ? "A scriptSig and a witness stack, which is what a spender is here."
+    held = Domain.Json.field(entry, name)
+    fromHeld(held, name)
+
+verify spenderFrom
+    spenderFrom(Json.JsonObject([]), "success") => Result.Err("entry has no 'success' field")
+
+fn fromHeld(held: Option<Json>, name: String) -> Result<Spender, String>
+    ? "The field has to be there."
+    match held
+        Option.None -> Result.Err("entry has no '{name}' field")
+        Option.Some(json) -> spenderOf(json)
+
+verify fromHeld
+    fromHeld(Option.None, "success") => Result.Err("entry has no 'success' field")
+
+fn spenderOf(json: Json) -> Result<Spender, String>
+    ? "Its two fields."
+    scriptSig = textField(json, "scriptSig")?
+    witness = witnessFrom(listField(json, "witness")?, [])?
+    Result.Ok(Spender(scriptSig = scriptSig, witness = witness))
+
+verify spenderOf
+    spenderOf(Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))])) => Result.Ok(Spender(scriptSig = "", witness = []))
+
+fn witnessFrom(items: List<Json>, acc: List<String>) -> Result<List<String>, String>
+    ? "Every witness item, in order."
+    match items
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> oneItem(head, tail, acc)
+
+verify witnessFrom
+    witnessFrom([], []) => Result.Ok([])
+    witnessFrom([Json.JsonString("aa")], []) => Result.Ok(["aa"])
+
+fn oneItem(head: Json, tail: List<Json>, acc: List<String>) -> Result<List<String>, String>
+    ? "One item, then the rest."
+    match Domain.Json.stringOf(head)
+        Option.None -> Result.Err("a witness item is {Domain.Json.kindOf(head)}, not a string")
+        Option.Some(text) -> witnessFrom(tail, List.prepend(text, acc))
+
+verify oneItem
+    oneItem(Json.JsonString("aa"), [], []) => Result.Ok(["aa"])
+    oneItem(Json.JsonNull, [], []) => Result.Err("a witness item is null, not a string")
+
+fn optionalSpender(entry: Json) -> Option<Spender>
+    ? "The failing spender, which many entries do not carry."
+    match spenderFrom(entry, "failure")
+        Result.Err(why) -> Option.None
+        Result.Ok(spender) -> Option.Some(spender)
+
+verify optionalSpender
+    optionalSpender(Json.JsonObject([])) => Option.None
+
+fn run(one: Case, spender: Spender) -> Outcome
+    ? "The named Input of the Transaction, with this spender's scriptSig and"
+      "witness in it, against the Output the prevouts give for it."
+    match prevoutAt(one.prevouts, one.index)
+        Option.None -> Outcome.Decided(Ending.Failed("no prevout at index {one.index}"))
+        Option.Some(prevout) -> against(one, spender, prevout)
+
+verify run
+    run(sample(), Spender(scriptSig = "", witness = [])) => Outcome.Decided(Ending.Failed("no prevout at index 0"))
+
+fn against(one: Case, spender: Spender, prevout: Spent) -> Outcome
+    ? "Run it."
+    Domain.SpendScript.check(spender.scriptSig, prevout.script, Domain.SpendContext.withPrevouts(Domain.SpendContext.committed(Domain.Rules.underFlags(one.flags), substituted(one, spender), one.index, prevout.amount, prevout.script, spender.witness), one.prevouts))
+
+verify against
+    against(sample(), Spender(scriptSig = "", witness = []), Spent(amount = 0, script = "51")) => Outcome.Decided(Ending.Passed)
+
+fn substituted(one: Case, spender: Spender) -> Transaction
+    ? "The Transaction with the spender's scriptSig and witness in its Input."
+      "Core's harness mutates the Transaction in place before handing it to"
+      "the signature checker, and it has to: BIP341 commits to the spend type"
+      "and BIP143 to the sequence, and the checker reads both off the"
+      "Transaction it was given rather than off its arguments."
+    Transaction(version = one.transaction.version, inputs = withSpender(Domain.Transaction.inputsOf(one.transaction), one.index, 0, spender, []), outputs = one.transaction.outputs, lockTime = one.transaction.lockTime, txid = one.transaction.txid, size = one.transaction.size, isSegWit = one.transaction.isSegWit)
+
+verify substituted
+    substituted(sample(), Spender(scriptSig = "51", witness = ["aa"])) => Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 4294967295, witness = ["aa"])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)
+    substituted(sample(), Spender(scriptSig = "", witness = [])) => sample().transaction
+
+fn withSpender(inputs: List<Input>, index: Int, position: Int, spender: Spender, acc: List<Input>) -> List<Input>
+    ? "Replace the Input at this position and leave the others alone."
+    match inputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keptOrReplaced(head, tail, index, position, spender, acc)
+
+verify withSpender
+    withSpender([], 0, 0, Spender(scriptSig = "", witness = []), []) => []
+
+fn keptOrReplaced(head: Input, tail: List<Input>, index: Int, position: Int, spender: Spender, acc: List<Input>) -> List<Input>
+    ? "This one, or the one it stands in for."
+    match position == index
+        false -> withSpender(tail, index, position + 1, spender, List.prepend(head, acc))
+        true -> withSpender(tail, index, position + 1, spender, List.prepend(replaced(head, spender), acc))
+
+verify keptOrReplaced
+    List.len(keptOrReplaced(anInput(), [], 0, 0, Spender(scriptSig = "51", witness = []), [])) => 1
+
+fn replaced(input: Input, spender: Spender) -> Input
+    ? "The same Input with a different scriptSig and witness."
+    Input(previousTxid = Domain.Transaction.previousTxidOf(input), previousIndex = Domain.Transaction.previousIndexOf(input), script = spender.scriptSig, sequence = Domain.Transaction.sequenceOf(input), witness = spender.witness)
+
+verify replaced
+    Domain.Transaction.scriptOf(replaced(anInput(), Spender(scriptSig = "51", witness = []))) => "51"
+    Domain.Transaction.previousTxidOf(replaced(anInput(), Spender(scriptSig = "51", witness = []))) => "aa"
+
+fn anInput() -> Input
+    ? "An Input for the cases here."
+    Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 4294967295, witness = [])
+
+verify anInput
+    Domain.Transaction.previousIndexOf(anInput()) => 0
+
+fn sample() -> Case
+    ? "A Case with one Input and no prevouts, for the cases here."
+    Case(comment = "sample", flags = [], index = 0, transaction = Transaction(version = 1, inputs = [anInput()], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), prevouts = [], success = Spender(scriptSig = "", witness = []), failure = Option.None)
+
+verify sample
+    sample().index => 0
+
+fn describe(one: Case) -> List<String>
+    ? "Everything the file said about this case, for a person reading a"
+      "failure."
+      "The Transaction and the prevouts as the file gave them, so the case can"
+      "be taken somewhere else and asked about."
+    List.concat([
+        "comment  {one.comment}",
+        "flags    {shownFlags(one.flags)}",
+        "index    {one.index}",
+        "inputs   {List.len(Domain.Transaction.inputsOf(one.transaction))}",
+        "outputs  {List.len(Domain.Transaction.outputsOf(one.transaction))}",
+        "version  {one.transaction.version}",
+        "locktime {one.transaction.lockTime}",
+    ], prevoutLines(one.prevouts, 0, []))
+
+verify describe
+    List.len(describe(sample())) => 7
+
+fn shownFlags(flags: List<String>) -> String
+    ? "The flags as Core wrote them."
+    String.join(flags, ",")
+
+verify shownFlags
+    shownFlags(["A", "B"]) => "A,B"
+    shownFlags([]) => ""
+
+fn prevoutLines(prevouts: List<Spent>, position: Int, acc: List<String>) -> List<String>
+    ? "One line per prevout, with its index."
+    match prevouts
+        [] -> List.reverse(acc)
+        [head, ..tail] -> prevoutLines(tail, position + 1, List.prepend("prevout  {position}: {head.amount} sat  {head.script}", acc))
+
+verify prevoutLines
+    prevoutLines([], 0, []) => []
+    List.len(prevoutLines([Spent(amount = 1, script = "51")], 0, [])) => 1
+
+fn byteAt(bytes: List<Int>, index: Int) -> Int
+    ? "One byte by position, or nought where there is none."
+      "Nought is safe here: every caller has already checked the list is long"
+      "enough, and a length of nought fails the check that follows anyway."
+    match List.take(List.drop(bytes, index), 1)
+        [] -> 0
+        [head, ..tail] -> head
+
+verify byteAt
+    byteAt([1, 2, 3], 0) => 1
+    byteAt([1, 2, 3], 2) => 3
+    byteAt([1, 2, 3], 9) => 0
+
+fn prevoutAt(prevouts: List<Spent>, index: Int) -> Option<Spent>
+    ? "The prevout for this Input, by position rather than by outpoint."
+    match List.take(List.drop(prevouts, index), 1)
+        [] -> Option.None
+        [head, ..tail] -> Option.Some(head)
+
+verify prevoutAt
+    prevoutAt([], 0) => Option.None
+    prevoutAt([Spent(amount = 1, script = "51")], 0) => Option.Some(Spent(amount = 1, script = "51"))
+    prevoutAt([Spent(amount = 1, script = "51")], 1) => Option.None
+
+fn hexOf(bytes: List<Int>) -> String
+    ? "Bytes as text."
+      "Total: the list came out of a Bytes and is octets by construction."
+    match Bytes.fromList(bytes)
+        Result.Err(message) -> ""
+        Result.Ok(raw) -> Bytes.toHex(raw)
+
+verify hexOf
+    hexOf([170, 187]) => "aabb"
+    hexOf([]) => ""
