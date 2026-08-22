@@ -39,6 +39,19 @@ fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> O
         true -> Outcome.Decided(Ending.Failed("script is over the {Domain.ScriptState.maxScript()} byte limit"))
         false -> pushesOnly(inputScriptHex, outputScriptHex, context)
 
+verify check
+    check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    check(signedInput(), Domain.SpendContext.signedScriptCode(), spendOfCorpusVector()) => Outcome.Decided(Ending.Passed)
+    check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
+    check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+    check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
+    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 170060))) => Outcome.Decided(Ending.Passed)
+    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
+    check("0101", "21020000000000000000000000000000000000000000000000000000000000000000ac", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 363724))) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    check("0101", "21020000000000000000000000000000000000000000000000000000000000000000ac", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 363725))) => Outcome.Decided(Ending.Failed("OP_CHECKSIG signature is not strict DER"))
+
 fn pushesOnly(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
     ? "SIGPUSHONLY: an Input Script that does anything but push is refused."
       "First of everything, because Core asks it first -- the top of"
@@ -65,19 +78,6 @@ fn witnessPlaced(inputScriptHex: String, outputScriptHex: String, context: Conte
 verify witnessPlaced
     witnessPlaced("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
     witnessPlaced("", "51", Domain.SpendContext.committed(Domain.Rules.latest(), Domain.SpendContext.emptyTransaction(), 0, 0, "", ["aa"])) => Outcome.Decided(Ending.Failed("the input carries witness data and its output is not a witness program"))
-
-verify check
-    check("51", "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
-    check(signedInput(), Domain.SpendContext.signedScriptCode(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
-    check(signedInput(), Domain.SpendContext.signedScriptCode(), spendOfCorpusVector()) => Outcome.Decided(Ending.Passed)
-    check(Domain.ScriptState.longScript(), "51", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
-    check("51", Domain.ScriptState.longScript(), Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script is over the 10000 byte limit"))
-    check("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
-    check("1600147cf9c846cd4882efec4bf07e44ebdad495c94f4b", "a9144e0c2aed91315303fc6a1dc4c7bc21c88f75402e87", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
-    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 170060))) => Outcome.Decided(Ending.Passed)
-    check(beforeBip16Input(), beforeBip16Output(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 173805))) => Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG needs 1 signatures and the item it discards"))
-    check("0101", "21020000000000000000000000000000000000000000000000000000000000000000ac", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 363724))) => Outcome.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
-    check("0101", "21020000000000000000000000000000000000000000000000000000000000000000ac", Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 363725))) => Outcome.Decided(Ending.Failed("OP_CHECKSIG signature is not strict DER"))
 
 fn beforeBip16Input() -> String
     ? "One push of a 1-of-1 redeem Script and nothing else, from Block 170060."
