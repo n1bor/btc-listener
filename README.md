@@ -524,6 +524,22 @@ return the exact Script Core records. See
 [ADR 0005](docs/adr/0005-a-script-engine-with-the-signatures-left-out.md) and
 [docs/core-corpora.md](docs/core-corpora.md).
 
+## Segwit and Taproot on a real chain
+
+Signet has had SegWit and Taproot since Height 1, which makes it the evidence
+mainnet cannot be until it is downloaded past 481824:
+
+```
+$ main signet audit signet-probe 1 96000
+blocks 96000  transactions 1749336  spends resolved 1653336  coinbase 96000
+unresolved 0  scripts 2133120 passed / 0 failed / 0 undecided
+CLEAN (faults 0, script failures 0)
+```
+
+Not one undecided script in 2.1 million. Six months ago the same walk left
+13.8 million of them, every one the same sentence — *output is a witness
+program and needs the witness evaluated*.
+
 ## Checking a range
 
 `audit` runs every check over a range of Heights: each Block against its Header,
