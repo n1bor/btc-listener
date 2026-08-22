@@ -87,13 +87,30 @@ verify piecesOf
 
 fn spread(owner: Work, position: Int, spent: List<Pending>, acc: List<Piece>) -> List<Piece>
     ? "Each Input of one Transaction as its own piece of work."
-    match spent
-        [] -> acc
-        [head, ..tail] -> spread(owner, position, tail, List.prepend(pieceFor(owner, position, head), acc))
+      "The spent Outputs and the weight are worked out once here and handed to"
+      "every Piece, rather than by each Piece for itself. Both are properties"
+      "of the Transaction and neither varies by Input, and doing them per"
+      "Piece made a Transaction with N Inputs allocate N lists of N Outputs"
+      "and walk N Inputs N times -- quadratic in the Input count, on the one"
+      "path every Input of every Block goes through. n1bor/btc-listener#77."
+    spreadOver(owner, position, spent, spentOutputs(owner.spent, []), List.len(owner.spent), acc)
 
 verify spread
     spread(sampleWork(), 0, [], []) => []
     List.len(spread(wideWork(), 0, wideWork().spent, [])) => 3
+
+fn spreadOver(owner: Work, position: Int, spent: List<Pending>, prevouts: List<Spent>, weight: Int, acc: List<Piece>) -> List<Piece>
+    ? "The same walk, with the two Transaction-wide values already in hand."
+      "They are passed rather than recomputed, so every Piece of one"
+      "Transaction holds the same list value -- which is what makes the rope"
+      "share it instead of copying it."
+    match spent
+        [] -> acc
+        [head, ..tail] -> spreadOver(owner, position, tail, prevouts, weight, List.prepend(pieceFor(owner, position, head, prevouts, weight), acc))
+
+verify spreadOver
+    spreadOver(sampleWork(), 0, [], [], 0, []) => []
+    List.len(spreadOver(wideWork(), 0, wideWork().spent, [], 3, [])) => 3
 
 fn spentOutputs(spent: List<Pending>, acc: List<Spent>) -> List<Spent>
     ? "Every Input's spent Output, in Input order, as Taproot needs them."
@@ -122,17 +139,18 @@ verify spentOne
     spentOne(samplePending(), [], []) => [Spent(amount = 5, script = "51")]
     spentOne(Pending(index = 0, input = Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = []), spend = Spend.Unknown("no")), [], []) => []
 
-fn pieceFor(owner: Work, position: Int, spent: Pending) -> Piece
+fn pieceFor(owner: Work, position: Int, spent: Pending, prevouts: List<Spent>, weight: Int) -> Piece
     ? "One Input of one Transaction, weighted by how wide that Transaction is."
       "The Transaction's whole list of spent Outputs rides along, because a"
       "Taproot signature commits to all of them and the Piece is only one"
-      "Input."
-    Piece(transaction = owner.transaction, position = position, spent = spent, weight = List.len(owner.spent), prevouts = spentOutputs(owner.spent, []))
+      "Input. It arrives as an argument rather than being built here, so all"
+      "the Pieces of one Transaction hold one list rather than N copies of it."
+    Piece(transaction = owner.transaction, position = position, spent = spent, weight = weight, prevouts = prevouts)
 
 verify pieceFor
-    pieceFor(sampleWork(), 0, samplePending()).weight => 1
-    pieceFor(wideWork(), 2, samplePending()).weight => 3
-    pieceFor(wideWork(), 2, samplePending()).position => 2
+    pieceFor(sampleWork(), 0, samplePending(), [], 1).weight => 1
+    pieceFor(wideWork(), 2, samplePending(), [], 3).weight => 3
+    pieceFor(wideWork(), 2, samplePending(), [], 3).position => 2
 
 fn divided(units: List<Piece>) -> List<List<Piece>>
     ? "The Block's Inputs split between branches, heaviest first."
@@ -246,7 +264,7 @@ verify loads
 
 fn samplePiece() -> Piece
     ? "One Input of a one-Input Transaction, for the cases here."
-    pieceFor(sampleWork(), 0, samplePending())
+    pieceFor(sampleWork(), 0, samplePending(), spentOutputs(sampleWork().spent, []), List.len(sampleWork().spent))
 
 verify samplePiece
     samplePiece().weight => 1
@@ -263,11 +281,24 @@ verify manyPiece
 
 fn heaviestFirst(work: List<Piece>) -> List<Piece>
     ? "The Block's Transactions, most Inputs first."
-      "Insertion into a sorted list rather than a merge sort, because the list"
-      "is already nearly uniform -- almost every Transaction has one or two"
-      "Inputs -- so the few long ones travel a short way and the rest do not"
-      "move at all."
-    inserted(work, [])
+      "Sorted by run rather than by Piece. Every Piece of one Transaction"
+      "carries that Transaction's Input count as its weight, and piecesOf"
+      "emits them together, so the list arrives as a handful of long runs of"
+      "equal weight -- one per Transaction. Sorting the runs sorts the Pieces,"
+      "and there are fifty of the first where there are fifteen thousand of"
+      "the second."
+      "It used to insert Piece by Piece into a sorted list, on the reasoning"
+      "that almost every Transaction has one or two Inputs so the few long"
+      "ones would travel a short way and the rest would not move at all. That"
+      "holds for most of the chain and fails completely where it matters: in"
+      "signet's dense era every Transaction has hundreds of Inputs, so every"
+      "weight is large and, worse, *equal*. Equal is the worst case for that"
+      "insertion -- the comparison is strictly greater-than, so a Piece never"
+      "stops early and walks the whole sorted prefix, reversing and"
+      "concatenating it. Fourteen thousand Pieces made about a hundred million"
+      "element copies in two fresh lists apiece, and the peak was tens of"
+      "gigabytes for one Block. n1bor/btc-listener#77."
+    flattened(sortedRuns(runsOf(work, [], []), []), [])
 
 verify heaviestFirst
     heaviestFirst([]) => []
@@ -276,40 +307,120 @@ verify heaviestFirst
 
 fn widePiece() -> Piece
     ? "One Input of a three-Input Transaction, so it outweighs the others."
-    pieceFor(wideWork(), 0, samplePending())
+    pieceFor(wideWork(), 0, samplePending(), spentOutputs(wideWork().spent, []), List.len(wideWork().spent))
 
 verify widePiece
     widePiece().weight => 3
 
-fn inserted(work: List<Piece>, acc: List<Piece>) -> List<Piece>
-    ? "Each Transaction put where it belongs in what is sorted so far."
+fn runsOf(work: List<Piece>, run: List<Piece>, acc: List<List<Piece>>) -> List<List<Piece>>
+    ? "The Pieces split into maximal stretches of one weight."
+      "One pass. A stretch ends where the weight changes, which is where one"
+      "Transaction ends and the next begins."
     match work
+        [] -> List.reverse(closedRun(run, acc))
+        [head, ..tail] -> runStep(head, tail, run, acc)
+
+verify runsOf
+    runsOf([], [], []) => []
+    List.len(runsOf(manyPiece(3, []), [], [])) => 1
+    List.len(runsOf(List.concat(manyPiece(2, []), [widePiece()]), [], [])) => 2
+
+fn runStep(head: Piece, tail: List<Piece>, run: List<Piece>, acc: List<List<Piece>>) -> List<List<Piece>>
+    ? "Keep the stretch going while the weight is the same."
+    match sameWeight(head, run)
+        true -> runsOf(tail, List.prepend(head, run), acc)
+        false -> runsOf(tail, [head], closedRun(run, acc))
+
+verify runStep
+    List.len(runStep(samplePiece(), [], [], [])) => 1
+    List.len(runStep(widePiece(), [], [samplePiece()], [])) => 2
+
+fn sameWeight(one: Piece, run: List<Piece>) -> Bool
+    ? "Whether this Piece belongs to the stretch being built."
+      "An empty stretch takes anything, which is how the first one starts."
+    match run
+        [] -> true
+        [head, ..tail] -> one.weight == head.weight
+
+verify sameWeight
+    sameWeight(samplePiece(), []) => true
+    sameWeight(samplePiece(), [samplePiece()]) => true
+    sameWeight(widePiece(), [samplePiece()]) => false
+
+fn closedRun(run: List<Piece>, acc: List<List<Piece>>) -> List<List<Piece>>
+    ? "Finish a stretch, unless there was not one."
+      "Turned round here: it was built by prepending and its Pieces are"
+      "interchangeable to the packer, but keeping Input order costs nothing"
+      "and makes a branch's work read the way the Block does."
+    match run
         [] -> acc
-        [head, ..tail] -> inserted(tail, placed(head, acc, []))
+        [head, ..tail] -> List.prepend(List.reverse(run), acc)
 
-verify inserted
-    inserted([], []) => []
-    List.len(inserted(manyPiece(3, []), [])) => 3
+verify closedRun
+    closedRun([], []) => []
+    List.len(closedRun([samplePiece()], [])) => 1
 
-fn placed(one: Piece, sorted: List<Piece>, seen: List<Piece>) -> List<Piece>
-    ? "In front of the first Transaction with fewer Inputs than this one."
+fn sortedRuns(runs: List<List<Piece>>, acc: List<List<Piece>>) -> List<List<Piece>>
+    ? "The stretches, heaviest first."
+      "Insertion again, and safe this time: there is one stretch per"
+      "Transaction, so this is fifty items rather than fifteen thousand."
+    match runs
+        [] -> acc
+        [head, ..tail] -> sortedRuns(tail, placedRun(head, acc, []))
+
+verify sortedRuns
+    sortedRuns([], []) => []
+    List.len(sortedRuns(runsOf(List.concat(manyPiece(2, []), [widePiece()]), [], []), [])) => 2
+
+fn placedRun(one: List<Piece>, sorted: List<List<Piece>>, seen: List<List<Piece>>) -> List<List<Piece>>
+    ? "In front of the first stretch lighter than this one."
     match sorted
         [] -> List.concat(List.reverse(seen), [one])
-        [head, ..tail] -> placedAgainst(one, head, tail, seen)
+        [head, ..tail] -> placedRunAgainst(one, head, tail, seen)
 
-verify placed
-    placed(samplePiece(), [], []) => [samplePiece()]
-    inputsIn(placed(widePiece(), [samplePiece()], [])) => 4
+verify placedRun
+    placedRun([samplePiece()], [], []) => [[samplePiece()]]
+    List.len(placedRun([widePiece()], [[samplePiece()]], [])) => 2
 
-fn placedAgainst(one: Piece, head: Piece, tail: List<Piece>, seen: List<Piece>) -> List<Piece>
-    ? "Compare against the next one along."
-    match one.weight > head.weight
+fn placedRunAgainst(one: List<Piece>, head: List<Piece>, tail: List<List<Piece>>, seen: List<List<Piece>>) -> List<List<Piece>>
+    ? "Compare against the next stretch along."
+    match weightOf(one) > weightOf(head)
         true -> List.concat(List.reverse(seen), List.prepend(one, List.prepend(head, tail)))
-        false -> placed(one, tail, List.prepend(head, seen))
+        false -> placedRun(one, tail, List.prepend(head, seen))
 
-verify placedAgainst
-    inputsIn(placedAgainst(widePiece(), samplePiece(), [], [])) => 4
-    inputsIn(placedAgainst(samplePiece(), widePiece(), [], [])) => 4
+verify placedRunAgainst
+    List.len(placedRunAgainst([widePiece()], [samplePiece()], [], [])) => 2
+    weightOf(firstRun(placedRunAgainst([widePiece()], [samplePiece()], [], []))) => 3
+
+fn firstRun(runs: List<List<Piece>>) -> List<Piece>
+    ? "The first stretch, for the cases here."
+    match runs
+        [] -> []
+        [head, ..tail] -> head
+
+verify firstRun
+    firstRun([]) => []
+    weightOf(firstRun([[widePiece()]])) => 3
+
+fn weightOf(run: List<Piece>) -> Int
+    ? "What a stretch weighs, which is what any one of its Pieces weighs."
+    match run
+        [] -> 0
+        [head, ..tail] -> head.weight
+
+verify weightOf
+    weightOf([]) => 0
+    weightOf([widePiece()]) => 3
+
+fn flattened(runs: List<List<Piece>>, acc: List<Piece>) -> List<Piece>
+    ? "The stretches back into one list, in the order they were sorted into."
+    match runs
+        [] -> acc
+        [head, ..tail] -> flattened(tail, List.concat(acc, head))
+
+verify flattened
+    flattened([], []) => []
+    List.len(flattened([[samplePiece()], [widePiece()]], [])) => 2
 
 fn inputsIn(work: List<Piece>) -> Int
     ? "How many Inputs the Transactions in this list hold, for the cases here."
