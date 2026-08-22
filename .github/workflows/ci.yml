@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  AVER_VERSION: "0.28.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: aver format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
+      - name: Install aver
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+      - name: Format check
+        run: aver format . --check
+
+  check:
+    name: aver check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
+      - name: Install aver
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+      - name: Check
+        run: aver check . --module-root . --deps
+
+  provider-tests:
+    name: provider tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            providers/primitives
+            providers/kv
+      - name: Test the primitives provider (libsecp256k1, RIPEMD-160)
+        run: cargo test --manifest-path providers/primitives/Cargo.toml
+      - name: Test the kv provider (LevelDB)
+        run: cargo test --manifest-path providers/kv/Cargo.toml
+
+  verify:
+    name: aver verify (full suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
+      - name: Install aver
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            providers/primitives
+            providers/kv
+      - name: Verify, all cases, with providers
+        run: |
+          aver verify . --module-root . --providers --deps | tee verify.log
+          tail -1 verify.log | grep -E "\| 0 failed" \
+            || { echo "verify reported failures"; exit 1; }
+
+  compile:
+    name: compile to Rust and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
+      - name: Install aver
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build
+      - name: Compile Aver to Rust
+        run: aver compile main.av --module-root . -o build
+      - name: Build the release binary
+        run: cargo build --release --manifest-path build/Cargo.toml
+      - name: Keep the binary for the corpus run
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-binary
+          path: build/target/release/main
+          retention-days: 1
+
+  taproottest:
+    name: taproottest (Core's corpus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: compile
+    steps:
+      - name: Fetch the built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: main-binary
+      - name: Run Core's script_assets_test corpus
+        run: |
+          chmod +x ./main
+          ./main taproottest | tee taproottest.log
+          grep -E "tests 3737  passed 3737  failed 0  undecided 0  CLEAN" taproottest.log \
+            || { echo "taproottest is not CLEAN at 3737/3737"; exit 1; }
