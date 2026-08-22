@@ -1,19 +1,23 @@
 name: CI
 
+# The Aver toolchain is pinned to the commit SHA in .aver-version at the repo
+# root — CI builds exactly that revision of jasisz/aver, and moving the pin is
+# a one-line PR that the whole pipeline then tests. The canary workflow
+# (canary.yml) tracks Aver's current tip without gating anything.
+
 on:
   push:
     branches: [main]
   pull_request:
 
 env:
-  AVER_VERSION: "0.28.1"
   CARGO_TERM_COLOR: always
 
 jobs:
   format:
     name: aver format
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,17 +26,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
-      - name: Install aver
+          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver at the pinned revision
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
       - name: Format check
         run: aver format . --check
 
   check:
     name: aver check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,12 +45,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
-      - name: Install aver
+          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver at the pinned revision
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
       - name: Check
-        run: aver check . --module-root . --deps
+        run: aver check . --module-root .
 
   provider-tests:
     name: provider tests
@@ -77,18 +81,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
-      - name: Install aver
+          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver at the pinned revision
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             providers/primitives
             providers/kv
-      - name: Verify, all cases, with providers
+      - name: Verify, all cases (providers auto-built)
         run: |
-          aver verify . --module-root . --providers --deps | tee verify.log
+          aver verify . --module-root . | tee verify.log
           tail -1 verify.log | grep -E "\| 0 failed" \
             || { echo "verify reported failures"; exit 1; }
 
@@ -104,10 +108,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-${{ env.AVER_VERSION }}-${{ runner.os }}
-      - name: Install aver
+          key: aver-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver at the pinned revision
         if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install aver-lang --version ${{ env.AVER_VERSION }} --locked
+        run: cargo install --git https://github.com/jasisz/aver aver-lang --rev "$(cat .aver-version)" --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: build

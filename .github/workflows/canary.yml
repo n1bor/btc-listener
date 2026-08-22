@@ -1,0 +1,38 @@
+name: Aver canary
+
+# Builds the Aver toolchain from the CURRENT TIP of jasisz/aver — deliberately
+# unpinned — and runs the cheap gates against it. This is the early-warning
+# system for upstream CLI and semantics changes: a red canary means the next
+# .aver-version bump will need work, and gates nothing today.
+#
+# Runs nightly, and on demand from the Actions tab (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  canary:
+    name: check and verify against aver main
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record which aver tip this run used
+        run: git ls-remote https://github.com/jasisz/aver refs/heads/main | tee aver-tip.txt
+      - name: Install aver from tip
+        run: cargo install --git https://github.com/jasisz/aver aver-lang --locked
+      - name: Toolchain identity
+        run: aver --version
+      - name: Check
+        run: aver check . --module-root .
+      - name: Verify, all cases
+        run: |
+          aver verify . --module-root . | tee verify.log
+          tail -1 verify.log | grep -E "\| 0 failed" \
+            || { echo "verify reported failures against aver tip"; exit 1; }
