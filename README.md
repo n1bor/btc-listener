@@ -480,14 +480,14 @@ comes out true. Witness programs are refused before they are run now, and those
 Blocks read `0 passed / 0 failed / 6493 undecided`.
 
 Bitcoin Core's own test data is the adversarial test, and nothing written here
-would be half as unkind. Eight files are read, 2,198 cases between them, and
+would be half as unkind. Eight files are read, 2,199 cases between them, and
 every Script case carries the verification flags Core ran it under:
 
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
-| `script_tests.json` Script pairs | 1118 | 1048 | 0 | 70 |
+| `script_tests.json` Script pairs | 1120 | 1050 | 0 | 70 |
 | `script_tests.json` Witness rows | 108 | 108 | 0 | 0 |
-| `tx_valid` + `tx_invalid` | 213 | 213 | 0 | 0 |
+| `tx_valid` + `tx_invalid` | 214 | 214 | 0 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
 | `key_io_valid.json`, both directions | 108 | 108 | 0 | 0 |
 | `key_io_invalid.json` | 70 | 70 | 0 | 0 |
@@ -498,6 +498,13 @@ every Script case carries the verification flags Core ran it under:
 pairs whose answer needs a Transaction the row does not carry, which is the
 honest answer rather than a disagreement — and the direction that would matter,
 refusing what Core accepts, is nought and has always been nought.
+
+Two of those cases — the 10,000 byte Script and the 1,911 byte twelve-input
+Transaction — are answered by the compiled engine rather than by `aver verify`,
+whose VM stops a case at a million steps. They are named in the generated
+module's `intent` with the answer they gave, because a case left out silently
+is a case nobody sees. Raising that budget needs a flag `aver verify` does not
+have; asked for as [jasisz/aver#1071](https://github.com/jasisz/aver/issues/1071).
 
 Three of those files are read **both ways**, which matters more than the case
 count suggests. An encoder only ever asked to produce output agrees with itself

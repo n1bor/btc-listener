@@ -19,15 +19,15 @@ blocks each one.
 | `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
 | `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
 
-Between them **2,198 verify cases**, and every entry these files hold is either
+Between them **2,199 verify cases**, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
 
 | file | entries | read | left out |
 |---|---|---|---|
-| `script_tests.json`, Script pairs | 1120 | 1118 | 2 over the verify VM's step budget, #75 |
+| `script_tests.json`, Script pairs | 1120 | 1119 | 1 over the verify VM's step budget, answered by the compiled engine and recorded in the module, #75 |
 | `script_tests.json`, Witness rows | 113 | 108 | 5 carrying `TAPROOT`, which are BIP342 leaf cases Core's own note sends to the taproot asset tests, #74 |
 | `sighash.json` | 500 | 500 | — |
-| `tx_valid.json`, `tx_invalid.json` | 214 | 213 | 1 over the step budget, #75 |
+| `tx_valid.json`, `tx_invalid.json` | 214 | 213 | 1 over the step budget, answered by the compiled engine and recorded in the module, #75 |
 | BIP341 `wallet-test-vectors.json` | 3 sections | all 3 | — |
 | `key_io_valid.json` | 70 | 54 | 16 WIF private keys, which this project has no notion of, #71 |
 | `key_io_invalid.json` | 70 | 70 | — |
@@ -459,3 +459,49 @@ agreement report moving in the right direction, and every disagreement having
 a reason. The open ones are #22 (BIP66), #51 (CLTV and CSV), #52 (verification
 flags), #53 (CheckTransaction), #54 (unknown witness versions), #20 (SegWit)
 and #12 (Taproot).
+
+
+## The cases verify cannot run, and how they stopped being invisible
+
+`aver verify` runs on a VM with a per-case budget of a million steps
+(`VERIFY_VM_STEP_LIMIT`, `src/diagnostics/vm_verify.rs`). It is there to turn a
+fuzz-discovered infinite loop into a clean error rather than a hang, and 1M is
+far above what an ordinary case needs. Two of Core's cases exceed it anyway,
+and they are the ones most worth running — the largest input is where a
+quadratic hash or a rope shows itself.
+
+Both tools used to drop oversized cases on a plain length test and say nothing.
+Two things were wrong with that.
+
+**The length test was measuring the wrong thing.** A Script *over* the
+consensus limit of 10,000 bytes is refused on its size before a single opcode
+runs, so it is as cheap to answer as an empty one. The 10,001 byte
+`SCRIPT_SIZE` case had been excluded for as long as the rule existed, and it
+answers in milliseconds. What is expensive is a Script that is long *and*
+executed — the band between the VM's reach and the consensus limit. The tools
+now exclude on that band, which recovers the `SCRIPT_SIZE` boundary case: the
+one case in the file that tests the 10,000 byte consensus limit itself.
+
+**An excluded case was invisible.** The probe step runs under the compiled
+engine, which has no step budget, so it always could answer these. Now it does,
+and the answer is written into the generated module's `intent`:
+
+```
+"1 case(s) are answered by the compiled engine and not by verify."
+"aver verify runs on a VM with a million-step budget and a Script"
+"that is both long and executed exhausts it. Each is named here with"
+"the answer the compiled engine gave it, because a case left out"
+"silently is a case nobody sees. n1bor/btc-listener#75:"
+"  10000 byte Script, flags P2SH,STRICTENC -- Core expects OK, this engine"
+"  answers Outcome.Decided(Ending.Passed)."
+```
+
+The agreement report counts them too, so `script_tests.json` reads 1120 cases
+rather than 1118 and `tx_valid`/`tx_invalid` reads 214 rather than 213. Both
+recovered cases agree with Core. The 1,911 byte twelve-input Transaction — the
+largest in Core's corpus, and the one whose twelve signature checks each hash
+the whole Transaction — had never been checked in either direction before.
+
+What is still missing is a re-check: the answer is recorded but nothing runs it
+again. That needs a way to raise the budget for a case known to be expensive,
+which `aver verify` has no flag for. Asked for upstream as jasisz/aver#1071.

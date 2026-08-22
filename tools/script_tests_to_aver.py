@@ -45,9 +45,29 @@ DATA = os.path.join(HERE, "script_tests_data")
 CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/script_tests.json"
 CORE_HEADER = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/script/script.h"
 
-# Scripts longer than this exhaust the verify VM's step budget.  Nothing to do
-# with consensus, which allows ten thousand bytes.
+# The consensus limit on a Script, which is also what makes an over-long Script
+# cheap: Core refuses it on size before running a single opcode, and so does
+# this engine, so a 10001 byte Script costs nothing to answer.
+CONSENSUS_SCRIPT_LIMIT = 10000
+
+# A Script this long or longer is *executed*, and `aver verify` runs on a VM
+# with a million-step budget that a few thousand opcodes exhaust.  Nothing to
+# do with consensus.  n1bor/btc-listener#75.
 VM_SCRIPT_LIMIT = 1000
+
+
+def too_slow_to_verify(sig, pubkey):
+    """Whether the verify VM can be expected to finish this case.
+
+    The band matters, not the threshold.  A Script *over* the consensus limit
+    is refused on its size before any opcode runs, so it is as cheap as an
+    empty one -- the 10001 byte SCRIPT_SIZE case was excluded for years by a
+    plain length test and answers in milliseconds.  What is expensive is a
+    Script that is long *and* executed, which is the band between the VM's
+    reach and the consensus limit.
+    """
+    longest = max(len(sig), len(pubkey)) // 2
+    return VM_SCRIPT_LIMIT < longest <= CONSENSUS_SCRIPT_LIMIT
 
 
 def fetch():
@@ -158,19 +178,19 @@ def rows():
 
 
 def collected():
-    """Every row that assembles and fits, as (sigHex, pubkeyHex, flags, expected)."""
-    out = []
-    for sig, pubkey, flags, expected, why in rows():
-        if why is not None:
-            continue
-        # `aver verify` runs on the VM, which has a million-step budget, and a
-        # Script of several thousand bytes exceeds it.  The compiled engine has
-        # no such limit and answers these; they are left out of the corpus
-        # rather than left in it failing.  n1bor/btc-listener#75.
-        if max(len(sig), len(pubkey)) // 2 > VM_SCRIPT_LIMIT:
-            continue
-        out.append((sig, pubkey, flags, expected))
-    return out
+    """Every row that assembles, as (sigHex, pubkeyHex, flags, expected).
+
+    Every one, including those the verify VM cannot finish.  The probe runs
+    under the compiled engine, which has no step budget, so it answers all of
+    them; `verifiable` is what decides which become verify cases.
+    """
+    return [(sig, pubkey, flags, expected)
+            for sig, pubkey, flags, expected, why in rows() if why is None]
+
+
+def verifiable(row):
+    """Whether this row becomes a verify case rather than a recorded exclusion."""
+    return not too_slow_to_verify(row[0], row[1])
 
 
 def rules_literal(flags):
@@ -305,7 +325,7 @@ def parts_source(lines, element="Tuple<String, String, Rules>"):
 
 
 def emit(out_dir, per_file=250, report=""):
-    rows = collected()
+    rows = [r for r in collected() if verifiable(r)]
     print("assembled %d cases" % len(rows))
     parts = [rows[i:i + per_file] for i in range(0, len(rows), per_file)]
     for k, chunk in enumerate(parts, start=1):
@@ -337,6 +357,28 @@ def written_back(out_dir, got):
         open(path, "w").write("\n".join(out))
 
 
+def excluded_note(pairs):
+    """The cases verify cannot run, written into the module rather than dropped.
+
+    A case left out silently is a case nobody sees.  Each one here names its
+    size, what Core expects, and what the compiled engine actually answered --
+    so the exclusion costs the corpus its verify case and not its coverage.
+    """
+    if not pairs:
+        return ""
+    lines = ['        "%d case(s) are answered by the compiled engine and not by verify."\n'
+             '        "aver verify runs on a VM with a million-step budget and a Script"\n'
+             '        "that is both long and executed exhausts it. Each is named here with"\n'
+             '        "the answer the compiled engine gave it, because a case left out"\n'
+             '        "silently is a case nobody sees. n1bor/btc-listener#75:"\n' % len(pairs)]
+    for (sig, pubkey, flags, expected), answer in pairs:
+        lines.append('        "  %d byte Script, flags %s -- Core expects %s, this engine"\n'
+                     '        "  answers %s."\n'
+                     % (max(len(sig), len(pubkey)) // 2, flags.strip() or "NONE",
+                        expected, answer.replace('"', "'")))
+    return "".join(lines)
+
+
 def answers(answers_path, out_dir):
     """Write the engine's own answers into the corpus, and report the agreement."""
     got = [l.rstrip("\n") for l in open(answers_path) if l.startswith("Outcome.")]
@@ -345,6 +387,7 @@ def answers(answers_path, out_dir):
         print("have %d answers for %d cases -- refusing to guess which is which"
               % (len(got), len(rows)))
         return 1
+    left_out = [(r, a) for r, a in zip(rows, got) if not verifiable(r)]
     agree = undecided = lax = strict = 0
     by_error = {}
     for (sig, pubkey, flags, expected), answer in zip(rows, got):
@@ -379,9 +422,15 @@ def answers(answers_path, out_dir):
               '        "refusing what Core accepts -- which is the direction a defect shows"\n'
               '        "up in, so any of those is a bug until shown otherwise. Run the tool"\n'
               '        "for the breakdown by Core error."\n'
-              % (len(rows), agree, disagree, undecided, lax, strict))
+              % (len(rows), agree, disagree, undecided, lax, strict)) + excluded_note(left_out)
+    if left_out:
+        print("\n%d case(s) answered by the compiled engine but not emitted as verify cases:"
+              % len(left_out))
+        for (sig, pubkey, flags, expected), answer in left_out:
+            print("  %d bytes, Core expects %-12s this engine answers %s"
+                  % (max(len(sig), len(pubkey)) // 2, expected, answer))
     emit(out_dir, report=report)
-    written_back(out_dir, got)
+    written_back(out_dir, [a for r, a in zip(rows, got) if verifiable(r)])
     return 0
 
 
