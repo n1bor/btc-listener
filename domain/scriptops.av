@@ -216,7 +216,26 @@ fn signedOrGrouped(code: Int, state: State, context: Context) -> Step
       "and there was no room left in this file for them."
     match Domain.Checksig.answersFor(code, context)
         true -> Domain.Checksig.step(code, state, context)
+        false -> outsideTapscript(code, state, context)
+
+fn outsideTapscript(code: Int, state: State, context: Context) -> Step
+    ? "OP_CHECKSIGADD outside a tapscript is an undefined opcode, and running"
+      "an undefined opcode invalidates the Script."
+      "Domain.Opcode calls 186 undecidable, which is true of it in the one"
+      "place it exists: there it needs secp256k1. Everywhere else the byte"
+      "means nothing at all, and Bitcoin does not treat a byte that means"
+      "nothing as a question it cannot answer -- it fails the Script. Core's"
+      "compat/nocsa and compact/nocsa cases are exactly this: a P2WSH spend"
+      "running 0xba, which must be refused."
+      "The distinction cannot be made in Domain.Opcode, which classifies a"
+      "byte without knowing which Script version is running it."
+    match code == 186
+        true -> Step.Stop(Outcome.Decided(Ending.Failed("{Domain.Opcode.nameOf(code)} makes any script that runs it invalid")))
         false -> byGroup(code, state, Domain.SpendContext.rulesOf(context))
+
+verify outsideTapscript
+    outsideTapscript(186, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSIGADD makes any script that runs it invalid")))
+    outsideTapscript(81, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 verify signedOrGrouped
     signedOrGrouped(81, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))

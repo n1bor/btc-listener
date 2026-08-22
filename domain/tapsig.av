@@ -144,12 +144,27 @@ fn overMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: 
     ? "The message, then the curve. A signature that is present and does not"
       "verify fails the Script -- it does not push false, which is the"
       "difference from legacy that matters most."
+      "An undefined hash type is refused before the message is asked for. It"
+      "is not a question this engine cannot answer: BIP341 says only zero,"
+      "ALL, NONE and SINGLE are defined, with or without ANYONECANPAY, and a"
+      "signature carrying anything else makes the Script invalid. Answering"
+      "undecided there would leave the lax reading standing in an audit."
+    match Domain.Bip341.validHashType(hashType)
+        false -> Answer.Fails("hash type {hashType} is not one Taproot defines")
+        true -> overBuiltMessage(code, signature, publicKey, hashType, context)
+
+verify overMessage
+    overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 0, spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 4, spending()) => Answer.Fails("hash type 4 is not one Taproot defines")
+
+fn overBuiltMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context) -> Answer
+    ? "The hash type is one BIP341 defines; now ask for the message."
     match Domain.SpendContext.messageFor(context, hashType)
         Option.None -> Answer.Undecided("{Domain.Opcode.nameOf(code)} needs the transaction its signature commits to")
         Option.Some(digest) -> verified(code, signature, publicKey, digest)
 
-verify overMessage
-    overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 0, spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+verify overBuiltMessage
+    overBuiltMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 0, spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
 
 fn verified(code: Int, signature: List<Int>, publicKey: List<Int>, digest: String) -> Answer
     ? "The curve has run and there is no third answer."

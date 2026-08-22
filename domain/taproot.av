@@ -412,12 +412,29 @@ fn overMessage(program: List<Int>, signature: String, hashType: Int, annex: Opti
       "every Input, which is a gap in what this engine was told and not a"
       "fault in the spend -- answering Failed there would call a valid"
       "Transaction invalid, which is the one mistake that must not happen."
+    match Domain.Bip341.validHashType(hashType)
+        false -> Outcome.Decided(Ending.Failed("hash type {hashType} is not one Taproot defines"))
+        true -> overBuiltMessage(program, signature, hashType, annex, context)
+
+verify overMessage
+    overMessage(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
+    overMessage(Domain.ScriptState.zeros(32), "", 4, Option.None, spending([])) => Outcome.Decided(Ending.Failed("hash type 4 is not one Taproot defines"))
+
+fn overBuiltMessage(program: List<Int>, signature: String, hashType: Int, annex: Option<String>, context: Context) -> Outcome
+    ? "The hash type is one BIP341 defines; now build the message."
+      "A message that will not build is undecided rather than failed. The"
+      "commonest reason is that the caller did not supply a spent Output for"
+      "every Input, which is a gap in what this engine was told and not a"
+      "fault in the spend -- answering Failed there would call a valid"
+      "Transaction invalid, which is the one mistake that must not happen."
+      "An undefined hash type is the other kind of reason and is checked"
+      "above, because BIP341 makes it invalid rather than unanswerable."
     match Domain.Bip341.message(transactionIn(context), Domain.SpendContext.inputIndexOf(context), Domain.SpendContext.prevoutsOf(context), hashType, annex)
         Result.Err(why) -> Outcome.Undecided("taproot message: {why}")
         Result.Ok(message) -> ruled(Domain.Schnorr.verified(hexOf(program), signature, message))
 
-verify overMessage
-    overMessage(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
+verify overBuiltMessage
+    overBuiltMessage(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
 
 fn transactionIn(context: Context) -> Transaction
     ? "The Transaction behind this run. Callers reach here only after"
