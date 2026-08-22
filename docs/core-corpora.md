@@ -14,12 +14,12 @@ blocks each one.
 | `sighash.json` | `domain/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
 | `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
-| BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 7 | hand-extracted, keyPathSpending |
+| BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 39 | `tools/bip341_vectors_to_aver.py` |
 | `key_io_valid.json` | `domain/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
 | `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
 | `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
 
-Between them **2,166 verify cases**, and every entry these files hold is either
+Between them **2,198 verify cases**, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
 
 | file | entries | read | left out |
@@ -28,6 +28,7 @@ read or excluded for a reason with an issue against it:
 | `script_tests.json`, Witness rows | 113 | 108 | 5 carrying `TAPROOT`, which are BIP342 leaf cases Core's own note sends to the taproot asset tests, #74 |
 | `sighash.json` | 500 | 500 | — |
 | `tx_valid.json`, `tx_invalid.json` | 214 | 213 | 1 over the step budget, #75 |
+| BIP341 `wallet-test-vectors.json` | 3 sections | all 3 | — |
 | `key_io_valid.json` | 70 | 54 | 16 WIF private keys, which this project has no notion of, #71 |
 | `key_io_invalid.json` | 70 | 70 | — |
 | `base58_encode_decode.json` | 21 | 21 | — |
@@ -344,9 +345,43 @@ files match.
 | `blockfilters.json` | BIP157/158 compact Block filters | not on the roadmap |
 | `asmap.raw` | peer ASN mapping | peer diversity, #27 at the earliest |
 
-The BIP341 wallet vectors are the one worth taking next: `bip341cases.av` reads
-seven of them through the finished sighash, and the `scriptPubKey` and
-intermediary sections are unread. #73.
+`script_assets_test.json` is the one worth taking next. It is the only
+published corpus that tests tapscript execution at all, it does not live in
+bitcoin/bitcoin, and picking a defensible subset of it is most of the work.
+#74, and #68 waits on it.
+
+## The BIP341 vectors ask six questions, on purpose
+
+`bip341cases.av` used to read seven of the `keyPathSpending` vectors through
+the finished sighash. It now reads all three sections, and the reason it asks
+six different things rather than one is that **a hash is the worst possible
+place to look for a mistake**: every field goes in and one number comes out, so
+two errors that cancel are indistinguishable from none.
+
+| asked | cases | what it would catch that the sighash would not |
+|---|---|---|
+| `sighash` | 7 | — this is the one that matters |
+| `sigMsg` | 7 | a wrong field, in the position it occupies, before anything is hashed |
+| the five intermediary hashes | 5 | one of the five sub-hashes wrong in a way the sixth compensates for |
+| `merkleRoot` | 6 | a script tree built rather than walked — `leafHashOf` and smaller-first `joined` |
+| `address` | 7 | Bech32m chosen for the wrong versions |
+| `script` | 7 | the same, read back |
+
+The `merkleRoot` cases are the ones that reach code from an unfamiliar
+direction. Verification only ever walks a path *upward* from a single leaf;
+these build a whole tree from its leaves, which is what a wallet does. The
+generator turns each tree into nested `Domain.Taproot.joined` and `leafHashOf`
+calls and lets the engine evaluate them — it does no hashing itself. Two of the
+six trees are unbalanced, so an implementation that recorded which side a node
+came from instead of sorting the pair would come apart on them.
+
+The seven addresses are the first published vectors this project's Bech32m
+encoder has ever been held to. It has chosen Bech32m for every witness version
+above zero since it was written, and until now nothing had contradicted it.
+
+The tweak arithmetic in the `scriptPubKey` section needs secp256k1 and is
+checked in Rust, in `providers/primitives` as `every_bip341_commitment_vector`.
+What is here is what Aver can answer.
 
 ## Reading an address back, and why the refusals had to be counted
 
