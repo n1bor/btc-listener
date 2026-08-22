@@ -15,14 +15,33 @@ blocks each one.
 | `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
 | `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
 | BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 7 | hand-extracted, keyPathSpending |
-| `key_io_valid.json` | `domain/keyiocases.av` | 54 | `tools/key_io_to_aver.py` |
+| `key_io_valid.json` | `domain/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
+| `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
+| `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
 
-Between them, 2000 cases out of a corpus of 4327.
+Between them **2,166 verify cases**, and every entry these files hold is either
+read or excluded for a reason with an issue against it:
+
+| file | entries | read | left out |
+|---|---|---|---|
+| `script_tests.json`, Script pairs | 1120 | 1118 | 2 over the verify VM's step budget, #75 |
+| `script_tests.json`, Witness rows | 113 | 108 | 5 carrying `TAPROOT`, which are BIP342 leaf cases Core's own note sends to the taproot asset tests, #74 |
+| `sighash.json` | 500 | 500 | — |
+| `tx_valid.json`, `tx_invalid.json` | 214 | 213 | 1 over the step budget, #75 |
+| `key_io_valid.json` | 70 | 54 | 16 WIF private keys, which this project has no notion of, #71 |
+| `key_io_invalid.json` | 70 | 70 | — |
+| `base58_encode_decode.json` | 21 | 21 | — |
+
+The case count exceeds the entry count because two of these files are read in
+both directions: an address is written and read back, and a base58 pair is
+encoded and decoded.
 
 ## The discipline, and what these corpora are not
 
-Every one of these is generated in three steps that are deliberately kept
-apart:
+The three Script and Transaction corpora — `script_tests.json` in both its
+shapes, `sighash.json`, and the `tx_*` pair — are generated in three steps that
+are deliberately kept apart. The three address corpora are not, and the
+difference is set out at the end of this section.
 
 1. **Python assembles.** It reads Core's JSON and turns each case into
    something the engine can be asked. It does not decide what the answer is.
@@ -31,9 +50,9 @@ apart:
 3. **Python writes the answers back** into the `.av` files as the expected
    values.
 
-The expected value of every case is therefore **this engine's own answer**,
-never Core's and never the tool author's. That makes these **regression**
-corpora: they pin behaviour so that a change is visible. They are not
+The expected value of every case in those three is therefore **this engine's
+own answer**, never Core's and never the tool author's. That makes them
+**regression** corpora: they pin behaviour so that a change is visible. They are not
 conformance corpora, and on their own they cannot tell you the engine is
 right — a wrong answer recorded is a wrong answer preserved.
 
@@ -52,6 +71,16 @@ undecided     0  (this engine cannot answer; not a disagreement)
 judge, which for an unimplemented opcode is the honest answer. A disagreement
 is either a rule not implemented — and then it should have an issue — or a bug.
 There should never be one that is neither.
+
+**The three address corpora work the other way round.** `key_io_valid.json`,
+`key_io_invalid.json` and `base58_encode_decode.json` all carry Core's own
+answer in the file — an address beside its Script, a string asserted not to be
+an address, a byte string beside its base58 — so there is nothing for the
+engine to be asked first. Those are **conformance** corpora, and a case failing
+in one of them is a disagreement with Bitcoin Core rather than a change of
+behaviour here. They are also the only ones where the expected value was not
+produced by this engine, which is why the tools for them are three steps
+shorter.
 
 ## Each case carries the flags Core ran it under
 
@@ -310,16 +339,45 @@ files match.
 
 | Core file | what it is | what blocks it |
 |---|---|---|
-| `key_io_invalid.json` | strings that must not decode as addresses | `Domain.Base58` and `Domain.Bech32` are encode-only; there is no decoder to point it at |
-| `base58_encode_decode.json` | raw base58, no checksum | `Domain.Base58` exposes only `encodeCheck`; the inner encoder is private |
 | `bip341_wallet_vectors.json` | Taproot key and script paths | Taproot, #12 |
 | `siphash.json` | SipHash-2-4 vectors | nothing uses SipHash until compact Blocks, #29 |
 | `blockfilters.json` | BIP157/158 compact Block filters | not on the roadmap |
 | `asmap.raw` | peer ASN mapping | peer diversity, #27 at the earliest |
 
-`key_io_invalid.json` is the one worth taking next, and #72 says what it costs:
-a decoder. Every address this project prints is produced by code no vector has
-contradicted, because there is nothing to feed a string to.
+The BIP341 wallet vectors are the one worth taking next: `bip341cases.av` reads
+seven of them through the finished sighash, and the `scriptPubKey` and
+intermediary sections are unread. #73.
+
+## Reading an address back, and why the refusals had to be counted
+
+`key_io_invalid.json` is 70 strings that must not decode. It is the cheapest
+corpus here to score and the easiest to fake: **a decoder that refused
+everything would pass all 70 of them.** It is worth something only alongside
+`key_io_valid.json`, where the same function has to succeed 54 times and return
+the exact Output Script Core records — a decoder that refused everything would
+fail every one of those. Neither half constrains anything alone, which is why
+`tools/key_io_to_aver.py` now emits both directions from the same entry.
+
+That still leaves the weaker version of the same worry: all 70 might be
+bouncing off one cheap guard, with the rest of the decoder never reached. So
+the reasons were counted rather than assumed. Across the 70:
+
+| refused because | entries |
+|---|---|
+| bech32 checksum does not match | 13 |
+| the base58 payload is not a 20 byte hash | 18 |
+| that address is not for this network | 9 |
+| upper and lower case are mixed | 8 |
+| no prefix, or no separator | 5 |
+| bits carried that are not part of the program | 5 |
+| the witness program is not 2 to 40 bytes | 6 |
+| a version zero program that is not 20 or 32 bytes | 3 |
+| the witness version is above sixteen | 3 |
+
+Thirteen distinct reasons, and every guard in the decoder is reached by at
+least three entries. The nine wrong-network refusals are the ones #34 made
+possible: until a directory could say which chain filled it, "this address is
+not for this chain" was not a sentence this project could say.
 
 ## What each corpus can and cannot express
 

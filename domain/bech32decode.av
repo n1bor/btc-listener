@@ -1,0 +1,363 @@
+module Bech32Decode
+    intent =
+        "Reading a Bech32 or Bech32m address back, and refusing one that is not."
+        "The encoder's mirror, and the half that can actually be wrong in an"
+        "interesting way. Encoding is a function of its inputs and produces one"
+        "answer; decoding is asked to distinguish a correct string from every"
+        "near miss, and the near misses are what Core's key_io_invalid.json is"
+        "made of -- a checksum off by one character, a prefix belonging to"
+        "another chain, upper and lower case mixed, a version one program"
+        "carrying a version zero checksum."
+        "That last pair is the reason BIP350 exists. Bech32 and Bech32m differ"
+        "only in the constant the checksum finalises against, so a decoder that"
+        "accepts either constant for either version will read a Taproot address"
+        "as a v0 one and pay a hash nobody holds the preimage of. The constant"
+        "is chosen by the version here and then required, not offered."
+        "Separate from Domain.Bech32 for length rather than for taste; the two"
+        "belong together and the encoder is already most of a file."
+    exposes [Decoded, decode]
+    depends [Domain.Bech32]
+    effects []
+
+record Decoded
+    prefix: String
+    witnessVersion: Int
+    program: List<Int>
+
+fn maxLength() -> Int
+    ? "BIP173 caps an address at ninety characters."
+      "Not a formality: the checksum guarantees detection of up to four errors"
+      "only while the string is under this length."
+    90
+
+verify maxLength
+    maxLength() => 90
+
+fn checksumLength() -> Int
+    ? "The last six data characters are the checksum."
+    6
+
+verify checksumLength
+    checksumLength() => 6
+
+fn decode(text: String) -> Result<Decoded, String>
+    ? "An address string as its prefix, witness version and program."
+      "Case first, because it is the one rule that has to be judged before the"
+      "string is normalised: BIP173 allows all upper or all lower and forbids"
+      "the mixture, and lowercasing first would lose the evidence."
+    _sized = withinLength(text)?
+    _cased = singleCase(text)?
+    split(String.toLower(text))
+
+verify decode
+    decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    decode("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4") => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    decode("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0") => Result.Ok(Decoded(prefix = "bc", witnessVersion = 1, program = Domain.Bech32.taprootProgram()))
+    decode("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx") => Result.Ok(Decoded(prefix = "tb", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    decode("bc1Qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Err("an address must be all upper case or all lower case")
+    decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5") => Result.Err("bech32 checksum does not match")
+    decode("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jjp") => Result.Err("bech32 checksum does not match")
+    decode("qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Err("an address needs a prefix and a separator")
+    decode("1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Err("an address needs a prefix and a separator")
+
+fn withinLength(text: String) -> Result<Unit, String>
+    ? "Refuse anything longer than the checksum can be trusted over."
+    match String.len(text) > maxLength()
+        true -> Result.Err("an address is at most {maxLength()} characters")
+        false -> Result.Ok(Unit)
+
+verify withinLength
+    withinLength("bc1q") => Result.Ok(Unit)
+    withinLength("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") => Result.Err("an address is at most 90 characters")
+    withinLength("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") => Result.Ok(Unit)
+
+fn singleCase(text: String) -> Result<Unit, String>
+    ? "All upper or all lower, never both."
+      "Mixed case is refused rather than tolerated because the checksum is"
+      "computed over one of the two spellings; accepting a mixture would mean"
+      "accepting strings whose checksum was never checked against what was"
+      "written."
+    match Bool.and(text != String.toLower(text), text != String.toUpper(text))
+        true -> Result.Err("an address must be all upper case or all lower case")
+        false -> Result.Ok(Unit)
+
+verify singleCase
+    singleCase("bc1qw") => Result.Ok(Unit)
+    singleCase("BC1QW") => Result.Ok(Unit)
+    singleCase("bc1QW") => Result.Err("an address must be all upper case or all lower case")
+    singleCase("11") => Result.Ok(Unit)
+
+fn split(text: String) -> Result<Decoded, String>
+    ? "The prefix runs to the last separator; the data follows it."
+      "The last, not the first: a prefix may contain a 1 and the data part"
+      "cannot, because 1 is one of the four characters Bech32 leaves out."
+    at = lastSeparator(String.chars(text), 0, 0 - 1)
+    parts(text, at)
+
+verify split
+    split("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    split("noseparator") => Result.Err("an address needs a prefix and a separator")
+
+fn lastSeparator(chars: List<String>, index: Int, best: Int) -> Int
+    ? "Where the last 1 sits, or minus one when there is none."
+    match chars
+        [] -> best
+        [head, ..tail] -> lastSeparator(tail, index + 1, betterIfOne(head, index, best))
+
+verify lastSeparator
+    lastSeparator([], 0, 0 - 1) => 0 - 1
+    lastSeparator(["b", "1", "q"], 0, 0 - 1) => 1
+    lastSeparator(["1", "q", "1"], 0, 0 - 1) => 2
+
+fn betterIfOne(head: String, index: Int, best: Int) -> Int
+    ? "Take this position when the character is the separator."
+    match head == "1"
+        true -> index
+        false -> best
+
+verify betterIfOne
+    betterIfOne("1", 4, 0 - 1) => 4
+    betterIfOne("q", 4, 2) => 2
+
+fn parts(text: String, at: Int) -> Result<Decoded, String>
+    ? "A prefix of at least one character, and a data part of at least seven."
+      "Seven because six of them are the checksum and one is the witness"
+      "version, so six data characters is a checksum with nothing under it."
+    match Bool.or(at < 1, String.len(text) - at < checksumLength() + 2)
+        true -> Result.Err("an address needs a prefix and a separator")
+        false -> checked(String.slice(text, 0, at), String.slice(text, at + 1, String.len(text)))
+
+verify parts
+    parts("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 2) => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    parts("nope", 0 - 1) => Result.Err("an address needs a prefix and a separator")
+    parts("b1qqqqqq", 1) => Result.Err("an address needs a prefix and a separator")
+
+fn checked(prefix: String, data: String) -> Result<Decoded, String>
+    ? "Both halves have to be spelled in their own alphabets before the"
+      "checksum over them means anything."
+    _prefix = printablePrefix(prefix)?
+    values = valuesOf(String.chars(data), [])?
+    versioned(prefix, values)
+
+verify checked
+    checked("bc", "qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    checked("bc", "bw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Err("'b' is not a bech32 character")
+
+fn printablePrefix(prefix: String) -> Result<Unit, String>
+    ? "Every prefix character has to be printable ASCII."
+    match allPrintable(String.chars(prefix))
+        true -> Result.Ok(Unit)
+        false -> Result.Err("'{prefix}' is not a usable address prefix")
+
+verify printablePrefix
+    printablePrefix("bc") => Result.Ok(Unit)
+    printablePrefix("bcrt") => Result.Ok(Unit)
+
+fn allPrintable(chars: List<String>) -> Bool
+    ? "Codes 33 to 126, which is printable ASCII without the space."
+    match chars
+        [] -> true
+        [head, ..tail] -> printableThen(head, tail)
+
+verify allPrintable
+    allPrintable([]) => true
+    allPrintable(["b", "c"]) => true
+    allPrintable([" "]) => false
+
+fn printableThen(head: String, tail: List<String>) -> Bool
+    ? "This character, then the rest."
+    match Bool.and(Char.toCode(head) >= 33, Char.toCode(head) <= 126)
+        false -> false
+        true -> allPrintable(tail)
+
+verify printableThen
+    printableThen("b", []) => true
+    printableThen(" ", []) => false
+
+fn valuesOf(chars: List<String>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Each data character as its five-bit value."
+    match chars
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> valueThen(head, tail, acc)
+
+verify valuesOf
+    valuesOf([], []) => Result.Ok([])
+    valuesOf(["q", "p"], []) => Result.Ok([0, 1])
+    valuesOf(["b"], []) => Result.Err("'b' is not a bech32 character")
+
+fn valueThen(head: String, tail: List<String>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "One character, then the rest."
+    match indexOf(head)
+        Option.None -> Result.Err("'{head}' is not a bech32 character")
+        Option.Some(value) -> valuesOf(tail, List.prepend(value, acc))
+
+verify valueThen
+    valueThen("q", [], []) => Result.Ok([0])
+    valueThen("b", [], []) => Result.Err("'b' is not a bech32 character")
+
+fn indexOf(character: String) -> Option<Int>
+    ? "Where a character sits in the Bech32 charset, if it is in it."
+    positionIn(Domain.Bech32.charset(), character, 0)
+
+verify indexOf
+    indexOf("q") => Option.Some(0)
+    indexOf("l") => Option.Some(31)
+    indexOf("1") => Option.None
+    indexOf("b") => Option.None
+    indexOf("i") => Option.None
+    indexOf("o") => Option.None
+
+fn positionIn(remaining: List<String>, character: String, index: Int) -> Option<Int>
+    ? "Walk the charset looking for the character."
+    match remaining
+        [] -> Option.None
+        [head, ..tail] -> hereOrOn(head, tail, character, index)
+
+verify positionIn
+    positionIn([], "q", 0) => Option.None
+    positionIn(["q", "p"], "p", 0) => Option.Some(1)
+
+fn hereOrOn(head: String, tail: List<String>, character: String, index: Int) -> Option<Int>
+    ? "This position, or keep looking."
+    match head == character
+        true -> Option.Some(index)
+        false -> positionIn(tail, character, index + 1)
+
+verify hereOrOn
+    hereOrOn("q", [], "q", 3) => Option.Some(3)
+    hereOrOn("q", [], "p", 3) => Option.None
+
+fn versioned(prefix: String, values: List<Int>) -> Result<Decoded, String>
+    ? "The first data value is the witness version."
+    match values
+        [] -> Result.Err("an address needs a prefix and a separator")
+        [head, ..tail] -> knownVersion(prefix, head, tail, values)
+
+verify versioned
+    versioned("bc", []) => Result.Err("an address needs a prefix and a separator")
+
+fn knownVersion(prefix: String, version: Int, rest: List<Int>, values: List<Int>) -> Result<Decoded, String>
+    ? "Witness versions run from zero to sixteen and no further."
+      "Seventeen upwards cannot be written -- a five-bit value stops at"
+      "thirty-one -- but the ones between seventeen and thirty-one can, and"
+      "they name no witness version that exists."
+    match version > 16
+        true -> Result.Err("{version} is not a witness version")
+        false -> summed(prefix, version, rest, values)
+
+verify knownVersion
+    knownVersion("bc", 17, [], [17]) => Result.Err("17 is not a witness version")
+
+fn summed(prefix: String, version: Int, rest: List<Int>, values: List<Int>) -> Result<Decoded, String>
+    ? "The checksum decides, and which constant it is measured against is"
+      "decided by the version rather than tried both ways."
+      "This is the whole of BIP350. A version one address carrying a version"
+      "zero checksum is a different address that happens to look like this"
+      "one, and accepting it pays a program nobody chose."
+    match Domain.Bech32.polymod(List.concat(Domain.Bech32.expandPrefix(prefix), values), 1) == Domain.Bech32.constantFor(version)
+        false -> Result.Err("bech32 checksum does not match")
+        true -> programOf(prefix, version, rest)
+
+verify summed
+    summed("bc", 0, [], [0]) => Result.Err("bech32 checksum does not match")
+
+fn programOf(prefix: String, version: Int, rest: List<Int>) -> Result<Decoded, String>
+    ? "The witness program is what sits between the version and the checksum."
+    body = List.take(rest, List.len(rest) - checksumLength())
+    bytes = toBytes(body)?
+    widthChecked(prefix, version, bytes)
+
+verify programOf
+    programOf("bc", 0, [14, 20, 15, 7, 13, 26, 0, 25, 18, 6, 11, 13, 8, 21, 4, 20, 3, 17, 2, 29, 3, 12, 29, 3, 4, 15, 24, 20, 6, 14, 30, 22, 0, 0, 0, 0, 0, 0]) => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+
+fn toBytes(values: List<Int>) -> Result<List<Int>, String>
+    ? "Regroup five-bit values back into bytes, refusing a sloppy tail."
+      "Going the other way pads with zero bits, so a correctly written address"
+      "leaves fewer than five bits over and every one of them zero. More than"
+      "that means bits were carried that say nothing, and a non-zero remainder"
+      "means bits were carried that say something and were then discarded --"
+      "two spellings of one program, which is what BIP173 forbids."
+    eightBits(values, 0, 0, [])
+
+verify toBytes
+    toBytes([]) => Result.Ok([])
+    toBytes([31, 28]) => Result.Ok([255])
+    toBytes([31, 31]) => Result.Err("the address carries bits that are not part of its program")
+    toBytes([0, 0]) => Result.Ok([0])
+
+fn eightBits(values: List<Int>, acc: Int, bits: Int, out: List<Int>) -> Result<List<Int>, String>
+    ? "Take in five bits at a time, giving back whole bytes."
+    match values
+        [] -> tidy(acc, bits, out)
+        [head, ..tail] -> emit(tail, Bits.shiftLeft(acc, 5) + head, bits + 5, out)
+
+verify eightBits
+    eightBits([], 0, 0, [7]) => Result.Ok([7])
+    eightBits([31, 28], 0, 0, []) => Result.Ok([255])
+
+fn emit(values: List<Int>, acc: Int, bits: Int, out: List<Int>) -> Result<List<Int>, String>
+    ? "Emit every whole byte the accumulator now holds."
+    match bits >= 8
+        true -> emit(values, acc, bits - 8, List.concat(out, [Bits.low(shiftedRight(acc, bits - 8), 8)]))
+        false -> eightBits(values, acc, bits, out)
+
+verify emit
+    emit([], 255, 8, []) => Result.Ok([255])
+    emit([], 0, 0, [7]) => Result.Ok([7])
+
+fn tidy(acc: Int, bits: Int, out: List<Int>) -> Result<List<Int>, String>
+    ? "What is left over has to be padding and nothing else."
+    match Bool.or(bits >= 5, lowBits(acc, bits) != 0)
+        true -> Result.Err("the address carries bits that are not part of its program")
+        false -> Result.Ok(out)
+
+verify tidy
+    tidy(0, 0, [7]) => Result.Ok([7])
+    tidy(0, 4, [7]) => Result.Ok([7])
+    tidy(1, 4, [7]) => Result.Err("the address carries bits that are not part of its program")
+    tidy(0, 5, [7]) => Result.Err("the address carries bits that are not part of its program")
+
+fn widthChecked(prefix: String, version: Int, program: List<Int>) -> Result<Decoded, String>
+    ? "Every witness program is two to forty bytes; version zero is stricter."
+      "Twenty or thirty-two under version zero, being P2WPKH and P2WSH and"
+      "nothing else. BIP141 left the other widths unassigned and BIP173 made"
+      "writing one down impossible rather than merely useless."
+    match Bool.or(List.len(program) < 2, List.len(program) > 40)
+        true -> Result.Err("a witness program is 2 to 40 bytes, not {List.len(program)}")
+        false -> zeroWidth(prefix, version, program)
+
+verify widthChecked
+    widthChecked("bc", 1, [1]) => Result.Err("a witness program is 2 to 40 bytes, not 1")
+    widthChecked("bc", 1, [1, 2]) => Result.Ok(Decoded(prefix = "bc", witnessVersion = 1, program = [1, 2]))
+
+fn zeroWidth(prefix: String, version: Int, program: List<Int>) -> Result<Decoded, String>
+    ? "Under version zero only two widths mean anything."
+    match Bool.and(version == 0, Bool.and(List.len(program) != 20, List.len(program) != 32))
+        true -> Result.Err("a version zero witness program is 20 or 32 bytes, not {List.len(program)}")
+        false -> Result.Ok(Decoded(prefix = prefix, witnessVersion = version, program = program))
+
+verify zeroWidth
+    zeroWidth("bc", 0, Domain.Bech32.twentyBytes()) => Result.Ok(Decoded(prefix = "bc", witnessVersion = 0, program = Domain.Bech32.twentyBytes()))
+    zeroWidth("bc", 0, [1, 2]) => Result.Err("a version zero witness program is 20 or 32 bytes, not 2")
+    zeroWidth("bc", 1, [1, 2]) => Result.Ok(Decoded(prefix = "bc", witnessVersion = 1, program = [1, 2]))
+
+fn shiftedRight(value: Int, places: Int) -> Int
+    ? "Shift right by a count the caller computed."
+      "Bits.shiftRight only fails on a negative count, and the one caller here"
+      "reaches this under a match that has already put `bits` at eight or"
+      "above, so the error branch is unreachable. Domain.Bech32 carries the"
+      "same wrapper for the same reason going the other way."
+    Result.withDefault(Bits.shiftRight(value, places), 0)
+
+verify shiftedRight
+    shiftedRight(256, 8) => 1
+    shiftedRight(7, 0) => 7
+
+fn lowBits(value: Int, width: Int) -> Int
+    ? "The bottom `width` bits of a value, for a width the caller computed."
+    Result.withDefault(Bits.low(value, width), 0)
+
+verify lowBits
+    lowBits(255, 4) => 15
+    lowBits(255, 0) => 0
+    lowBits(7, 8) => 7

@@ -2,10 +2,15 @@
 """Turn Bitcoin Core's key_io_valid.json into Aver verify cases.
 
 Each entry is an address string, the Output Script hex it stands for, and
-metadata naming the chain.  `Domain.Payto.describeOn` is exactly the function
-under test, so unlike the Script and Transaction corpora this one **carries
-Core's own answer**: it is a conformance corpus, not a regression one, and a
-case that fails means this engine and Bitcoin Core disagree about an address.
+metadata naming the chain.  `Domain.Payto.addressFor` and
+`Domain.ReadAddress.scriptFor` are exactly the functions under test, so unlike
+the Script and Transaction corpora this one **carries Core's own answer**: it
+is a conformance corpus, not a regression one, and a case that fails means this
+engine and Bitcoin Core disagree about an address.
+
+Both directions are emitted from the same entry.  The reading half is also what
+makes key_io_invalid.json worth anything -- a decoder that refused everything
+would pass all 70 of those and fail all 54 of these.
 
 The private-key entries are skipped.  They are WIF, which this project has no
 notion of -- there are no keys here, only Scripts -- and skipping them is
@@ -66,6 +71,10 @@ HEADER = '''module KeyIoCases
         "means this engine and Bitcoin Core disagree about an address, which"
         "is not a difference of opinion -- an address is a thing a wallet"
         "pastes into a payment."
+        "Both directions, from the same entry. Writing an address and reading"
+        "one back are different functions and only one of them has to tell a"
+        "correct string from a near miss; key_io_invalid.json is the file full"
+        "of near misses, and it means nothing without this half succeeding."
         "Every Network the file names is here, which is what makes it worth"
         "more than the mainnet third: base58 cannot tell testnet, signet and"
         "regtest apart, and Bech32 can, so the prefixes are only really tested"
@@ -74,26 +83,37 @@ HEADER = '''module KeyIoCases
         "project has no notion of a key -- only of Scripts."
         "Nothing here was written by hand and nothing should be. Regenerate it"
         "with tools/key_io_to_aver.py."
-    exposes [case]
-    depends [Domain.Network, Domain.Payto]
+    exposes [case, script]
+    depends [Domain.Network, Domain.Payto, Domain.ReadAddress]
     effects []
 
 fn case(network: Network, scriptHex: String) -> Result<String, String>
     ? "The address this Output Script pays to, on this Network."
     Domain.Payto.addressFor(network, scriptHex)
 
-verify case'''
+verify case
+%(written)s
+
+fn script(network: Network, address: String) -> Result<String, String>
+    ? "And the Output Script that address pays to, back again."
+      "The half that catches an encoder agreeing with itself. It also decides"
+      "what keyioinvalidcases.av is worth: a decoder that refused everything"
+      "would pass every case there and none here."
+    Domain.ReadAddress.scriptFor(network, address)
+
+verify script
+%(read)s'''
 
 
 def emitted():
     got, keys, unknown = rows()
-    lines = []
-    for address, script, network in got:
-        lines.append('    case(Network.%s, "%s") => Result.Ok("%s")'
-                     % (network, script, address))
+    written = "\n".join('    case(Network.%s, "%s") => Result.Ok("%s")'
+                        % (network, script, address) for address, script, network in got)
+    read = "\n".join('    script(Network.%s, "%s") => Result.Ok("%s")'
+                     % (network, address, script) for address, script, network in got)
     if unknown:
         print("skipped %d entry(s) naming a chain this project has no Network for" % unknown)
-    body = HEADER % {"keys": keys} + "\n" + "\n".join(lines) + "\n"
+    body = HEADER % {"keys": keys, "written": written, "read": read} + "\n"
     return body, len(got), keys
 
 
@@ -101,7 +121,7 @@ def emit():
     body, n, keys = emitted()
     path = os.path.join(OUT, "keyiocases.av")
     open(path, "w").write(body)
-    print("wrote %s with %d cases (%d private keys skipped)" % (path, n, keys))
+    print("wrote %s with %d entries, %d cases (%d private keys skipped)" % (path, n, n * 2, keys))
     return 0
 
 

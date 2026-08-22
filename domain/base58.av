@@ -8,7 +8,12 @@ module Base58
         "Which version byte belongs to which Network is not decided here. It"
         "is a fact about a chain rather than about an encoding, and it lives"
         "in Domain.Payto beside the Bech32 prefixes it pairs with."
-    exposes [encodeCheck]
+        "Both directions, because an encoder never asked to read anything back"
+        "is half tested. The vectors that would catch a wrong one are the ones"
+        "asserting what must fail -- a bad checksum, a character the alphabet"
+        "does not have -- and there is nothing to feed those to without a"
+        "decoder."
+    exposes [encodeCheck, encode, decode, decodeCheck, Checked]
     depends [Bytes, Crypto.Digest32, Domain.Hash]
     effects []
 
@@ -101,3 +106,207 @@ fn oneIfZero(head: Int, tail: List<Int>, acc: String) -> String
 verify oneIfZero
     oneIfZero(0, [5], "") => "1"
     oneIfZero(5, [0], "") => ""
+
+record Checked
+    version: Int
+    payload: List<Int>
+
+fn encode(bytes: List<Int>) -> String
+    ? "Bytes in base 58, with no checksum and no version byte."
+      "What encodeCheck does once it has built the thing to be encoded, and"
+      "the half Core's base58_encode_decode.json tests on its own."
+    leadingOnes(bytes, "") + digitsOf(toNumber(bytes, 0), "")
+
+verify encode
+    encode([]) => ""
+    encode([0]) => "1"
+    encode([97]) => "2g"
+    encode([98, 98, 98]) => "a3gV"
+    encode([0, 0, 1]) => "112"
+
+fn decode(text: String) -> Result<List<Int>, String>
+    ? "Read base 58 back into bytes."
+      "Two halves that have to be counted separately. Base 58 is positional and"
+      "a leading zero byte contributes nothing to the number, so the ones at the"
+      "front are counted as characters and the rest is read as one integer --"
+      "which is the same asymmetry leadingOnes handles going the other way."
+    chars = String.chars(text)
+    values = valuesOf(chars, [])?
+    Result.Ok(List.concat(zeroBytes(zeroCount(chars, 0), []), bytesFrom(numberFrom(values, 0), [])))
+
+verify decode
+    decode("") => Result.Ok([])
+    decode("1") => Result.Ok([0])
+    decode("2g") => Result.Ok([97])
+    decode("a3gV") => Result.Ok([98, 98, 98])
+    decode("112") => Result.Ok([0, 0, 1])
+    decode("0") => Result.Err("'0' is not a base 58 character")
+    decode("l") => Result.Err("'l' is not a base 58 character")
+    decode("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => Result.Ok([0, 117, 30, 118, 232, 25, 145, 150, 212, 84, 148, 28, 69, 209, 179, 163, 35, 241, 67, 59, 214, 81, 13, 22, 52])
+
+fn valuesOf(chars: List<String>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Each character as its base 58 digit, refusing any the alphabet lacks."
+    match chars
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> valueThen(head, tail, acc)
+
+verify valuesOf
+    valuesOf([], []) => Result.Ok([])
+    valuesOf(["2", "g"], []) => Result.Ok([1, 39])
+    valuesOf(["0"], []) => Result.Err("'0' is not a base 58 character")
+
+fn valueThen(head: String, tail: List<String>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "One character, then the rest."
+    match indexOf(head)
+        Option.None -> Result.Err("'{head}' is not a base 58 character")
+        Option.Some(value) -> valuesOf(tail, List.prepend(value, acc))
+
+verify valueThen
+    valueThen("2", [], []) => Result.Ok([1])
+    valueThen("0", [], []) => Result.Err("'0' is not a base 58 character")
+
+fn indexOf(character: String) -> Option<Int>
+    ? "Where a character sits in the alphabet, if it is in it at all."
+    positionIn(alphabet(), character, 0)
+
+verify indexOf
+    indexOf("1") => Option.Some(0)
+    indexOf("z") => Option.Some(57)
+    indexOf("0") => Option.None
+    indexOf("O") => Option.None
+    indexOf("I") => Option.None
+    indexOf("l") => Option.None
+
+fn positionIn(remaining: List<String>, character: String, index: Int) -> Option<Int>
+    ? "Walk the alphabet looking for the character."
+    match remaining
+        [] -> Option.None
+        [head, ..tail] -> hereOrOn(head, tail, character, index)
+
+verify positionIn
+    positionIn([], "a", 0) => Option.None
+    positionIn(["a", "b"], "b", 0) => Option.Some(1)
+
+fn hereOrOn(head: String, tail: List<String>, character: String, index: Int) -> Option<Int>
+    ? "This position, or keep looking."
+    match head == character
+        true -> Option.Some(index)
+        false -> positionIn(tail, character, index + 1)
+
+verify hereOrOn
+    hereOrOn("a", [], "a", 3) => Option.Some(3)
+    hereOrOn("a", [], "b", 3) => Option.None
+
+fn numberFrom(values: List<Int>, acc: Int) -> Int
+    ? "Read the digits as one base 58 number."
+    match values
+        [] -> acc
+        [head, ..tail] -> numberFrom(tail, acc * 58 + head)
+
+verify numberFrom
+    numberFrom([], 0) => 0
+    numberFrom([1], 0) => 1
+    numberFrom([1, 0], 0) => 58
+
+fn bytesFrom(value: Int, acc: List<Int>) -> List<Int>
+    ? "The number as big-endian bytes, with no leading zero byte."
+      "A zero gives no bytes at all rather than one zero byte, which is right:"
+      "every zero byte a base 58 string carries is written as a 1 at the front"
+      "and counted there."
+    match value <= 0
+        true -> acc
+        false -> bytesFrom(Int.div(value, 256), List.prepend(Int.mod(value, 256), acc))
+
+verify bytesFrom
+    bytesFrom(0, []) => []
+    bytesFrom(1, []) => [1]
+    bytesFrom(256, []) => [1, 0]
+    bytesFrom(255, []) => [255]
+
+fn zeroCount(chars: List<String>, acc: Int) -> Int
+    ? "How many 1s the string begins with, each of them a zero byte."
+    match chars
+        [] -> acc
+        [head, ..tail] -> countIfOne(head, tail, acc)
+
+verify zeroCount
+    zeroCount([], 0) => 0
+    zeroCount(["1", "1", "2"], 0) => 2
+    zeroCount(["2", "1"], 0) => 0
+
+fn countIfOne(head: String, tail: List<String>, acc: Int) -> Int
+    ? "Keep counting while the characters are 1s."
+    match head == "1"
+        true -> zeroCount(tail, acc + 1)
+        false -> acc
+
+verify countIfOne
+    countIfOne("1", [], 0) => 1
+    countIfOne("2", ["1"], 0) => 0
+
+fn zeroBytes(count: Int, acc: List<Int>) -> List<Int>
+    ? "That many zero bytes."
+    match count <= 0
+        true -> acc
+        false -> zeroBytes(count - 1, List.prepend(0, acc))
+
+verify zeroBytes
+    zeroBytes(0, []) => []
+    zeroBytes(2, []) => [0, 0]
+
+fn decodeCheck(text: String) -> Result<Checked, String>
+    ? "Read a Base58Check string back, refusing one whose checksum disagrees."
+      "The checksum is the whole point of the encoding and the only thing that"
+      "makes a mistyped address a refusal rather than a payment somewhere else,"
+      "so it is checked before the version byte is even looked at."
+    raw = decode(text)?
+    wideEnough(text, raw)
+
+verify decodeCheck
+    decodeCheck("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => Result.Ok(Checked(version = 0, payload = exampleHash()))
+    decodeCheck("32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ") => Result.Ok(Checked(version = 5, payload = scriptExampleHash()))
+    decodeCheck("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMJ") => Result.Err("base58 checksum does not match")
+    decodeCheck("") => Result.Err("'' is too short to be Base58Check")
+    decodeCheck("1111") => Result.Err("'1111' is too short to be Base58Check")
+    decodeCheck("0") => Result.Err("'0' is not a base 58 character")
+
+fn wideEnough(text: String, raw: List<Int>) -> Result<Checked, String>
+    ? "A version byte and four checksum bytes are the least it can hold."
+    match List.len(raw) < 5
+        true -> Result.Err("'{text}' is too short to be Base58Check")
+        false -> checksumAgrees(raw)
+
+verify wideEnough
+    wideEnough("x", [1, 2, 3]) => Result.Err("'x' is too short to be Base58Check")
+
+fn checksumAgrees(raw: List<Int>) -> Result<Checked, String>
+    ? "The last four bytes have to be the first four of the rest's double-SHA256."
+    cut = List.len(raw) - 4
+    body = List.take(raw, cut)
+    found = List.drop(raw, cut)
+    expected = checksumOf(body)?
+    splitBody(body, found, expected)
+
+verify checksumAgrees
+    checksumAgrees([0, 20, 6, 224, 88]) => Result.Ok(Checked(version = 0, payload = []))
+    checksumAgrees([0, 20, 6, 224, 89]) => Result.Err("base58 checksum does not match")
+
+fn splitBody(body: List<Int>, found: List<Int>, expected: List<Int>) -> Result<Checked, String>
+    ? "Refuse a disagreeing checksum, then take the version off the front."
+    match found == expected
+        false -> Result.Err("base58 checksum does not match")
+        true -> versioned(body)
+
+verify splitBody
+    splitBody([7], [1], [1]) => Result.Ok(Checked(version = 7, payload = []))
+    splitBody([7], [1], [2]) => Result.Err("base58 checksum does not match")
+
+fn versioned(body: List<Int>) -> Result<Checked, String>
+    ? "The first byte is the version and the rest is what it versions."
+    match body
+        [] -> Result.Err("base58 payload has no version byte")
+        [head, ..tail] -> Result.Ok(Checked(version = head, payload = tail))
+
+verify versioned
+    versioned([]) => Result.Err("base58 payload has no version byte")
+    versioned([5, 1, 2]) => Result.Ok(Checked(version = 5, payload = [1, 2]))

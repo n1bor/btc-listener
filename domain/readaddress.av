@@ -1,0 +1,157 @@
+module ReadAddress
+    intent =
+        "An address string back into the Output Script it stands for."
+        "Domain.Payto goes one way and this comes back, and the return trip is"
+        "where the interesting mistakes are. Writing an address is a function"
+        "of its inputs and has one answer. Reading one is asked to separate a"
+        "correct string from every near miss, and the near misses are what"
+        "Core's key_io_invalid.json is made of."
+        "The Network is an argument rather than a discovery. An address that"
+        "decodes cleanly and belongs to another chain is a refusal here, not a"
+        "success with a note attached -- paying a testnet script on mainnet is"
+        "not a lesser error than paying a mistyped one."
+        "Two encodings and they are tried in a fixed order: Base58Check first,"
+        "then Bech32. Nothing can be both. Base58's alphabet has no 0 and"
+        "Bech32's data part has no 1, and a Bech32 address is required to"
+        "carry a separator that base58 cannot contain."
+    exposes [scriptFor, readsAnywhere]
+    depends [Bytes, Domain.Base58, Domain.Bech32Decode, Domain.Network, Domain.Payto]
+    effects []
+
+fn scriptFor(network: Network, address: String) -> Result<String, String>
+    ? "The Output Script an address pays to on this Network."
+      "The inverse of Domain.Payto.addressFor, and held to that: every entry"
+      "in Core's key_io_valid.json has to come back as the Script the file"
+      "records, and every entry in key_io_invalid.json has to fail on all four"
+      "Networks."
+    match Domain.Base58.decodeCheck(address)
+        Result.Ok(checked) -> fromBase58(network, checked)
+        Result.Err(why) -> fromBech32(network, address)
+
+verify scriptFor
+    scriptFor(Network.Mainnet, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => Result.Ok("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")
+    scriptFor(Network.Mainnet, "32N9goLjsePShNTwoSaEe7fzJ8NTrm9keZ") => Result.Ok("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")
+    scriptFor(Network.Mainnet, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Ok("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    scriptFor(Network.Mainnet, "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0") => Result.Ok("512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+    scriptFor(Network.Signet, "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx") => Result.Ok("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    scriptFor(Network.Signet, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Err("that address is not for this network")
+    scriptFor(Network.Signet, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => Result.Err("that address is not for this network")
+    scriptFor(Network.Mainnet, "") => Result.Err("an address needs a prefix and a separator")
+
+fn readsAnywhere(address: String) -> Bool
+    ? "Whether any of the four Networks reads this string as an address."
+      "What key_io_invalid.json asserts is not that a string fails on some"
+      "chain but that it fails on every one, so the corpus asks it this way"
+      "rather than four times over."
+    Bool.or(reads(Network.Mainnet, address), Bool.or(reads(Network.Testnet, address), Bool.or(reads(Network.Signet, address), reads(Network.Regtest, address))))
+
+verify readsAnywhere
+    readsAnywhere("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => true
+    readsAnywhere("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx") => true
+    readsAnywhere("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => true
+    readsAnywhere("") => false
+    readsAnywhere("x") => false
+    readsAnywhere("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5") => false
+
+fn reads(network: Network, address: String) -> Bool
+    ? "Whether one Network reads it."
+    match scriptFor(network, address)
+        Result.Ok(script) -> true
+        Result.Err(why) -> false
+
+verify reads
+    reads(Network.Mainnet, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => true
+    reads(Network.Signet, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => false
+
+fn fromBase58(network: Network, checked: Checked) -> Result<String, String>
+    ? "A version byte this Network uses, over a twenty-byte hash."
+    match List.len(checked.payload) == 20
+        false -> Result.Err("a base58 address carries a 20 byte hash, not {List.len(checked.payload)}")
+        true -> byVersion(network, checked)
+
+verify fromBase58
+    fromBase58(Network.Mainnet, Domain.Base58.Checked(version = 0, payload = [])) => Result.Err("a base58 address carries a 20 byte hash, not 0")
+
+fn byVersion(network: Network, checked: Checked) -> Result<String, String>
+    ? "Nought or five on mainnet, 111 or 196 elsewhere, and nothing else."
+      "A version byte belonging to another chain is refused here rather than"
+      "reported as an unknown kind: it is a well formed address and the thing"
+      "wrong with it is exactly which chain it is for."
+    match checked.version == Domain.Payto.pubKeyHashVersion(network)
+        true -> Result.Ok("76a914" + hexOf(checked.payload) + "88ac")
+        false -> scriptHashOrNot(network, checked)
+
+verify byVersion
+    byVersion(Network.Mainnet, Domain.Base58.Checked(version = 0, payload = twentyBytes())) => Result.Ok("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")
+
+fn scriptHashOrNot(network: Network, checked: Checked) -> Result<String, String>
+    ? "The other version byte this Network uses, or none of them."
+    match checked.version == Domain.Payto.scriptHashVersion(network)
+        true -> Result.Ok("a914" + hexOf(checked.payload) + "87")
+        false -> Result.Err("that address is not for this network")
+
+verify scriptHashOrNot
+    scriptHashOrNot(Network.Mainnet, Domain.Base58.Checked(version = 5, payload = twentyBytes())) => Result.Ok("a914751e76e8199196d454941c45d1b3a323f1433bd687")
+    scriptHashOrNot(Network.Mainnet, Domain.Base58.Checked(version = 111, payload = twentyBytes())) => Result.Err("that address is not for this network")
+
+fn twentyBytes() -> List<Int>
+    ? "The published BIP173 example hash, for the cases above."
+    [117, 30, 118, 232, 25, 145, 150, 212, 84, 148, 28, 69, 209, 179, 163, 35, 241, 67, 59, 214]
+
+verify twentyBytes
+    List.len(twentyBytes()) => 20
+
+fn fromBech32(network: Network, address: String) -> Result<String, String>
+    ? "A witness program, if the string is one and the prefix is this chain's."
+    decoded = Domain.Bech32Decode.decode(address)?
+    matchingPrefix(network, decoded)
+
+verify fromBech32
+    fromBech32(Network.Mainnet, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4") => Result.Ok("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    fromBech32(Network.Mainnet, "nonsense") => Result.Err("an address needs a prefix and a separator")
+
+fn matchingPrefix(network: Network, decoded: Decoded) -> Result<String, String>
+    ? "The prefix names the chain, and it has to be this one."
+      "bc, tb and bcrt are the whole of the difference between a mainnet"
+      "address and the others in Bech32, and unlike base58 they do tell"
+      "testnet apart from mainnet. Signet borrows testnet's on purpose."
+    match decoded.prefix == Domain.Payto.prefixOf(network)
+        false -> Result.Err("that address is not for this network")
+        true -> Result.Ok(scriptOf(decoded))
+
+verify matchingPrefix
+    matchingPrefix(Network.Mainnet, Domain.Bech32Decode.Decoded(prefix = "bc", witnessVersion = 0, program = twentyBytes())) => Result.Ok("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    matchingPrefix(Network.Signet, Domain.Bech32Decode.Decoded(prefix = "bc", witnessVersion = 0, program = twentyBytes())) => Result.Err("that address is not for this network")
+
+fn scriptOf(decoded: Decoded) -> String
+    ? "The version opcode, then the program as one push."
+    hexOf([versionOpcode(decoded.witnessVersion), List.len(decoded.program)]) + hexOf(decoded.program)
+
+verify scriptOf
+    scriptOf(Domain.Bech32Decode.Decoded(prefix = "bc", witnessVersion = 0, program = twentyBytes())) => "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+    scriptOf(Domain.Bech32Decode.Decoded(prefix = "bc", witnessVersion = 1, program = [1, 2])) => "51020102"
+
+fn versionOpcode(witnessVersion: Int) -> Int
+    ? "Version zero is OP_0, which is the byte zero; one to sixteen are OP_1"
+      "upwards, which begin at eighty-one."
+    match witnessVersion == 0
+        true -> 0
+        false -> 80 + witnessVersion
+
+verify versionOpcode
+    versionOpcode(0) => 0
+    versionOpcode(1) => 81
+    versionOpcode(16) => 96
+
+fn hexOf(bytes: List<Int>) -> String
+    ? "Bytes as text."
+      "Total: every list reaching this came out of a decoder that emits octets"
+      "by construction, so Bytes.fromList cannot refuse them and the default"
+      "is unreachable."
+    match Bytes.fromList(bytes)
+        Result.Err(message) -> ""
+        Result.Ok(raw) -> Bytes.toHex(raw)
+
+verify hexOf
+    hexOf([170, 187]) => "aabb"
+    hexOf([]) => ""
