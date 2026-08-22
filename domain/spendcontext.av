@@ -27,7 +27,7 @@ module SpendContext
         "the legacy hash and n1bor/btc-listener#60 is where that changes; this"
         "is the plumbing under it, and the proof it is only plumbing is that"
         "no answer moved when it landed."
-    exposes [Locking, lockingOf, withoutSignatures, deletes, minimalConditions, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
+    exposes [atSeparator, tapPositionOf, Locking, lockingOf, withoutSignatures, deletes, minimalConditions, SigVersion, TapContext, Commitment, Context, bare, committed, inWitnessV0, inTapscript, tapOf, sigVersionOf, hasSpend, amountOf, withPrevouts, prevoutsOf, transactionOf, inputIndexOf, rulesOf, overScript, messageFor, scriptCodeOf, witnessOf, emptyTransaction, signedTransaction, signedScriptCode]
     depends [Domain.Network, Bytes, Domain.Bip143, Domain.Bip341, Domain.Rules, Domain.ScriptParse, Domain.Sighash, Domain.Transaction]
     effects []
 
@@ -142,6 +142,52 @@ fn sigVersionOf(context: Context) -> SigVersion
 verify sigVersionOf
     sigVersionOf(bare(Domain.Rules.latest())) => SigVersion.Base
     sigVersionOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => SigVersion.Base
+
+fn atSeparator(context: Context, position: Int) -> Context
+    ? "Record where the OP_CODESEPARATOR that just ran sits in the Script."
+      "BIP341 commits to it. A signature made after a separator is valid only"
+      "for that branch, which is the whole reason the field exists: the same"
+      "Script with the separator somewhere else signs a different message."
+      "Only tapscript has it. The older versions commit to the Script code"
+      "from the separator onward instead, which Domain.Interp already does by"
+      "rewriting the Script code, and nothing here disturbs that."
+    match context.spend
+        Option.None -> context
+        Option.Some(commitment) -> separatorIn(context, commitment, position)
+
+verify atSeparator
+    atSeparator(bare(Domain.Rules.latest()), 3) => bare(Domain.Rules.latest())
+    tapPositionOf(atSeparator(inTapscript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 4294967295)), 3)) => 3
+
+fn separatorIn(context: Context, commitment: Commitment, position: Int) -> Context
+    ? "The same spend with the separator position moved."
+    match commitment.tap
+        Option.None -> context
+        Option.Some(tap) -> Context(rules = context.rules, spend = Option.Some(Commitment(transaction = commitment.transaction, inputIndex = commitment.inputIndex, amount = commitment.amount, scriptCode = commitment.scriptCode, witness = commitment.witness, sigVersion = commitment.sigVersion, prevouts = commitment.prevouts, tap = Option.Some(TapContext(leafHash = tap.leafHash, annex = tap.annex, codeSeparatorPosition = position)))))
+
+verify separatorIn
+    separatorIn(bare(Domain.Rules.latest()), Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None), 3) => bare(Domain.Rules.latest())
+
+fn tapPositionOf(context: Context) -> Int
+    ? "Where the last executed OP_CODESEPARATOR was, or the sentinel."
+      "Four billion and change is BIP341's \"there was none\", which is what a"
+      "tapscript starts with."
+    match context.spend
+        Option.None -> 4294967295
+        Option.Some(commitment) -> positionIn(commitment)
+
+verify tapPositionOf
+    tapPositionOf(bare(Domain.Rules.latest())) => 4294967295
+    tapPositionOf(inTapscript(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", []), TapContext(leafHash = "aa", annex = Option.None, codeSeparatorPosition = 7))) => 7
+
+fn positionIn(commitment: Commitment) -> Int
+    ? "Out of the tapscript half of the spend, if there is one."
+    match commitment.tap
+        Option.None -> 4294967295
+        Option.Some(tap) -> tap.codeSeparatorPosition
+
+verify positionIn
+    positionIn(Commitment(transaction = emptyTransaction(), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None)) => 4294967295
 
 fn withPrevouts(context: Context, prevouts: List<Spent>) -> Context
     ? "The same spend, told what every Input of the Transaction spends."

@@ -113,21 +113,24 @@ fn reach(ops: List<Op>, state: State, context: Context) -> Step
       "before, which is right for the Output Script and wrong for the other"
       "two: an Input Script that checks a signature itself takes it over its"
       "own bytes, and so does a redeem Script."
-    walked(ops, state, Domain.SpendContext.overScript(context, bytesHex(ops)))
+    walked(ops, state, Domain.SpendContext.overScript(context, bytesHex(ops)), 0)
 
 verify reach
     reach([], Domain.ScriptState.holding([[1]]), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
     reach([Op.Push(1, [1])], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
     reach([Op.Code(106)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
 
-fn walked(ops: List<Op>, state: State, context: Context) -> Step
+fn walked(ops: List<Op>, state: State, context: Context, position: Int) -> Step
     ? "Each Op in turn, with the Script code already set for this Script."
+      "The position counts Ops, pushes included, and is what BIP341 commits to"
+      "when an OP_CODESEPARATOR runs. Core counts the same way, incrementing"
+      "once per GetOp."
     match ops
         [] -> Step.Continue(state)
-        [head, ..tail] -> stepped(head, tail, state, context)
+        [head, ..tail] -> stepped(head, tail, state, context, position)
 
 verify walked
-    walked([], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.empty())
+    walked([], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Continue(Domain.ScriptState.empty())
 
 fn bytesHex(ops: List<Op>) -> String
     ? "These Ops back as the bytes a signature commits to."
@@ -152,7 +155,7 @@ verify separates
     separates(Op.Code(172)) => false
     separates(Op.Push(2, [170, 187])) => false
 
-fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
+fn stepped(op: Op, rest: List<Op>, state: State, context: Context, position: Int) -> Step
     ? "Take the Step the Op asks for, then carry on or stop as it says."
       "CONST_SCRIPTCODE is asked before anything else, because Core asks it"
       "before anything else: the check sits above the fExec guard in"
@@ -172,12 +175,12 @@ fn stepped(op: Op, rest: List<Op>, state: State, context: Context) -> Step
       "reads IF CODESEPARATOR ENDIF <key> CHECKSIGVERIFY CODESEPARATOR 1."
     match Bool.and(separates(op), refusesSeparators(context))
         true -> Step.Stop(Outcome.Decided(Ending.Failed("OP_CODESEPARATOR in a legacy script, which CONST_SCRIPTCODE forbids")))
-        false -> executed(op, rest, state, context)
+        false -> executed(op, rest, state, context, position)
 
 verify stepped
-    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
-    stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
+    stepped(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    stepped(Op.Code(106), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Stop(Outcome.Decided(Ending.Failed("OP_RETURN")))
+    stepped(Op.Code(169), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Stop(Outcome.Decided(Ending.Failed("OP_HASH160 needs an item")))
 
 fn refusesSeparators(context: Context) -> Bool
     ? "Whether CONST_SCRIPTCODE is in force over a legacy Script."
@@ -198,22 +201,22 @@ verify refusesSeparators
     refusesSeparators(Domain.SpendContext.bare(Domain.Rules.underFlags([]))) => false
     refusesSeparators(Domain.SpendContext.inWitnessV0(Domain.SpendContext.committed(Domain.Rules.underFlags(["CONST_SCRIPTCODE"]), Domain.SpendContext.emptyTransaction(), 0, 5, "51", []), "51")) => false
 
-fn executed(op: Op, rest: List<Op>, state: State, context: Context) -> Step
+fn executed(op: Op, rest: List<Op>, state: State, context: Context, position: Int) -> Step
     ? "OP_CODESEPARATOR moves the Script code, but only if it actually runs."
     match Bool.and(separates(op), Domain.ScriptState.executing(state.conditions))
-        true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.overScript(context, bytesHex(rest)))
-        false -> ordinary(op, rest, state, context)
+        true -> walked(rest, Domain.ScriptState.spent(state, 171), Domain.SpendContext.atSeparator(Domain.SpendContext.overScript(context, bytesHex(rest)), position), position + 1)
+        false -> ordinary(op, rest, state, context, position)
 
 verify executed
-    executed(Op.Code(171), [Op.Code(81)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(State(stack = [[1]], alt = [], conditions = [], opCount = 1, weightLeft = 0))
-    executed(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    executed(Op.Code(171), [Op.Code(81)], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Continue(State(stack = [[1]], alt = [], conditions = [], opCount = 1, weightLeft = 0))
+    executed(Op.Push(1, [1]), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
-fn ordinary(op: Op, rest: List<Op>, state: State, context: Context) -> Step
+fn ordinary(op: Op, rest: List<Op>, state: State, context: Context, position: Int) -> Step
     ? "Every other Op, against the machine."
     match Domain.ScriptOps.step(op, state, context)
-        Step.Continue(next) -> walked(rest, next, context)
+        Step.Continue(next) -> walked(rest, next, context, position + 1)
         Step.Stop(outcome) -> Step.Stop(outcome)
 
 verify ordinary
-    ordinary(Op.Code(81), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Continue(Domain.ScriptState.holding([[1]]))
-    ordinary(Op.Code(105), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))
+    ordinary(Op.Code(81), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Continue(Domain.ScriptState.holding([[1]]))
+    ordinary(Op.Code(105), [], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest()), 0) => Step.Stop(Outcome.Decided(Ending.Failed("OP_VERIFY needs an item")))

@@ -95,12 +95,53 @@ fn tapscript(control: String, leaf: String, stack: List<String>, annex: Option<S
       "parse past it."
     match hasSuccessOpcode(bytesIn(leaf))
         true -> Outcome.Decided(Ending.Passed)
-        false -> parsedLeaf(control, leaf, stack, annex, context)
+        false -> withinLimits(control, leaf, stack, annex, context)
 
 verify tapscript
     tapscript("c0", "50", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
     tapscript("c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
     tapscript("c0", "00", [], Option.None, spending([])) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+
+fn withinLimits(control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "The Witness stack the leaf starts on has to be inside two limits."
+      "Both are checked before the leaf runs and after the annex, the control"
+      "block and the leaf itself have been taken off, which is Core's order in"
+      "ExecuteWitnessScript -- and after the OP_SUCCESS scan, so a Script that"
+      "succeeds without running is not refused for its stack."
+      "A thousand items, the same limit the machine keeps during execution."
+      "The initial stack is not exempt from it just because nothing pushed"
+      "those items."
+    match List.len(stack) > Domain.ScriptState.maxStack()
+        true -> Outcome.Decided(Ending.Failed("stack is over the {Domain.ScriptState.maxStack()} item limit"))
+        false -> withinWidths(control, leaf, stack, annex, context)
+
+verify withinLimits
+    withinLimits("c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+
+fn withinWidths(control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
+    ? "And no item wider than a push may be."
+      "Five hundred and twenty bytes, the same limit a push inside a Script"
+      "keeps. Tapscript dropped the Script size limit and the opcode limit and"
+      "kept this one, so an item that could not have been pushed cannot be"
+      "handed in through the Witness either."
+    match tooWide(stack)
+        true -> Outcome.Decided(Ending.Failed("witness item is over the {Domain.ScriptState.maxItem()} byte limit"))
+        false -> parsedLeaf(control, leaf, stack, annex, context)
+
+verify withinWidths
+    withinWidths("c0", "51", [], Option.None, spending([])) => Outcome.Decided(Ending.Passed)
+    withinWidths("c0", "51", [hexOf(Domain.ScriptState.zeros(521))], Option.None, spending([])) => Outcome.Decided(Ending.Failed("witness item is over the 520 byte limit"))
+
+fn tooWide(items: List<String>) -> Bool
+    ? "Whether any item is wider than a push may be."
+    match items
+        [] -> false
+        [head, ..tail] -> Bool.or(byteWidth(head) > Domain.ScriptState.maxItem(), tooWide(tail))
+
+verify tooWide
+    tooWide([]) => false
+    tooWide([hexOf(Domain.ScriptState.zeros(520))]) => false
+    tooWide([hexOf(Domain.ScriptState.zeros(521))]) => true
 
 fn parsedLeaf(control: String, leaf: String, stack: List<String>, annex: Option<String>, context: Context) -> Outcome
     ? "A leaf that does not parse fails the spend: it was committed to by"
