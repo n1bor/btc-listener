@@ -18,7 +18,7 @@ module AssetSweep
         "never mentions. That was jasisz/aver#1076, fixed upstream by #1075 and"
         "#1081, so the split is available again; this stays one module on"
         "merit, since the tally and the report are one story."
-    exposes [Tally, everyEntry, counted, standing, totals, verdict, shown, expectation, detailed, spenderLines, shownFlags]
+    exposes [Tally, everyEntry, counted, standing, totals, verdict, judged, shown, expectation, detailed, spenderLines, shownFlags]
     depends [Domain.Json, Domain.ScriptAssets, Domain.ScriptState, Domain.Transaction]
     effects []
 
@@ -121,6 +121,20 @@ fn shownEnding(ending: Ending) -> String
 verify shownEnding
     shownEnding(Ending.Passed) => "passed"
     shownEnding(Ending.Failed("no")) => "failed: no"
+
+fn judged(tx: String, prevouts: List<String>, index: Int, flags: String, scriptSig: String, witness: List<String>, mustPass: Bool) -> String
+    ? "One spender of one entry, from its fields, as the generated verify cases"
+      "ask it: PASS when the engine agrees with the file's claim, FAIL when it"
+      "does not, UNDECIDED when it cannot say, and the reason when the entry"
+      "itself could not be read."
+    match Domain.ScriptAssets.caseOf(tx, prevouts, index, flags, Spender(scriptSig = scriptSig, witness = witness))
+        Result.Err(why) -> "ERROR: {why}"
+        Result.Ok(one) -> verdict(Domain.ScriptAssets.run(one, Spender(scriptSig = scriptSig, witness = witness)), mustPass)
+
+verify judged
+    judged("zz", [], 0, "", "", [], true) => "ERROR: Bytes.fromHex: invalid hexadecimal character 'z'"
+    judged("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000", ["01000000000000000151"], 0, "P2SH", "", [], true) => "PASS"
+    judged("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000", ["01000000000000000151"], 0, "P2SH", "", [], false) => "FAIL"
 
 fn verdict(outcome: Outcome, mustPass: Bool) -> String
     ? "Whether the engine did what the file says it should."

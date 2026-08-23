@@ -19,7 +19,7 @@ module ScriptAssets
         "engine computes is built from the record's own fields, so putting a"
         "different Input in the list is enough -- there is no raw form to keep"
         "in step with it."
-    exposes [Case, Spender, caseFrom, run, describe]
+    exposes [Case, Spender, caseFrom, caseOf, run, describe]
     depends [Bytes, Domain.Bip341, Domain.Json, Domain.Rules, Domain.ScriptState, Domain.SpendContext, Domain.SpendScript, Domain.Transaction]
     effects []
 
@@ -50,6 +50,32 @@ fn caseFrom(entry: Json) -> Result<Case, String>
 verify caseFrom
     caseFrom(Json.JsonNull) => Result.Err("entry has no 'tx' field")
     caseFrom(Json.JsonObject([Domain.Json.Pair(key = "tx", held = Json.JsonString("zz"))])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn caseOf(tx: String, prevouts: List<String>, index: Int, flags: String, spender: Spender) -> Result<Case, String>
+    ? "One entry from its fields already split out, for the generated verify"
+      "cases: the same Case caseFrom builds from Json, without the Json."
+      "The spender under test stands as the Case's success spender, since run"
+      "reads neither success nor failure; they are the file's claims, and the"
+      "case carries its own claim as mustPass."
+    transaction = Domain.Transaction.decode(Bytes.toList(Bytes.fromHex(tx)?))?
+    spent = spentsOf(prevouts, [])?
+    Result.Ok(Case(comment = "", flags = splitFlags(flags), index = index, transaction = transaction, prevouts = spent, success = spender, failure = Option.None))
+
+verify caseOf
+    caseOf("zz", [], 0, "", Spender(scriptSig = "", witness = [])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    caseOf("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000", ["01000000000000000151"], 0, "P2SH", Spender(scriptSig = "", witness = []))?.index => 0
+    List.len(caseOf("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000", ["01000000000000000151"], 0, "P2SH", Spender(scriptSig = "", witness = []))?.prevouts) => 1
+
+fn spentsOf(texts: List<String>, acc: List<Spent>) -> Result<List<Spent>, String>
+    ? "Every prevout, from its serialised text."
+    match texts
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> spentsOf(tail, List.prepend(spentOf(head)?, acc))
+
+verify spentsOf
+    spentsOf([], []) => Result.Ok([])
+    spentsOf(["01000000000000000151"], []) => Result.Ok([Spent(amount = 1, script = "51")])
+    spentsOf([""], []) => Result.Err("a prevout is shorter than an amount and a length: ''")
 
 fn textField(entry: Json, name: String) -> Result<String, String>
     ? "A required string field."
