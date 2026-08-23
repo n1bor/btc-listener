@@ -1,0 +1,229 @@
+module UtxoStore
+    intent =
+        "How the UTXO Set and its Undo Data are spelled inside a Store."
+        "Two more keyspaces. The u: space holds every Output no Transaction"
+        "has spent yet, and it is the first keyspace here that shrinks: an"
+        "Output is written when the Block creating it connects and deleted"
+        "when the Block spending it does."
+        "That is what makes it different from o:, which holds every Output"
+        "ever created and only grows. Both are wanted and neither replaces the"
+        "other -- o: answers 'what did this Input spend', which a reorganised"
+        "Block still has to be able to ask, and u: answers 'may this Input"
+        "spend it', which only the current chain can answer."
+        "The d: space is the Undo Data: what connecting a Block removed from"
+        "the Set, kept so that disconnecting it can put it back. Without it a"
+        "reorganisation means rebuilding the Set from genesis, because a UTXO"
+        "Set has no memory of what it used to hold."
+        "The value format is Domain.Index's, unchanged. An Output is an amount"
+        "and a Script wherever it is written down, and having two spellings of"
+        "the same thing would be two things to get wrong."
+    exposes [Unspent, unspentKey, undoKey, undoWindowKey, encodeUndo, decodeUndo, unspentAt, keyOf]
+    depends [Domain.Index]
+    effects []
+
+record Unspent
+    txid: String
+    index: Int
+    value: Int
+    script: String
+
+fn unspentKey(txid: String, index: Int) -> String
+    ? "Where one unspent Output lives, keyed the way an Input names it."
+      "The same shape as Domain.Index.outputKey and a different prefix, so the"
+      "two keyspaces answer the same question from the same key material and"
+      "cannot be confused for one another."
+    "u:{txid}:{Domain.Index.padIndex(index)}"
+
+verify unspentKey
+    unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0) => "u:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:00000"
+    unspentKey("aa", 1) => "u:aa:00001"
+    unspentKey("aa", 12345) => "u:aa:12345"
+
+fn keyOf(unspent: Unspent) -> String
+    ? "Where this Output lives."
+    unspentKey(unspent.txid, unspent.index)
+
+verify keyOf
+    keyOf(Unspent(txid = "aa", index = 1, value = 5, script = "76")) => "u:aa:00001"
+
+fn undoKey(blockId: String) -> String
+    ? "Where a Block's Undo Data lives."
+      "Keyed by Block Id rather than Height: a reorganisation is exactly when"
+      "Undo Data is read, and it is exactly when a Height stops naming the"
+      "Block it named before."
+    "d:{blockId}"
+
+verify undoKey
+    undoKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "d:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    undoKey("") => "d:"
+
+fn undoWindowKey() -> String
+    ? "The single record naming the lowest Height whose Undo Data is still kept."
+      "Undo Data is bounded: keeping it for the whole chain would cost more"
+      "than the chain. A reorganisation reaching below this Height cannot be"
+      "undone, and the node has to say so and stop rather than guess."
+    "meta:undoBelow"
+
+verify undoWindowKey
+    undoWindowKey() => "meta:undoBelow"
+
+fn unspentAt(txid: String, index: Int, output: SpentOutput) -> Unspent
+    ? "An Output of a Transaction, as the Set holds it."
+    Unspent(txid = txid, index = index, value = output.value, script = output.script)
+
+verify unspentAt
+    unspentAt("aa", 0, SpentOutput(value = 5, script = "76")).value => 5
+    unspentAt("aa", 0, SpentOutput(value = 5, script = "76")).txid => "aa"
+
+fn encodeUndo(removed: List<Unspent>) -> String
+    ? "Everything a Block took out of the Set, as one record."
+      "Semicolons between Outputs and colons within them. A Script is"
+      "hexadecimal and a Transaction Id is hexadecimal, so neither separator"
+      "can appear inside a field, and the empty list is the empty string --"
+      "which is what a Block of nothing but a coinbase removes."
+    joined(removed, "")
+
+verify encodeUndo
+    encodeUndo([]) => ""
+    encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76")]) => "aa:0:5:76"
+    encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76"), Unspent(txid = "bb", index = 2, value = 7, script = "")]) => "aa:0:5:76;bb:2:7:"
+
+fn joined(removed: List<Unspent>, acc: String) -> String
+    ? "One Output at a time, separated where there is something to separate."
+    match removed
+        [] -> acc
+        [head, ..tail] -> joined(tail, appended(acc, oneUndo(head)))
+
+verify joined
+    joined([], "") => ""
+    joined([Unspent(txid = "aa", index = 0, value = 5, script = "76")], "") => "aa:0:5:76"
+
+fn appended(acc: String, piece: String) -> String
+    ? "A separator only between pieces, never before the first."
+    match String.len(acc) == 0
+        true -> piece
+        false -> "{acc};{piece}"
+
+verify appended
+    appended("", "x") => "x"
+    appended("x", "y") => "x;y"
+
+fn oneUndo(unspent: Unspent) -> String
+    ? "One removed Output: where it was and what it was worth."
+    "{unspent.txid}:{unspent.index}:{unspent.value}:{unspent.script}"
+
+verify oneUndo
+    oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76")) => "aa:0:5:76"
+    oneUndo(Unspent(txid = "aa", index = 3, value = 0, script = "")) => "aa:3:0:"
+
+fn decodeUndo(text: String) -> Result<List<Unspent>, String>
+    ? "Read a Block's Undo Data back."
+    match String.len(text) == 0
+        true -> Result.Ok([])
+        false -> eachUndo(String.split(text, ";"), [])
+
+verify decodeUndo
+    decodeUndo("") => Result.Ok([])
+    decodeUndo("aa:0:5:76") => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76")])
+    decodeUndo("aa:0:5:76;bb:2:7:") => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76"), Unspent(txid = "bb", index = 2, value = 7, script = "")])
+    decodeUndo("aa:0:5") => Result.Err("Undo entry must be txid:index:value:script, got 'aa:0:5'")
+    decodeUndo("aa:x:5:76") => Result.Err("Undo entry must hold whole numbers, got 'aa:x:5:76'")
+    decodeUndo("aa:0:x:76") => Result.Err("Undo entry must hold whole numbers, got 'aa:0:x:76'")
+
+fn eachUndo(pieces: List<String>, acc: List<Unspent>) -> Result<List<Unspent>, String>
+    ? "One piece at a time, in the order they were written."
+    match pieces
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> undoThen(head, tail, acc)
+
+verify eachUndo
+    eachUndo([], []) => Result.Ok([])
+    eachUndo(["aa:0:5:76"], []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76")])
+
+fn undoThen(piece: String, rest: List<String>, acc: List<Unspent>) -> Result<List<Unspent>, String>
+    ? "Decode this one, then carry on."
+    match oneDecoded(piece)
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(unspent) -> eachUndo(rest, List.prepend(unspent, acc))
+
+verify undoThen
+    undoThen("aa:0:5:76", [], []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76")])
+    undoThen("bad", [], []) => Result.Err("Undo entry must be txid:index:value:script, got 'bad'")
+
+fn oneDecoded(piece: String) -> Result<Unspent, String>
+    ? "Four colon-separated fields, and no more."
+    undoParts(piece, String.split(piece, ":"))
+
+verify oneDecoded
+    oneDecoded("aa:0:5:76") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    oneDecoded("aa:0:5:76:x") => Result.Err("Undo entry must be txid:index:value:script, got 'aa:0:5:76:x'")
+
+fn undoParts(piece: String, split: List<String>) -> Result<Unspent, String>
+    ? "The Transaction Id comes first."
+    match split
+        [] -> Result.Err("Undo entry must be txid:index:value:script, got '{piece}'")
+        [txid, ..rest] -> afterTxid(piece, txid, rest)
+
+verify undoParts
+    undoParts("aa:0:5:76", ["aa", "0", "5", "76"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    undoParts("", []) => Result.Err("Undo entry must be txid:index:value:script, got ''")
+
+fn afterTxid(piece: String, txid: String, rest: List<String>) -> Result<Unspent, String>
+    ? "Then which Output of it."
+    match rest
+        [] -> Result.Err("Undo entry must be txid:index:value:script, got '{piece}'")
+        [index, ..more] -> afterIndex(piece, txid, index, more)
+
+verify afterTxid
+    afterTxid("aa:0:5:76", "aa", ["0", "5", "76"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    afterTxid("aa", "aa", []) => Result.Err("Undo entry must be txid:index:value:script, got 'aa'")
+
+fn afterIndex(piece: String, txid: String, index: String, more: List<String>) -> Result<Unspent, String>
+    ? "Then what it was worth."
+    match more
+        [] -> Result.Err("Undo entry must be txid:index:value:script, got '{piece}'")
+        [value, ..last] -> afterValue(piece, txid, index, value, last)
+
+verify afterIndex
+    afterIndex("aa:0:5:76", "aa", "0", ["5", "76"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    afterIndex("aa:0", "aa", "0", []) => Result.Err("Undo entry must be txid:index:value:script, got 'aa:0'")
+
+fn afterValue(piece: String, txid: String, index: String, value: String, last: List<String>) -> Result<Unspent, String>
+    ? "The Script is last, and nothing follows it."
+    match last
+        [] -> Result.Err("Undo entry must be txid:index:value:script, got '{piece}'")
+        [script, ..extra] -> afterScript(piece, txid, index, value, script, extra)
+
+verify afterValue
+    afterValue("aa:0:5:76", "aa", "0", "5", ["76"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    afterValue("aa:0:5", "aa", "0", "5", []) => Result.Err("Undo entry must be txid:index:value:script, got 'aa:0:5'")
+
+fn afterScript(piece: String, txid: String, index: String, value: String, script: String, extra: List<String>) -> Result<Unspent, String>
+    ? "Refuse a fifth field, then read the two numbers."
+    match extra
+        [] -> numbered(piece, txid, Domain.Index.decodeHeight(index), Domain.Index.decodeHeight(value), script)
+        [head, ..tail] -> Result.Err("Undo entry must be txid:index:value:script, got '{piece}'")
+
+verify afterScript
+    afterScript("aa:0:5:76", "aa", "0", "5", "76", []) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    afterScript("aa:0:5:76:x", "aa", "0", "5", "76", ["x"]) => Result.Err("Undo entry must be txid:index:value:script, got 'aa:0:5:76:x'")
+
+fn numbered(piece: String, txid: String, index: Result<Int, String>, value: Result<Int, String>, script: String) -> Result<Unspent, String>
+    ? "Both the position and the amount have to be whole numbers."
+    match index
+        Result.Err(why) -> Result.Err("Undo entry must hold whole numbers, got '{piece}'")
+        Result.Ok(at) -> withIndex(piece, txid, at, value, script)
+
+verify numbered
+    numbered("aa:0:5:76", "aa", Result.Ok(0), Result.Ok(5), "76") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    numbered("aa:x:5:76", "aa", Result.Err("no"), Result.Ok(5), "76") => Result.Err("Undo entry must hold whole numbers, got 'aa:x:5:76'")
+
+fn withIndex(piece: String, txid: String, index: Int, value: Result<Int, String>, script: String) -> Result<Unspent, String>
+    ? "The position parsed; the amount still has to."
+    match value
+        Result.Err(why) -> Result.Err("Undo entry must hold whole numbers, got '{piece}'")
+        Result.Ok(amount) -> Result.Ok(Unspent(txid = txid, index = index, value = amount, script = script))
+
+verify withIndex
+    withIndex("aa:0:5:76", "aa", 0, Result.Ok(5), "76") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76"))
+    withIndex("aa:0:x:76", "aa", 0, Result.Err("no"), "76") => Result.Err("Undo entry must hold whole numbers, got 'aa:0:x:76'")

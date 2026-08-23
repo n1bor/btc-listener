@@ -1,0 +1,141 @@
+module Subsidy
+    intent =
+        "What a Block is allowed to mint, and what its coinbase may therefore"
+        "claim."
+        "The subsidy starts at fifty coins and halves on a fixed interval. That"
+        "is the only place new value enters the chain, so it is the only thing"
+        "standing between a valid Block and one that pays its miner whatever it"
+        "likes -- every other Output has to be paid for by an Input."
+        "The interval is a Network parameter, not a constant. Regtest halves"
+        "every hundred and fifty Blocks so that a test can reach a halving"
+        "without mining two hundred thousand Blocks; mainnet, testnet and"
+        "signet all halve every two hundred and ten thousand."
+        "The schedule is checked against its own total rather than against a"
+        "list of eras: summing every subsidy the schedule will ever pay has to"
+        "give 2,099,999,997,690,000 satoshis, the published figure for the"
+        "whole supply. That number is what it is because the halving truncates"
+        "-- it is not fifty times two hundred and ten thousand times two -- so"
+        "a schedule that rounded the wrong way could not produce it."
+    exposes [halvingInterval, atHeight, claimAllowed, withinClaim, possibleSupply]
+    depends [Domain.Network]
+    effects []
+
+fn halvingInterval(network: Network) -> Int
+    ? "How many Blocks pass between halvings."
+    match network
+        Network.Mainnet -> 210000
+        Network.Testnet -> 210000
+        Network.Signet -> 210000
+        Network.Regtest -> 150
+
+verify halvingInterval
+    halvingInterval(Network.Mainnet) => 210000
+    halvingInterval(Network.Testnet) => 210000
+    halvingInterval(Network.Signet) => 210000
+    halvingInterval(Network.Regtest) => 150
+
+fn atHeight(network: Network, height: Int) -> Int
+    ? "What the Block at this Height may mint."
+      "Fifty coins halved once per interval. The Heights pinned below are the"
+      "first Block of each era on mainnet and the last of the one before, so"
+      "each case pins the boundary rather than the middle of a run."
+    halved(5000000000, eras(network, height))
+
+verify atHeight
+    atHeight(Network.Mainnet, 0) => 5000000000
+    atHeight(Network.Mainnet, 209999) => 5000000000
+    atHeight(Network.Mainnet, 210000) => 2500000000
+    atHeight(Network.Mainnet, 419999) => 2500000000
+    atHeight(Network.Mainnet, 420000) => 1250000000
+    atHeight(Network.Mainnet, 630000) => 625000000
+    atHeight(Network.Mainnet, 840000) => 312500000
+    atHeight(Network.Mainnet, 13440000) => 0
+    atHeight(Network.Regtest, 149) => 5000000000
+    atHeight(Network.Regtest, 150) => 2500000000
+    atHeight(Network.Regtest, 300) => 1250000000
+
+fn eras(network: Network, height: Int) -> Int
+    ? "How many halvings have happened by this Height."
+      "Total: the interval is a positive constant per Network, so the division"
+      "cannot fail and the fallback is unreachable."
+    Result.withDefault(Int.div(height, halvingInterval(network)), 0)
+
+verify eras
+    eras(Network.Mainnet, 0) => 0
+    eras(Network.Mainnet, 209999) => 0
+    eras(Network.Mainnet, 210000) => 1
+    eras(Network.Mainnet, 630000) => 3
+    eras(Network.Regtest, 300) => 2
+
+fn halved(amount: Int, times: Int) -> Int
+    ? "An amount halved that many times, rounding down."
+      "Rounding down is the whole reason the total supply is not a round"
+      "number. Bitcoin Core stops at sixty-four halvings to avoid shifting a"
+      "64-bit value past its width; here the amount simply reaches zero on the"
+      "thirty-third and stays there, which is the same schedule without the"
+      "special case."
+      "The divisor is a literal, so this division answers an Int rather than a"
+      "Result -- unlike the one in eras, whose divisor is a Network parameter"
+      "the checker cannot see the sign of."
+    match times <= 0
+        true -> amount
+        false -> halved(Int.div(amount, 2), times - 1)
+
+verify halved
+    halved(5000000000, 0) => 5000000000
+    halved(5000000000, 1) => 2500000000
+    halved(5000000000, 33) => 0
+    halved(5000000000, 64) => 0
+    halved(1, 1) => 0
+    halved(3, 1) => 1
+
+fn claimAllowed(subsidy: Int, fees: Int) -> Int
+    ? "The most a coinbase may pay out: what it mints plus what the Block's"
+      "other Transactions left behind."
+    subsidy + fees
+
+verify claimAllowed
+    claimAllowed(5000000000, 0) => 5000000000
+    claimAllowed(5000000000, 1234) => 5000001234
+    claimAllowed(0, 1234) => 1234
+
+fn withinClaim(paid: Int, subsidy: Int, fees: Int) -> Bool
+    ? "Whether the coinbase claimed no more than it was allowed."
+      "No more rather than exactly: a miner may pay itself less, and many"
+      "have, either by mistake or on purpose. Those coins are simply never"
+      "created, which is why the total ever minted is below the total the"
+      "schedule allows."
+    paid <= claimAllowed(subsidy, fees)
+
+verify withinClaim
+    withinClaim(5000000000, 5000000000, 0) => true
+    withinClaim(4999999999, 5000000000, 0) => true
+    withinClaim(5000000001, 5000000000, 0) => false
+    withinClaim(5000001234, 5000000000, 1234) => true
+    withinClaim(5000001235, 5000000000, 1234) => false
+    withinClaim(0, 5000000000, 0) => true
+
+fn possibleSupply() -> Int
+    ? "Every satoshi the mainnet schedule will ever allow, added up."
+      "The check on the whole schedule, and the reason this module needs no"
+      "table of eras: the published total is 2,099,999,997,690,000 satoshis,"
+      "and only a schedule that halves on the right interval and truncates the"
+      "right way reaches it."
+    minted(Network.Mainnet, 0, 0)
+
+verify possibleSupply
+    possibleSupply() => 2099999997690000
+
+fn minted(network: Network, height: Int, acc: Int) -> Int
+    ? "The subsidy of every era from this Height up, times the Blocks in each."
+      "Walked one era at a time rather than one Block at a time -- every Block"
+      "of an era pays the same, so thirty-three multiplications answer what"
+      "would otherwise be thirteen million additions."
+    match atHeight(network, height) == 0
+        true -> acc
+        false -> minted(network, height + halvingInterval(network), acc + atHeight(network, height) * halvingInterval(network))
+
+verify minted
+    minted(Network.Mainnet, 0, 0) => 2099999997690000
+    minted(Network.Mainnet, 13440000, 0) => 0
+    minted(Network.Mainnet, 0, 7) => 2099999997690007
