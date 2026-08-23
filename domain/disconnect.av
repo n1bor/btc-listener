@@ -1,0 +1,135 @@
+module Disconnect
+    intent =
+        "Taking a Block back out of the UTXO Set, and whether that is still"
+        "possible."
+        "The reverse of connecting, and much simpler, because it does not have"
+        "to decide anything: the Block was accepted once, so everything it did"
+        "is already known. Delete every Output it created and put back"
+        "everything its Undo Data says it took."
+        "Deleting every Output it created rather than only the ones still"
+        "unspent. An Output created and spent inside the same Block is not in"
+        "the Set, so deleting it is a delete of nothing -- and working out"
+        "which ones those were would mean redoing the connect walk to learn"
+        "something that costs nothing to get wrong in this direction."
+        "The Undo Data is bounded, which is the one thing here that can fail."
+        "Keeping it for the whole chain would cost more than the chain does. A"
+        "reorganisation reaching below the window cannot be undone, and the"
+        "node has to say so and stop -- guessing would mean a UTXO Set that"
+        "silently disagrees with the chain it claims to be following, which is"
+        "the one failure a validating node must never have."
+    exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize]
+    depends [Domain.Transaction, Domain.UtxoStore]
+    effects []
+
+record Reversal
+    deleted: List<String>
+    restored: List<Unspent>
+
+type Undoable
+    Reversible
+    TooDeep(Int, Int)
+
+fn windowSize() -> Int
+    ? "How many Blocks of Undo Data are kept."
+      "Two hundred and eighty-eight is two days of Blocks at ten minutes"
+      "apiece. Deeper than any reorganisation Bitcoin has had -- the largest"
+      "was twenty-four Blocks, in March 2013, and that one was a consensus"
+      "split rather than a race -- and shallow enough that the Undo Data stays"
+      "a rounding error beside the Segments."
+    288
+
+verify windowSize
+    windowSize() => 288
+
+fn windowFrom(tipHeight: Int) -> Int
+    ? "The lowest Height whose Undo Data is still worth keeping."
+      "Counted from the tip, so it moves up as the chain grows. Never below"
+      "zero: a chain shorter than the window keeps all of it."
+    atLeastZero(tipHeight - windowSize() + 1)
+
+verify windowFrom
+    windowFrom(0) => 0
+    windowFrom(100) => 0
+    windowFrom(287) => 0
+    windowFrom(288) => 1
+    windowFrom(1000) => 713
+
+fn atLeastZero(height: Int) -> Int
+    ? "A Height, or zero where the arithmetic went below it."
+    match height < 0
+        true -> 0
+        false -> height
+
+verify atLeastZero
+    atLeastZero(5) => 5
+    atLeastZero(0) => 0
+    atLeastZero(0 - 5) => 0
+
+fn undoable(forkHeight: Int, undoBelow: Int) -> Undoable
+    ? "Whether a reorganisation back to this Height can still be undone."
+      "The fork Height is the last Height the two branches agree on, so the"
+      "Blocks to be taken back are the ones above it. The lowest of those is"
+      "one above the fork, and it has to be inside the window."
+      "The boundary is easy to state wrong by one, so both sides of it are"
+      "pinned: with the window holding from 713 up, a fork at 712 disconnects"
+      "713 and is fine, and a fork at 711 would have to disconnect 712 and is"
+      "not."
+    match forkHeight + 1 >= undoBelow
+        true -> Undoable.Reversible
+        false -> Undoable.TooDeep(forkHeight + 1, undoBelow)
+
+verify undoable
+    undoable(100, 0) => Undoable.Reversible
+    undoable(0, 0) => Undoable.Reversible
+    undoable(712, 713) => Undoable.Reversible
+    undoable(711, 713) => Undoable.TooDeep(712, 713)
+    undoable(500, 713) => Undoable.TooDeep(501, 713)
+
+fn reversal(transactions: List<Transaction>, undo: List<Unspent>) -> Reversal
+    ? "What taking this Block back out does to the Set."
+    Reversal(deleted = madeBy(transactions, []), restored = undo)
+
+verify reversal
+    reversal([], []) => Reversal(deleted = [], restored = [])
+    List.len(reversal([paying("t1", 2)], []).deleted) => 2
+    List.len(reversal([], [Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)]).restored) => 1
+
+fn madeBy(transactions: List<Transaction>, acc: List<String>) -> List<String>
+    ? "Every key the Block's Outputs were written under."
+    match transactions
+        [] -> List.reverse(acc)
+        [head, ..tail] -> madeBy(tail, keysOf(head.txid, head.outputs, 0, acc))
+
+verify madeBy
+    madeBy([], []) => []
+    madeBy([paying("t1", 1)], []) => ["u:t1:00000"]
+    madeBy([paying("t1", 1), paying("t2", 1)], []) => ["u:t1:00000", "u:t2:00000"]
+
+fn keysOf(txid: String, outputs: List<Output>, index: Int, acc: List<String>) -> List<String>
+    ? "One key per Output, counting positions."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> keysOf(txid, tail, index + 1, List.prepend(Domain.UtxoStore.unspentKey(txid, index), acc))
+
+verify keysOf
+    keysOf("t1", [], 0, []) => []
+    keysOf("t1", [Output(value = 1, script = "")], 0, []) => ["u:t1:00000"]
+    List.len(keysOf("t1", [Output(value = 1, script = ""), Output(value = 2, script = "")], 0, [])) => 2
+
+fn paying(txid: String, outputs: Int) -> Transaction
+    ? "A Transaction with that many Outputs, for the cases here."
+    Transaction(version = 1, inputs = [], outputs = someOutputs(outputs, []), lockTime = 0, txid = txid, size = 0, isSegWit = false)
+
+verify paying
+    List.len(paying("t1", 2).outputs) => 2
+    paying("t1", 0).txid => "t1"
+
+fn someOutputs(count: Int, acc: List<Output>) -> List<Output>
+    ? "That many Outputs of no particular value."
+    match count <= 0
+        true -> acc
+        false -> someOutputs(count - 1, List.prepend(Output(value = 1, script = ""), acc))
+
+verify someOutputs
+    someOutputs(0, []) => []
+    List.len(someOutputs(3, [])) => 3

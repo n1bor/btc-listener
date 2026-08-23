@@ -1,0 +1,278 @@
+module Utxo
+    intent =
+        "Connecting and disconnecting a Block against a Store."
+        "The deciding is Domain.Connect and Domain.Disconnect, both of which"
+        "are pure and carry their own cases. What is here is the part that"
+        "cannot be: reading the Outputs a Block's Inputs name, and writing the"
+        "answer down."
+        "Every Input the Block spends is looked up once, before anything is"
+        "decided. Some of those lookups come back empty and are not faults --"
+        "an Input may be spending an Output made earlier in the same Block,"
+        "which the Set does not hold and will not until the Block connects."
+        "Domain.Connect knows the difference; this only has to hand it"
+        "everything the Store could find."
+        "The three writes go together and in order: the Outputs the Block"
+        "made, the keys it spent, and the Undo Data that says what those keys"
+        "held. A Store that stopped between them would hold a Set that never"
+        "existed, so they are one batch."
+    exposes [Applied, connectBlock, disconnectBlock, prunedUndo]
+    depends [Domain.Connect, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
+    effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+
+record Applied
+    store: Store
+    added: Int
+    removed: Int
+    fees: Int
+
+fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
+    ? "Take this Block's spends out of the Set and put its Outputs in."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    fromStore = resolved(store, spentKeys(transactions, []), Map.fromList([]))?
+    written(store, blockId, Domain.Connect.connected(network, height, transactions, fromStore))
+
+fn written(store: Store, blockId: String, connection: Connection) -> Result<Applied, String>
+    ? "A refusal is a fact about the Block, not a failure of the Store."
+      "It still comes back as an Err: the caller asked for a Block to be"
+      "connected and it was not, and a node that carried on would be"
+      "following a chain it had not checked."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    match connection
+        Connection.Refused(why) -> Result.Err("Block {blockId} cannot connect: {why}")
+        Connection.Applied(change) -> applying(store, blockId, change)
+
+fn applying(store: Store, blockId: String, change: Change) -> Result<Applied, String>
+    ? "The Outputs, the spends and the Undo Data, in that order."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    grown = Infra.Store.putAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId), value = Domain.UtxoStore.encodeUndo(change.removed))]))?
+    shrunk = Infra.Store.deleteAll(grown, keysOf(change.removed, []))?
+    Result.Ok(Applied(store = shrunk, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees))
+
+fn entriesFor(added: List<Unspent>, acc: List<Entry>) -> List<Entry>
+    ? "One Set entry per Output the Block leaves unspent."
+    match added
+        [] -> acc
+        [head, ..tail] -> entriesFor(tail, List.prepend(Entry(key = Domain.UtxoStore.keyOf(head), value = Domain.UtxoStore.encodeCoin(head)), acc))
+
+verify entriesFor
+    entriesFor([], []) => []
+    List.len(entriesFor([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], [])) => 1
+    entriesFor([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], []) => [Entry(key = "u:aa:00000", value = "5::1:0")]
+
+fn keysOf(unspents: List<Unspent>, acc: List<String>) -> List<String>
+    ? "Where each of these Outputs lived."
+    match unspents
+        [] -> acc
+        [head, ..tail] -> keysOf(tail, List.prepend(Domain.UtxoStore.keyOf(head), acc))
+
+verify keysOf
+    keysOf([], []) => []
+    keysOf([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], []) => ["u:aa:00000"]
+
+fn spentKeys(transactions: List<Transaction>, acc: List<String>) -> List<String>
+    ? "Every Output this Block's Inputs name."
+      "The coinbase is the first Transaction and its Input names no Output, so"
+      "it is dropped rather than looked up. Everything else is asked for, even"
+      "the ones the Block itself is about to make -- the Store will not have"
+      "those, and Domain.Connect is what knows that is fine."
+    match transactions
+        [] -> acc
+        [coinbase, ..rest] -> namedBy(rest, acc)
+
+verify spentKeys
+    spentKeys([], []) => []
+    spentKeys([coinbaseTx()], []) => []
+    spentKeys([coinbaseTx(), spendingTx("aa", 0)], []) => ["u:aa:00000"]
+
+fn namedBy(transactions: List<Transaction>, acc: List<String>) -> List<String>
+    ? "The Outputs named by every Transaction after the coinbase."
+    match transactions
+        [] -> List.reverse(acc)
+        [head, ..tail] -> namedBy(tail, fromInputs(head.inputs, acc))
+
+verify namedBy
+    namedBy([], []) => []
+    namedBy([spendingTx("aa", 0)], []) => ["u:aa:00000"]
+
+fn fromInputs(inputs: List<Input>, acc: List<String>) -> List<String>
+    ? "One key per Input, skipping any that names no Transaction."
+    match inputs
+        [] -> acc
+        [head, ..tail] -> fromInputs(tail, keptUnlessCoinbase(head, acc))
+
+verify fromInputs
+    fromInputs([], []) => []
+    List.len(fromInputs([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], [])) => 1
+
+fn keptUnlessCoinbase(input: Input, acc: List<String>) -> List<String>
+    ? "An Input naming the empty Transaction Id spends nothing."
+    match Domain.Spend.isCoinbaseInput(input.previousTxid)
+        true -> acc
+        false -> List.prepend(Domain.Connect.outpointKey(input.previousTxid, input.previousIndex), acc)
+
+verify keptUnlessCoinbase
+    keptUnlessCoinbase(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), []) => ["u:aa:00000"]
+    keptUnlessCoinbase(Input(previousTxid = Domain.Spend.coinbaseTxid(), previousIndex = 0, script = "", sequence = 0, witness = []), []) => []
+
+fn resolved(store: Store, keys: List<String>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+    ? "Everything the Set holds for these keys."
+      "A key the Set does not hold is left out rather than recorded as absent."
+      "Domain.Connect looks in its own Map first and treats a miss in both as"
+      "an Input naming nothing, which is the same answer either way."
+    ! [Infra.Kv.get]
+    match keys
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> oneResolved(store, head, tail, acc)
+
+fn oneResolved(store: Store, key: String, rest: List<String>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+    ? "Look this one up, then carry on with the rest."
+    ! [Infra.Kv.get]
+    text = Infra.Store.get(store, key)?
+    carried = keptIfFound(key, text, acc)?
+    resolved(store, rest, carried)
+
+fn keptIfFound(key: String, text: Option<String>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+    ? "A Set entry that will not decode is corruption and stops the walk."
+    match text
+        Option.None -> Result.Ok(acc)
+        Option.Some(value) -> decodedInto(key, value, acc)
+
+verify keptIfFound
+    Map.len(keptIfFound("u:aa:00000", Option.None, Map.fromList([]))?) => 0
+    Map.len(keptIfFound("u:aa:00000", Option.Some("5::1:0"), Map.fromList([]))?) => 1
+    keptIfFound("u:aa:00000", Option.Some("nonsense"), Map.fromList([])) => Result.Err("Set entry must be value:script:height:coinbase, got 'nonsense'")
+
+fn decodedInto(key: String, value: String, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+    ? "The entry, keyed as the caller will ask for it."
+      "The Transaction Id and position are read back out of the key, because"
+      "the Set does not repeat them in the value."
+    match Domain.UtxoStore.decodeCoin(txidIn(key), indexIn(key), value)
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(unspent) -> Result.Ok(Map.set(acc, key, unspent))
+
+verify decodedInto
+    Map.len(decodedInto("u:aa:00000", "5::1:0", Map.fromList([]))?) => 1
+    Map.get(decodedInto("u:aa:00000", "5::1:0", Map.fromList([]))?, "u:aa:00000") => Option.Some(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))
+    decodedInto("u:aa:00000", "nonsense", Map.fromList([])) => Result.Err("Set entry must be value:script:height:coinbase, got 'nonsense'")
+
+fn txidIn(key: String) -> String
+    ? "The Transaction Id a Set key names."
+      "Total: every key here was built by Domain.UtxoStore.unspentKey and so"
+      "has three colon-separated parts; the fallback is unreachable."
+    partAt(String.split(key, ":"), 1)
+
+verify txidIn
+    txidIn("u:aa:00000") => "aa"
+    txidIn("") => ""
+
+fn indexIn(key: String) -> Int
+    ? "The Output position a Set key names."
+      "Total: as txidIn, the key was built by unspentKey."
+    Result.withDefault(Int.fromString(partAt(String.split(key, ":"), 2)), 0)
+
+verify indexIn
+    indexIn("u:aa:00000") => 0
+    indexIn("u:aa:00012") => 12
+    indexIn("") => 0
+
+fn partAt(pieces: List<String>, wanted: Int) -> String
+    ? "One field of a split key, counting from zero."
+    match pieces
+        [] -> ""
+        [head, ..tail] -> hereOrOn(head, tail, wanted)
+
+verify partAt
+    partAt([], 0) => ""
+    partAt(["u", "aa", "0"], 1) => "aa"
+    partAt(["u", "aa", "0"], 9) => ""
+
+fn hereOrOn(head: String, tail: List<String>, wanted: Int) -> String
+    ? "This field when the count runs out, the rest otherwise."
+    match wanted <= 0
+        true -> head
+        false -> partAt(tail, wanted - 1)
+
+verify hereOrOn
+    hereOrOn("a", [], 0) => "a"
+    hereOrOn("a", ["b"], 1) => "b"
+
+fn disconnectBlock(store: Store, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
+    ? "Take this Block back out of the Set, from what it recorded on the way in."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    held = Infra.Store.get(store, Domain.UtxoStore.undoKey(blockId))?
+    reversing(store, blockId, transactions, held)
+
+fn reversing(store: Store, blockId: String, transactions: List<Transaction>, held: Option<String>) -> Result<Applied, String>
+    ? "No Undo Data means the Block was never connected, or the window has passed it."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    match held
+        Option.None -> Result.Err("Block {blockId} has no Undo Data, so it cannot be disconnected")
+        Option.Some(text) -> undoing(store, blockId, transactions, Domain.UtxoStore.decodeUndo(text))
+
+fn undoing(store: Store, blockId: String, transactions: List<Transaction>, undo: Result<List<Unspent>, String>) -> Result<Applied, String>
+    ? "Undo Data that will not decode is corruption."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    match undo
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(removed) -> reversed(store, blockId, Domain.Disconnect.reversal(transactions, removed))
+
+fn reversed(store: Store, blockId: String, reversal: Reversal) -> Result<Applied, String>
+    ? "Put back what was taken, take out what was made, and forget the record."
+      "Restoring before deleting, so that an Output this Block both made and"
+      "spent is deleted rather than left behind: it is in neither list, but a"
+      "Set that was written in the other order could still be holding one."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    restored = Infra.Store.putAll(store, entriesFor(reversal.restored, []))?
+    cleared = Infra.Store.deleteAll(restored, List.prepend(Domain.UtxoStore.undoKey(blockId), reversal.deleted))?
+    Result.Ok(Applied(store = cleared, added = List.len(reversal.restored), removed = List.len(reversal.deleted), fees = 0))
+
+fn prunedUndo(store: Store, tipHeight: Int) -> Result<Store, String>
+    ? "Forget the Undo Data of Blocks the window has moved past."
+      "Walks up from where it last got to, so it does not rescan the chain"
+      "every Block. The record it keeps is the lowest Height still held."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    below = Infra.Store.get(store, Domain.UtxoStore.undoWindowKey())?
+    sweeping(store, Domain.Index.prunedBelowOf(below)?, Domain.Disconnect.windowFrom(tipHeight), [])
+
+fn sweeping(store: Store, from: Int, target: Int, acc: List<String>) -> Result<Store, String>
+    ? "One Height at a time up to the window's new floor."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    match from >= target
+        true -> marked(store, target, acc)
+        false -> undoAt(store, from, target, acc)
+
+fn undoAt(store: Store, from: Int, target: Int, acc: List<String>) -> Result<Store, String>
+    ? "The Block this Height names, and its Undo Data record."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    named = Infra.Store.get(store, Domain.Index.heightKey(from))?
+    sweeping(store, from + 1, target, gathered(named, acc))
+
+fn gathered(named: Option<String>, acc: List<String>) -> List<String>
+    ? "A Height that names no Block leaves nothing to forget."
+    match named
+        Option.None -> acc
+        Option.Some(blockId) -> List.prepend(Domain.UtxoStore.undoKey(blockId), acc)
+
+verify gathered
+    gathered(Option.None, []) => []
+    gathered(Option.Some("aa"), []) => ["d:aa"]
+
+fn marked(store: Store, target: Int, acc: List<String>) -> Result<Store, String>
+    ? "Delete what was gathered and record how far the window now reaches."
+    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    swept = Infra.Store.deleteAll(store, acc)?
+    Infra.Store.putAll(swept, [Entry(key = Domain.UtxoStore.undoWindowKey(), value = Domain.Index.encodeHeight(target))])
+
+fn coinbaseTx() -> Transaction
+    ? "A coinbase, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = Domain.Spend.coinbaseTxid(), previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [Output(value = 50, script = "")], lockTime = 0, txid = "cb", size = 0, isSegWit = false)
+
+verify coinbaseTx
+    coinbaseTx().txid => "cb"
+
+fn spendingTx(txid: String, index: Int) -> Transaction
+    ? "A Transaction spending one named Output, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = txid, previousIndex = index, script = "", sequence = 0, witness = [])], outputs = [Output(value = 40, script = "")], lockTime = 0, txid = "t1", size = 0, isSegWit = false)
+
+verify spendingTx
+    spendingTx("aa", 0).txid => "t1"
