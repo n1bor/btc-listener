@@ -1,0 +1,238 @@
+module ChainState
+    intent =
+        "Building the UTXO Set by connecting Blocks, one Height at a time."
+        "The walk that makes Stage 2 a thing you can run. Where the outputs"
+        "phase records what every Block created and never looks back, this"
+        "connects each Block against the Set the one below it left, so it can"
+        "say that value was conserved rather than only that Outputs existed."
+        "It has no range. A UTXO Set is the state after connecting every Block"
+        "up to one Height, so the only thing it can be asked for is a Height"
+        "to reach; where it resumes from is whatever it last recorded."
+        "It starts at Height 1. Genesis is the base of the chain rather than a"
+        "Block that connects -- no Peer sends its body and its Output cannot"
+        "be spent, which is why the fifty coins of Block 0 are missing from"
+        "the supply that can ever move."
+        "A Height whose body is not held ends the walk rather than being"
+        "stepped over, which is the opposite of what the outputs phase does"
+        "and for a reason: a skipped Block leaves a Set that never existed,"
+        "and every Block after it would be checked against a lie. The outputs"
+        "keyspace can afford a gap because each entry stands alone."
+        "A Block that will not connect stops the walk with the reason. That is"
+        "a consensus failure, not a fault to be counted and walked past: the"
+        "chain the Index is following is not one this program can follow."
+    exposes [Built, build]
+    depends [Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Store, Infra.Utxo]
+    effects [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+
+record Built
+    blocks: Int
+    added: Int
+    removed: Int
+    fees: Int
+    reached: Int
+
+record Walk
+    store: Store
+    blocks: BlockStore
+    counted: Built
+    pace: Pace
+
+fn build(network: Network, store: Store, blocks: BlockStore, to: Int) -> Result<Built, String>
+    ? "Connect every Block from where the Set stands up to this Height."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    from = resumeAt(store)?
+    _said = Console.print("utxo    connecting {from}..{to}")
+    walked = walk(network, Walk(store = store, blocks = blocks, counted = Built(blocks = 0, added = 0, removed = 0, fees = 0, reached = from - 1), pace = Infra.Pace.pacedFrom(Time.unixMs())), from, to)?
+    swept = Infra.Utxo.prunedUndo(walked.store, walked.counted.reached)?
+    _told = claimTold(swept, walked.counted.reached)?
+    Result.Ok(walked.counted)
+
+fn resumeAt(store: Store) -> Result<Int, String>
+    ? "The Height after the last one connected, or zero for an empty Set."
+    ! [Infra.Kv.get]
+    held = Infra.Store.get(store, Domain.UtxoStore.setHeightKey())?
+    nextAfter(held)
+
+verify resumeAt
+    resumeAt(Infra.Store.fixture([])) => Result.Ok(1)
+    resumeAt(Infra.Store.fixture([("meta:setTo", "5")])) => Result.Ok(6)
+
+fn nextAfter(held: Option<String>) -> Result<Int, String>
+    ? "Nothing recorded means nothing connected, so the walk starts at Height 1."
+      "One rather than zero, because genesis is not a Block that connects. It"
+      "is the base the chain is measured from: no Peer will send its body, and"
+      "its Output is not spendable -- Bitcoin Core never puts it in the UTXO"
+      "Set either, which is why the fifty coins of Block 0 are missing from"
+      "the supply that can ever move. Starting at zero would find no body and"
+      "stop before it began."
+    match held
+        Option.None -> Result.Ok(1)
+        Option.Some(text) -> oneAbove(Domain.Index.decodeHeight(text))
+
+verify nextAfter
+    nextAfter(Option.None) => Result.Ok(1)
+    nextAfter(Option.Some("5")) => Result.Ok(6)
+    nextAfter(Option.Some("x")) => Result.Err("Height must be a whole number, got 'x'")
+
+fn oneAbove(height: Result<Int, String>) -> Result<Int, String>
+    ? "The Height after the one recorded."
+    match height
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(at) -> Result.Ok(at + 1)
+
+verify oneAbove
+    oneAbove(Result.Ok(5)) => Result.Ok(6)
+    oneAbove(Result.Err("no")) => Result.Err("no")
+
+fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "Each Height in turn, stopping at the first one the chain cannot supply."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    match height > to
+        true -> Result.Ok(state)
+        false -> atHeight(network, state, height, to)
+
+fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
+    ? "A Height the Index does not name ends the walk."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    named = Infra.Store.get(state.store, Domain.Index.heightKey(height))?
+    match named
+        Option.None -> Result.Ok(state)
+        Option.Some(blockId) -> atBlock(network, state, height, to, blockId)
+
+fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
+    ? "A Block whose body is not held ends the walk too."
+      "Stepping over it would connect the next Block against a Set that never"
+      "existed. The outputs phase can step over a gap; this cannot."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    located = Infra.Store.get(state.store, Domain.Index.blockKey(blockId))?
+    match located
+        Option.None -> Result.Ok(state)
+        Option.Some(text) -> connecting(network, state, height, to, blockId, text)
+
+fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+    ? "Read the Block and put it into the Set."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    location = Domain.Index.decodeLocation(text)?
+    payload = Infra.Blocks.read(state.blocks, location)?
+    transactions = Domain.Block.transactionsOf(payload)?
+    applied = Infra.Utxo.connectBlock(network, state.store, height, blockId, transactions)?
+    recorded(network, state, height, to, applied)
+
+fn recorded(network: Network, state: Walk, height: Int, to: Int, applied: Applied) -> Result<Walk, String>
+    ? "Count it, write how far the Set now reaches, and go on."
+      "The Height is written every Block rather than at the end, because a"
+      "walk that stopped would otherwise leave a Set whose contents and whose"
+      "recorded Height disagree -- and the recorded Height is the only thing"
+      "that says what the Set means."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    counted = Built(blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height)
+    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.setHeightKey(), value = Domain.Index.encodeHeight(height))])?
+    stepped = maybeReport(height, counted, state.pace)?
+    walk(network, Walk(store = marked, blocks = state.blocks, counted = counted, pace = stepped), height + 1, to)
+
+fn maybeReport(height: Int, counted: Built, pace: Pace) -> Result<Pace, String>
+    ? "Say where the walk has got to, about once a minute."
+    ! [Console.print, Time.now, Time.unixMs]
+    nowMs = Time.unixMs()
+    match Infra.Pace.due(pace, nowMs, counted.blocks)
+        false -> Result.Ok(pace)
+        true -> reported(height, counted, pace, nowMs)
+
+fn reported(height: Int, counted: Built, pace: Pace, nowMs: Int) -> Result<Pace, String>
+    ? "One progress line, and the Pace the next one measures from."
+      "Outputs into the Set and out of it, because those are what the work is"
+      "and the Block rate says little once Blocks stop being small."
+    ! [Console.print, Time.now]
+    _said = Console.print("  {Time.now()}  height {height}: {counted.blocks} blocks, set +{counted.added} -{counted.removed}, recent {Infra.Pace.perSecond(counted.blocks - pace.lastBlocks, nowMs - pace.lastMs)} blocks/s {Infra.Pace.perSecond(counted.added - pace.lastItems, nowMs - pace.lastMs)} outputs/s, overall {Infra.Pace.perSecond(counted.blocks, nowMs - pace.startedMs)} blocks/s")
+    Result.Ok(Infra.Pace.advanced(pace, nowMs, counted.blocks, counted.added))
+
+fn claimTold(store: Store, reached: Int) -> Result<Unit, String>
+    ? "Say what the Assume-valid Height covered, and whether it still holds."
+      "Printed at the end of every walk rather than only when it is set,"
+      "because a claim nobody restates is a claim nobody checks."
+    ! [Console.print, Infra.Kv.get]
+    held = Infra.Store.get(store, Domain.AssumeValid.claimKey())?
+    claim = claimIn(held)?
+    standingTold(store, claim, reached)
+
+fn claimIn(held: Option<String>) -> Result<Option<Claim>, String>
+    ? "The claim the Store holds, if it holds one."
+    match held
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(text) -> someClaim(Domain.AssumeValid.decodeClaim(text))
+
+verify claimIn
+    claimIn(Option.None) => Result.Ok(Option.None)
+    claimIn(Option.Some("100:aa")) => Result.Ok(Option.Some(Claim(height = 100, blockId = "aa")))
+    claimIn(Option.Some("x:aa")) => Result.Err("Assume-valid Height must be a whole number, got 'x:aa'")
+
+fn someClaim(decoded: Result<Claim, String>) -> Result<Option<Claim>, String>
+    ? "A claim that will not decode is corruption."
+    match decoded
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(claim) -> Result.Ok(Option.Some(claim))
+
+verify someClaim
+    someClaim(Result.Ok(Claim(height = 1, blockId = "aa"))) => Result.Ok(Option.Some(Claim(height = 1, blockId = "aa")))
+    someClaim(Result.Err("no")) => Result.Err("no")
+
+fn standingTold(store: Store, claim: Option<Claim>, reached: Int) -> Result<Unit, String>
+    ? "Look up what the Index names at the claimed Height, and report."
+    ! [Console.print, Infra.Kv.get]
+    namedNow = heldAt(store, claim)?
+    Result.Ok(said(Domain.AssumeValid.standing(claim, namedNow), Domain.AssumeValid.skippedBelow(claim, reached)))
+
+fn heldAt(store: Store, claim: Option<Claim>) -> Result<Option<String>, String>
+    ? "What h: names at the claimed Height, if there is a claim to check."
+    ! [Infra.Kv.get]
+    match claim
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(held) -> Infra.Store.get(store, Domain.Index.heightKey(held.height))
+
+fn said(standing: Standing, skipped: Int) -> Unit
+    ? "One line, and a loud one when the claim has been undermined."
+    ! [Console.print]
+    match standing
+        Standing.Unset -> Console.print("scripts every Block above the Assume-valid Height; none is set, so none were skipped")
+        Standing.Holding(height) -> Console.print("scripts deferred below Height {height}: {skipped} Block(s) not run, and the pinned Block is still there")
+        Standing.Broken(height, why) -> broken(height, why)
+
+fn broken(height: Int, why: String) -> Unit
+    ? "The claim pinned a Block the Index no longer names at that Height."
+    ! [Console.print]
+    Console.print("ASSUME-VALID BROKEN at Height {height}: {why}. The skipped Blocks are not the Blocks there now; re-run audit over that range or clear the claim")

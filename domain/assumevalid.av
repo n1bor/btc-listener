@@ -1,0 +1,189 @@
+module AssumeValid
+    intent =
+        "The Height below which Scripts are taken as settled, and the Block Id"
+        "that keeps that claim honest."
+        "ADR 0007: the node follows the chain with an Assume-valid Height and"
+        "audit fully verifies ranges behind it. Below the Height, Scripts are"
+        "not run; merkle roots, parent links, work, value accounting and the"
+        "UTXO Set are all still checked. Above it, everything is verified."
+        "A Height alone would be a claim about a chain rather than about"
+        "these Blocks, so the claim pins the Block Id as well -- the one the"
+        "Index held at that Height when the claim was made. If a"
+        "reorganisation later moves that Height onto a different Block, the"
+        "Blocks that were skipped are not the Blocks now sitting there and the"
+        "claim is void. Detected, rather than trusted."
+        "No default. Bitcoin Core ships a constant per Network; this does not,"
+        "because a constant nobody here can check is exactly the kind of"
+        "borrowed claim the rest of the project refuses. Unset means every"
+        "Script runs, which is the auditor's stance and the safe one."
+    exposes [Claim, Standing, claimKey, encodeClaim, decodeClaim, runsScriptsAt, standing, skippedBelow]
+    depends [Domain.Index]
+    effects []
+
+record Claim
+    height: Int
+    blockId: String
+
+type Standing
+    Unset
+    Holding(Int)
+    Broken(Int, String)
+
+fn claimKey() -> String
+    ? "The single record naming the Assume-valid Height and the Block it pins."
+    "meta:assumeValid"
+
+verify claimKey
+    claimKey() => "meta:assumeValid"
+
+fn encodeClaim(claim: Claim) -> String
+    ? "The Height, and the Block the Index held there when the claim was made."
+    "{claim.height}:{claim.blockId}"
+
+verify encodeClaim
+    encodeClaim(Claim(height = 0, blockId = "aa")) => "0:aa"
+    encodeClaim(Claim(height = 700000, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")) => "700000:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+fn decodeClaim(text: String) -> Result<Claim, String>
+    ? "Read it back."
+    claimParts(text, String.split(text, ":"))
+
+verify decodeClaim
+    decodeClaim("0:aa") => Result.Ok(Claim(height = 0, blockId = "aa"))
+    decodeClaim("700000:bb") => Result.Ok(Claim(height = 700000, blockId = "bb"))
+    decodeClaim("") => Result.Err("Assume-valid claim must be height:blockId, got ''")
+    decodeClaim("700000") => Result.Err("Assume-valid claim must be height:blockId, got '700000'")
+    decodeClaim("700000:bb:cc") => Result.Err("Assume-valid claim must be height:blockId, got '700000:bb:cc'")
+    decodeClaim("x:bb") => Result.Err("Assume-valid Height must be a whole number, got 'x:bb'")
+
+fn claimParts(text: String, split: List<String>) -> Result<Claim, String>
+    ? "The Height comes first."
+    match split
+        [] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
+        [height, ..rest] -> afterHeight(text, height, rest)
+
+verify claimParts
+    claimParts("0:aa", ["0", "aa"]) => Result.Ok(Claim(height = 0, blockId = "aa"))
+    claimParts("", []) => Result.Err("Assume-valid claim must be height:blockId, got ''")
+
+fn afterHeight(text: String, height: String, rest: List<String>) -> Result<Claim, String>
+    ? "The Block Id is last, and nothing follows it."
+    match rest
+        [] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
+        [blockId, ..extra] -> afterBlockId(text, height, blockId, extra)
+
+verify afterHeight
+    afterHeight("0:aa", "0", ["aa"]) => Result.Ok(Claim(height = 0, blockId = "aa"))
+    afterHeight("0", "0", []) => Result.Err("Assume-valid claim must be height:blockId, got '0'")
+
+fn afterBlockId(text: String, height: String, blockId: String, extra: List<String>) -> Result<Claim, String>
+    ? "Refuse a third field, then read the Height."
+    match extra
+        [] -> numbered(text, Domain.Index.decodeHeight(height), blockId)
+        [head, ..tail] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
+
+verify afterBlockId
+    afterBlockId("0:aa", "0", "aa", []) => Result.Ok(Claim(height = 0, blockId = "aa"))
+    afterBlockId("0:aa:bb", "0", "aa", ["bb"]) => Result.Err("Assume-valid claim must be height:blockId, got '0:aa:bb'")
+
+fn numbered(text: String, height: Result<Int, String>, blockId: String) -> Result<Claim, String>
+    ? "The Height has to be a whole number."
+    match height
+        Result.Err(why) -> Result.Err("Assume-valid Height must be a whole number, got '{text}'")
+        Result.Ok(at) -> Result.Ok(Claim(height = at, blockId = blockId))
+
+verify numbered
+    numbered("0:aa", Result.Ok(0), "aa") => Result.Ok(Claim(height = 0, blockId = "aa"))
+    numbered("x:aa", Result.Err("no"), "aa") => Result.Err("Assume-valid Height must be a whole number, got 'x:aa'")
+
+fn runsScriptsAt(height: Int, claim: Option<Claim>) -> Bool
+    ? "Whether the Scripts of the Block at this Height are run."
+      "Strictly above the claimed Height, so the pinned Block itself is one of"
+      "the skipped ones -- which is what pinning it is for: the claim covers"
+      "everything up to and including the Block it names."
+      "No claim runs everything. That is the safe direction: a node with no"
+      "Assume-valid Height is slower and says less, never more."
+    match claim
+        Option.None -> true
+        Option.Some(held) -> height > held.height
+
+verify runsScriptsAt
+    runsScriptsAt(0, Option.None) => true
+    runsScriptsAt(999999, Option.None) => true
+    runsScriptsAt(100, Option.Some(Claim(height = 100, blockId = "aa"))) => false
+    runsScriptsAt(99, Option.Some(Claim(height = 100, blockId = "aa"))) => false
+    runsScriptsAt(101, Option.Some(Claim(height = 100, blockId = "aa"))) => true
+
+fn standing(claim: Option<Claim>, namedNow: Option<String>) -> Standing
+    ? "Whether the claim still describes the chain the Index is following."
+      "namedNow is what h: holds at the claimed Height today. The same Block"
+      "Id means the skipped Blocks are still the Blocks that were skipped. A"
+      "different one, or none, means a reorganisation has moved the ground"
+      "under the claim and it no longer says anything."
+    match claim
+        Option.None -> Standing.Unset
+        Option.Some(held) -> against(held, namedNow)
+
+verify standing
+    standing(Option.None, Option.None) => Standing.Unset
+    standing(Option.None, Option.Some("aa")) => Standing.Unset
+    standing(Option.Some(Claim(height = 100, blockId = "aa")), Option.Some("aa")) => Standing.Holding(100)
+    standing(Option.Some(Claim(height = 100, blockId = "aa")), Option.Some("bb")) => Standing.Broken(100, "the Index now names bb there")
+    standing(Option.Some(Claim(height = 100, blockId = "aa")), Option.None) => Standing.Broken(100, "the Index names no Block there")
+
+fn against(held: Claim, namedNow: Option<String>) -> Standing
+    ? "The pinned Block Id against what the Index names there now."
+    match namedNow
+        Option.None -> Standing.Broken(held.height, "the Index names no Block there")
+        Option.Some(blockId) -> matching(held, blockId)
+
+verify against
+    against(Claim(height = 100, blockId = "aa"), Option.Some("aa")) => Standing.Holding(100)
+    against(Claim(height = 100, blockId = "aa"), Option.None) => Standing.Broken(100, "the Index names no Block there")
+
+fn matching(held: Claim, blockId: String) -> Standing
+    ? "The same Block, or a different one."
+    match held.blockId == blockId
+        true -> Standing.Holding(held.height)
+        false -> Standing.Broken(held.height, "the Index now names {blockId} there")
+
+verify matching
+    matching(Claim(height = 100, blockId = "aa"), "aa") => Standing.Holding(100)
+    matching(Claim(height = 100, blockId = "aa"), "bb") => Standing.Broken(100, "the Index now names bb there")
+
+fn skippedBelow(claim: Option<Claim>, reached: Int) -> Int
+    ? "How many Heights of a walk had their Scripts taken as settled."
+      "What the node has to be able to say. A claim deferred is only honest if"
+      "the size of the deferral is reportable, which is the same discipline"
+      "the Prune Watermark carries."
+    match claim
+        Option.None -> 0
+        Option.Some(held) -> countedTo(held.height, reached)
+
+verify skippedBelow
+    skippedBelow(Option.None, 500) => 0
+    skippedBelow(Option.Some(Claim(height = 100, blockId = "aa")), 500) => 101
+    skippedBelow(Option.Some(Claim(height = 100, blockId = "aa")), 50) => 51
+    skippedBelow(Option.Some(Claim(height = 100, blockId = "aa")), 0 - 1) => 0
+
+fn countedTo(claimHeight: Int, reached: Int) -> Int
+    ? "The Heights at or below the claim that the walk actually covered."
+    match reached < claimHeight
+        true -> atLeastZero(reached + 1)
+        false -> claimHeight + 1
+
+verify countedTo
+    countedTo(100, 500) => 101
+    countedTo(100, 100) => 101
+    countedTo(100, 50) => 51
+    countedTo(100, 0 - 1) => 0
+
+fn atLeastZero(count: Int) -> Int
+    ? "Never below zero."
+    match count < 0
+        true -> 0
+        false -> count
+
+verify atLeastZero
+    atLeastZero(5) => 5
+    atLeastZero(0 - 1) => 0

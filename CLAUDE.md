@@ -64,9 +64,10 @@ Three flags are load-bearing and easy to drop:
   still needs its own `aver.toml` with an **absolute** provider path, or
   every case that reaches the curve fails.
 
-The twelve CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
-`tx`, `spend`, `audit`, `prune`, `reindex`, listen, `help`), their ordering
-constraints and their output formats are documented in README.md.
+The fourteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `utxo`,
+`assumevalid`, `show`, `tx`, `spend`, `audit`, `prune`, `reindex`, listen,
+`help`), their ordering constraints and their output formats are documented in
+README.md.
 
 ## Architecture
 

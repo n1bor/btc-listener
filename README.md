@@ -21,7 +21,7 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Twelve of them. Only the first three need a Peer; everything else reads what
+Fourteen of them. Only the first three need a Peer; everything else reads what
 those wrote and works offline.
 
 | command | what it does | Peer |
@@ -35,6 +35,8 @@ those wrote and works offline.
 | `tx <dir> <txid>` | [find](#finding-a-transaction) one Transaction by its Id | no |
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
+| `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
+| `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -588,6 +590,74 @@ anything else is a defect. Once a directory has been pruned that stops being
 true — a parent below the Watermark is gone deliberately — so unresolved counts
 those and the faults stay clean. A Transaction that is *wrong*, paying out more
 than it spends or naming an Output that cannot exist, is a fault either way.
+
+## The UTXO Set
+
+`outputs` records every Output ever created and never forgets one. `utxo` keeps
+the other kind of record — the Outputs nobody has spent yet — and it is the one
+that can say value was conserved rather than only that Outputs existed.
+
+```bash
+./target/release/main signet utxo ~/chain 3000
+```
+
+It takes a Height rather than a range, because a UTXO Set is the state after
+connecting every Block up to one Height; there is nothing a start Height could
+mean. It resumes from whatever it last recorded.
+
+Three rules are checked as each Block connects, and none of them is about
+signatures:
+
+- every Input finds an unspent Output it is allowed to spend — including the
+  hundred-Block wait on anything a coinbase minted
+- no Transaction pays out more than it takes in
+- the coinbase claims no more than the subsidy plus the fees the rest of the
+  Block left behind
+
+A Block that breaks one of them stops the walk with the reason. So does a
+Height whose body is not held: stepping over it would connect the next Block
+against a Set that never existed, and every Block after it would be checked
+against a lie. That is the opposite of what `outputs` does with a gap, and
+deliberately so — each `o:` entry stands alone, and a UTXO Set does not.
+
+Connecting a Block also writes its **Undo Data**: what it took out of the Set,
+so the removal can be reversed if that Block leaves the chain. That is kept for
+288 Blocks — two days, and deeper than any reorganisation Bitcoin has had. A
+reorganisation reaching below the window cannot be undone, and the node says so
+and stops rather than guessing.
+
+Genesis is not connected. It is the base the chain is measured from: no Peer
+sends its body and its Output cannot be spent, which is why the fifty coins of
+Block 0 are missing from the supply that can ever move. Bitcoin Core leaves it
+out of the UTXO Set for the same reason.
+
+### The Assume-valid Height
+
+```bash
+./target/release/main signet assumevalid ~/chain 2000
+```
+
+Below the Height, Scripts are not run; merkle roots, parent links, work, value
+accounting and the UTXO Set are all still checked. Above it, everything is
+verified. [ADR 0007](docs/adr/0007-two-claims-two-tools.md) has the reasoning,
+and `audit` is the other half of it: the tool that goes back and fully verifies
+any range, at whatever pace the engine and the disk allow.
+
+The claim is pinned to a **Block Id**, not a bare Height — the one the Index
+held there when the claim was made. If a reorganisation later moves that Height
+onto a different Block, the Blocks that were skipped are not the Blocks sitting
+there now, and every `utxo` run says so:
+
+```
+ASSUME-VALID BROKEN at Height 2000: the Index now names 000000... there.
+The skipped Blocks are not the Blocks there now; re-run audit over that range
+or clear the claim
+```
+
+There is no default. Bitcoin Core ships a constant per Network; this does not,
+because a constant nobody here can check is the kind of borrowed claim the rest
+of the project refuses. Unset means every Script runs, and every `utxo` run says
+that too.
 
 ## Reclaiming space
 

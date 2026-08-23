@@ -6,8 +6,8 @@ module Maintain
         "The first two write and claim the directory; audit only reads."
         "reindex is the recovery command: it rewrites every Block's Location"
         "from the Segments, for a directory whose Index was lost (#92, #93)."
-    exposes [prune, txIndex, outputs, audit, reindex]
-    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex]
+    exposes [prune, txIndex, outputs, audit, reindex, utxo, assumeValid]
+    depends [Domain.AssumeValid, Infra.ChainState, Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
@@ -292,3 +292,131 @@ fn said(outcome: Result<String, String>) -> Unit
     match outcome
         Result.Ok(line) -> Console.print(line)
         Result.Err(message) -> Console.error("error: {message}")
+
+fn utxo(network: Network, rest: List<String>) -> Unit
+    ? "Building the UTXO Set is local: a directory and a Height to reach."
+      "A Height rather than a range. The Set is the state after connecting"
+      "every Block up to one Height, so there is nothing a start Height could"
+      "mean -- it resumes from whatever it last recorded."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir> <height>")
+        [dir, ..more] -> utxoHeight(network, dir, more)
+
+fn utxoHeight(network: Network, dir: String, more: List<String>) -> Unit
+    ? "Take the Height that follows the directory."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    match more
+        [] -> Console.error("usage: <dir> <height>")
+        [height, ..extra] -> startUtxo(network, dir, Int.fromString(height))
+
+fn startUtxo(network: Network, dir: String, parsed: Result<Int, String>) -> Unit
+    ? "Build, or show the usage if the Height was not a whole number."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    match parsed
+        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Ok(to) -> said(utxoRun(network, dir, to))
+
+fn utxoRun(network: Network, dir: String, to: Int) -> Result<String, String>
+    ? "Connect Blocks into the UTXO Set up to the Height."
+    ! [
+        Console.print,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    _claimed = Infra.Lock.claim(dir, "utxo")?
+    Infra.Lock.releasingAfter(dir, utxoDone(network, dir, to))
+
+fn utxoDone(network: Network, dir: String, to: Int) -> Result<String, String>
+    ? "Build the Set, with the claim already taken."
+    ! [
+        Console.print,
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open("{dir}/blocks")?
+    built = Infra.ChainState.build(network, store, blocks, to)?
+    Result.Ok("{built.blocks} Blocks connected to Height {built.reached}; Set +{built.added} -{built.removed} Outputs, {built.fees} satoshis in fees")
+
+fn assumeValid(rest: List<String>) -> Unit
+    ? "Setting the Assume-valid Height is local: a directory and a Height."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir> <height>")
+        [dir, ..more] -> assumeValidHeight(dir, more)
+
+fn assumeValidHeight(dir: String, more: List<String>) -> Unit
+    ? "Take the Height that follows the directory."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match more
+        [] -> Console.error("usage: <dir> <height>")
+        [height, ..extra] -> startAssumeValid(dir, Int.fromString(height))
+
+fn startAssumeValid(dir: String, parsed: Result<Int, String>) -> Unit
+    ? "Set it, or show the usage if the Height was not a whole number."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match parsed
+        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Ok(height) -> said(assumeValidRun(dir, height))
+
+fn assumeValidRun(dir: String, height: Int) -> Result<String, String>
+    ? "Pin the claim to whatever Block the Index names at that Height."
+    ! [
+        Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText,
+        Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    _claimed = Infra.Lock.claim(dir, "assumevalid")?
+    Infra.Lock.releasingAfter(dir, assumeValidDone(dir, height))
+
+fn assumeValidDone(dir: String, height: Int) -> Result<String, String>
+    ? "Read the Block Id there and write the claim against it."
+      "Against the Block rather than the Height alone, so a reorganisation"
+      "under the claim is detected rather than trusted -- which is the whole"
+      "of ADR 0007's 'a pinned Block Id, not a bare Height'."
+    ! [Disk.exists, Disk.makeDir, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll]
+    store = Infra.Store.open(dir)?
+    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    pinned(store, height, named)
+
+fn pinned(store: Store, height: Int, named: Option<String>) -> Result<String, String>
+    ? "A Height the Index does not name cannot be claimed."
+    ! [Infra.Kv.putAll]
+    match named
+        Option.None -> Result.Err("the Index names no Block at Height {height}, so there is nothing to pin the claim to")
+        Option.Some(blockId) -> written(store, height, blockId)
+
+fn written(store: Store, height: Int, blockId: String) -> Result<String, String>
+    ? "The claim, recorded."
+    ! [Infra.Kv.putAll]
+    _stored = Infra.Store.putAll(store, [Entry(key = Domain.AssumeValid.claimKey(), value = Domain.AssumeValid.encodeClaim(Claim(height = height, blockId = blockId)))])?
+    Result.Ok("Assume-valid Height {height}, pinned to {blockId}; Scripts at or below it will not be run")

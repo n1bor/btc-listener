@@ -18,7 +18,7 @@ module Connect
         "answer. It must not be left in the Set, and it must not be in the"
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
-    exposes [Change, Connection, connected, paidBy, createdBy, outpointKey]
+    exposes [Change, Connecting, connected, paidBy, createdBy, outpointKey]
     depends [Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
@@ -27,7 +27,7 @@ record Change
     removed: List<Unspent>
     fees: Int
 
-type Connection
+type Connecting
     Applied(Change)
     Refused(String)
 
@@ -87,36 +87,36 @@ verify createdInto
     List.len(createdInto("aa", [Output(value = 5, script = "")], 0, false, 0, [])) => 1
     createdInto("aa", [Output(value = 5, script = "")], 3, true, 2, []) => [Unspent(txid = "aa", index = 2, value = 5, script = "", height = 3, coinbase = true)]
 
-fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<String, Unspent>) -> Connection
+fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<String, Unspent>) -> Connecting
     ? "What this Block does to the Set, or why it may not."
       "The first Transaction is the coinbase and is not asked to find its"
       "Inputs; every other one is. Its claim is checked last, because it can"
       "only be judged once the fees the rest of the Block left behind are"
       "known."
     match transactions
-        [] -> Connection.Refused("a Block must hold at least a coinbase")
+        [] -> Connecting.Refused("a Block must hold at least a coinbase")
         [coinbase, ..rest] -> withCoinbase(network, height, coinbase, rest, fromStore)
 
 verify connected
-    connected(Network.Mainnet, 0, [], Map.fromList([])) => Connection.Refused("a Block must hold at least a coinbase")
+    connected(Network.Mainnet, 0, [], Map.fromList([])) => Connecting.Refused("a Block must hold at least a coinbase")
     List.len(added(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding()))) => 2
     List.len(removedBy(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding()))) => 1
     feesOf(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding())) => 20
-    connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connection.Refused("Input names u:aa:00000, which this Block has already spent")
-    connected(Network.Mainnet, 1, [minting(50), paying("t1", "t2", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connection.Refused("Input names u:t2:00000, which is not an unspent Output")
-    connected(Network.Mainnet, 50, [minting(50), paying("t1", "cc", 0, 90)], holding()) => Connection.Refused("Input names u:cc:00000, a coinbase Output from Height 1 that is not spendable until 101")
+    connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connecting.Refused("Input names u:aa:00000, which this Block has already spent")
+    connected(Network.Mainnet, 1, [minting(50), paying("t1", "t2", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connecting.Refused("Input names u:t2:00000, which is not an unspent Output")
+    connected(Network.Mainnet, 50, [minting(50), paying("t1", "cc", 0, 90)], holding()) => Connecting.Refused("Input names u:cc:00000, a coinbase Output from Height 1 that is not spendable until 101")
     feesOf(connected(Network.Mainnet, 101, [minting(50), paying("t1", "cc", 0, 90)], holding())) => 10
-    connected(Network.Mainnet, 1, [minting(5000000000)], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
-    connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connection.Refused("coinbase claims 5000000001 with 5000000000 allowed")
-    connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    connected(Network.Mainnet, 1, [minting(5000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
+    connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
 
-fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<String, Unspent>) -> Connection
+fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<String, Unspent>) -> Connecting
     ? "The rest of the Block first, then what the coinbase is owed."
     settled(network, height, coinbase, walked(rest, height, fromStore, Result.Ok(seeded(coinbase, height))))
 
 verify withCoinbase
-    withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
-    withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connection.Refused("coinbase claims 6000000000 with 5000000000 allowed")
+    withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connecting.Refused("coinbase claims 6000000000 with 5000000000 allowed")
 
 fn seeded(coinbase: Transaction, height: Int) -> Building
     ? "The Block's own Outputs, before any of it has been spent."
@@ -281,33 +281,33 @@ verify weighed
     weighed(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 40, 10)?.fees => 10
     weighed(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 60, 0 - 10) => Result.Err("Transaction bb pays out 60 against 50 taken in")
 
-fn settled(network: Network, height: Int, coinbase: Transaction, building: Result<Building, String>) -> Connection
+fn settled(network: Network, height: Int, coinbase: Transaction, building: Result<Building, String>) -> Connecting
     ? "The coinbase's claim, judged against the subsidy and the fees."
     match building
-        Result.Err(why) -> Connection.Refused(why)
+        Result.Err(why) -> Connecting.Refused(why)
         Result.Ok(state) -> claimed(network, height, coinbase, state)
 
 verify settled
-    settled(Network.Mainnet, 1, minting(50), Result.Err("no")) => Connection.Refused("no")
-    settled(Network.Mainnet, 1, minting(50), Result.Ok(seeded(minting(50), 1))) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    settled(Network.Mainnet, 1, minting(50), Result.Err("no")) => Connecting.Refused("no")
+    settled(Network.Mainnet, 1, minting(50), Result.Ok(seeded(minting(50), 1))) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
 
-fn claimed(network: Network, height: Int, coinbase: Transaction, state: Building) -> Connection
+fn claimed(network: Network, height: Int, coinbase: Transaction, state: Building) -> Connecting
     ? "No more than the subsidy plus what the Block's fees left behind."
     allowed(paidBy(coinbase), Domain.Subsidy.atHeight(network, height), state)
 
 verify claimed
-    claimed(Network.Mainnet, 1, minting(5000000000), seeded(minting(5000000000), 1)) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
-    claimed(Network.Mainnet, 1, minting(5000000001), seeded(minting(5000000001), 1)) => Connection.Refused("coinbase claims 5000000001 with 5000000000 allowed")
+    claimed(Network.Mainnet, 1, minting(5000000000), seeded(minting(5000000000), 1)) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    claimed(Network.Mainnet, 1, minting(5000000001), seeded(minting(5000000001), 1)) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
 
-fn allowed(paid: Int, subsidy: Int, state: Building) -> Connection
+fn allowed(paid: Int, subsidy: Int, state: Building) -> Connecting
     ? "Within the claim, the Block's changes; over it, the reason."
     match Domain.Subsidy.withinClaim(paid, subsidy, state.fees)
-        false -> Connection.Refused("coinbase claims {paid} with {Domain.Subsidy.claimAllowed(subsidy, state.fees)} allowed")
-        true -> Connection.Applied(Change(added = Map.values(state.created), removed = List.reverse(state.removed), fees = state.fees))
+        false -> Connecting.Refused("coinbase claims {paid} with {Domain.Subsidy.claimAllowed(subsidy, state.fees)} allowed")
+        true -> Connecting.Applied(Change(added = Map.values(state.created), removed = List.reverse(state.removed), fees = state.fees))
 
 verify allowed
-    allowed(50, 50, seeded(minting(50), 1)) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
-    allowed(51, 50, seeded(minting(50), 1)) => Connection.Refused("coinbase claims 51 with 50 allowed")
+    allowed(50, 50, seeded(minting(50), 1)) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    allowed(51, 50, seeded(minting(50), 1)) => Connecting.Refused("coinbase claims 51 with 50 allowed")
 
 fn minting(value: Int) -> Transaction
     ? "A coinbase paying one Output, for the cases here."
@@ -343,32 +343,32 @@ verify paying
     paying("t1", "aa", 0, 90).txid => "t1"
     paidBy(paying("t1", "aa", 0, 90)) => 90
 
-fn added(connection: Connection) -> List<Unspent>
-    ? "What a Connection puts into the Set, or nothing when it was refused."
+fn added(connection: Connecting) -> List<Unspent>
+    ? "What a Connecting puts into the Set, or nothing when it was refused."
     match connection
-        Connection.Refused(why) -> []
-        Connection.Applied(change) -> change.added
+        Connecting.Refused(why) -> []
+        Connecting.Applied(change) -> change.added
 
 verify added
-    added(Connection.Refused("no")) => []
-    List.len(added(Connection.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+    added(Connecting.Refused("no")) => []
+    List.len(added(Connecting.Applied(Change(added = [], removed = [], fees = 0)))) => 0
 
-fn removedBy(connection: Connection) -> List<Unspent>
+fn removedBy(connection: Connecting) -> List<Unspent>
     ? "What it takes out, which is the Undo Data."
     match connection
-        Connection.Refused(why) -> []
-        Connection.Applied(change) -> change.removed
+        Connecting.Refused(why) -> []
+        Connecting.Applied(change) -> change.removed
 
 verify removedBy
-    removedBy(Connection.Refused("no")) => []
-    List.len(removedBy(Connection.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+    removedBy(Connecting.Refused("no")) => []
+    List.len(removedBy(Connecting.Applied(Change(added = [], removed = [], fees = 0)))) => 0
 
-fn feesOf(connection: Connection) -> Int
+fn feesOf(connection: Connecting) -> Int
     ? "What the Block left for its miner, or below zero when it was refused."
     match connection
-        Connection.Refused(why) -> 0 - 1
-        Connection.Applied(change) -> change.fees
+        Connecting.Refused(why) -> 0 - 1
+        Connecting.Applied(change) -> change.fees
 
 verify feesOf
-    feesOf(Connection.Refused("no")) => 0 - 1
-    feesOf(Connection.Applied(Change(added = [], removed = [], fees = 7))) => 7
+    feesOf(Connecting.Refused("no")) => 0 - 1
+    feesOf(Connecting.Applied(Change(added = [], removed = [], fees = 7))) => 7
