@@ -1,0 +1,374 @@
+module Connect
+    intent =
+        "What connecting a Block does to the UTXO Set, and whether it is"
+        "allowed to."
+        "Three rules, and none of them is about signatures. Every Input has to"
+        "find an unspent Output it is allowed to spend; no Transaction may pay"
+        "out more than it takes in; and the coinbase may claim no more than"
+        "the subsidy plus what the other Transactions left behind. Whether the"
+        "spender was entitled needs the Script engine, which runs above the"
+        "Assume-valid Height and not here."
+        "A Transaction may spend an Output made earlier in the same Block, so"
+        "the walk carries what the Block has created so far and looks there"
+        "before it looks at what the Store resolved. Getting that wrong in"
+        "either direction is a consensus bug: refusing them would reject real"
+        "Blocks, and letting a Transaction spend an Output made *later* in its"
+        "own Block would accept invented value."
+        "An Output created and spent inside one Block appears in neither"
+        "answer. It must not be left in the Set, and it must not be in the"
+        "Undo Data either -- restoring it on a disconnect would put back"
+        "something that never existed before this Block."
+    exposes [Change, Connection, connected, paidBy, createdBy, outpointKey]
+    depends [Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
+    effects []
+
+record Change
+    added: List<Unspent>
+    removed: List<Unspent>
+    fees: Int
+
+type Connection
+    Applied(Change)
+    Refused(String)
+
+record Building
+    created: Map<String, Unspent>
+    spent: Map<String, Bool>
+    removed: List<Unspent>
+    fees: Int
+
+fn outpointKey(txid: String, index: Int) -> String
+    ? "How an Input names the Output it spends."
+      "Domain.UtxoStore's key, so the Map the walk carries and the Store are"
+      "keyed alike and a lookup reads the same in both."
+    Domain.UtxoStore.unspentKey(txid, index)
+
+verify outpointKey
+    outpointKey("aa", 0) => "u:aa:00000"
+    outpointKey("aa", 12) => "u:aa:00012"
+
+fn paidBy(transaction: Transaction) -> Int
+    ? "Everything a Transaction pays out."
+    paidInto(transaction.outputs, 0)
+
+verify paidBy
+    paidBy(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "aa", size = 0, isSegWit = false)) => 0
+    paidBy(Transaction(version = 1, inputs = [], outputs = [Output(value = 5, script = "")], lockTime = 0, txid = "aa", size = 0, isSegWit = false)) => 5
+    paidBy(Transaction(version = 1, inputs = [], outputs = [Output(value = 5, script = ""), Output(value = 7, script = "")], lockTime = 0, txid = "aa", size = 0, isSegWit = false)) => 12
+
+fn paidInto(outputs: List<Output>, acc: Int) -> Int
+    ? "One Output's value at a time."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> paidInto(tail, acc + head.value)
+
+verify paidInto
+    paidInto([], 0) => 0
+    paidInto([Output(value = 5, script = "")], 0) => 5
+    paidInto([Output(value = 5, script = "")], 2) => 7
+
+fn createdBy(transaction: Transaction, height: Int, coinbase: Bool) -> List<Unspent>
+    ? "The Outputs a Transaction adds to the Set, in position order."
+    createdInto(transaction.txid, transaction.outputs, height, coinbase, 0, [])
+
+verify createdBy
+    createdBy(Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "aa", size = 0, isSegWit = false), 7, false) => []
+    List.len(createdBy(Transaction(version = 1, inputs = [], outputs = [Output(value = 5, script = "76"), Output(value = 7, script = "")], lockTime = 0, txid = "aa", size = 0, isSegWit = false), 7, false)) => 2
+    createdBy(Transaction(version = 1, inputs = [], outputs = [Output(value = 5, script = "76")], lockTime = 0, txid = "aa", size = 0, isSegWit = true), 7, true) => [Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = true)]
+
+fn createdInto(txid: String, outputs: List<Output>, height: Int, coinbase: Bool, index: Int, acc: List<Unspent>) -> List<Unspent>
+    ? "One Output at a time, counting positions as it goes."
+    match outputs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> createdInto(txid, tail, height, coinbase, index + 1, List.prepend(Unspent(txid = txid, index = index, value = head.value, script = head.script, height = height, coinbase = coinbase), acc))
+
+verify createdInto
+    createdInto("aa", [], 0, false, 0, []) => []
+    List.len(createdInto("aa", [Output(value = 5, script = "")], 0, false, 0, [])) => 1
+    createdInto("aa", [Output(value = 5, script = "")], 3, true, 2, []) => [Unspent(txid = "aa", index = 2, value = 5, script = "", height = 3, coinbase = true)]
+
+fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<String, Unspent>) -> Connection
+    ? "What this Block does to the Set, or why it may not."
+      "The first Transaction is the coinbase and is not asked to find its"
+      "Inputs; every other one is. Its claim is checked last, because it can"
+      "only be judged once the fees the rest of the Block left behind are"
+      "known."
+    match transactions
+        [] -> Connection.Refused("a Block must hold at least a coinbase")
+        [coinbase, ..rest] -> withCoinbase(network, height, coinbase, rest, fromStore)
+
+verify connected
+    connected(Network.Mainnet, 0, [], Map.fromList([])) => Connection.Refused("a Block must hold at least a coinbase")
+    List.len(added(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding()))) => 2
+    List.len(removedBy(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding()))) => 1
+    feesOf(connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "t1", 0, 80)], holding())) => 20
+    connected(Network.Mainnet, 1, [minting(50), paying("t1", "aa", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connection.Refused("Input names u:aa:00000, which this Block has already spent")
+    connected(Network.Mainnet, 1, [minting(50), paying("t1", "t2", 0, 90), paying("t2", "aa", 0, 80)], holding()) => Connection.Refused("Input names u:t2:00000, which is not an unspent Output")
+    connected(Network.Mainnet, 50, [minting(50), paying("t1", "cc", 0, 90)], holding()) => Connection.Refused("Input names u:cc:00000, a coinbase Output from Height 1 that is not spendable until 101")
+    feesOf(connected(Network.Mainnet, 101, [minting(50), paying("t1", "cc", 0, 90)], holding())) => 10
+    connected(Network.Mainnet, 1, [minting(5000000000)], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connection.Refused("coinbase claims 5000000001 with 5000000000 allowed")
+    connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+
+fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<String, Unspent>) -> Connection
+    ? "The rest of the Block first, then what the coinbase is owed."
+    settled(network, height, coinbase, walked(rest, height, fromStore, Result.Ok(seeded(coinbase, height))))
+
+verify withCoinbase
+    withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connection.Refused("coinbase claims 6000000000 with 5000000000 allowed")
+
+fn seeded(coinbase: Transaction, height: Int) -> Building
+    ? "The Block's own Outputs, before any of it has been spent."
+      "The coinbase's Outputs go in first because a later Transaction in the"
+      "same Block may not spend them -- a coinbase waits a hundred Blocks --"
+      "but they still have to be in the Set at the end."
+    Building(created = intoMap(createdBy(coinbase, height, true), Map.fromList([])), spent = Map.fromList([]), removed = [], fees = 0)
+
+verify seeded
+    Map.len(seeded(minting(50), 1).created) => 1
+    seeded(minting(50), 1).fees => 0
+
+fn intoMap(unspents: List<Unspent>, acc: Map<String, Unspent>) -> Map<String, Unspent>
+    ? "A list of Outputs, keyed the way an Input names them."
+    match unspents
+        [] -> acc
+        [head, ..tail] -> intoMap(tail, Map.set(acc, Domain.UtxoStore.keyOf(head), head))
+
+verify intoMap
+    Map.len(intoMap([], Map.fromList([]))) => 0
+    Map.len(intoMap([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)], Map.fromList([]))) => 1
+
+fn walked(transactions: List<Transaction>, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+    ? "Every Transaction after the coinbase, in the order the Block holds them."
+    match transactions
+        [] -> building
+        [head, ..tail] -> walked(tail, height, fromStore, oneTransaction(head, height, fromStore, building))
+
+verify walked
+    walked([], 0, Map.fromList([]), Result.Ok(seeded(minting(50), 1)))?.fees => 0
+    walked([], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
+
+fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+    ? "One Transaction's Inputs taken, and its Outputs offered."
+    match building
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(state) -> taking(transaction, height, fromStore, state)
+
+verify oneTransaction
+    oneTransaction(minting(50), 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
+    oneTransaction(spending("aa", 0, 40), 1, Map.fromList([("u:aa:00000", Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), Result.Ok(seeded(minting(50), 1)))?.fees => 10
+
+fn taking(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, state: Building) -> Result<Building, String>
+    ? "Resolve every Input, then check the arithmetic."
+    afterInputs(transaction, height, spentBy(transaction.inputs, height, fromStore, Result.Ok(state), 0))
+
+verify taking
+    taking(spending("aa", 0, 40), 1, Map.fromList([("u:aa:00000", Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1))?.fees => 10
+    taking(spending("aa", 0, 60), 1, Map.fromList([("u:aa:00000", Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+
+fn spentBy(inputs: List<Input>, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>, taken: Int) -> Result<Building, String>
+    ? "Every Input of one Transaction, and what they add up to."
+      "The running total travels in the Building's fees field, which is what"
+      "afterInputs then turns into a fee once the Outputs are known."
+    match inputs
+        [] -> building
+        [head, ..tail] -> spentBy(tail, height, fromStore, oneInput(head, height, fromStore, building), taken)
+
+verify spentBy
+    spentBy([], 0, Map.fromList([]), Result.Err("no"), 0) => Result.Err("no")
+    spentBy([], 0, Map.fromList([]), Result.Ok(seeded(minting(50), 1)), 0)?.fees => 0
+
+fn oneInput(input: Input, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+    ? "One Input, taken out of whatever holds the Output it names."
+    match building
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(state) -> resolving(input, height, fromStore, state)
+
+verify oneInput
+    oneInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), Result.Err("no")) => Result.Err("no")
+    oneInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), Result.Ok(seeded(minting(50), 1))) => Result.Err("Input names u:aa:00000, which is not an unspent Output")
+
+fn resolving(input: Input, height: Int, fromStore: Map<String, Unspent>, state: Building) -> Result<Building, String>
+    ? "Already spent, made in this Block, or resolved from the Store."
+      "Spent is checked first, and it is what stops a Block spending the same"
+      "Output twice -- once from the Store's answer and once again, because"
+      "the Store still says it is there."
+    key = outpointKey(input.previousTxid, input.previousIndex)
+    found(key, height, state, Map.has(state.spent, key), Map.get(state.created, key), Map.get(fromStore, key))
+
+verify resolving
+    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), seeded(minting(50), 1)) => Result.Err("Input names u:aa:00000, which is not an unspent Output")
+    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([("u:aa:00000", Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1))?.fees => 50
+
+fn found(key: String, height: Int, state: Building, already: Bool, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
+    ? "Which of the three answers applies, in the order they have to be asked."
+    match already
+        true -> Result.Err("Input names {key}, which this Block has already spent")
+        false -> notYetSpent(key, height, state, inBlock, inStore)
+
+verify found
+    found("u:aa:00000", 1, seeded(minting(50), 1), true, Option.None, Option.None) => Result.Err("Input names u:aa:00000, which this Block has already spent")
+    found("u:aa:00000", 1, seeded(minting(50), 1), false, Option.None, Option.None) => Result.Err("Input names u:aa:00000, which is not an unspent Output")
+
+fn notYetSpent(key: String, height: Int, state: Building, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
+    ? "An Output made earlier in this Block, before one the Store holds."
+      "It leaves no Undo Data: it did not exist before this Block, so putting"
+      "it back on a disconnect would invent it."
+    match inBlock
+        Option.Some(unspent) -> takenFromBlock(key, height, state, unspent)
+        Option.None -> fromTheStore(key, height, state, inStore)
+
+verify notYetSpent
+    notYetSpent("u:aa:00000", 1, seeded(minting(50), 1), Option.None, Option.None) => Result.Err("Input names u:aa:00000, which is not an unspent Output")
+    List.len(notYetSpent("u:cb:00000", 101, seeded(minting(50), 1), Map.get(seeded(minting(50), 1).created, "u:cb:00000"), Option.None)?.removed) => 0
+
+fn takenFromBlock(key: String, height: Int, state: Building, unspent: Unspent) -> Result<Building, String>
+    ? "Spent where it was made, so it never reaches the Set at all."
+    matureEnough(key, height, unspent, Building(created = Map.remove(state.created, key), spent = Map.set(state.spent, key, true), removed = state.removed, fees = state.fees + unspent.value))
+
+verify takenFromBlock
+    takenFromBlock("u:cb:00000", 101, seeded(minting(50), 1), Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.fees => 50
+    Map.len(takenFromBlock("u:cb:00000", 101, seeded(minting(50), 1), Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.created) => 0
+
+fn fromTheStore(key: String, height: Int, state: Building, inStore: Option<Unspent>) -> Result<Building, String>
+    ? "An Output the Set already held, which does leave Undo Data."
+    match inStore
+        Option.None -> Result.Err("Input names {key}, which is not an unspent Output")
+        Option.Some(unspent) -> matureEnough(key, height, unspent, Building(created = state.created, spent = Map.set(state.spent, key, true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value))
+
+verify fromTheStore
+    fromTheStore("u:aa:00000", 1, seeded(minting(50), 1), Option.None) => Result.Err("Input names u:aa:00000, which is not an unspent Output")
+    List.len(fromTheStore("u:aa:00000", 1, seeded(minting(50), 1), Option.Some(Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false)))?.removed) => 1
+
+fn matureEnough(key: String, height: Int, unspent: Unspent, state: Building) -> Result<Building, String>
+    ? "A coinbase Output cannot be spent for a hundred Blocks."
+    match Domain.UtxoStore.matured(unspent, height)
+        true -> Result.Ok(state)
+        false -> Result.Err("Input names {key}, a coinbase Output from Height {unspent.height} that is not spendable until {unspent.height + Domain.UtxoStore.maturity()}")
+
+verify matureEnough
+    matureEnough("u:aa:00000", 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false), seeded(minting(50), 1))?.fees => 0
+    matureEnough("u:aa:00000", 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), seeded(minting(50), 1)) => Result.Err("Input names u:aa:00000, a coinbase Output from Height 1 that is not spendable until 101")
+
+fn afterInputs(transaction: Transaction, height: Int, building: Result<Building, String>) -> Result<Building, String>
+    ? "What came in against what goes out."
+    match building
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(state) -> conserving(transaction, height, state)
+
+verify afterInputs
+    afterInputs(minting(50), 0, Result.Err("no")) => Result.Err("no")
+    afterInputs(spending("aa", 0, 40), 1, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50)))?.fees => 10
+
+fn conserving(transaction: Transaction, height: Int, state: Building) -> Result<Building, String>
+    ? "A Transaction may not pay out more than it took in."
+      "The difference is the fee, and it belongs to whoever mined the Block."
+    paid = paidBy(transaction)
+    weighed(transaction, height, state, paid, state.fees - paid)
+
+verify conserving
+    conserving(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50))?.fees => 10
+    conserving(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50)) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+
+fn weighed(transaction: Transaction, height: Int, state: Building, paid: Int, left: Int) -> Result<Building, String>
+    ? "Refuse value that was not taken in; otherwise keep the Outputs."
+    match left < 0
+        true -> Result.Err("Transaction {transaction.txid} pays out {paid} against {state.fees} taken in")
+        false -> Result.Ok(Building(created = intoMap(createdBy(transaction, height, false), state.created), spent = state.spent, removed = state.removed, fees = left))
+
+verify weighed
+    weighed(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 40, 10)?.fees => 10
+    weighed(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 60, 0 - 10) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+
+fn settled(network: Network, height: Int, coinbase: Transaction, building: Result<Building, String>) -> Connection
+    ? "The coinbase's claim, judged against the subsidy and the fees."
+    match building
+        Result.Err(why) -> Connection.Refused(why)
+        Result.Ok(state) -> claimed(network, height, coinbase, state)
+
+verify settled
+    settled(Network.Mainnet, 1, minting(50), Result.Err("no")) => Connection.Refused("no")
+    settled(Network.Mainnet, 1, minting(50), Result.Ok(seeded(minting(50), 1))) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+
+fn claimed(network: Network, height: Int, coinbase: Transaction, state: Building) -> Connection
+    ? "No more than the subsidy plus what the Block's fees left behind."
+    allowed(paidBy(coinbase), Domain.Subsidy.atHeight(network, height), state)
+
+verify claimed
+    claimed(Network.Mainnet, 1, minting(5000000000), seeded(minting(5000000000), 1)) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    claimed(Network.Mainnet, 1, minting(5000000001), seeded(minting(5000000001), 1)) => Connection.Refused("coinbase claims 5000000001 with 5000000000 allowed")
+
+fn allowed(paid: Int, subsidy: Int, state: Building) -> Connection
+    ? "Within the claim, the Block's changes; over it, the reason."
+    match Domain.Subsidy.withinClaim(paid, subsidy, state.fees)
+        false -> Connection.Refused("coinbase claims {paid} with {Domain.Subsidy.claimAllowed(subsidy, state.fees)} allowed")
+        true -> Connection.Applied(Change(added = Map.values(state.created), removed = List.reverse(state.removed), fees = state.fees))
+
+verify allowed
+    allowed(50, 50, seeded(minting(50), 1)) => Connection.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    allowed(51, 50, seeded(minting(50), 1)) => Connection.Refused("coinbase claims 51 with 50 allowed")
+
+fn minting(value: Int) -> Transaction
+    ? "A coinbase paying one Output, for the cases here."
+    Transaction(version = 1, inputs = [], outputs = [Output(value = value, script = "")], lockTime = 0, txid = "cb", size = 0, isSegWit = false)
+
+verify minting
+    minting(50).txid => "cb"
+    paidBy(minting(50)) => 50
+
+fn spending(txid: String, index: Int, value: Int) -> Transaction
+    ? "A Transaction spending one Output and paying one, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = txid, previousIndex = index, script = "", sequence = 0, witness = [])], outputs = [Output(value = value, script = "")], lockTime = 0, txid = "bb", size = 0, isSegWit = false)
+
+verify spending
+    spending("aa", 0, 40).txid => "bb"
+    paidBy(spending("aa", 0, 40)) => 40
+
+fn holding() -> Map<String, Unspent>
+    ? "What the Set already holds, for the cases here."
+      "One ordinary Output worth a hundred, and one coinbase Output from"
+      "Height 1 worth the same, so a case can ask whether maturity is being"
+      "checked without any other difference between them."
+    Map.fromList([("u:aa:00000", Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)), ("u:cc:00000", Unspent(txid = "cc", index = 0, value = 100, script = "", height = 1, coinbase = true))])
+
+verify holding
+    Map.len(holding()) => 2
+
+fn paying(txid: String, fromTxid: String, fromIndex: Int, value: Int) -> Transaction
+    ? "A Transaction spending one named Output and paying one, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = fromTxid, previousIndex = fromIndex, script = "", sequence = 0, witness = [])], outputs = [Output(value = value, script = "")], lockTime = 0, txid = txid, size = 0, isSegWit = false)
+
+verify paying
+    paying("t1", "aa", 0, 90).txid => "t1"
+    paidBy(paying("t1", "aa", 0, 90)) => 90
+
+fn added(connection: Connection) -> List<Unspent>
+    ? "What a Connection puts into the Set, or nothing when it was refused."
+    match connection
+        Connection.Refused(why) -> []
+        Connection.Applied(change) -> change.added
+
+verify added
+    added(Connection.Refused("no")) => []
+    List.len(added(Connection.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+
+fn removedBy(connection: Connection) -> List<Unspent>
+    ? "What it takes out, which is the Undo Data."
+    match connection
+        Connection.Refused(why) -> []
+        Connection.Applied(change) -> change.removed
+
+verify removedBy
+    removedBy(Connection.Refused("no")) => []
+    List.len(removedBy(Connection.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+
+fn feesOf(connection: Connection) -> Int
+    ? "What the Block left for its miner, or below zero when it was refused."
+    match connection
+        Connection.Refused(why) -> 0 - 1
+        Connection.Applied(change) -> change.fees
+
+verify feesOf
+    feesOf(Connection.Refused("no")) => 0 - 1
+    feesOf(Connection.Applied(Change(added = [], removed = [], fees = 7))) => 7

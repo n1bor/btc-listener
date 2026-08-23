@@ -96,9 +96,19 @@ crash (#92, the rusty-leveldb era; RocksDB syncs every batch).
 Key prefixes: `b:` Block Id → Location, `h:` Height →
 Block Id, `t:` Transaction Id → site, `n:` Block Id → Height, `k:` Block Id →
 Header plus its Height and Chain Work, `o:<txid>:<index>` → Output (what lets a
-spend resolve in one lookup). `h:` is the only one a Reorganisation rewrites;
-`b:`, `t:`, `n:` and `k:` are append-only, because a Block Id always names the
-same bytes.
+spend resolve in one lookup), `u:<txid>:<index>` → unspent Output, `d:` Block Id
+→ Undo Data. `h:` is rewritten by a Reorganisation and `u:` shrinks on every
+spend; `b:`, `t:`, `n:`, `k:` and `o:` are append-only, because a Block Id
+always names the same bytes.
+
+**The UTXO Set** (#25, Stage 2): `u:` is deliberately not `o:`. `o:` answers
+*what did this Input spend*, which a reorganised Block still has to be able to
+ask, and only grows; `u:` answers *may this Input spend it*, which only the
+current chain can answer, and shrinks. Decision D3. Every entry carries the
+Height that made it and whether it came from a coinbase, because that is the
+only way to check the hundred-Block maturity. `d:` is the Undo Data, keyed by
+Block Id rather than Height — a Reorganisation is exactly when it is read, and
+exactly when a Height stops naming the Block it named before.
 
 **The Header tree** (#24, Stage 1 of the full-node plan): `k:` holds every
 Header seen, not just the ones on the chain we follow. A Header whose parent is
