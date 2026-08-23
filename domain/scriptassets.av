@@ -50,6 +50,7 @@ fn caseFrom(entry: Json) -> Result<Case, String>
 verify caseFrom
     caseFrom(Json.JsonNull) => Result.Err("entry has no 'tx' field")
     caseFrom(Json.JsonObject([Domain.Json.Pair(key = "tx", held = Json.JsonString("zz"))])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    caseFrom(Json.JsonObject([Domain.Json.Pair(key = "tx", held = Json.JsonString("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000")), Domain.Json.Pair(key = "prevouts", held = Json.JsonList([Json.JsonString("01000000000000000151")])), Domain.Json.Pair(key = "index", held = Json.JsonInt(0)), Domain.Json.Pair(key = "flags", held = Json.JsonString("P2SH")), Domain.Json.Pair(key = "comment", held = Json.JsonString("")), Domain.Json.Pair(key = "success", held = Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))]))])) => caseOf("0100000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000016a00000000", ["01000000000000000151"], 0, "P2SH", Spender(scriptSig = "", witness = []))
 
 fn caseOf(tx: String, prevouts: List<String>, index: Int, flags: String, spender: Spender) -> Result<Case, String>
     ? "One entry from its fields already split out, for the generated verify"
@@ -177,6 +178,7 @@ fn oneSpent(head: Json, tail: List<Json>, acc: List<Spent>) -> Result<List<Spent
 
 verify oneSpent
     oneSpent(Json.JsonNull, [], []) => Result.Err("a prevout is null, not a string")
+    oneSpent(Json.JsonString("01000000000000000151"), [], []) => Result.Ok([Spent(amount = 1, script = "51")])
 
 fn prevoutText(json: Json) -> Result<String, String>
     ? "A prevout is a hex string."
@@ -246,6 +248,7 @@ fn spenderFrom(entry: Json, name: String) -> Result<Spender, String>
 
 verify spenderFrom
     spenderFrom(Json.JsonObject([]), "success") => Result.Err("entry has no 'success' field")
+    spenderFrom(Json.JsonObject([Domain.Json.Pair(key = "success", held = Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))]))]), "success") => Result.Ok(Spender(scriptSig = "", witness = []))
 
 fn fromHeld(held: Option<Json>, name: String) -> Result<Spender, String>
     ? "The field has to be there."
@@ -255,6 +258,7 @@ fn fromHeld(held: Option<Json>, name: String) -> Result<Spender, String>
 
 verify fromHeld
     fromHeld(Option.None, "success") => Result.Err("entry has no 'success' field")
+    fromHeld(Option.Some(Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))])), "success") => Result.Ok(Spender(scriptSig = "", witness = []))
 
 fn spenderOf(json: Json) -> Result<Spender, String>
     ? "Its two fields."
@@ -264,6 +268,7 @@ fn spenderOf(json: Json) -> Result<Spender, String>
 
 verify spenderOf
     spenderOf(Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))])) => Result.Ok(Spender(scriptSig = "", witness = []))
+    spenderOf(Json.JsonObject([])) => Result.Err("entry has no 'scriptSig' field")
 
 fn witnessFrom(items: List<Json>, acc: List<String>) -> Result<List<String>, String>
     ? "Every witness item, in order."
@@ -274,6 +279,7 @@ fn witnessFrom(items: List<Json>, acc: List<String>) -> Result<List<String>, Str
 verify witnessFrom
     witnessFrom([], []) => Result.Ok([])
     witnessFrom([Json.JsonString("aa")], []) => Result.Ok(["aa"])
+    witnessFrom([Json.JsonNull], []) => Result.Err("a witness item is null, not a string")
 
 fn oneItem(head: Json, tail: List<Json>, acc: List<String>) -> Result<List<String>, String>
     ? "One item, then the rest."
@@ -293,6 +299,7 @@ fn optionalSpender(entry: Json) -> Option<Spender>
 
 verify optionalSpender
     optionalSpender(Json.JsonObject([])) => Option.None
+    optionalSpender(Json.JsonObject([Domain.Json.Pair(key = "failure", held = Json.JsonObject([Domain.Json.Pair(key = "scriptSig", held = Json.JsonString("")), Domain.Json.Pair(key = "witness", held = Json.JsonList([]))]))])) => Option.Some(Spender(scriptSig = "", witness = []))
 
 fn run(one: Case, spender: Spender) -> Outcome
     ? "The named Input of the Transaction, with this spender's scriptSig and"
@@ -331,6 +338,7 @@ fn withSpender(inputs: List<Input>, index: Int, position: Int, spender: Spender,
 
 verify withSpender
     withSpender([], 0, 0, Spender(scriptSig = "", witness = []), []) => []
+    withSpender([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], 0, 0, Spender(scriptSig = "51", witness = ["bb"]), []) => [Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = ["bb"])]
 
 fn keptOrReplaced(head: Input, tail: List<Input>, index: Int, position: Int, spender: Spender, acc: List<Input>) -> List<Input>
     ? "This one, or the one it stands in for."

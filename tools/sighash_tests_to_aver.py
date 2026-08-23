@@ -91,12 +91,17 @@ def rows():
         yield raw, index, script, unsigned(hash_type), hashed_order(expected)
 
 
+FROMHEX_ERR = 'Result.Err("Bytes.fromHex: invalid hexadecimal character \'z\'")'
+
+
 def files():
     cases = list(rows())
     parts = [cases[i:i + PER_FILE] for i in range(0, len(cases), PER_FILE)]
     out = {}
     for k, chunk in enumerate(parts, start=1):
         lines = ['    check("%s", %d, "%s", %d) => Result.Ok("%s")' % c for c in chunk]
+        lines.append('    // The refusal arm, which no row of the file can reach: the raw hex must parse.')
+        lines.append('    check("zz", 0, "", 1) => %s' % FROMHEX_ERR)
         out["sighashcases%d.av" % k] = (
             HEADER % {"k": k, "n": WORDS.get(len(parts), str(len(parts)))}
             + "\n" + "\n".join(lines) + "\n")

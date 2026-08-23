@@ -94,6 +94,8 @@ fn sighash(rawHex: String, inputIndex: Int, prevouts: List<Spent>, hashType: Int
 
 verify sighash
 %(sighash)s
+    // The refusal arm, which no vector can reach: the raw hex must parse.
+    sighash("zz", 0, [], 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn sigMsg(rawHex: String, inputIndex: Int, prevouts: List<Spent>, hashType: Int) -> Result<String, String>
     ? "The same vector's SigMsg, which is what gets hashed."
@@ -106,6 +108,8 @@ fn sigMsg(rawHex: String, inputIndex: Int, prevouts: List<Spent>, hashType: Int)
 
 verify sigMsg
 %(sigmsg)s
+    // The refusal arm, which no vector can reach: the raw hex must parse.
+    sigMsg("zz", 0, [], 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn hashPrevouts(rawHex: String) -> Result<String, String>
     ? "Every outpoint, hashed once."
@@ -113,6 +117,8 @@ fn hashPrevouts(rawHex: String) -> Result<String, String>
 
 verify hashPrevouts
 %(prevouts)s
+    // The refusal arm, which no vector can reach: the raw hex must parse.
+    hashPrevouts("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn hashAmounts(prevouts: List<Spent>) -> String
     ? "Every spent amount, hashed once."
@@ -136,6 +142,8 @@ fn hashSequences(rawHex: String) -> Result<String, String>
 
 verify hashSequences
 %(sequences)s
+    // The refusal arm, which no vector can reach: the raw hex must parse.
+    hashSequences("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn hashOutputs(rawHex: String) -> Result<String, String>
     ? "Every Output, hashed once."
@@ -143,6 +151,8 @@ fn hashOutputs(rawHex: String) -> Result<String, String>
 
 verify hashOutputs
 %(outputs)s
+    // The refusal arm, which no vector can reach: the raw hex must parse.
+    hashOutputs("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn merkleRoot(root: List<Int>) -> String
     ? "A script tree's root, built from its leaves rather than walked up to."
@@ -167,6 +177,8 @@ fn address(scriptHex: String) -> Result<String, String>
 
 verify address
 %(address)s
+    // The refusal arm: OP_RETURN pays nobody.
+    address("6a0b68656c6c6f20776f726c64") => Result.Err("no address for OP_RETURN")
 
 fn script(text: String) -> Result<String, String>
     ? "And the Output Script that address pays to, back again."
@@ -174,6 +186,8 @@ fn script(text: String) -> Result<String, String>
 
 verify script
 %(script)s
+    // The refusal arm: an empty string is no address.
+    script("") => Result.Err("an address needs a prefix and a separator")
 
 fn decoded(rawHex: String) -> Result<Transaction, String>
     ? "The Transaction the vector gives, as bytes then as fields."
@@ -181,6 +195,7 @@ fn decoded(rawHex: String) -> Result<Transaction, String>
 
 verify decoded
     Domain.Transaction.versionOf(decoded("%(sample)s")?) => 2
+    decoded("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn hexOf(bytes: List<Int>) -> String
     ? "Bytes as text."

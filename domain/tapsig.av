@@ -139,6 +139,7 @@ fn answered(code: Int, signature: List<Int>, publicKey: List<Int>, rest: List<Li
 
 verify answered
     answered(172, [], Domain.ScriptState.zeros(32), [], Domain.ScriptState.holding([[], []]), spending(), false, []) => Step.Continue(Domain.ScriptState.holding([[]]))
+    answered(186, [9], [1, 2, 3], [], Domain.ScriptState.holding([[], []]), spending(), true, []) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn summed(ruled: Answer, count: List<Int>, rest: List<List<Int>>, state: State) -> Step
     ? "OP_CHECKSIGADD adds one to the count when the signature checked."
@@ -149,6 +150,8 @@ fn summed(ruled: Answer, count: List<Int>, rest: List<List<Int>>, state: State) 
 
 verify summed
     summed(Answer.Fails("no"), [], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
+    summed(Answer.Undecided("later"), [], [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("later"))
+    summed(Answer.Answered(true), [], [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn ruling(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
     ? "BIP342's order, which Core's own comment calls consensus critical."
@@ -164,6 +167,7 @@ verify ruling
     ruling(186, [], [], spending()) => Answer.Fails("OP_CHECKSIGADD was given a public key of no bytes at all")
     ruling(172, [], [1, 2, 3], spending()) => Answer.Answered(false)
     ruling(172, [9], [1, 2, 3], spending()) => Answer.Answered(true)
+    ruling(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
 
 fn overCurve(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
     ? "An empty signature is a plain no and never reaches the curve."
@@ -173,6 +177,8 @@ fn overCurve(code: Int, signature: List<Int>, publicKey: List<Int>, context: Con
 
 verify overCurve
     overCurve(172, [], Domain.ScriptState.zeros(32), spending()) => Answer.Answered(false)
+    overCurve(172, [1], Domain.ScriptState.zeros(32), spending()) => Answer.Fails("a taproot signature is 1 bytes, which is neither 64 nor 65")
+    overCurve(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
 
 fn shaped(code: Int, signature: List<Int>, publicKey: List<Int>, context: Context) -> Answer
     ? "A signature of any width but sixty-four or sixty-five fails the Script."
@@ -182,6 +188,7 @@ fn shaped(code: Int, signature: List<Int>, publicKey: List<Int>, context: Contex
 
 verify shaped
     shaped(172, [1], Domain.ScriptState.zeros(32), spending()) => Answer.Fails("a taproot signature is 1 bytes, which is neither 64 nor 65")
+    shaped(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
 
 fn overMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context) -> Answer
     ? "The message, then the curve. A signature that is present and does not"
@@ -217,6 +224,7 @@ fn verified(code: Int, signature: List<Int>, publicKey: List<Int>, digest: Strin
 
 verify verified
     verified(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), "00") => Answer.Fails("OP_CHECKSIG found a schnorr signature that does not verify")
+    verified(172, Bytes.toList(Bytes.fromHex("e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0")?), Bytes.toList(Bytes.fromHex("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9")?), "0000000000000000000000000000000000000000000000000000000000000000") => Answer.Answered(true)
 
 fn settled(code: Int, ruled: Answer, rest: List<List<Int>>, state: State) -> Step
     ? "CHECKSIG pushes the answer; CHECKSIGVERIFY insists on it."
@@ -227,6 +235,8 @@ fn settled(code: Int, ruled: Answer, rest: List<List<Int>>, state: State) -> Ste
 
 verify settled
     settled(172, Answer.Fails("no"), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("no")))
+    settled(172, Answer.Undecided("later"), [], Domain.ScriptState.empty()) => Step.Stop(Outcome.Undecided("later"))
+    settled(172, Answer.Answered(true), [], Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.holding([[1]]))
 
 fn pushedOrVerified(code: Int, passed: Bool, rest: List<List<Int>>, state: State) -> Step
     ? "One seventy-two pushes, one seventy-three verifies."

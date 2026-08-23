@@ -93,6 +93,8 @@ fn case(network: Network, scriptHex: String) -> Result<String, String>
 
 verify case
 %(written)s
+    // The refusal arm, which no row of Core's file can reach: OP_RETURN pays nobody.
+    case(Network.Mainnet, "6a0b68656c6c6f20776f726c64") => Result.Err("no address for OP_RETURN")
 
 fn script(network: Network, address: String) -> Result<String, String>
     ? "And the Output Script that address pays to, back again."
@@ -102,7 +104,9 @@ fn script(network: Network, address: String) -> Result<String, String>
     Domain.ReadAddress.scriptFor(network, address)
 
 verify script
-%(read)s'''
+%(read)s
+    // The refusal arm: an empty string is no address on any Network.
+    script(Network.Mainnet, "") => Result.Err("an address needs a prefix and a separator")'''
 
 
 def emitted():

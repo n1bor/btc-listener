@@ -76,6 +76,8 @@ fn readsAnywhere(address: String) -> Bool
 
 verify readsAnywhere
 %(cases)s
+    // The true arm, from key_io_valid.json: a decoder that refused everything would pass every case above.
+    readsAnywhere("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH") => true
 '''
 
 

@@ -76,6 +76,8 @@ fn read(text: String) -> Result<List<Int>, String>
 
 verify read
 %(read)s
+    // The refusal arm, which no row of Core's file can reach: "0" is not in the alphabet.
+    read("0") => Result.Err("'0' is not a base 58 character")
 '''
 
 

@@ -201,6 +201,7 @@ verify multiAnswered
     multiAnswered(174, Result.Ok(Domain.Ecdsa.Ruling.Undecidable("no")), [], [], Domain.ScriptState.empty(), false) => Step.Stop(Outcome.Undecided("OP_CHECKMULTISIG needs the transaction its signature commits to"))
     multiAnswered(174, Result.Ok(Domain.Ecdsa.Ruling.Invalid("no")), [[4, 5]], [], Domain.ScriptState.empty(), true) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG was given a signature that does not check and is not empty")))
     multiAnswered(174, Result.Ok(Domain.Ecdsa.Ruling.Invalid("no")), [[]], [], Domain.ScriptState.empty(), true) => Step.Continue(Domain.ScriptState.holding([[]]))
+    multiAnswered(174, Result.Err("signature is not strict DER"), [], [], Domain.ScriptState.empty(), false) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKMULTISIG signature is not strict DER")))
 
 fn multiDecided(code: Int, ruling: Ruling, sigItems: List<List<Int>>, below: List<List<Int>>, state: State, nullFail: Bool) -> Step
     ? "The answer the loop reached, turned back into a Step."
@@ -232,6 +233,7 @@ fn multiRuling(sigItems: List<List<Int>>, keyItems: List<List<Int>>, context: Co
 verify multiRuling
     multiRuling([], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Domain.Ecdsa.Ruling.Valid)
     multiRuling([[]], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest())) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
+    multiRuling([[4, 5]], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"]))) => Result.Err("signature is not strict DER")
 
 fn multiAgainst(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<Int>>, context: Context) -> Result<Ruling, String>
     ? "One signature, against the keys that are left."
@@ -275,6 +277,7 @@ fn againstKeys(signature: List<Int>, rest: List<List<Int>>, keyItems: List<List<
 verify againstKeys
     againstKeys([], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
     againstKeys([], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
+    againstKeys([4, 5], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"])), Result.Ok(Option.None)) => Result.Err("signature is not strict DER")
 
 fn encodedPair(signature: List<Int>, publicKey: List<Int>, rest: List<List<Int>>, keyRest: List<List<Int>>, context: Context, message: Result<Option<String>, String>) -> Result<Ruling, String>
     ? "Both encodings, at the top of each turn of the loop, which is where"
@@ -327,6 +330,7 @@ verify multiAdvanced
     multiAdvanced(Domain.Ecdsa.Ruling.Valid, [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Valid)
     multiAdvanced(Domain.Ecdsa.Ruling.Undecidable("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Undecidable("no"))
     multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [], [], [], Domain.SpendContext.bare(Domain.Rules.latest()), Result.Ok(Option.None)) => Result.Ok(Domain.Ecdsa.Ruling.Invalid("more signatures than public keys that answer them"))
+    multiAdvanced(Domain.Ecdsa.Ruling.Invalid("no"), [4, 5], [], [Domain.Checkwork.validKey()], Domain.SpendContext.bare(Domain.Rules.underFlags(["DERSIG"])), Result.Ok(Option.None)) => Result.Err("signature is not strict DER")
 
 fn oneRuling(signature: List<Int>, publicKey: List<Int>, context: Context) -> Ruling
     ? "One pair. The shape is asked first, exactly as it is for OP_CHECKSIG,"
@@ -358,3 +362,4 @@ fn overOneMessage(signature: List<Int>, publicKey: List<Int>, message: Option<St
 
 verify overOneMessage
     overOneMessage([4, 5], Domain.Checkwork.validKey(), Option.None) => Domain.Ecdsa.Ruling.Undecidable("no transaction to take a message from")
+    overOneMessage([4, 5], Domain.Checkwork.validKey(), Option.Some("00")) => Domain.Ecdsa.Ruling.Invalid("signature does not verify")

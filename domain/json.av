@@ -111,6 +111,7 @@ fn value(chars: List<String>) -> Result<Parsed, String>
 verify value
     value([]) => Result.Err("a value was expected and the input ended")
     value(["]"]) => Result.Err("a value was expected, and ']' is not one")
+    value(["7"]) => Result.Ok(Parsed(value = Json.JsonInt(7), rest = []))
 
 fn byFirst(head: String, tail: List<String>, whole: List<String>) -> Result<Parsed, String>
     ? "Dispatch on the first character."
@@ -152,6 +153,7 @@ verify startsWith
     startsWith(["t", "r"], ["t", "r"]) => true
     startsWith(["t"], ["t", "r"]) => false
     startsWith(["x"], ["t"]) => false
+    startsWith(["t"], []) => true
 
 fn sameHead(chars: List<String>, want: String, rest: List<String>) -> Bool
     ? "This character has to match, then the rest."
@@ -214,6 +216,7 @@ fn stringStep(head: String, tail: List<String>, acc: String) -> Result<Parsed, S
 verify stringStep
     stringStep("\"", ["x"], "a") => Result.Ok(Parsed(value = Json.JsonString("a"), rest = ["x"]))
     stringStep("a", ["\""], "") => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
+    stringStep("\\", [], "") => Result.Err("a string was not closed")
 
 fn escaped(chars: List<String>, acc: String) -> Result<Parsed, String>
     ? "What follows a backslash."
@@ -266,6 +269,7 @@ fn digitsFrom(chars: List<String>) -> Result<Parsed, String>
 verify digitsFrom
     digitsFrom(["1"]) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
     digitsFrom(["-", "1"]) => Result.Ok(Parsed(value = Json.JsonInt(0 - 1), rest = []))
+    digitsFrom([]) => Result.Err("a value was expected and the input ended")
 
 fn signThen(head: String, tail: List<String>) -> Result<Parsed, String>
     ? "A leading minus negates what follows it."
@@ -300,6 +304,10 @@ fn flipped(json: Json) -> Json
 verify flipped
     flipped(Json.JsonInt(2)) => Json.JsonInt(0 - 2)
     flipped(Json.JsonNull) => Json.JsonNull
+    flipped(Json.JsonString("a")) => Json.JsonString("a")
+    flipped(Json.JsonBool(true)) => Json.JsonBool(true)
+    flipped(Json.JsonList([])) => Json.JsonList([])
+    flipped(Json.JsonObject([])) => Json.JsonObject([])
 
 fn digitsInto(chars: List<String>, acc: String, any: Bool) -> Result<Parsed, String>
     ? "Digits, and at least one of them."
@@ -321,6 +329,7 @@ fn digitStep(head: String, tail: List<String>, acc: String, any: Bool) -> Result
 verify digitStep
     digitStep("1", [], "", false) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = []))
     digitStep("]", [], "1", true) => Result.Ok(Parsed(value = Json.JsonInt(1), rest = ["]"]))
+    digitStep("]", [], "", false) => Result.Err("a number had no digits")
 
 fn finishedNumber(acc: String, any: Bool, rest: List<String>) -> Result<Parsed, String>
     ? "A number needs at least one digit, and has to fit an Int."
@@ -371,6 +380,7 @@ fn emptyOrItems(head: String, tail: List<String>, whole: List<String>) -> Result
 verify emptyOrItems
     emptyOrItems("]", [], ["]"]) => Result.Ok(Parsed(value = Json.JsonList([]), rest = []))
     emptyOrItems("1", ["]"], ["1", "]"]) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
+    emptyOrItems("x", [], ["x"]) => Result.Err("a value was expected, and 'x' is not one")
 
 fn arrayItems(chars: List<String>, acc: List<Json>) -> Result<Parsed, String>
     ? "One value, then a comma or the closing bracket."
@@ -380,6 +390,7 @@ fn arrayItems(chars: List<String>, acc: List<Json>) -> Result<Parsed, String>
 verify arrayItems
     arrayItems(["1", "]"], []) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1)]), rest = []))
     arrayItems(["1", ",", "2", "]"], []) => Result.Ok(Parsed(value = Json.JsonList([Json.JsonInt(1), Json.JsonInt(2)]), rest = []))
+    arrayItems(["1"], []) => Result.Err("an array was not closed")
 
 fn afterItem(chars: List<String>, acc: List<Json>) -> Result<Parsed, String>
     ? "What may follow an array element."
@@ -421,6 +432,7 @@ fn emptyOrPairs(head: String, tail: List<String>, whole: List<String>) -> Result
 verify emptyOrPairs
     emptyOrPairs("}", [], ["}"]) => Result.Ok(Parsed(value = Json.JsonObject([]), rest = []))
     emptyOrPairs("\"", ["a", "\"", ":", "1", "}"], ["\"", "a", "\"", ":", "1", "}"]) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+    emptyOrPairs("1", [], ["1"]) => Result.Err("an object key must be a string")
 
 fn objectPairs(chars: List<String>, acc: List<Pair>) -> Result<Parsed, String>
     ? "A key, a colon, a value, then a comma or the closing brace."
@@ -431,6 +443,7 @@ fn objectPairs(chars: List<String>, acc: List<Pair>) -> Result<Parsed, String>
 
 verify objectPairs
     objectPairs(["\"", "a", "\"", ":", "1", "}"], []) => Result.Ok(Parsed(value = Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), rest = []))
+    objectPairs(["1"], []) => Result.Err("an object key must be a string")
 
 fn objectKey(chars: List<String>) -> Result<Parsed, String>
     ? "An object key has to be a string."
@@ -441,6 +454,7 @@ fn objectKey(chars: List<String>) -> Result<Parsed, String>
 verify objectKey
     objectKey(["\"", "a", "\""]) => Result.Ok(Parsed(value = Json.JsonString("a"), rest = []))
     objectKey(["1"]) => Result.Err("an object key must be a string")
+    objectKey([]) => Result.Err("an object was not closed")
 
 fn keyStep(head: String, tail: List<String>) -> Result<Parsed, String>
     ? "Only a quote will do."
@@ -471,6 +485,7 @@ fn afterColon(chars: List<String>) -> Result<List<String>, String>
 verify afterColon
     afterColon([":", "1"]) => Result.Ok(["1"])
     afterColon(["1"]) => Result.Err("'1' is not the colon after an object key")
+    afterColon([]) => Result.Err("an object was not closed")
 
 fn colonStep(head: String, tail: List<String>) -> Result<List<String>, String>
     ? "It has to be a colon."
@@ -517,6 +532,10 @@ verify field
     field(Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), "a") => Option.Some(Json.JsonInt(1))
     field(Json.JsonObject([Pair(key = "a", held = Json.JsonInt(1))]), "b") => Option.None
     field(Json.JsonInt(1), "a") => Option.None
+    field(Json.JsonString("a"), "a") => Option.None
+    field(Json.JsonBool(true), "a") => Option.None
+    field(Json.JsonList([]), "a") => Option.None
+    field(Json.JsonNull, "a") => Option.None
 
 fn lookup(pairs: List<Pair>, name: String) -> Option<Json>
     ? "Walk the pairs looking for the key."
@@ -559,6 +578,10 @@ fn stringOf(json: Json) -> Option<String>
 verify stringOf
     stringOf(Json.JsonString("a")) => Option.Some("a")
     stringOf(Json.JsonInt(1)) => Option.None
+    stringOf(Json.JsonBool(true)) => Option.None
+    stringOf(Json.JsonList([])) => Option.None
+    stringOf(Json.JsonObject([])) => Option.None
+    stringOf(Json.JsonNull) => Option.None
 
 fn intOf(json: Json) -> Option<Int>
     ? "The value of a number, or nothing if it is not one."
@@ -573,6 +596,10 @@ fn intOf(json: Json) -> Option<Int>
 verify intOf
     intOf(Json.JsonInt(1)) => Option.Some(1)
     intOf(Json.JsonString("1")) => Option.None
+    intOf(Json.JsonBool(true)) => Option.None
+    intOf(Json.JsonList([])) => Option.None
+    intOf(Json.JsonObject([])) => Option.None
+    intOf(Json.JsonNull) => Option.None
 
 fn boolOf(json: Json) -> Option<Bool>
     ? "The value of a boolean, or nothing if it is not one."
@@ -587,6 +614,10 @@ fn boolOf(json: Json) -> Option<Bool>
 verify boolOf
     boolOf(Json.JsonBool(true)) => Option.Some(true)
     boolOf(Json.JsonInt(1)) => Option.None
+    boolOf(Json.JsonString("t")) => Option.None
+    boolOf(Json.JsonList([])) => Option.None
+    boolOf(Json.JsonObject([])) => Option.None
+    boolOf(Json.JsonNull) => Option.None
 
 fn listOf(json: Json) -> Option<List<Json>>
     ? "The elements of an array, or nothing if it is not one."
@@ -601,6 +632,10 @@ fn listOf(json: Json) -> Option<List<Json>>
 verify listOf
     listOf(Json.JsonList([])) => Option.Some([])
     listOf(Json.JsonInt(1)) => Option.None
+    listOf(Json.JsonString("a")) => Option.None
+    listOf(Json.JsonBool(true)) => Option.None
+    listOf(Json.JsonObject([])) => Option.None
+    listOf(Json.JsonNull) => Option.None
 
 fn kindOf(json: Json) -> String
     ? "What kind of value this is, for an error message."
@@ -615,3 +650,7 @@ fn kindOf(json: Json) -> String
 verify kindOf
     kindOf(Json.JsonNull) => "null"
     kindOf(Json.JsonInt(1)) => "a number"
+    kindOf(Json.JsonString("a")) => "a string"
+    kindOf(Json.JsonBool(true)) => "a boolean"
+    kindOf(Json.JsonList([])) => "an array"
+    kindOf(Json.JsonObject([])) => "an object"
