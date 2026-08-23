@@ -1,35 +1,78 @@
-//! A LevelDB behind the `Infra.Kv` capability contract.
+//! A RocksDB behind the `Infra.Kv` capability contract.
 //!
-//! The database is not written here either. It comes from `rusty-leveldb`, a
-//! re-implementation of LevelDB in Rust, chosen over `rocksdb` because it
-//! needs no C++ toolchain to build. That choice is provisional and the
-//! contract does not depend on it: swapping the crate changes this file and
-//! nothing in Aver.
+//! The database is not written here either. It comes from the `rocksdb`
+//! crate, which binds the C++ engine. It replaced `rusty-leveldb`, a pure-Rust
+//! port chosen originally because it needed no C++ toolchain; two defects in
+//! the port's own code ended that — its table cache panicked on eviction
+//! (n1bor/btc-listener#33) and it never called `fsync`, so a power loss took
+//! the Index with it (n1bor/btc-listener#92). The swap changed this file and
+//! nothing in Aver: the contract is the same six operations (#96).
+//!
+//! Durability is the point, so every batch is written with `sync = true`:
+//! `putAll` and `deleteAll` return only once the write-ahead log is on the
+//! disk. One batch is one fsync, which is why the callers batch.
 //!
 //! An open database is a capability resource. `open` hands back a
 //! `ProviderResource` holding it, and every other operation takes one back.
 //! Aver sees an opaque `Handle` it cannot construct, name, or serialise.
-//!
-//! It was a record holding an `Int`, with the databases kept here in a
-//! registry, for as long as jasisz/aver#994 was open. jasisz/aver#997 fixed
-//! it and both are gone.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use aver_rt::provider::{
     CapabilityProvider, ProviderBinding, ProviderContext, ProviderFault, ProviderResource,
     ProviderValue,
 };
-use rusty_leveldb::{LdbIterator, Options, WriteBatch, DB};
+use rocksdb::{
+    BlockBasedOptions, Cache, DBCompressionType, Direction, IteratorMode, Options, WriteBatch,
+    WriteOptions, DB,
+};
 
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
 /// than at the first call.
 pub const CONTRACT_HASH: &str =
     "sha256:a3ca919aeb2d1693376f626e4dfe727d5c486cb36c0594ff1a85a069f457bd01";
 
-/// The open database, behind a lock because a `ProviderResource` payload is
-/// shared and the LevelDB handle wants `&mut` for every call, reads included.
-struct Open(Mutex<DB>);
+/// The open database. RocksDB takes `&self` for every operation and is
+/// `Sync`, so the resource needs no lock of its own.
+struct Open(DB);
+
+/// How the database is tuned for this program's shape: a few hundred million
+/// small keys written in large batches, read one at a time by exact key or
+/// by prefix, and compacted in the background while the writer keeps going.
+fn tuned() -> Options {
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    // Block Ids and scripts are hex text today and bytes after #45/#46;
+    // either compresses. LZ4 is the fast one, and the Index is write-bound.
+    options.set_compression_type(DBCompressionType::Lz4);
+    // Compaction on its own threads is what rusty-leveldb did not have, and
+    // why outputs took seven hours: the writer waited on its own compactions.
+    options.increase_parallelism(parallelism());
+    options.set_max_background_jobs(parallelism());
+    // A larger memtable means fewer, larger flushes for the same batches.
+    options.set_write_buffer_size(128 << 20);
+    options.set_max_write_buffer_number(4);
+    let mut table = BlockBasedOptions::default();
+    // Every spend resolves by one exact-key read of the o: keyspace; a bloom
+    // filter answers the misses without touching a table.
+    table.set_bloom_filter(10.0, false);
+    table.set_block_cache(&Cache::new_lru_cache(256 << 20));
+    options.set_block_based_table_factory(&table);
+    options
+}
+
+fn parallelism() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(8) as i32)
+        .unwrap_or(2)
+}
+
+/// Every batch reaches the disk before the call returns.
+fn durable() -> WriteOptions {
+    let mut write = WriteOptions::default();
+    write.set_sync(true);
+    write
+}
 
 fn open_in<'a>(value: &'a ProviderValue, what: &str) -> Result<&'a Open, ProviderFault> {
     let ProviderValue::Resource(resource) = value else {
@@ -93,11 +136,11 @@ fn text(bytes: Vec<u8>, what: &str) -> Result<String, String> {
 
 impl CapabilityProvider for Kv {
     fn identity(&self) -> &str {
-        "btc-listener.kv/rusty-leveldb@1"
+        "btc-listener.kv/rocksdb@1"
     }
 
     fn fingerprint(&self) -> &str {
-        concat!("rusty-leveldb 4.0, built ", env!("CARGO_PKG_VERSION"))
+        concat!("rocksdb 0.25, built ", env!("CARGO_PKG_VERSION"))
     }
 
     fn invoke(
@@ -111,32 +154,8 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "open takes one String"));
                 };
                 let dir = string_in(dir, "dir")?;
-                let mut options = Options::default();
-                options.create_if_missing = true;
-                // rusty-leveldb's table cache is an intrusive LRU built on
-                // raw pointers, and `LRUList::remove` never updates the list's
-                // tail pointer when the node it removes is the tail. Deleting
-                // an obsolete table after a compaction goes through that path,
-                // so the tail pointer is left addressing a freed node; the
-                // next eviction reads it and corrupts the list. It killed a
-                // whole-chain audit at Height 163642 roughly one run in three.
-                //
-                // Eviction is the only operation that reads the tail pointer,
-                // so a cache that never evicts never dereferences it. The
-                // default holds 1014 tables and this database already has
-                // 3879, so sizing the cache past the table count is what keeps
-                // this safe. The file descriptor ceiling here is 1048576, so
-                // it is affordable.
-                //
-                // This is a mitigation, not a fix. `tools/leveldb-tail-pointer`
-                // has a reproducer and a one-branch patch; until that is
-                // released the choice is a patched crate or RocksDB.
-                // See n1bor/btc-listener#33.
-                options.max_open_files = 1 << 17;
-                Ok(match DB::open(&dir, options) {
-                    Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(
-                        Mutex::new(db),
-                    )))),
+                Ok(match DB::open(&tuned(), &dir) {
+                    Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(db)))),
                     Err(why) => failed(&format!("cannot open the database at '{dir}'"), why),
                 })
             }
@@ -146,10 +165,10 @@ impl CapabilityProvider for Kv {
                 };
                 let key = string_in(key, "key")?;
                 let open = open_in(handle, "handle")?;
-                let mut db = open.0.lock().expect("Kv handle poisoned");
-                Ok(match db.get(key.as_bytes()) {
-                    None => ok(ProviderValue::OptionNone),
-                    Some(bytes) => match text(bytes.to_vec(), &format!("the value under '{key}'")) {
+                Ok(match open.0.get(key.as_bytes()) {
+                    Err(why) => failed(&format!("cannot read '{key}'"), why),
+                    Ok(None) => ok(ProviderValue::OptionNone),
+                    Ok(Some(bytes)) => match text(bytes, &format!("the value under '{key}'")) {
                         Ok(value) => ok(ProviderValue::OptionSome(Box::new(ProviderValue::String(value)))),
                         Err(why) => ProviderValue::ResultErr(Box::new(ProviderValue::String(why))),
                     },
@@ -165,8 +184,7 @@ impl CapabilityProvider for Kv {
                 for (key, value) in &entries {
                     batch.put(key.as_bytes(), value.as_bytes());
                 }
-                let mut db = open.0.lock().expect("Kv handle poisoned");
-                Ok(match db.write(batch, true) {
+                Ok(match open.0.write_opt(batch, &durable()) {
                     Ok(()) => ok(ProviderValue::Unit),
                     Err(why) => failed("cannot write the batch", why),
                 })
@@ -181,8 +199,7 @@ impl CapabilityProvider for Kv {
                 for key in &keys {
                     batch.delete(key.as_bytes());
                 }
-                let mut db = open.0.lock().expect("Kv handle poisoned");
-                Ok(match db.write(batch, true) {
+                Ok(match open.0.write_opt(batch, &durable()) {
                     Ok(()) => ok(ProviderValue::Unit),
                     Err(why) => failed("cannot delete the batch", why),
                 })
@@ -192,13 +209,11 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "count takes a Handle"));
                 };
                 let open = open_in(handle, "handle")?;
-                let mut db = open.0.lock().expect("Kv handle poisoned");
-                let mut iterator = match db.new_iter() {
-                    Ok(iterator) => iterator,
-                    Err(why) => return Ok(failed("cannot walk the keyspace", why)),
-                };
                 let mut held: i64 = 0;
-                while iterator.next().is_some() {
+                for item in open.0.iterator(IteratorMode::Start) {
+                    if let Err(why) = item {
+                        return Ok(failed("cannot walk the keyspace", why));
+                    }
                     held += 1;
                 }
                 Ok(ok(ProviderValue::Int(held.into())))
@@ -209,14 +224,15 @@ impl CapabilityProvider for Kv {
                 };
                 let prefix = string_in(prefix, "prefix")?;
                 let open = open_in(handle, "handle")?;
-                let mut db = open.0.lock().expect("Kv handle poisoned");
-                let mut iterator = match db.new_iter() {
-                    Ok(iterator) => iterator,
-                    Err(why) => return Ok(failed("cannot walk the keyspace", why)),
-                };
                 let mut found = Vec::new();
-                iterator.seek(prefix.as_bytes());
-                while let Some((key, value)) = iterator.current() {
+                for item in open
+                    .0
+                    .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+                {
+                    let (key, value) = match item {
+                        Ok(pair) => pair,
+                        Err(why) => return Ok(failed("cannot walk the keyspace", why)),
+                    };
                     if !key.starts_with(prefix.as_bytes()) {
                         break;
                     }
@@ -232,9 +248,6 @@ impl CapabilityProvider for Kv {
                         ProviderValue::String(key),
                         ProviderValue::String(value),
                     ]));
-                    if !iterator.advance() {
-                        break;
-                    }
                 }
                 Ok(ok(ProviderValue::List(found)))
             }
@@ -412,7 +425,7 @@ mod tests {
     ///
     /// This is the property the append-only log could only approximate. It is
     /// shown the way it actually matters: write a batch, close, cut the tail
-    /// of the write-ahead log so the record is torn, and reopen. LevelDB
+    /// of the write-ahead log so the record is torn, and reopen. RocksDB
     /// checksums each record, so a torn one is discarded — and because the
     /// whole batch is one record, what is discarded is the whole batch. A
     /// store that wrote entry-per-record would come back holding a prefix.
@@ -514,10 +527,8 @@ mod tests {
     fn a_value_that_is_not_utf8_is_an_error_the_caller_can_read() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let mut options = Options::default();
-            options.create_if_missing = true;
-            let mut db = DB::open(dir.path(), options).unwrap();
-            db.put(b"b:aa", &[0xff, 0xfe]).unwrap();
+            let db = DB::open(&tuned(), dir.path()).unwrap();
+            db.put(b"b:aa", [0xff, 0xfe]).unwrap();
             db.flush().unwrap();
         }
         let handle = opened(dir.path());
@@ -566,7 +577,7 @@ mod tests {
         assert_eq!(Kv.invoke(&unknown, &[]).unwrap_err().code, "bad_operation");
     }
 
-    /// LevelDB holds an exclusive lock on its directory, so a second open
+    /// RocksDB holds an exclusive lock on its directory, so a second open
     /// while the first Handle is alive is an Err the caller can read rather
     /// than a fault. Nothing in this program does it — one command opens one
     /// database once — but the failure should be legible if it ever does.

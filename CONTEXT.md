@@ -127,7 +127,7 @@ _Avoid_: standardness (that is one Policy, not the boundary), relay rules
 
 **Store**:
 A keyed byte store offering get, put, delete and batch. One API over two
-**backends**: Memory, which fixtures return, and Database, a LevelDB behind
+**backends**: Memory, which fixtures return, and Database, a RocksDB behind
 the `Infra.Kv` capability. A third, Logged — an append-only file — was
 retired with `migrate` (#44); a directory holding only its `index.log` is
 refused rather than read. The Store is derived data: `reindex` rebuilds every

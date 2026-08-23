@@ -114,3 +114,7 @@ retired the Logged backend, `Infra.StoreLog` and `migrate` together; a
 directory holding only an `index.log` is refused by name rather than read,
 and is rebuilt from the network. Memory stays, for exactly the reason given
 above. The title's "keep the log" is the part this amendment ends.
+
+**Superseded in its choice of engine by [ADR 0009](0009-rocksdb-under-the-index.md)**
+on 23 August 2026: the Index stays a key-value database behind `Infra.Kv`, but
+`rusty-leveldb` gave way to RocksDB.

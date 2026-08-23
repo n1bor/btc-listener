@@ -80,18 +80,19 @@ supplied at run time by Rust crates named in `aver.toml`:
 - `domain/primitives.av` → `providers/primitives` — RIPEMD-160 and secp256k1
   (libsecp256k1, the same code Bitcoin Core runs). The curve is a provider on
   purpose: its edge cases are consensus rules.
-- `infra/kv.av` → `providers/kv` — a LevelDB (`rusty-leveldb`). Effectful, so
+- `infra/kv.av` → `providers/kv` — a RocksDB (`rocksdb` crate; needs clang +
+  libclang-dev to build, ADR 0009). Effectful, so
   each operation declares an Oracle dimension. `Handle` is an opaque capability
   resource Aver code cannot construct or serialise.
 
 The providers carry their own Rust tests; everything else is tested from Aver.
 
 **The Store and the Index** (`infra/store.av`): one opaque keyed-store API over
-two backends — Memory (fixtures), Database (LevelDB in `kv/`, made on first
+two backends — Memory (fixtures), Database (RocksDB in `kv/`, made on first
 open). The log backend and `migrate` are gone (#44); a directory holding an
 `index.log` and no `kv/` is refused. The Index is derived: `reindex` rebuilds
 every `b:` Location from the Segments (#93), which is the recovery path after a
-crash — rusty-leveldb never fsyncs (#92).
+crash (#92, the rusty-leveldb era; RocksDB syncs every batch).
 Key prefixes: `b:` Block Id → Location, `h:` Height →
 Block Id, `t:` Transaction Id → site, `o:<txid>:<index>` → Output (what lets a
 spend resolve in one lookup).
@@ -132,9 +133,10 @@ deliberate (post-hoc verification flags this engine doesn't apply — ADR 0005).
   Prune Watermark, Index, Store...), and each entry lists words to avoid
   (say Peer, not node/host; Block Id, not block hash; Height, not index).
   New concepts get an entry.
-- Architecture decisions go in `docs/adr/` (six so far — P2P not RPC, no fees,
+- Architecture decisions go in `docs/adr/` (nine so far — P2P not RPC, no fees,
   compile don't interpret, hex-text block format, signatures-left-out engine,
-  LevelDB under the Index).
+  LevelDB under the Index, two claims two tools, the single-writer loop,
+  RocksDB under the Index).
 - Verify-case expectations are pinned against sources *outside* this
   implementation (published vectors, Core's test data, spec-computed values) —
   never captured from the code under test.

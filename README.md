@@ -628,7 +628,7 @@ behind one API. Callers cannot tell them apart: `Store` is opaque, so the same
 | backend | what it is | where it comes from |
 |---|---|---|
 | Memory | a `Map`, holding exactly what it was handed | `Store.fixture`, used by the verify cases |
-| Database | a LevelDB, read a key at a time | a directory's `kv/`, made on first open |
+| Database | a RocksDB, read a key at a time | a directory's `kv/`, made on first open |
 
 There was a third: Logged, an append-only text file replayed into memory on
 every open — the format that came before the database, kept so the one-shot
@@ -641,9 +641,10 @@ directory of hex Segments is.
 ### Recovering a lost Index
 
 The Index is derived and the Segments are the source. On 23 August 2026 a hard
-crash mid-`outputs` left 57 GB of intact Segments beside a LevelDB that would
-not open — `Corruption: missing live files`, because rusty-leveldb never
-fsyncs ([#92](https://github.com/n1bor/btc-listener/issues/92)). `reindex`
+crash mid-`outputs` left 57 GB of intact Segments beside a database that would
+not open — `Corruption: missing live files`, because the rusty-leveldb of the
+day never fsynced ([#92](https://github.com/n1bor/btc-listener/issues/92); the
+RocksDB that replaced it syncs every batch, [ADR 0009](docs/adr/0009-rocksdb-under-the-index.md)). `reindex`
 exists so that costs minutes rather than a download
 ([#93](https://github.com/n1bor/btc-listener/issues/93)):
 
@@ -865,10 +866,18 @@ the curve behind the same contract, so there is one boundary rather than two.
 whole index in a Map, which cannot be stretched to the two hundred million
 entries an output keyspace would need. That is a database, and Aver has not got
 one. Unlike the primitives it is **effectful**, so every operation declares an
-Oracle dimension and what a replay does with it. The provider is
-`rusty-leveldb`, chosen over RocksDB because it needs no C++ toolchain, and the
-choice is provisional: swapping the crate changes one Rust file and no Aver at
-all.
+Oracle dimension and what a replay does with it. The provider is RocksDB,
+through the `rocksdb` crate, and every batch is written with `sync = true` so
+a `putAll` returns only once the write-ahead log is on the disk. It was
+`rusty-leveldb`, a pure-Rust port chosen because it needed no C++ toolchain,
+until two defects in the port's own code — a table cache that panicked on
+eviction ([#33](https://github.com/n1bor/btc-listener/issues/33)) and no
+`fsync` anywhere ([#92](https://github.com/n1bor/btc-listener/issues/92)) —
+called the provision in;
+[ADR 0009](docs/adr/0009-rocksdb-under-the-index.md). The swap changed one
+Rust file and no Aver at all, which is what the contract was for. Building it
+needs `clang` and `libclang-dev`, and the first build compiles RocksDB from
+source.
 
 `Handle` is an opaque capability resource: only `open` produces one, only the
 contract's operations consume one, and Aver cannot construct, name or serialise
