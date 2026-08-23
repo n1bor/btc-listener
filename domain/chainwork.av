@@ -1,0 +1,156 @@
+module Chainwork
+    intent =
+        "How much work one Header proves, and how much a branch has behind it."
+        "A Header's Block Id has to fall under the target its bits name, so the"
+        "smaller the target the more hashing it took to find one. The work a"
+        "Header is worth is therefore the reciprocal of its target, scaled: the"
+        "number of Block Ids in the whole 256-bit space divided by the number"
+        "that would have been accepted. Bitcoin Core writes that as"
+        "`~target / (target + 1) + 1` because it has no room for two to the"
+        "256th in a 256-bit number; Aver's Int is arbitrary precision, so the"
+        "division is written the way the definition reads."
+        "This is what decides which branch a node follows. Not Height -- a"
+        "longer branch of easier Blocks is worth less than a shorter branch of"
+        "harder ones, and choosing on Height is how a node is fooled into"
+        "following a chain nobody paid for."
+        "The three refusals below are Core's, and each is a target that is not"
+        "a target: a negative one, one too large to fit the space, and a zero"
+        "one that would divide the whole space by nothing. All three answer"
+        "zero work rather than an error, because a Header carrying one is a"
+        "Header that proves nothing, which is a fact about the branch and not"
+        "a failure of the arithmetic."
+    exposes [ofBits, added, over, heavier, ceiling]
+    depends [Domain.Block]
+    effects []
+
+fn ceiling() -> Int
+    ? "How many values a 256-bit Block Id can take: two to the 256th."
+      "Built by doubling rather than written down, and checked against the"
+      "constant, so the case below is a real comparison rather than a copy of"
+      "the expression above it."
+    doubled(256, 1)
+
+verify ceiling
+    ceiling() => 115792089237316195423570985008687907853269984665640564039457584007913129639936
+
+fn doubled(times: Int, acc: Int) -> Int
+    ? "Two to the given power, by repeated doubling."
+    match times <= 0
+        true -> acc
+        false -> doubled(times - 1, acc * 2)
+
+verify doubled
+    doubled(0, 1) => 1
+    doubled(1, 1) => 2
+    doubled(8, 1) => 256
+    doubled(16, 1) => 65536
+    doubled(0 - 5, 1) => 1
+
+fn ofBits(bits: Int) -> Int
+    ? "The work a single Header proves, from the compact target it carries."
+      "The four pinned below are the genesis Headers of three Networks and one"
+      "modern mainnet target. Mainnet's is the number Core reports as the"
+      "chainwork of Block 0 -- 0x100010001 -- which is the check that matters:"
+      "it is a published value produced by a different implementation."
+    match usable(bits)
+        false -> 0
+        true -> perTarget(Domain.Block.targetOf(bits))
+
+verify ofBits
+    ofBits(486604799) => 4295032833
+    ofBits(503543726) => 4838420
+    ofBits(545259519) => 2
+    ofBits(386075020) => 398027462744731716302995
+    ofBits(486539264) => 0
+    ofBits(494927872) => 0
+    ofBits(587202561) => 0
+
+fn perTarget(target: Int) -> Int
+    ? "The whole space divided by the values the target admits."
+      "Total: usable has already refused a zero target, so the divisor is at"
+      "least two and the default is unreachable."
+    Result.withDefault(Int.div(ceiling(), target + 1), 0)
+
+verify perTarget
+    perTarget(1) => 57896044618658097711785492504343953926634992332820282019728792003956564819968
+    perTarget(26959535291011309493156476344723991336010898738574164086137773096960) => 4295032833
+
+fn usable(bits: Int) -> Bool
+    ? "Whether these bits name a target at all."
+      "Core's SetCompact reports negative and overflow separately and"
+      "GetBlockProof discards the Header on either, along with a target of"
+      "zero. A zero mantissa is what makes a target zero, and it is the one of"
+      "the three that has actually appeared: an all-zero bits field."
+    match Int.mod(bits, 16777216) == 0
+        true -> false
+        false -> Bool.and(negative(bits) == false, overflowing(bits) == false)
+
+verify usable
+    usable(486604799) => true
+    usable(545259519) => true
+    usable(570425345) => true
+    usable(486539264) => false
+    usable(494927872) => false
+    usable(587202561) => false
+
+fn negative(bits: Int) -> Bool
+    ? "Whether the mantissa's top bit is set, which would make the target negative."
+      "The compact form is a signed mantissa, and a Header claiming a negative"
+      "target is claiming something no Block Id can fall under."
+    Int.mod(Int.div(bits, 8388608), 2) == 1
+
+verify negative
+    negative(486604799) => false
+    negative(494927872) => true
+    negative(494993407) => true
+    negative(545259519) => false
+
+fn overflowing(bits: Int) -> Bool
+    ? "Whether the exponent shifts the mantissa past the 256 bits there are."
+      "Core's boundary: an exponent above 34 overflows, 34 itself does not."
+    Int.div(bits, 16777216) > 34
+
+verify overflowing
+    overflowing(486604799) => false
+    overflowing(570425345) => false
+    overflowing(587202561) => true
+
+fn added(parent: Int, bits: Int) -> Int
+    ? "A branch's work is everything behind it plus what this Header proves."
+      "Mainnet Block 1 is the pinned case: two Headers at the genesis target,"
+      "which Core reports as 0x200020002."
+    parent + ofBits(bits)
+
+verify added
+    added(0, 486604799) => 4295032833
+    added(4295032833, 486604799) => 8590065666
+    added(4295032833, 486539264) => 4295032833
+
+fn over(bitsList: List<Int>, acc: Int) -> Int
+    ? "The work of a run of Headers, added to what was already behind them."
+    match bitsList
+        [] -> acc
+        [head, ..tail] -> over(tail, added(acc, head))
+
+verify over
+    over([], 0) => 0
+    over([], 17) => 17
+    over([486604799], 0) => 4295032833
+    over([486604799, 486604799], 0) => 8590065666
+    over([486604799, 486604799, 486604799], 0) => 12885098499
+    over([545259519, 545259519], 0) => 4
+
+fn heavier(candidate: Int, incumbent: Int) -> Bool
+    ? "Whether a branch beats the one being followed."
+      "Strictly greater, so an equal-work branch does not displace the one"
+      "already held. That is Core's rule and it is what stops a node flapping"
+      "between two tips of the same work, but it is also why first-seen order"
+      "decides such a tie -- which is a property of the arrival order, not of"
+      "the arithmetic, and so belongs to whoever holds the tree."
+    candidate > incumbent
+
+verify heavier
+    heavier(2, 1) => true
+    heavier(1, 2) => false
+    heavier(1, 1) => false
+    heavier(8590065666, 4295032833) => true

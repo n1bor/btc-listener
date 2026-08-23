@@ -1,0 +1,149 @@
+module TreeStore
+    intent =
+        "How the Header tree is spelled inside a Store."
+        "A fifth keyspace beside b:, h:, t: and o:. The k: space maps a Block"
+        "Id to the Header itself and to the two things a Header does not carry"
+        "and cannot be placed without: the Height it sits at and the work of"
+        "the whole branch below it. Both come from its parent, so both are"
+        "fixed the moment the Header is placed and neither ever changes -- k:"
+        "is append-only in the way b: is, and unlike h:, which a"
+        "reorganisation rewrites."
+        "The Header bytes are kept rather than derived because they are not"
+        "derived from anything: the Segments hold Block bodies for the range"
+        "that was fetched, and a Header above that range exists nowhere else"
+        "on disk. Throwing them away would make the tree unrebuildable without"
+        "going back to a Peer."
+        "The parent's Block Id is stored beside the Header even though the"
+        "Header already contains it. That is a deliberate 64 characters per"
+        "Block: it lets a walk up the tree read a Placement without decoding a"
+        "Header, and this keyspace is walked once per arriving Header."
+    exposes [Held, headerKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
+    depends [Domain.HeaderTree, Domain.Index]
+    effects []
+
+record Held
+    node: Placement
+    headerHex: String
+
+fn headerKey(blockId: String) -> String
+    ? "Where a Header and its place in the tree live."
+    "k:{blockId}"
+
+verify headerKey
+    headerKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "k:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    headerKey("") => "k:"
+
+fn bestTipKey() -> String
+    ? "The single record naming the tip of the branch with the most work."
+      "A record rather than a search, because finding the best tip by walking"
+      "every Placement is a walk of the whole tree and the answer only changes when"
+      "a Header arrives."
+    "meta:bestTip"
+
+verify bestTipKey
+    bestTipKey() => "meta:bestTip"
+
+fn heldFor(node: Placement, headerHex: String) -> Held
+    ? "A placed Header, ready to be written down."
+    Held(node = node, headerHex = headerHex)
+
+verify heldFor
+    heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "01").headerHex => "01"
+    heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "01").node.height => 0
+
+fn encodeHeld(held: Held) -> String
+    ? "The Height, the branch's work, the parent, and the Header itself."
+      "The Block Id is the key and so is not repeated in the value."
+    "{held.node.height}:{held.node.work}:{held.node.parentId}:{held.headerHex}"
+
+verify encodeHeld
+    encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100")) => "0:4295032833:0000000000000000000000000000000000000000000000000000000000000000:0100"
+    encodeHeld(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("aa", 486604799), "bb", 486604799), "02")) => "1:8590065666:aa:02"
+
+fn decodeHeld(blockId: String, text: String) -> Result<Held, String>
+    ? "Read one back, given the Block Id its key named."
+    heldParts(blockId, text, String.split(text, ":"))
+
+verify decodeHeld
+    decodeHeld("aa", "0:4295032833:0000000000000000000000000000000000000000000000000000000000000000:0100") => Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))
+    decodeHeld("bb", "1:8590065666:aa:02") => Result.Ok(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("aa", 486604799), "bb", 486604799), "02"))
+    decodeHeld("aa", "") => Result.Err("Header record must be height:work:parent:header, got ''")
+    decodeHeld("aa", "0:1:2") => Result.Err("Header record must be height:work:parent:header, got '0:1:2'")
+    decodeHeld("aa", "0:1:2:3:4") => Result.Err("Header record must be height:work:parent:header, got '0:1:2:3:4'")
+    decodeHeld("aa", "x:1:2:3") => Result.Err("Header record must hold whole numbers, got 'x:1:2:3'")
+    decodeHeld("aa", "0:x:2:3") => Result.Err("Header record must hold whole numbers, got '0:x:2:3'")
+    decodeHeld("aa", "-1:1:2:3") => Result.Err("Header record must hold whole numbers, got '-1:1:2:3'")
+
+fn heldParts(blockId: String, text: String, split: List<String>) -> Result<Held, String>
+    ? "The Height comes first."
+    match split
+        [] -> Result.Err("Header record must be height:work:parent:header, got '{text}'")
+        [height, ..rest] -> afterHeight(blockId, text, height, rest)
+
+verify heldParts
+    heldParts("aa", "0:1:p:h", ["0", "1", "p", "h"]) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    heldParts("aa", "", []) => Result.Err("Header record must be height:work:parent:header, got ''")
+
+fn afterHeight(blockId: String, text: String, height: String, rest: List<String>) -> Result<Held, String>
+    ? "Then the work behind the branch."
+    match rest
+        [] -> Result.Err("Header record must be height:work:parent:header, got '{text}'")
+        [work, ..more] -> afterWork(blockId, text, height, work, more)
+
+verify afterHeight
+    afterHeight("aa", "0:1:p:h", "0", ["1", "p", "h"]) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    afterHeight("aa", "0", "0", []) => Result.Err("Header record must be height:work:parent:header, got '0'")
+
+fn afterWork(blockId: String, text: String, height: String, work: String, more: List<String>) -> Result<Held, String>
+    ? "Then the parent's Block Id."
+    match more
+        [] -> Result.Err("Header record must be height:work:parent:header, got '{text}'")
+        [parentId, ..last] -> afterParent(blockId, text, height, work, parentId, last)
+
+verify afterWork
+    afterWork("aa", "0:1:p:h", "0", "1", ["p", "h"]) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    afterWork("aa", "0:1", "0", "1", []) => Result.Err("Header record must be height:work:parent:header, got '0:1'")
+
+fn afterParent(blockId: String, text: String, height: String, work: String, parentId: String, last: List<String>) -> Result<Held, String>
+    ? "The Header itself is last, and nothing follows it."
+      "A Header is hexadecimal and holds no colon, so a fifth field means the"
+      "text was never a Header record."
+    match last
+        [] -> Result.Err("Header record must be height:work:parent:header, got '{text}'")
+        [headerHex, ..extra] -> afterHeader(blockId, text, height, work, parentId, headerHex, extra)
+
+verify afterParent
+    afterParent("aa", "0:1:p:h", "0", "1", "p", ["h"]) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    afterParent("aa", "0:1:p", "0", "1", "p", []) => Result.Err("Header record must be height:work:parent:header, got '0:1:p'")
+
+fn afterHeader(blockId: String, text: String, height: String, work: String, parentId: String, headerHex: String, extra: List<String>) -> Result<Held, String>
+    ? "Refuse a fifth field, then read the two numbers."
+    match extra
+        [] -> numbered(blockId, text, Domain.Index.decodeHeight(height), Domain.Index.decodeHeight(work), parentId, headerHex)
+        [head, ..tail] -> Result.Err("Header record must be height:work:parent:header, got '{text}'")
+
+verify afterHeader
+    afterHeader("aa", "0:1:p:h", "0", "1", "p", "h", []) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    afterHeader("aa", "0:1:p:h:x", "0", "1", "p", "h", ["x"]) => Result.Err("Header record must be height:work:parent:header, got '0:1:p:h:x'")
+
+fn numbered(blockId: String, text: String, height: Result<Int, String>, work: Result<Int, String>, parentId: String, headerHex: String) -> Result<Held, String>
+    ? "Both the Height and the work have to be whole numbers."
+      "Domain.Index already refuses a negative one, which is what a Height and"
+      "a quantity of work both are."
+    match height
+        Result.Err(why) -> Result.Err("Header record must hold whole numbers, got '{text}'")
+        Result.Ok(at) -> withHeight(blockId, text, at, work, parentId, headerHex)
+
+verify numbered
+    numbered("aa", "0:1:p:h", Result.Ok(0), Result.Ok(1), "p", "h") => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    numbered("aa", "x:1:p:h", Result.Err("no"), Result.Ok(1), "p", "h") => Result.Err("Header record must hold whole numbers, got 'x:1:p:h'")
+
+fn withHeight(blockId: String, text: String, height: Int, work: Result<Int, String>, parentId: String, headerHex: String) -> Result<Held, String>
+    ? "The Height parsed; the work still has to."
+    match work
+        Result.Err(why) -> Result.Err("Header record must hold whole numbers, got '{text}'")
+        Result.Ok(behind) -> Result.Ok(heldFor(Placement(blockId = blockId, parentId = parentId, height = height, work = behind), headerHex))
+
+verify withHeight
+    withHeight("aa", "0:1:p:h", 0, Result.Ok(1), "p", "h") => Result.Ok(heldFor(Placement(blockId = "aa", parentId = "p", height = 0, work = 1), "h"))
+    withHeight("aa", "0:x:p:h", 0, Result.Err("no"), "p", "h") => Result.Err("Header record must hold whole numbers, got '0:x:p:h'")

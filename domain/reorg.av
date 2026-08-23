@@ -1,0 +1,308 @@
+module Reorg
+    intent =
+        "What has to change in the h: keyspace for the Index to name the"
+        "most-work branch, and whether that change is a reorganisation."
+        "Growth and reorganisation look identical from inside the walk -- both"
+        "write h: entries the Index did not have -- and they are not the same"
+        "event. A Height that held no Block Id is the chain getting longer. A"
+        "Height that held a different one is the chain changing its mind, and"
+        "everything derived from the Blocks it displaced is now describing"
+        "Blocks that are no longer on the chain."
+        "Counting the two apart is the whole of Stage 1's detection. Acting on"
+        "it is Stage 2's problem: there is no UTXO Set yet, so there is"
+        "nothing to unwind, which is exactly why detection can ship before"
+        "Undo Data exists (n1bor/btc-listener#24)."
+        "A Standing is one Height of the branch being adopted beside whatever"
+        "h: records there. Pairing them here rather than looking either up"
+        "keeps the whole comparison pure -- the Store is read once by the"
+        "caller and never by this."
+    exposes [Standing, Repointing, Movement, repointing, movementOf, agrees]
+    depends [Domain.HeaderTree]
+    effects []
+
+record Standing
+    node: Placement
+    recorded: Option<String>
+
+record Repointing
+    forkHeight: Int
+    changed: List<Placement>
+    displaced: Int
+    staleFrom: Int
+
+type Movement
+    Unchanged
+    Extended(Int)
+    Reorganised(Int, Int)
+
+fn repointing(standing: List<Standing>) -> Repointing
+    ? "What the Index has to be told, for a branch beside what it already holds."
+      "The branch arrives root first. Everything up to the last Height that"
+      "already agrees is left alone; everything above it is rewritten, whether"
+      "it held nothing or held something else."
+    built(standing, agreedThrough(standing, 0 - 1))
+
+verify repointing
+    repointing(adopting()).forkHeight => 0
+    repointing(adopting()).displaced => 2
+    repointing(adopting()).staleFrom => 4
+    List.len(repointing(adopting()).changed) => 3
+    repointing(extending()).forkHeight => 2
+    repointing(extending()).displaced => 0
+    List.len(repointing(extending()).changed) => 1
+    repointing(settled()).forkHeight => 2
+    repointing(settled()).displaced => 0
+    List.len(repointing(settled()).changed) => 0
+    repointing([]).forkHeight => 0 - 1
+    repointing([]).staleFrom => 0
+
+fn built(standing: List<Standing>, forkHeight: Int) -> Repointing
+    ? "The plan, once the fork Height is known."
+    Repointing(forkHeight = forkHeight, changed = changedAbove(standing, forkHeight, []), displaced = displacedAbove(standing, forkHeight, 0), staleFrom = topHeight(standing, 0 - 1) + 1)
+
+verify built
+    built([], 0 - 1).staleFrom => 0
+    built(adopting(), 0).displaced => 2
+    built(settled(), 2).displaced => 0
+
+fn agreedThrough(standing: List<Standing>, acc: Int) -> Int
+    ? "The highest Height, counting from the root, that already names this Block."
+      "It stops at the first disagreement rather than looking further up. Two"
+      "branches that diverge do not meet again -- a Block Id commits to its"
+      "whole ancestry -- so anything above the first difference is on the new"
+      "branch by construction."
+    match standing
+        [] -> acc
+        [head, ..tail] -> stillAgreeing(head, tail, acc)
+
+verify agreedThrough
+    agreedThrough([], 0 - 1) => 0 - 1
+    agreedThrough([agreeingAt(0)], 0 - 1) => 0
+    agreedThrough([differingAt(1)], 0 - 1) => 0 - 1
+    agreedThrough(adopting(), 0 - 1) => 0
+    agreedThrough(extending(), 0 - 1) => 2
+    agreedThrough(settled(), 0 - 1) => 2
+
+fn stillAgreeing(one: Standing, rest: List<Standing>, acc: Int) -> Int
+    ? "Carry on while this Height agrees; stop where it does not."
+    match agrees(one)
+        true -> agreedThrough(rest, one.node.height)
+        false -> acc
+
+verify stillAgreeing
+    stillAgreeing(agreeingAt(0), [], 0 - 1) => 0
+    stillAgreeing(differingAt(1), [], 0) => 0
+
+fn agrees(one: Standing) -> Bool
+    ? "Whether h: already names this Block at this Height."
+      "No entry is a disagreement, not an agreement: a Height the Index has"
+      "never heard of is a Height that has to be written."
+    match one.recorded
+        Option.None -> false
+        Option.Some(named) -> named == one.node.blockId
+
+verify agrees
+    agrees(agreeingAt(0)) => true
+    agrees(differingAt(1)) => false
+    agrees(Standing(node = Domain.HeaderTree.rootedAt("a", 486604799), recorded = Option.None)) => false
+
+fn changedAbove(standing: List<Standing>, forkHeight: Int, acc: List<Placement>) -> List<Placement>
+    ? "The Heights above the fork, in the order they have to be written."
+    match standing
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keptIfAbove(head, tail, forkHeight, acc)
+
+verify changedAbove
+    List.len(changedAbove([agreeingAt(0)], 0 - 1, [])) => 1
+    List.len(changedAbove([agreeingAt(0)], 0, [])) => 0
+    changedAbove([], 0, []) => []
+    List.len(changedAbove(adopting(), 0, [])) => 3
+    List.len(changedAbove(settled(), 2, [])) => 0
+
+fn keptIfAbove(one: Standing, rest: List<Standing>, forkHeight: Int, acc: List<Placement>) -> List<Placement>
+    ? "Keep this Height only if it sits above the fork."
+    match one.node.height > forkHeight
+        true -> changedAbove(rest, forkHeight, List.prepend(one.node, acc))
+        false -> changedAbove(rest, forkHeight, acc)
+
+verify keptIfAbove
+    List.len(keptIfAbove(agreeingAt(0), [], 0 - 1, [])) => 1
+    List.len(keptIfAbove(agreeingAt(0), [], 0, [])) => 0
+
+fn displacedAbove(standing: List<Standing>, forkHeight: Int, acc: Int) -> Int
+    ? "How many of the rewritten Heights already held a different Block Id."
+      "This is the number that separates a reorganisation from growth, and it"
+      "is counted rather than inferred, because a branch can do both at once:"
+      "displace two Heights and add three more above them."
+    match standing
+        [] -> acc
+        [head, ..tail] -> countedIfDisplaced(head, tail, forkHeight, acc)
+
+verify displacedAbove
+    displacedAbove([differingAt(1)], 0, 0) => 1
+    displacedAbove([agreeingAt(0)], 0 - 1, 0) => 1
+    displacedAbove([], 0, 0) => 0
+    displacedAbove(adopting(), 0, 0) => 2
+    displacedAbove(extending(), 2, 0) => 0
+
+fn countedIfDisplaced(one: Standing, rest: List<Standing>, forkHeight: Int, acc: Int) -> Int
+    ? "A Height above the fork that held something counts; one that held nothing does not."
+    match Bool.and(one.node.height > forkHeight, held(one.recorded))
+        true -> displacedAbove(rest, forkHeight, acc + 1)
+        false -> displacedAbove(rest, forkHeight, acc)
+
+verify countedIfDisplaced
+    countedIfDisplaced(differingAt(1), [], 0, 0) => 1
+    countedIfDisplaced(differingAt(1), [], 1, 0) => 0
+
+fn held(recorded: Option<String>) -> Bool
+    ? "Whether h: had anything at this Height at all."
+    match recorded
+        Option.None -> false
+        Option.Some(any) -> true
+
+verify held
+    held(Option.None) => false
+    held(Option.Some("a")) => true
+    held(Option.Some("")) => true
+
+fn topHeight(standing: List<Standing>, acc: Int) -> Int
+    ? "The Height the branch ends at, or below zero when it is empty."
+    match standing
+        [] -> acc
+        [head, ..tail] -> topHeight(tail, head.node.height)
+
+verify topHeight
+    topHeight([agreeingAt(0)], 0 - 1) => 0
+    topHeight([agreeingAt(0), agreeingAt(2)], 0 - 1) => 2
+    topHeight([], 0 - 1) => 0 - 1
+    topHeight(adopting(), 0 - 1) => 3
+    topHeight(settled(), 0 - 1) => 2
+
+fn movementOf(plan: Repointing) -> Movement
+    ? "What this plan is: nothing, growth, or a reorganisation."
+      "Named rather than left as three numbers for the caller to compare,"
+      "because the whole point of Stage 1 is that the node says which of the"
+      "three happened."
+    match List.len(plan.changed) == 0
+        true -> Movement.Unchanged
+        false -> moving(plan)
+
+verify movementOf
+    movementOf(repointing(settled())) => Movement.Unchanged
+    movementOf(repointing(extending())) => Movement.Extended(1)
+    movementOf(repointing(adopting())) => Movement.Reorganised(0, 2)
+
+fn moving(plan: Repointing) -> Movement
+    ? "A plan that writes something is growth unless it displaces something."
+    match plan.displaced == 0
+        true -> Movement.Extended(List.len(plan.changed))
+        false -> Movement.Reorganised(plan.forkHeight, plan.displaced)
+
+verify moving
+    moving(repointing(extending())) => Movement.Extended(1)
+    moving(repointing(adopting())) => Movement.Reorganised(0, 2)
+
+fn trunk() -> List<Placement>
+    ? "Three Blocks in a line at one difficulty, the chain the Index records."
+    [Domain.HeaderTree.rootedAt("a", 486604799), Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("a", 486604799), "b", 486604799), Domain.HeaderTree.childOf(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("a", 486604799), "b", 486604799), "c", 486604799)]
+
+verify trunk
+    List.len(trunk()) => 3
+
+fn agreeingAt(height: Int) -> Standing
+    ? "A Height of the trunk beside the same Block Id, for the cases here."
+    Standing(node = nodeAt(height), recorded = Option.Some(nodeAt(height).blockId))
+
+verify agreeingAt
+    agreeingAt(0).recorded => Option.Some("a")
+    agreeingAt(2).recorded => Option.Some("c")
+
+fn differingAt(height: Int) -> Standing
+    ? "A Height of the branch beside the trunk's Block Id at the same Height."
+    Standing(node = branchAt(height), recorded = Option.Some(nodeAt(height).blockId))
+
+verify differingAt
+    differingAt(1).recorded => Option.Some("b")
+    differingAt(1).node.blockId => "d"
+
+fn nodeAt(height: Int) -> Placement
+    ? "The trunk's Placement at a Height."
+      "Total: the cases here only ask for Heights the trunk has, so the"
+      "fallback is unreachable and answers the root."
+    nth(trunk(), height)
+
+verify nodeAt
+    nodeAt(0).blockId => "a"
+    nodeAt(1).blockId => "b"
+    nodeAt(2).blockId => "c"
+    nodeAt(9).blockId => "a"
+
+fn branchAt(height: Int) -> Placement
+    ? "The competing branch's Placement at a Height: a-d-e-f beside a-b-c."
+      "Total: as nodeAt, the cases only ask for Heights the branch has."
+    nth(branch(), height)
+
+verify branchAt
+    branchAt(0).blockId => "a"
+    branchAt(1).blockId => "d"
+    branchAt(3).blockId => "f"
+
+fn nth(nodes: List<Placement>, index: Int) -> Placement
+    ? "The Placement at a position, counting from zero."
+      "Walked rather than indexed, because a List here is a List. The empty"
+      "answer is the root, which the cases above never reach."
+    match nodes
+        [] -> Domain.HeaderTree.rootedAt("a", 486604799)
+        [head, ..tail] -> hereOrOn(head, tail, index)
+
+verify nth
+    nth([], 0).blockId => "a"
+    nth(trunk(), 0).blockId => "a"
+    nth(trunk(), 2).blockId => "c"
+    nth(trunk(), 9).blockId => "a"
+
+fn hereOrOn(head: Placement, tail: List<Placement>, index: Int) -> Placement
+    ? "This one when the count runs out, the rest otherwise."
+    match index <= 0
+        true -> head
+        false -> nth(tail, index - 1)
+
+verify hereOrOn
+    hereOrOn(Domain.HeaderTree.rootedAt("a", 486604799), [], 0).blockId => "a"
+    hereOrOn(Domain.HeaderTree.rootedAt("a", 486604799), trunk(), 1).blockId => "a"
+
+fn branch() -> List<Placement>
+    ? "Four Blocks forking from the trunk at Height 0."
+    grownBranch(Domain.HeaderTree.rootedAt("a", 486604799))
+
+verify branch
+    List.len(branch()) => 4
+
+fn grownBranch(root: Placement) -> List<Placement>
+    ? "The branch built onto its root."
+    [root, Domain.HeaderTree.childOf(root, "d", 486604799), Domain.HeaderTree.childOf(Domain.HeaderTree.childOf(root, "d", 486604799), "e", 486604799), Domain.HeaderTree.childOf(Domain.HeaderTree.childOf(Domain.HeaderTree.childOf(root, "d", 486604799), "e", 486604799), "f", 486604799)]
+
+verify grownBranch
+    List.len(grownBranch(Domain.HeaderTree.rootedAt("a", 486604799))) => 4
+
+fn adopting() -> List<Standing>
+    ? "The branch beside the trunk: agrees at Height 0, displaces 1 and 2, adds 3."
+    [agreeingAt(0), differingAt(1), differingAt(2), Standing(node = branchAt(3), recorded = Option.None)]
+
+verify adopting
+    List.len(adopting()) => 4
+
+fn extending() -> List<Standing>
+    ? "The trunk with one more Block on it: nothing displaced."
+    [agreeingAt(0), agreeingAt(1), agreeingAt(2), Standing(node = Domain.HeaderTree.childOf(nodeAt(2), "g", 486604799), recorded = Option.None)]
+
+verify extending
+    List.len(extending()) => 4
+
+fn settled() -> List<Standing>
+    ? "The trunk beside itself: nothing to do."
+    [agreeingAt(0), agreeingAt(1), agreeingAt(2)]
+
+verify settled
+    List.len(settled()) => 3

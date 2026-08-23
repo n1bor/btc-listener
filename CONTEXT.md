@@ -98,6 +98,20 @@ The double-SHA256 of a Block Header, displayed in reverse byte order, exactly as
 a Transaction Id is. A Block's only stable name.
 _Avoid_: block hash, hash, digest
 
+**Branch**:
+A run of Headers each naming the one below it, ending at a Tip. Every Header we
+hold sits on one; the chain this program follows is the Branch with the most
+Chain Work behind it. A Header whose parent is not the Tip starts a Branch, and
+that is ordinary rather than an error.
+_Avoid_: fork, side chain, alternate chain, candidate
+
+**Chain Work**:
+How much hashing a Branch represents: for each Header, the whole 256-bit space
+divided by the values its target admits, summed from the first Block. What
+decides which Branch to follow — Height does not, because a longer Branch of
+easier Blocks is worth less than a shorter Branch of harder ones.
+_Avoid_: difficulty, total difficulty, weight, score, length
+
 **Height**:
 A Block's distance from the first Block. A position rather than an identity: the
 chain may reassign one, so a Height names a slot and never a Block.
@@ -107,6 +121,32 @@ _Avoid_: index, number, sequence, depth
 The descending list of Block Ids sent with `getheaders` to tell a Peer how far we
 have got. Sparse by design — recent Ids in full, then exponentially thinning.
 _Avoid_: checkpoint, cursor, bookmark
+
+**Orphan Header**:
+A Header whose parent we do not hold. It gets no Height and no Chain Work,
+because both are counted from the parent, so it cannot join the tree yet.
+Not refused — nothing is wrong with it — just not placed.
+_Avoid_: orphan block, stray, floating, invalid
+
+**Placement**:
+What a Header becomes once its parent is known: the Height it sits at and the
+Chain Work of the Branch below it. Neither is carried by the Header itself,
+which is why a Header without a parent has no Placement.
+_Avoid_: node, block index, entry, record
+
+**Reorganisation**:
+The chain changing which Branch it follows, so Heights that named one Block now
+name another. Distinct from the chain merely growing: growth writes Heights that
+held nothing, a Reorganisation displaces Heights that held something else, and
+everything derived from the displaced Blocks is now describing Blocks that are
+no longer on the chain.
+_Avoid_: rollback, revert, chain switch, fork
+
+**Tip**:
+The Header at the end of a Branch — one that no other Header we hold names as
+its parent. A tree has as many Tips as Branches, and the one with the most
+Chain Work is the chain this program follows.
+_Avoid_: head, top, leaf, best block, latest
 
 ### What we hold unconfirmed
 

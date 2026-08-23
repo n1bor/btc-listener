@@ -1,0 +1,290 @@
+module HeaderTree
+    intent =
+        "Every Header we have seen, as the tree it actually is, and which of"
+        "its tips has the most work behind it."
+        "Today the Index believes one chain: h: maps a Height to one Block Id"
+        "and the parent check compares against the Block below. That is true"
+        "of the chain as it settles and false of the chain as it arrives. Two"
+        "Blocks can name the same parent, and until one of their branches"
+        "outweighs the other neither is wrong -- so a Header whose parent is"
+        "not the tip is a branch, not an error."
+        "A Placement is what a Header becomes once its parent is known: the Height"
+        "it sits at and the work behind it, both of which come from its parent"
+        "and neither of which the Header itself carries. A Header whose parent"
+        "has not arrived is an Orphan and gets no Placement, because there is"
+        "nothing to count its Height or its work from -- it is not refused,"
+        "just not placed yet."
+        "Nothing here reads or writes anything. The tree arrives as a Map and"
+        "leaves as a Map, which is what lets the whole of it carry verify"
+        "blocks; whoever holds the Store decides how it is spelled on disk."
+    exposes [Placement, Placed, zeroId, rootedAt, childOf, placed, placedFrom, grown, bestOf, ancestryOf, tipsOf]
+    depends [Domain.Chainwork]
+    effects []
+
+record Placement
+    blockId: String
+    parentId: String
+    height: Int
+    work: Int
+
+type Placed
+    Attached(Placement)
+    Known(Placement)
+    Orphan
+
+fn zeroId() -> String
+    ? "What a Header with no parent names as its parent: thirty-two zero bytes."
+      "A genesis Header carries this in the field every other Header uses for"
+      "its parent, so it is a real Block Id-shaped value that names no Block."
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+verify zeroId
+    String.len(zeroId()) => 64
+    String.startsWith(zeroId(), "0000") => true
+
+fn rootedAt(blockId: String, bits: Int) -> Placement
+    ? "The Placement a genesis Header makes: Height zero, its own work behind it."
+    Placement(blockId = blockId, parentId = zeroId(), height = 0, work = Domain.Chainwork.ofBits(bits))
+
+verify rootedAt
+    rootedAt("aa", 486604799).height => 0
+    rootedAt("aa", 486604799).work => 4295032833
+    rootedAt("aa", 486604799).blockId => "aa"
+    rootedAt("aa", 545259519).work => 2
+
+fn childOf(parent: Placement, blockId: String, bits: Int) -> Placement
+    ? "The Placement a Header makes once its parent is known."
+      "Height and work both come from the parent, which is the whole reason a"
+      "Header cannot be placed without one."
+    Placement(blockId = blockId, parentId = parent.blockId, height = parent.height + 1, work = Domain.Chainwork.added(parent.work, bits))
+
+verify childOf
+    childOf(rootedAt("aa", 486604799), "bb", 486604799).height => 1
+    childOf(rootedAt("aa", 486604799), "bb", 486604799).work => 8590065666
+    childOf(rootedAt("aa", 486604799), "bb", 486604799).parentId => "aa"
+    childOf(childOf(rootedAt("aa", 486604799), "bb", 486604799), "cc", 486604799).height => 2
+    childOf(childOf(rootedAt("aa", 486604799), "bb", 486604799), "cc", 486604799).work => 12885098499
+
+fn placed(known: Map<String, Placement>, blockId: String, parentId: String, bits: Int) -> Placed
+    ? "Where an arriving Header goes: onto its parent, nowhere, or already here."
+      "Three answers rather than two because a Header we already hold and a"
+      "Header we cannot place are different situations with the same"
+      "non-effect, and telling them apart is what lets a caller count one as"
+      "a duplicate and the other as something to ask for the parent of."
+    match Map.has(known, blockId)
+        true -> alreadyHeld(known, blockId)
+        false -> ontoParent(known, blockId, parentId, bits)
+
+verify placed
+    placed(sample(), "b", "a", 486604799) => Placed.Known(childOf(rootedAt("a", 486604799), "b", 486604799))
+    placed(sample(), "z", "c", 486604799) => Placed.Attached(Placement(blockId = "z", parentId = "c", height = 3, work = 17180131332))
+    placed(sample(), "z", "nowhere", 486604799) => Placed.Orphan
+    placed(Map.fromList([]), "z", "nowhere", 486604799) => Placed.Orphan
+
+fn alreadyHeld(known: Map<String, Placement>, blockId: String) -> Placed
+    ? "A Header we already have."
+      "Total: the caller has already asked whether the Map holds it, so the"
+      "absent arm is unreachable and answers Orphan, which is what an absent"
+      "Block is."
+    match Map.get(known, blockId)
+        Option.None -> Placed.Orphan
+        Option.Some(node) -> Placed.Known(node)
+
+verify alreadyHeld
+    alreadyHeld(sample(), "a") => Placed.Known(rootedAt("a", 486604799))
+    alreadyHeld(sample(), "missing") => Placed.Orphan
+
+fn ontoParent(known: Map<String, Placement>, blockId: String, parentId: String, bits: Int) -> Placed
+    ? "A new Header, placed on its parent if we hold one."
+    match Map.get(known, parentId)
+        Option.None -> Placed.Orphan
+        Option.Some(parent) -> Placed.Attached(childOf(parent, blockId, bits))
+
+verify ontoParent
+    ontoParent(sample(), "z", "a", 486604799) => Placed.Attached(Placement(blockId = "z", parentId = "a", height = 1, work = 8590065666))
+    ontoParent(sample(), "z", "absent", 486604799) => Placed.Orphan
+
+fn placedFrom(held: Option<Placement>, parent: Option<Placement>, blockId: String, bits: Int) -> Placed
+    ? "The same three answers, from two lookups rather than a whole tree."
+      "A chain of Headers is hundreds of thousands of Nodes and a walk needs"
+      "two of them: this Block, to see whether it is already here, and its"
+      "parent, to count from. Whoever holds the Store can fetch exactly those"
+      "two, so nothing has to hold the tree in memory to place one Header."
+      "placed does the same job over a Map, which is what the cases here and"
+      "a batch small enough to fit want."
+    match held
+        Option.Some(node) -> Placed.Known(node)
+        Option.None -> ontoFetched(parent, blockId, bits)
+
+verify placedFrom
+    placedFrom(Option.Some(rootedAt("a", 486604799)), Option.None, "a", 486604799) => Placed.Known(rootedAt("a", 486604799))
+    placedFrom(Option.None, Option.None, "z", 486604799) => Placed.Orphan
+    placedFrom(Option.None, Option.Some(rootedAt("a", 486604799)), "z", 486604799) => Placed.Attached(Placement(blockId = "z", parentId = "a", height = 1, work = 8590065666))
+
+fn ontoFetched(parent: Option<Placement>, blockId: String, bits: Int) -> Placed
+    ? "A Header we do not hold, placed on the parent we fetched for it."
+    match parent
+        Option.None -> Placed.Orphan
+        Option.Some(node) -> Placed.Attached(childOf(node, blockId, bits))
+
+verify ontoFetched
+    ontoFetched(Option.None, "z", 486604799) => Placed.Orphan
+    ontoFetched(Option.Some(rootedAt("a", 486604799)), "z", 486604799) => Placed.Attached(Placement(blockId = "z", parentId = "a", height = 1, work = 8590065666))
+
+fn grown(known: Map<String, Placement>, blockId: String, parentId: String, bits: Int) -> Map<String, Placement>
+    ? "The tree with this Header in it, or unchanged where it could not be placed."
+      "An Orphan changes nothing and neither does a duplicate, so a caller can"
+      "fold a batch of Headers through this without deciding anything."
+    settled(known, blockId, placed(known, blockId, parentId, bits))
+
+verify grown
+    Map.len(grown(sample(), "z", "c", 486604799)) => 7
+    Map.len(grown(sample(), "z", "nowhere", 486604799)) => 6
+    Map.len(grown(sample(), "b", "a", 486604799)) => 6
+
+fn settled(known: Map<String, Placement>, blockId: String, placement: Placed) -> Map<String, Placement>
+    ? "Only an Attached Header is written down."
+    match placement
+        Placed.Orphan -> known
+        Placed.Known(node) -> known
+        Placed.Attached(node) -> Map.set(known, blockId, node)
+
+verify settled
+    Map.len(settled(sample(), "z", Placed.Orphan)) => 6
+    Map.len(settled(sample(), "z", Placed.Attached(rootedAt("z", 486604799)))) => 7
+
+fn bestOf(nodes: List<Placement>) -> Option<Placement>
+    ? "The Placement with the most work behind it, or nothing from an empty tree."
+    match nodes
+        [] -> Option.None
+        [head, ..tail] -> Option.Some(bestFrom(tail, head))
+
+verify bestOf
+    bestOf([]) => Option.None
+    bestOf([rootedAt("a", 486604799)]) => Option.Some(rootedAt("a", 486604799))
+    bestOf(tipsOf(sample())) => Option.Some(Placement(blockId = "f", parentId = "e", height = 3, work = 17180131332))
+
+fn bestFrom(nodes: List<Placement>, incumbent: Placement) -> Placement
+    ? "The heaviest of these, against the heaviest so far."
+    match nodes
+        [] -> incumbent
+        [head, ..tail] -> bestFrom(tail, betterOf(head, incumbent))
+
+verify bestFrom
+    bestFrom([], rootedAt("a", 486604799)) => rootedAt("a", 486604799)
+    bestFrom([childOf(rootedAt("a", 486604799), "b", 486604799)], rootedAt("a", 486604799)).blockId => "b"
+
+fn betterOf(candidate: Placement, incumbent: Placement) -> Placement
+    ? "Strictly heavier displaces; equal work does not."
+      "Equal work leaving the incumbent in place is what makes this first-seen:"
+      "the Placement that got here first is the one still standing after a tie, and"
+      "a node that swapped on equal work would flap between two tips forever."
+    match Domain.Chainwork.heavier(candidate.work, incumbent.work)
+        true -> candidate
+        false -> incumbent
+
+verify betterOf
+    betterOf(childOf(rootedAt("a", 486604799), "b", 486604799), rootedAt("a", 486604799)).blockId => "b"
+    betterOf(rootedAt("a", 486604799), childOf(rootedAt("a", 486604799), "b", 486604799)).blockId => "b"
+    betterOf(rootedAt("second", 486604799), rootedAt("first", 486604799)).blockId => "first"
+
+fn ancestryOf(known: Map<String, Placement>, blockId: String, acc: List<Placement>) -> List<Placement>
+    ? "The branch ending at this Block, root first."
+      "Walks parent links until one names a Block the tree does not hold,"
+      "which is the genesis Header's zero parent on a complete branch and the"
+      "join to an unfetched range on a partial one. Headers are hash-linked,"
+      "so the walk cannot cycle."
+    match Map.get(known, blockId)
+        Option.None -> acc
+        Option.Some(node) -> ancestryOf(known, node.parentId, List.prepend(node, acc))
+
+verify ancestryOf
+    ancestryOf(sample(), "absent", []) => []
+    List.len(ancestryOf(sample(), "a", [])) => 1
+    List.len(ancestryOf(sample(), "c", [])) => 3
+    List.len(ancestryOf(sample(), "f", [])) => 4
+    idsOf(ancestryOf(sample(), "c", []), []) => ["a", "b", "c"]
+    idsOf(ancestryOf(sample(), "f", []), []) => ["a", "d", "e", "f"]
+
+fn idsOf(nodes: List<Placement>, acc: List<String>) -> List<String>
+    ? "The Block Ids of a branch, in the order it was given."
+    match nodes
+        [] -> List.reverse(acc)
+        [head, ..tail] -> idsOf(tail, List.prepend(head.blockId, acc))
+
+verify idsOf
+    idsOf([], []) => []
+    idsOf([rootedAt("a", 486604799)], []) => ["a"]
+
+fn tipsOf(known: Map<String, Placement>) -> List<Placement>
+    ? "Every Placement no other Placement claims as its parent."
+      "A tip is where a branch currently ends, and the most-work tip is the"
+      "chain to follow. Found by elimination rather than by tracking, because"
+      "a tip stops being one the moment a child arrives and a tree that"
+      "remembers which is a tree with two truths in it."
+    childless(Map.values(known), Map.keys(parentsIn(Map.values(known))), [])
+
+verify tipsOf
+    List.len(tipsOf(sample())) => 2
+    List.len(tipsOf(Map.fromList([]))) => 0
+    List.len(tipsOf(Map.fromList([("a", rootedAt("a", 486604799))]))) => 1
+
+fn parentsIn(nodes: List<Placement>) -> Map<String, Bool>
+    ? "Every Block Id that some Placement in the tree names as its parent."
+    parentsInto(nodes, Map.fromList([]))
+
+verify parentsIn
+    Map.len(parentsIn([])) => 0
+    Map.len(parentsIn(Map.values(sample()))) => 5
+
+fn parentsInto(nodes: List<Placement>, acc: Map<String, Bool>) -> Map<String, Bool>
+    ? "The claimed parents, gathered."
+    match nodes
+        [] -> acc
+        [head, ..tail] -> parentsInto(tail, Map.set(acc, head.parentId, true))
+
+verify parentsInto
+    Map.len(parentsInto([], Map.fromList([]))) => 0
+    Map.len(parentsInto([rootedAt("a", 486604799)], Map.fromList([]))) => 1
+
+fn childless(nodes: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
+    ? "The Nodes whose Block Ids nobody claimed."
+    match nodes
+        [] -> acc
+        [head, ..tail] -> keptIfTip(head, tail, claimed, acc)
+
+verify childless
+    List.len(childless([], [], [])) => 0
+    List.len(childless([rootedAt("a", 486604799)], [], [])) => 1
+    List.len(childless([rootedAt("a", 486604799)], ["a"], [])) => 0
+
+fn keptIfTip(node: Placement, rest: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
+    ? "Keep this Placement only if no other Placement named it as a parent."
+    match List.contains(claimed, node.blockId)
+        true -> childless(rest, claimed, acc)
+        false -> childless(rest, claimed, List.prepend(node, acc))
+
+verify keptIfTip
+    List.len(keptIfTip(rootedAt("a", 486604799), [], [], [])) => 1
+    List.len(keptIfTip(rootedAt("a", 486604799), [], ["a"], [])) => 0
+
+fn sample() -> Map<String, Placement>
+    ? "A tree that forks at Height 0, for the cases above."
+      "Six Blocks at one difficulty: a trunk a-b-c and a longer branch"
+      "a-d-e-f, so the branch with more Blocks is also the branch with more"
+      "work and f is the tip to follow. Single-letter Ids because nothing"
+      "here hashes anything -- what is under test is the shape."
+    forked(Map.fromList([("a", rootedAt("a", 486604799))]))
+
+verify sample
+    Map.len(sample()) => 6
+    Map.has(sample(), "f") => true
+    Map.has(sample(), "z") => false
+
+fn forked(root: Map<String, Placement>) -> Map<String, Placement>
+    ? "The two branches grown onto the root, trunk first."
+    grown(grown(grown(grown(grown(root, "b", "a", 486604799), "c", "b", 486604799), "d", "a", 486604799), "e", "d", 486604799), "f", "e", 486604799)
+
+verify forked
+    Map.len(forked(Map.fromList([("a", rootedAt("a", 486604799))]))) => 6
+    Map.len(forked(Map.fromList([]))) => 0
