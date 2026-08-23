@@ -54,18 +54,19 @@ which is an answer rather than an error.
 Everything but the listener takes a `<dir>`, where the Index and the Segments
 live. Point them all at the same one.
 
-All of them run either way. `aver run --providers` builds the provider host once
-and caches it, so the interpreted path works; the examples below use a compiled
-binary because anything that opens the Index is several times faster that way.
-Plain `aver run`, with no flag, cannot start this program — see
+All of them run either way. `aver run` builds the provider host once and caches
+it, so the interpreted path works; the examples below use a compiled binary
+because anything that opens the Index is several times faster that way. See
 [Providers](#providers).
 
 ## Requirements
 
-- **Aver 0.28.1 or later.** Earlier versions cannot do this at all: byte-clean
-  TCP (`Tcp.sendBytes`, `Tcp.readBytes`, `Tcp.writeBytes`) and `Crypto.sha256`
-  landed in 0.28.0 "Oktet", and the `Bits` namespace the Bech32 checksum needs
-  landed in 0.28.1.
+- **Aver at the commit in [`.aver-version`](.aver-version).** The version
+  string does not move between upstream commits, so the project pins a SHA
+  rather than a number, and CI builds exactly that one. Anything older than
+  0.29 lacks what this program needs (byte-clean `Disk`, `Tcp.poll`, the
+  automatic provider host). See [Moving the Aver pin](#moving-the-aver-pin).
+- `clang` and `libclang-dev`, for the RocksDB bindings.
 - A reachable Bitcoin node. Any peer will do; one you run yourself is easier to
   debug against.
 
@@ -73,7 +74,7 @@ Plain `aver run`, with no flag, cannot start this program — see
 
 ```bash
 cd btc-listener
-aver run main.av --module-root . --providers -- [peer-address] [port]
+aver run main.av --module-root . -- [peer-address] [port]
 ```
 
 or compiled, which is what the rest of these examples use:
@@ -125,23 +126,12 @@ nothing for 150 seconds` instead of blocking while looking like it is
 working. A Peer that stalls *mid-frame* still blocks, deliberately; that
 residue waits for the event loop of #26.
 
-`aver compile` prints one warning per dependency module — 45 of them — each
-saying that module's verify blocks are not sampled and suggesting you move them
-to the entry module. Ignore the suggestion: it would mean collapsing 3,777 cases
-into a `main.av` that is deliberately thin. The blocks are checked, by
-`aver verify --deps`.
-
-There is no flag to quiet it
-([jasisz/aver#857](https://github.com/jasisz/aver/issues/857)), so filter that
-one line off stderr and leave the rest alone:
-
-```bash
-aver compile main.av --module-root . -o ../btc-listener-build \
-  2> >(grep -v "non-law verify block" >&2)
-```
-
-Real errors still come through, and the compiled binary itself is quiet: an
-unparseable address still says `error: octet 999 is out of range (0-255)`.
+`aver compile` used to print one warning per dependency module — 45 lines
+saying the module's verify blocks were not sampled — and the README carried a
+`grep -v` to filter them. [jasisz/aver#857](https://github.com/jasisz/aver/issues/857)
+closed and the warning is gone; compile is quiet, and so is the compiled
+binary: an unparseable address still says `error: octet 999 is out of range
+(0-255)`.
 
 ### Signet
 
@@ -700,20 +690,24 @@ needs. The full table, and why the log is being kept anyway, are in
 ## Checking the code
 
 ```bash
-aver audit   . --providers              # all three of the below, in one pass
-aver check   . --module-root . --deps   # contracts, coverage, lints
-aver verify  . --module-root . --providers --deps   # every verify block
-aver format  . --check                  # formatting
+aver audit   .                     # all three of the below, in one pass
+aver check   . --module-root .     # contracts, coverage, lints
+aver verify  . --module-root .     # every verify block, in parallel
+aver format  . --check             # formatting
 ```
 
-60 files, 0 check errors, 0 format issues, and **3,889 verify cases**.
-Everything except the socket is pure and covered.
+0 check errors, 0 format issues, and about **6,000 verify cases**. Everything
+except the socket is pure and covered.
 
-`--providers` is not optional. The verify cases that reach RIPEMD-160 or a
-signature check run the real implementations through the provider, so without
-it 50 of them fail rather than passing on a fixture. That is the right way
-round: a suite that quietly substituted a stub for the curve would report
-passes it had not earned.
+The provider host is built and installed automatically: the verify cases that
+reach RIPEMD-160, a signature check or the database run the real
+implementations through the providers, never a fixture — a suite that quietly
+substituted a stub for the curve would report passes it had not earned. The
+first `verify` after a toolchain or provider change rebuilds that host (RocksDB
+included, several minutes); after that the whole suite runs in seconds —
+[jasisz/aver#1095](https://github.com/jasisz/aver/issues/1095) took it from
+eight to fifteen minutes down to about four seconds, and `-j N` picks the
+worker count.
 
 Values are pinned against sources outside this implementation rather than
 captured from it. The wire format: a `verack` and a `ping` frame, a full
@@ -914,7 +908,7 @@ the engine pushes, hashes, compares and settles, and no longer tested whether
 RIPEMD-160 was RIPEMD-160.
 
 That is over. [jasisz/aver#989](https://github.com/jasisz/aver/issues/989)
-closed, `aver audit . --providers` runs the whole project against the real
+closed, `aver audit .` runs the whole project against the real
 implementations, and the stub table is deleted. Every expectation the fixtures
 had been standing in for holds against the real thing.
 
@@ -925,15 +919,45 @@ What remains:
   Bitcoin ever made; and for the database, round trip, overwrite, delete,
   reopen, prefix order, a handle it never issued, and a batch whose write-ahead
   record is deliberately torn, which comes back absent rather than half applied.
-- **Plain `aver run` cannot start this program**, and that is the safe failure:
-  an interpreter running the audit with no crypto would report passes it had not
-  earned. Pass `--providers` and it works — Aver builds a thin Rust host from the
-  `[providers]` composition, caches it, and runs the ordinary VM with the binding
-  installed.
+- **Nothing runs without the providers**, and that is the safe failure: an
+  interpreter running the audit with no crypto would report passes it had not
+  earned. Aver builds a thin Rust host from the `[providers]` composition in
+  `aver.toml`, caches it, and runs the ordinary VM with the binding installed —
+  automatically, since 0.29; `--providers` is gone.
 
   ```bash
-  aver run main.av --module-root . --providers -- audit chain 1 2000
+  aver run main.av --module-root . -- audit chain 1 2000
   ```
 
 `aver check`, `aver format` and `aver capabilities` need no provider. `aver
-verify` and `aver audit` do, and take `--providers` to get one.
+verify`, `aver run` and `aver audit` build one.
+
+## Moving the Aver pin
+
+Aver is a moving target and this project is one of its driving projects, so
+fixes we ask for land often. The toolchain CI tests with is whatever commit
+[`.aver-version`](.aver-version) names, and a developer machine's `aver` is
+whatever `../aver` was at when it was last `cargo install`ed — `aver
+--version` cannot tell you which. Moving forward is a routine, and the
+[canary workflow](.github/workflows/canary.yml) runs the cheap gates against
+upstream's tip nightly so the routine is rarely a surprise:
+
+```bash
+cd ../aver && git fetch upstream && git log --oneline $(cat ../btc-listener/.aver-version)..upstream/main
+git merge --ff-only upstream/main && cargo install --path . aver-lang --locked
+cd ../btc-listener && git -C ../aver rev-parse HEAD > .aver-version
+aver check . --module-root . && aver verify . --module-root . && aver compile main.av --module-root . -o ../btc-listener-build
+```
+
+Then, before opening the PR, **look for workarounds the move retires**:
+
+```bash
+grep -rhoE "jasisz/aver#[0-9]+" --include="*.av" --include="*.md" --include="*.yml" . | sort -u
+```
+
+Every upstream issue this repository cites is either history (a docstring
+saying what was once worked around and why the shape survived on merit) or a
+live workaround — a filter, a flag, a module kept whole, a cache oversized.
+Check each issue's state; a closed one with a live workaround means code or
+documentation to simplify, and that belongs in the same PR as the pin. The PR
+is what proves the pin: all six CI jobs build the named commit from source.

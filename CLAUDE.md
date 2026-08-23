@@ -21,17 +21,20 @@ explicit effect lists on both the module and each effectful function).
 `cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
 whatever that checkout was at when it was last installed — and **`aver
 --version` cannot tell you which**, because the version string does not move
-between releases. Two fixes this project reported were in `upstream/main` and
-absent from a PATH binary reporting the same `0.28.1`. When something verifies
-and will not compile, or the VM and the compiled binary disagree, check
-`git log upstream/main` before believing it is a live bug.
+between releases. CI builds the commit named in `.aver-version`. When
+something verifies and will not compile, or the VM and the compiled binary
+disagree, check `git log upstream/main` before believing it is a live bug.
+**Moving the pin is a routine** — README "Moving the Aver pin": pull
+`../aver`, reinstall, write the SHA to `.aver-version`, run the gates, then
+grep the repo for `jasisz/aver#` and retire every workaround whose issue has
+closed, in the same PR.
 
 ## Commands
 
 ```bash
 aver audit  .                                       # check + verify + format, the CI gate
-aver check  . --module-root . --deps                 # contracts, coverage, lints
-aver verify . --module-root . --deps                 # all verify cases (~6,000)
+aver check  . --module-root .                        # contracts, coverage, lints
+aver verify . --module-root .                        # all ~6,000 cases, parallel, ~seconds once the host is cached
 aver verify domain/script.av --module-root .         # one file's cases
 aver format . --check
 ```
@@ -46,8 +49,7 @@ aver run main.av --module-root . -- [args...]
 Compile (what the long-running commands should use — several times faster):
 
 ```bash
-aver compile main.av --module-root . -o ../btc-listener-build \
-  2> >(grep -v "non-law verify block" >&2)     # filters one known noisy warning
+aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release
 ./target/release/main [args...]
 ```
