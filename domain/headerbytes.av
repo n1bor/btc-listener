@@ -1,0 +1,159 @@
+module HeaderBytes
+    intent =
+        "A Block Header back into the eighty bytes it arrived as."
+        "Domain.Block reads Headers off the wire and never writes one, because"
+        "until there was a tree to keep there was nothing to write: the"
+        "headers phase decoded each Header, took its Block Id, and dropped the"
+        "bytes."
+        "A Header above the range whose bodies were fetched exists nowhere on"
+        "disk but here, so keeping the tree means keeping these bytes. Serving"
+        "them to a Peer is Stage 8's problem and will want the same function."
+        "Re-encoding rather than carrying the original slice through the"
+        "decode is a deliberate choice: it costs a little arithmetic and it is"
+        "checkable, because the double-SHA256 of what comes out has to be the"
+        "Block Id that went in. The round trip below is that check."
+    exposes [bytesOf, hexOf, genesisHexFor, genesisBitsFor, genesisHeaderFor]
+    depends [Bytes, Domain.Block, Domain.Message, Domain.Network]
+    effects []
+
+fn bytesOf(header: BlockHeader) -> Result<List<Int>, String>
+    ? "The eighty bytes, in the order they travel."
+      "Version, parent, merkle root, timestamp, bits, nonce. The two Ids are"
+      "held the way they are displayed, which is backwards from the way they"
+      "are hashed, so both are reversed on the way out."
+    previous = wireOrder(header.previousBlockId)?
+    merkle = wireOrder(header.merkleRoot)?
+    Result.Ok(joined(header, previous, merkle))
+
+verify bytesOf
+    List.len(bytesOf(genesisHeader())?) => 80
+    List.take(bytesOf(genesisHeader())?, 4) => [1, 0, 0, 0]
+    bytesOf(BlockHeader(blockId = "aa", version = 1, previousBlockId = "zz", merkleRoot = "", timestamp = 0, bits = 0, nonce = 0)) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn joined(header: BlockHeader, previous: List<Int>, merkle: List<Int>) -> List<Int>
+    ? "The six fields in wire order."
+    List.concat(Domain.Message.littleEndian(header.version, 4), List.concat(previous, List.concat(merkle, List.concat(Domain.Message.littleEndian(header.timestamp, 4), List.concat(Domain.Message.littleEndian(header.bits, 4), Domain.Message.littleEndian(header.nonce, 4))))))
+
+verify joined
+    List.len(joined(genesisHeader(), zeros(32, []), zeros(32, []))) => 80
+    List.take(joined(genesisHeader(), zeros(32, []), zeros(32, [])), 4) => [1, 0, 0, 0]
+
+fn wireOrder(blockId: String) -> Result<List<Int>, String>
+    ? "An Id as it is hashed, which is the reverse of how it is shown."
+    bytes = Bytes.fromHex(blockId)?
+    Result.Ok(List.reverse(Bytes.toList(bytes)))
+
+verify wireOrder
+    wireOrder("") => Result.Ok([])
+    wireOrder("0102") => Result.Ok([2, 1])
+    wireOrder("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn hexOf(header: BlockHeader) -> Result<String, String>
+    ? "The same eighty bytes as the hexadecimal the Store keeps."
+      "The case below is the whole point of the module: mainnet's genesis"
+      "Header, decoded and written back out, has to be the bytes it came from"
+      "-- and hashing those bytes has to give the Block Id the Network is"
+      "named by."
+    bytes = bytesOf(header)?
+    Result.Ok(Bytes.toHex(Bytes.fromList(bytes)?))
+
+verify hexOf
+    hexOf(genesisHeader()) => Result.Ok("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")
+    Domain.Block.blockIdOf(Bytes.fromHex(hexOf(genesisHeader())?)?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    hexOf(BlockHeader(blockId = "aa", version = 1, previousBlockId = "zz", merkleRoot = "", timestamp = 0, bits = 0, nonce = 0)) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn genesisHeader() -> BlockHeader
+    ? "Mainnet's first Header, for the cases here."
+    decodedFrom(Bytes.fromHex(genesisHeaderHex()))
+
+verify genesisHeader
+    genesisHeader().blockId => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    genesisHeader().bits => 486604799
+    genesisHeader().version => 1
+
+fn genesisHeaderHex() -> String
+    ? "Mainnet's first Header, which the cases in this module use."
+    genesisHexFor(Network.Mainnet)
+
+verify genesisHeaderHex
+    String.len(genesisHeaderHex()) => 160
+
+fn genesisHexFor(network: Network) -> String
+    ? "The first Header of each Network, as it travels."
+      "A getheaders answer holds what follows the Locator, so the first Header"
+      "of a chain never arrives over the wire and has to be a constant. The"
+      "cases below prove these rather than assert them: each is hashed, and"
+      "the answer has to be the Block Id Domain.Block already names for that"
+      "Network. One wrong byte anywhere changes the hash, so a case that"
+      "passes cannot be passing by accident."
+    match network
+        Network.Mainnet -> "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
+        Network.Testnet -> "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18"
+        Network.Signet -> "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a008f4d5fae77031e8ad22203"
+        Network.Regtest -> "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000"
+
+verify genesisHexFor
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Mainnet))?) => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Testnet))?) => "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Signet))?) => "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Regtest))?) => "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Signet))?) => Domain.Block.genesisBlockId(Network.Signet)
+    Domain.Block.blockIdOf(Bytes.fromHex(genesisHexFor(Network.Regtest))?) => Domain.Block.genesisBlockId(Network.Regtest)
+
+fn genesisHeaderFor(network: Network) -> BlockHeader
+    ? "The first Header of a Network, decoded."
+      "The Block Id it carries is computed from its own bytes, so the cases"
+      "below are the same proof genesisHexFor makes, arrived at from the"
+      "other side."
+    decodedFrom(Bytes.fromHex(genesisHexFor(network)))
+
+verify genesisHeaderFor
+    genesisHeaderFor(Network.Mainnet).blockId => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    genesisHeaderFor(Network.Signet).blockId => "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+    genesisHeaderFor(Network.Signet).bits => 503543726
+    genesisHeaderFor(Network.Regtest).previousBlockId => "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn genesisBitsFor(network: Network) -> Int
+    ? "The target the first Header of a Network was mined under."
+      "Read out of the Header rather than written down twice, so it cannot"
+      "disagree with it. Signet's is far easier than mainnet's, and regtest's"
+      "is the easiest a target can be -- two units of work for the whole"
+      "Block, which is what makes a regtest chain reorganisable by hand."
+    genesisHeaderFor(network).bits
+
+verify genesisBitsFor
+    genesisBitsFor(Network.Mainnet) => 486604799
+    genesisBitsFor(Network.Testnet) => 486604799
+    genesisBitsFor(Network.Signet) => 503543726
+    genesisBitsFor(Network.Regtest) => 545259519
+
+fn decodedFrom(bytes: Result<Bytes, String>) -> BlockHeader
+    ? "The Header those bytes hold."
+      "Total: the only caller hands it a literal that is eighty valid bytes,"
+      "so neither fallback is reachable."
+    match bytes
+        Result.Err(why) -> blank()
+        Result.Ok(held) -> Result.withDefault(Domain.Block.decodeHeader(Bytes.toList(held)), blank())
+
+verify decodedFrom
+    decodedFrom(Bytes.fromHex(genesisHeaderHex())).bits => 486604799
+    decodedFrom(Bytes.fromHex("zz")).bits => 0
+    decodedFrom(Bytes.fromHex("01")).bits => 0
+
+fn blank() -> BlockHeader
+    ? "A Header of nothing, for the unreachable fallbacks above."
+    BlockHeader(blockId = "", version = 0, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 0, nonce = 0)
+
+verify blank
+    blank().bits => 0
+    blank().blockId => ""
+
+fn zeros(count: Int, acc: List<Int>) -> List<Int>
+    ? "A run of zero bytes, for the cases here."
+    match count <= 0
+        true -> acc
+        false -> zeros(count - 1, List.prepend(0, acc))
+
+verify zeros
+    zeros(0, []) => []
+    List.len(zeros(32, [])) => 32

@@ -94,8 +94,19 @@ open). The log backend and `migrate` are gone (#44); a directory holding an
 every `b:` Location from the Segments (#93), which is the recovery path after a
 crash (#92, the rusty-leveldb era; RocksDB syncs every batch).
 Key prefixes: `b:` Block Id → Location, `h:` Height →
-Block Id, `t:` Transaction Id → site, `o:<txid>:<index>` → Output (what lets a
-spend resolve in one lookup).
+Block Id, `t:` Transaction Id → site, `n:` Block Id → Height, `k:` Block Id →
+Header plus its Height and Chain Work, `o:<txid>:<index>` → Output (what lets a
+spend resolve in one lookup). `h:` is the only one a Reorganisation rewrites;
+`b:`, `t:`, `n:` and `k:` are append-only, because a Block Id always names the
+same bytes.
+
+**The Header tree** (#24, Stage 1 of the full-node plan): `k:` holds every
+Header seen, not just the ones on the chain we follow. A Header whose parent is
+not the tip is a Branch, and the chain followed is the Branch with the most
+Chain Work — never the longest. `Domain.Chainwork` is the arithmetic (pinned
+against Core's chainwork for mainnet Block 0), `Domain.HeaderTree` is the tree,
+`Domain.Reorg` tells growth from a Reorganisation, and `Infra.Headers` is the
+only part that touches a Store.
 
 **Three-valued answers, everywhere.** The project's central discipline is
 never collapsing "cannot tell" into pass or fail:

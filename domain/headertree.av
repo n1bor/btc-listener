@@ -88,7 +88,7 @@ fn alreadyHeld(known: Map<String, Placement>, blockId: String) -> Placed
       "Block is."
     match Map.get(known, blockId)
         Option.None -> Placed.Orphan
-        Option.Some(node) -> Placed.Known(node)
+        Option.Some(placement) -> Placed.Known(placement)
 
 verify alreadyHeld
     alreadyHeld(sample(), "a") => Placed.Known(rootedAt("a", 486604799))
@@ -113,7 +113,7 @@ fn placedFrom(held: Option<Placement>, parent: Option<Placement>, blockId: Strin
       "placed does the same job over a Map, which is what the cases here and"
       "a batch small enough to fit want."
     match held
-        Option.Some(node) -> Placed.Known(node)
+        Option.Some(placement) -> Placed.Known(placement)
         Option.None -> ontoFetched(parent, blockId, bits)
 
 verify placedFrom
@@ -125,7 +125,7 @@ fn ontoFetched(parent: Option<Placement>, blockId: String, bits: Int) -> Placed
     ? "A Header we do not hold, placed on the parent we fetched for it."
     match parent
         Option.None -> Placed.Orphan
-        Option.Some(node) -> Placed.Attached(childOf(node, blockId, bits))
+        Option.Some(placement) -> Placed.Attached(childOf(placement, blockId, bits))
 
 verify ontoFetched
     ontoFetched(Option.None, "z", 486604799) => Placed.Orphan
@@ -146,16 +146,16 @@ fn settled(known: Map<String, Placement>, blockId: String, placement: Placed) ->
     ? "Only an Attached Header is written down."
     match placement
         Placed.Orphan -> known
-        Placed.Known(node) -> known
-        Placed.Attached(node) -> Map.set(known, blockId, node)
+        Placed.Known(found) -> known
+        Placed.Attached(found) -> Map.set(known, blockId, found)
 
 verify settled
     Map.len(settled(sample(), "z", Placed.Orphan)) => 6
     Map.len(settled(sample(), "z", Placed.Attached(rootedAt("z", 486604799)))) => 7
 
-fn bestOf(nodes: List<Placement>) -> Option<Placement>
+fn bestOf(placements: List<Placement>) -> Option<Placement>
     ? "The Placement with the most work behind it, or nothing from an empty tree."
-    match nodes
+    match placements
         [] -> Option.None
         [head, ..tail] -> Option.Some(bestFrom(tail, head))
 
@@ -164,9 +164,9 @@ verify bestOf
     bestOf([rootedAt("a", 486604799)]) => Option.Some(rootedAt("a", 486604799))
     bestOf(tipsOf(sample())) => Option.Some(Placement(blockId = "f", parentId = "e", height = 3, work = 17180131332))
 
-fn bestFrom(nodes: List<Placement>, incumbent: Placement) -> Placement
+fn bestFrom(placements: List<Placement>, incumbent: Placement) -> Placement
     ? "The heaviest of these, against the heaviest so far."
-    match nodes
+    match placements
         [] -> incumbent
         [head, ..tail] -> bestFrom(tail, betterOf(head, incumbent))
 
@@ -196,7 +196,7 @@ fn ancestryOf(known: Map<String, Placement>, blockId: String, acc: List<Placemen
       "so the walk cannot cycle."
     match Map.get(known, blockId)
         Option.None -> acc
-        Option.Some(node) -> ancestryOf(known, node.parentId, List.prepend(node, acc))
+        Option.Some(placement) -> ancestryOf(known, placement.parentId, List.prepend(placement, acc))
 
 verify ancestryOf
     ancestryOf(sample(), "absent", []) => []
@@ -206,9 +206,9 @@ verify ancestryOf
     idsOf(ancestryOf(sample(), "c", []), []) => ["a", "b", "c"]
     idsOf(ancestryOf(sample(), "f", []), []) => ["a", "d", "e", "f"]
 
-fn idsOf(nodes: List<Placement>, acc: List<String>) -> List<String>
+fn idsOf(placements: List<Placement>, acc: List<String>) -> List<String>
     ? "The Block Ids of a branch, in the order it was given."
-    match nodes
+    match placements
         [] -> List.reverse(acc)
         [head, ..tail] -> idsOf(tail, List.prepend(head.blockId, acc))
 
@@ -229,17 +229,17 @@ verify tipsOf
     List.len(tipsOf(Map.fromList([]))) => 0
     List.len(tipsOf(Map.fromList([("a", rootedAt("a", 486604799))]))) => 1
 
-fn parentsIn(nodes: List<Placement>) -> Map<String, Bool>
+fn parentsIn(placements: List<Placement>) -> Map<String, Bool>
     ? "Every Block Id that some Placement in the tree names as its parent."
-    parentsInto(nodes, Map.fromList([]))
+    parentsInto(placements, Map.fromList([]))
 
 verify parentsIn
     Map.len(parentsIn([])) => 0
     Map.len(parentsIn(Map.values(sample()))) => 5
 
-fn parentsInto(nodes: List<Placement>, acc: Map<String, Bool>) -> Map<String, Bool>
+fn parentsInto(placements: List<Placement>, acc: Map<String, Bool>) -> Map<String, Bool>
     ? "The claimed parents, gathered."
-    match nodes
+    match placements
         [] -> acc
         [head, ..tail] -> parentsInto(tail, Map.set(acc, head.parentId, true))
 
@@ -247,9 +247,9 @@ verify parentsInto
     Map.len(parentsInto([], Map.fromList([]))) => 0
     Map.len(parentsInto([rootedAt("a", 486604799)], Map.fromList([]))) => 1
 
-fn childless(nodes: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
+fn childless(placements: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
     ? "The Nodes whose Block Ids nobody claimed."
-    match nodes
+    match placements
         [] -> acc
         [head, ..tail] -> keptIfTip(head, tail, claimed, acc)
 
@@ -258,11 +258,11 @@ verify childless
     List.len(childless([rootedAt("a", 486604799)], [], [])) => 1
     List.len(childless([rootedAt("a", 486604799)], ["a"], [])) => 0
 
-fn keptIfTip(node: Placement, rest: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
+fn keptIfTip(placement: Placement, rest: List<Placement>, claimed: List<String>, acc: List<Placement>) -> List<Placement>
     ? "Keep this Placement only if no other Placement named it as a parent."
-    match List.contains(claimed, node.blockId)
+    match List.contains(claimed, placement.blockId)
         true -> childless(rest, claimed, acc)
-        false -> childless(rest, claimed, List.prepend(node, acc))
+        false -> childless(rest, claimed, List.prepend(placement, acc))
 
 verify keptIfTip
     List.len(keptIfTip(rootedAt("a", 486604799), [], [], [])) => 1

@@ -21,7 +21,7 @@ module Reorg
     effects []
 
 record Standing
-    node: Placement
+    placement: Placement
     recorded: Option<String>
 
 record Repointing
@@ -86,7 +86,7 @@ verify agreedThrough
 fn stillAgreeing(one: Standing, rest: List<Standing>, acc: Int) -> Int
     ? "Carry on while this Height agrees; stop where it does not."
     match agrees(one)
-        true -> agreedThrough(rest, one.node.height)
+        true -> agreedThrough(rest, one.placement.height)
         false -> acc
 
 verify stillAgreeing
@@ -99,12 +99,12 @@ fn agrees(one: Standing) -> Bool
       "never heard of is a Height that has to be written."
     match one.recorded
         Option.None -> false
-        Option.Some(named) -> named == one.node.blockId
+        Option.Some(named) -> named == one.placement.blockId
 
 verify agrees
     agrees(agreeingAt(0)) => true
     agrees(differingAt(1)) => false
-    agrees(Standing(node = Domain.HeaderTree.rootedAt("a", 486604799), recorded = Option.None)) => false
+    agrees(Standing(placement = Domain.HeaderTree.rootedAt("a", 486604799), recorded = Option.None)) => false
 
 fn changedAbove(standing: List<Standing>, forkHeight: Int, acc: List<Placement>) -> List<Placement>
     ? "The Heights above the fork, in the order they have to be written."
@@ -121,8 +121,8 @@ verify changedAbove
 
 fn keptIfAbove(one: Standing, rest: List<Standing>, forkHeight: Int, acc: List<Placement>) -> List<Placement>
     ? "Keep this Height only if it sits above the fork."
-    match one.node.height > forkHeight
-        true -> changedAbove(rest, forkHeight, List.prepend(one.node, acc))
+    match one.placement.height > forkHeight
+        true -> changedAbove(rest, forkHeight, List.prepend(one.placement, acc))
         false -> changedAbove(rest, forkHeight, acc)
 
 verify keptIfAbove
@@ -147,7 +147,7 @@ verify displacedAbove
 
 fn countedIfDisplaced(one: Standing, rest: List<Standing>, forkHeight: Int, acc: Int) -> Int
     ? "A Height above the fork that held something counts; one that held nothing does not."
-    match Bool.and(one.node.height > forkHeight, held(one.recorded))
+    match Bool.and(one.placement.height > forkHeight, held(one.recorded))
         true -> displacedAbove(rest, forkHeight, acc + 1)
         false -> displacedAbove(rest, forkHeight, acc)
 
@@ -170,7 +170,7 @@ fn topHeight(standing: List<Standing>, acc: Int) -> Int
     ? "The Height the branch ends at, or below zero when it is empty."
     match standing
         [] -> acc
-        [head, ..tail] -> topHeight(tail, head.node.height)
+        [head, ..tail] -> topHeight(tail, head.placement.height)
 
 verify topHeight
     topHeight([agreeingAt(0)], 0 - 1) => 0
@@ -212,7 +212,7 @@ verify trunk
 
 fn agreeingAt(height: Int) -> Standing
     ? "A Height of the trunk beside the same Block Id, for the cases here."
-    Standing(node = nodeAt(height), recorded = Option.Some(nodeAt(height).blockId))
+    Standing(placement = nodeAt(height), recorded = Option.Some(nodeAt(height).blockId))
 
 verify agreeingAt
     agreeingAt(0).recorded => Option.Some("a")
@@ -220,11 +220,11 @@ verify agreeingAt
 
 fn differingAt(height: Int) -> Standing
     ? "A Height of the branch beside the trunk's Block Id at the same Height."
-    Standing(node = branchAt(height), recorded = Option.Some(nodeAt(height).blockId))
+    Standing(placement = branchAt(height), recorded = Option.Some(nodeAt(height).blockId))
 
 verify differingAt
     differingAt(1).recorded => Option.Some("b")
-    differingAt(1).node.blockId => "d"
+    differingAt(1).placement.blockId => "d"
 
 fn nodeAt(height: Int) -> Placement
     ? "The trunk's Placement at a Height."
@@ -248,11 +248,11 @@ verify branchAt
     branchAt(1).blockId => "d"
     branchAt(3).blockId => "f"
 
-fn nth(nodes: List<Placement>, index: Int) -> Placement
+fn nth(placements: List<Placement>, index: Int) -> Placement
     ? "The Placement at a position, counting from zero."
       "Walked rather than indexed, because a List here is a List. The empty"
       "answer is the root, which the cases above never reach."
-    match nodes
+    match placements
         [] -> Domain.HeaderTree.rootedAt("a", 486604799)
         [head, ..tail] -> hereOrOn(head, tail, index)
 
@@ -288,14 +288,14 @@ verify grownBranch
 
 fn adopting() -> List<Standing>
     ? "The branch beside the trunk: agrees at Height 0, displaces 1 and 2, adds 3."
-    [agreeingAt(0), differingAt(1), differingAt(2), Standing(node = branchAt(3), recorded = Option.None)]
+    [agreeingAt(0), differingAt(1), differingAt(2), Standing(placement = branchAt(3), recorded = Option.None)]
 
 verify adopting
     List.len(adopting()) => 4
 
 fn extending() -> List<Standing>
     ? "The trunk with one more Block on it: nothing displaced."
-    [agreeingAt(0), agreeingAt(1), agreeingAt(2), Standing(node = Domain.HeaderTree.childOf(nodeAt(2), "g", 486604799), recorded = Option.None)]
+    [agreeingAt(0), agreeingAt(1), agreeingAt(2), Standing(placement = Domain.HeaderTree.childOf(nodeAt(2), "g", 486604799), recorded = Option.None)]
 
 verify extending
     List.len(extending()) => 4

@@ -11,11 +11,11 @@ module Download
         "down, so stopping is always safe and restarting costs at most the batch"
         "or the Block that was in flight."
     exposes [Progress, headers, bodies]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.Index, Domain.Inventory, Domain.Message, Domain.Network, Infra.Blocks, Infra.Peer, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Index, Domain.Inventory, Domain.Message, Domain.Network, Domain.Reorg, Infra.Blocks, Infra.Headers, Infra.Peer, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -54,7 +54,7 @@ fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -74,7 +74,7 @@ fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddr
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
         Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
@@ -92,8 +92,14 @@ fn withGenesis(network: Network, store: Store) -> Result<Store, String>
       "the answer. Left out, every Height in the Index is one too low and nothing"
       "says so."
     ! [Infra.Kv.get, Infra.Kv.putAll]
-    seeded = Infra.Store.has(store, Domain.Index.heightKey(0))?
-    match seeded
+    planted = Infra.Headers.seeded(network, store)?
+    held = Infra.Store.has(planted, Domain.Index.heightKey(0))?
+    heightNamed(network, planted, held)
+
+fn heightNamed(network: Network, store: Store, held: Bool) -> Result<Store, String>
+    ? "Height zero names genesis, which is where every Locator ends."
+    ! [Infra.Kv.putAll]
+    match held
         true -> Result.Ok(store)
         false -> Infra.Store.put(store, Domain.Index.heightKey(0), Domain.Block.genesisBlockId(network))
 
@@ -139,7 +145,7 @@ fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have:
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     locator = locatorFor(network, store, have)?
@@ -154,7 +160,7 @@ fn absorb(connection: Tcp.Connection, network: Network, store: Store, have: Int,
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
     match decoded
@@ -174,38 +180,48 @@ fn stored(connection: Tcp.Connection, network: Network, store: Store, have: Int,
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
     ]
-    grown = Infra.Store.putAll(store, entriesFor(decoded, have, []))?
-    reached = have + List.len(decoded)
-    _said = Console.print("headers to {reached}")
-    headerBatch(connection, network, grown, reached)
+    outcome = Infra.Headers.absorbed(store, decoded)?
+    _told = announced(outcome)
+    continuing(connection, network, outcome)
 
-fn entriesFor(decoded: List<BlockHeader>, height: Int, acc: List<Entry>) -> List<Entry>
-    ? "One Index entry per Header: this Height names this Block Id."
-    match decoded
-        [] -> List.reverse(acc)
-        [head, ..tail] -> entriesFor(tail, height + 1, List.prepend(Entry(key = Domain.Index.heightKey(height), value = head.blockId), acc))
+fn continuing(connection: Tcp.Connection, network: Network, outcome: Settled) -> Result<Store, String>
+    ? "Ask for more only while the batch is moving the tip."
+      "The Height to carry forward used to be the old one plus however many"
+      "Headers arrived, which always went up. It is now the tip's Height,"
+      "which does not: a Peer answering with Headers we already hold, or with"
+      "a branch too light to win, leaves h: exactly as it was. The Locator is"
+      "built from h:, so asking again would send the same one and get the same"
+      "answer. Unchanged is the honest stop, and it is not the same as an"
+      "empty batch -- Headers can arrive, be placed on a losing branch, and"
+      "change nothing about which chain we follow."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+    ]
+    match outcome.movement
+        Movement.Unchanged -> done(outcome.store, outcome.tipHeight + 1)
+        Movement.Extended(added) -> headerBatch(connection, network, outcome.store, outcome.tipHeight + 1)
+        Movement.Reorganised(forkHeight, displaced) -> headerBatch(connection, network, outcome.store, outcome.tipHeight + 1)
 
-verify entriesFor
-    entriesFor([], 0, []) => []
-    entriesFor([headerNamed("aa")], 5, []) => [Entry(key = Domain.Index.heightKey(5), value = "aa")]
-    entriesFor([headerNamed("aa"), headerNamed("bb")], 5, []) => [Entry(key = Domain.Index.heightKey(5), value = "aa"), Entry(key = Domain.Index.heightKey(6), value = "bb")]
-    entriesFor([headerNamed("aa"), headerNamed("bb")], 0, []) => [Entry(key = Domain.Index.heightKey(0), value = "aa"), Entry(key = Domain.Index.heightKey(1), value = "bb")]
+fn announced(outcome: Settled) -> Unit
+    ? "Say where the tip now is, and say so differently when it moved sideways."
+      "A reorganisation is the one thing in this phase that is not routine, so"
+      "it is not left to be inferred from a Height that failed to go up."
+    ! [Console.print]
+    match outcome.movement
+        Movement.Unchanged -> Unit
+        Movement.Extended(added) -> Console.print("headers to {outcome.tipHeight}")
+        Movement.Reorganised(forkHeight, displaced) -> reorganised(outcome, forkHeight, displaced)
 
-fn headerNamed(blockId: String) -> BlockHeader
-    ? "A Header standing in for a real one, carrying the one field that matters."
-      "The Block Id is all entriesFor reads, and it is the parameter because a"
-      "case cannot tell one entry from another unless the Headers differ. Fixing"
-      "it and varying something unread — the nonce, as this once did — leaves"
-      "every entry identical, so the order the accumulator is reversed into"
-      "cannot be pinned and neither can which Height a Block Id landed on."
-    BlockHeader(blockId = blockId, version = 1, previousBlockId = "cc", merkleRoot = "dd", timestamp = 0, bits = 0, nonce = 0)
-
-verify headerNamed
-    headerNamed("aa").blockId => "aa"
-    headerNamed("bb").blockId => "bb"
+fn reorganised(outcome: Settled, forkHeight: Int, displaced: Int) -> Unit
+    ? "A branch with more work displaced the one the Index was following."
+    ! [Console.print]
+    Console.print("headers to {outcome.tipHeight}  REORGANISED: {displaced} Height(s) re-pointed above {forkHeight}")
 
 fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int>>, String>
     ? "The Block Ids a getheaders should carry, newest first."

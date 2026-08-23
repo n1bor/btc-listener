@@ -203,11 +203,29 @@ Then, from that directory:
 ./target/release/main bodies  192.168.1.10 ~/chain 1 500  # Blocks for Heights 1..500
 ```
 
-`headers` must run first, and it runs in Height order. A `getdata` names Block
-Ids and never Heights, so the chain has to be known before any Block can be
-asked for. It fetches every Header — around 962,000 at the time of writing,
-roughly 24 minutes — recording a Height against a Block Id for each. Asking for
-bodies above the Height it has reached gives `no header for height N`.
+`headers` must run first. A `getdata` names Block Ids and never Heights, so the
+chain has to be known before any Block can be asked for. It fetches every Header
+— around 962,000 at the time of writing, roughly 24 minutes — keeping each one
+and working out where it sits. Asking for bodies above the Height it has reached
+gives `no header for height N`.
+
+It does not assume the Peer is sending one chain. Every Header goes into a tree
+keyed by Block Id, carrying the Height it sits at and the Chain Work of the
+Branch below it; the Heights are then pointed at whichever Branch has the most
+work. A Header whose parent is not the tip is a Branch and not an error, and a
+Header whose parent has not arrived is an Orphan — counted, not refused.
+
+Growth says so quietly and a Reorganisation says so loudly, because they are not
+the same event: a Height that held nothing is the chain getting longer, and a
+Height that held a different Block Id is the chain changing its mind.
+
+```
+headers to 318986
+headers to 318987  REORGANISED: 2 Height(s) re-pointed above 318985
+```
+
+Re-running `headers` on a directory that is already up to date places nothing
+and stops, rather than asking the same question again.
 
 `bodies` then fetches the Blocks for a range, writing them into Segments and
 recording where each went.
