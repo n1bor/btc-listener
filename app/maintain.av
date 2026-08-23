@@ -4,8 +4,10 @@ module Maintain
         "prune discards Blocks below a Height, txindex records where Transactions"
         "sit, and audit checks a range against everything we know how to check."
         "The first two write and claim the directory; audit only reads."
-    exposes [prune, txIndex, outputs, audit]
-    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Store, Infra.TxIndex]
+        "reindex is the recovery command: it rewrites every Block's Location"
+        "from the Segments, for a directory whose Index was lost (#92, #93)."
+    exposes [prune, txIndex, outputs, audit, reindex]
+    depends [Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex]
     effects [
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
@@ -69,6 +71,37 @@ fn pruneDone(dir: String, below: Int) -> Result<String, String>
     blocks = Infra.Blocks.open("{dir}/blocks")?
     pruned = Infra.Prune.run(store, blocks, below)?
     Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
+
+fn reindex(rest: List<String>) -> Unit
+    ? "Reindexing is local: a directory, and nothing else to choose."
+    ! [
+        Console.error, Console.print,
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    match rest
+        [] -> Console.error("usage: <dir>")
+        [dir, ..extra] -> said(reindexRun(dir))
+
+fn reindexRun(dir: String) -> Result<String, String>
+    ? "Take the directory claim, then rebuild the Locations."
+    ! [
+        Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    _claimed = Infra.Lock.claim(dir, "reindex")?
+    Infra.Lock.releasingAfter(dir, reindexDone(dir))
+
+fn reindexDone(dir: String) -> Result<String, String>
+    ? "Open the Blocks first, so any torn tail is repaired before the walk."
+    ! [
+        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Kv.open, Infra.Kv.putAll,
+    ]
+    store = Infra.Store.open(dir)?
+    _blocks = Infra.Blocks.open("{dir}/blocks")?
+    rebuilt = Infra.Reindex.run(store, "{dir}/blocks")?
+    Result.Ok("{rebuilt.blocks} Blocks located across {rebuilt.segments} Segments")
 
 fn txIndex(rest: List<String>) -> Unit
     ? "Indexing is local: a directory and a range of Heights."

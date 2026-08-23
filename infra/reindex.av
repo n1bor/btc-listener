@@ -1,0 +1,118 @@
+module Reindex
+    intent =
+        "Rebuilding every Block's Location from the Segments, for a directory"
+        "whose Index has been lost."
+        "The Index is derived and the Segments are the source. Each Segment is a"
+        "sequence of self-framing records, and each record's payload begins with"
+        "the Block's own 80-byte Header, whose hash is the Block Id. So walking"
+        "the Segments and hashing each Header recovers every b: entry without"
+        "reading a single Block body: one 4-byte length and one 80-byte Header"
+        "per Block, which is minutes over a chain that took hours to download."
+        "It rebuilds b: and nothing else, on purpose. Heights could be derived"
+        "here too, by chaining previousBlockId back to genesis, but that would"
+        "make this command decide which chain the directory holds, and that is"
+        "headers' job and a Peer's answer. This command locates bytes and hashes"
+        "them; it decides nothing."
+        "It assumes every Segment is whole records end to end. Infra.Blocks.open"
+        "guarantees that — it truncates a torn tail on every open — and the app"
+        "opens the Blocks before calling here, so a record the file does not"
+        "fully hold is a fault to report rather than a tail to repair."
+        "Segments are walked in directory order and the entries of each are"
+        "written in one batch. Order does not matter: b: keys are independent of"
+        "one another, and a directory that pruning has left with gaps is walked"
+        "exactly as one without."
+    exposes [Rebuilt, run]
+    depends [Bytes, Domain.Block, Domain.Index, Domain.Segment, Infra.Blocks, Infra.Store]
+    effects [Disk.listDir, Disk.readBytesAt, Disk.size, Infra.Kv.putAll]
+
+record Rebuilt
+    segments: Int
+    blocks: Int
+
+fn run(store: Store, dir: String) -> Result<Rebuilt, String>
+    ? "Locate every Block in every Segment of a directory, writing each b: entry."
+    ! [Disk.listDir, Disk.readBytesAt, Disk.size, Infra.Kv.putAll]
+    names = Disk.listDir(dir)?
+    walkSegments(store, dir, segmentsIn(names, []), Rebuilt(segments = 0, blocks = 0))
+
+fn segmentsIn(names: List<String>, acc: List<Int>) -> List<Int>
+    ? "The Segment numbers a directory listing names, ignoring anything else in it."
+    match names
+        [] -> acc
+        [head, ..tail] -> segmentsIn(tail, withSegment(acc, Infra.Blocks.segmentNumberOf(head)))
+
+verify segmentsIn
+    segmentsIn([], []) => []
+    segmentsIn(["blk000000.dat"], []) => [0]
+    segmentsIn(["notes.txt", "blk000007.dat", "blk000003.dat"], []) => [3, 7]
+    segmentsIn(["blk000000.hex"], []) => []
+
+fn withSegment(acc: List<Int>, found: Option<Int>) -> List<Int>
+    ? "Add a Segment number to the list, or leave the list alone."
+    match found
+        Option.None -> acc
+        Option.Some(segment) -> List.prepend(segment, acc)
+
+verify withSegment
+    withSegment([], Option.Some(4)) => [4]
+    withSegment([4], Option.None) => [4]
+
+fn walkSegments(store: Store, dir: String, segments: List<Int>, counted: Rebuilt) -> Result<Rebuilt, String>
+    ? "Each Segment in turn, its entries written before the next is read."
+    ! [Disk.readBytesAt, Disk.size, Infra.Kv.putAll]
+    match segments
+        [] -> Result.Ok(counted)
+        [head, ..tail] -> nextSegment(store, dir, head, tail, counted)
+
+fn nextSegment(store: Store, dir: String, segment: Int, rest: List<Int>, counted: Rebuilt) -> Result<Rebuilt, String>
+    ? "Walk one Segment's records, write its Locations in one batch, carry on."
+    ! [Disk.readBytesAt, Disk.size, Infra.Kv.putAll]
+    path = Infra.Blocks.segmentPath(dir, segment)
+    size = Disk.size(path)?
+    entries = records(path, segment, size, 0, [])?
+    grown = Infra.Store.putAll(store, entries)?
+    walkSegments(grown, dir, rest, Rebuilt(segments = counted.segments + 1, blocks = counted.blocks + List.len(entries)))
+
+fn records(path: String, segment: Int, size: Int, headerAt: Int, acc: List<Entry>) -> Result<List<Entry>, String>
+    ? "One b: entry per record, header to header until the end of the file."
+    ! [Disk.readBytesAt]
+    match headerAt >= size
+        true -> Result.Ok(List.reverse(acc))
+        false -> nextRecord(path, segment, size, headerAt, acc)
+
+fn nextRecord(path: String, segment: Int, size: Int, headerAt: Int, acc: List<Entry>) -> Result<List<Entry>, String>
+    ? "Read the record's length, then the Block Header that opens its payload."
+    ! [Disk.readBytesAt]
+    header = Disk.readBytesAt(path, headerAt, Domain.Segment.headerBytes())?
+    length = Domain.Segment.lengthOf(header)?
+    _whole = framed(segment, size, headerAt, length)?
+    raw = Disk.readBytesAt(path, Domain.Segment.payloadAt(headerAt), Domain.Block.headerLength())?
+    entry = entryFor(segment, headerAt, length, raw)?
+    records(path, segment, size, Domain.Segment.nextHeader(headerAt, length), List.prepend(entry, acc))
+
+fn framed(segment: Int, size: Int, headerAt: Int, length: Int) -> Result<Unit, String>
+    ? "A record the Segment does not hold in full is a fault, not a tail to trim."
+      "Infra.Blocks.open has already cut any torn tail, so reaching one here"
+      "means the Segment changed underneath this walk or was never opened."
+    match Domain.Segment.complete(size, headerAt, length)
+        true -> Result.Ok(Unit)
+        false -> Result.Err("Segment {segment} ends inside the record at offset {headerAt}, which claims {length} bytes")
+
+verify framed
+    framed(0, 100, 0, 96) => Result.Ok(Unit)
+    framed(0, 100, 0, 97) => Result.Err("Segment 0 ends inside the record at offset 0, which claims 97 bytes")
+    framed(3, 4, 0, 0) => Result.Ok(Unit)
+
+fn entryFor(segment: Int, headerAt: Int, length: Int, raw: Bytes) -> Result<Entry, String>
+    ? "The b: entry for a record: its Block Id, hashed from the Header it opens"
+      "with, against the Location that names its payload."
+      "Fewer than 80 bytes cannot be a Block, and hashing them would invent an"
+      "Id for something that is not one."
+    match List.len(Bytes.toList(raw)) == Domain.Block.headerLength()
+        false -> Result.Err("Segment {segment} holds {List.len(Bytes.toList(raw))} bytes of a Block Header at offset {Domain.Segment.payloadAt(headerAt)}, not {Domain.Block.headerLength()}")
+        true -> Result.Ok(Entry(key = Domain.Index.blockKey(Domain.Block.blockIdOf(raw)), value = Domain.Index.encodeLocation(Location(segment = segment, offset = Domain.Segment.payloadAt(headerAt), length = length))))
+
+verify entryFor
+    entryFor(0, 0, 285, Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => Result.Ok(Entry(key = "b:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", value = "0:4:285"))
+    entryFor(7, 1000, 285, Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")?) => Result.Ok(Entry(key = "b:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", value = "7:1004:285"))
+    entryFor(2, 0, 40, Bytes.fromHex("0100")?) => Result.Err("Segment 2 holds 2 bytes of a Block Header at offset 4, not 80")

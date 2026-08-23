@@ -21,7 +21,7 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Twelve of them. Only the first three need a Peer; everything else reads what
+Thirteen of them. Only the first three need a Peer; everything else reads what
 those wrote and works offline.
 
 | command | what it does | Peer |
@@ -36,6 +36,7 @@ those wrote and works offline.
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
+| `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `taproottest [n]` | run Core's script_assets corpus — 3,737 tapscript tests — or explain test n | no |
 | `help` | print the usage | no |
 
@@ -637,6 +638,36 @@ directory is rebuilt from the network rather than migrated. A directory still
 holding an `index.log` and no `kv/` is refused by name, the same way a
 directory of hex Segments is.
 
+### Recovering a lost Index
+
+The Index is derived and the Segments are the source. On 23 August 2026 a hard
+crash mid-`outputs` left 57 GB of intact Segments beside a LevelDB that would
+not open — `Corruption: missing live files`, because rusty-leveldb never
+fsyncs ([#92](https://github.com/n1bor/btc-listener/issues/92)). `reindex`
+exists so that costs minutes rather than a download
+([#93](https://github.com/n1bor/btc-listener/issues/93)):
+
+```bash
+mv ~/chain/kv ~/chain/kv-lost            # or delete it; a fresh database is made on open
+rm -f ~/chain/index.log                  # a log beside no database is refused
+./target/release/main headers 192.168.1.10 ~/chain     # h:  Height → Block Id, from a Peer
+./target/release/main reindex ~/chain                  # b:  Block Id → Location, from the Segments
+./target/release/main txindex ~/chain 1 400000         # t:, n:  as before
+./target/release/main outputs ~/chain 1 400000         # o:      as before
+```
+
+`reindex` walks every Segment record to record, reads the 80-byte Header that
+opens each payload, hashes it, and writes `b:<Block Id> → segment:offset:length`.
+It never reads a Block body, so 400,000 Blocks is 400,000 reads of 84 bytes.
+It rebuilds only `b:` — Heights are `headers`' job and a Peer's answer, and
+deriving them here by chaining `previousBlockId` would make `reindex` decide
+which chain the directory holds. It locates bytes and hashes them, and decides
+nothing.
+
+```
+400000 Blocks located across 454 Segments
+```
+
 Memory is the point, not speed. 615 MB is the whole Index held open regardless
 of what is being read; 67 MB is what the audit itself needs. The sharpest
 difference is on the small commands: `tx` does one lookup and exits, and goes
@@ -721,6 +752,7 @@ infra/  the network
 
 infra/  the disk
   store.av          keyed store over two backends, one opaque API
+  reindex.av        every Block's Location, rebuilt from the Segments
   kv.av             the key-value database capability contract
   blocks.av chain.av txindex.av lock.av prune.av
   spends.av audit.av

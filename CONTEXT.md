@@ -130,7 +130,8 @@ A keyed byte store offering get, put, delete and batch. One API over two
 **backends**: Memory, which fixtures return, and Database, a LevelDB behind
 the `Infra.Kv` capability. A third, Logged — an append-only file — was
 retired with `migrate` (#44); a directory holding only its `index.log` is
-refused rather than read.
+refused rather than read. The Store is derived data: `reindex` rebuilds every
+Block's Location from the Segments, which are the source.
 _Avoid_: database, cache, map, persistence
 
 **Index**:

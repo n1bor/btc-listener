@@ -62,8 +62,8 @@ Three flags are load-bearing and easy to drop:
   still needs its own `aver.toml` with an **absolute** provider path, or
   every case that reaches the curve fails.
 
-The twelve CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
-`tx`, `spend`, `audit`, `prune`, `taproottest`, listen, `help`), their ordering
+The thirteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
+`tx`, `spend`, `audit`, `prune`, `reindex`, `taproottest`, listen, `help`), their ordering
 constraints and their output formats are documented in README.md.
 
 ## Architecture
@@ -89,7 +89,9 @@ The providers carry their own Rust tests; everything else is tested from Aver.
 **The Store and the Index** (`infra/store.av`): one opaque keyed-store API over
 two backends — Memory (fixtures), Database (LevelDB in `kv/`, made on first
 open). The log backend and `migrate` are gone (#44); a directory holding an
-`index.log` and no `kv/` is refused, and is rebuilt from the network instead.
+`index.log` and no `kv/` is refused. The Index is derived: `reindex` rebuilds
+every `b:` Location from the Segments (#93), which is the recovery path after a
+crash — rusty-leveldb never fsyncs (#92).
 Key prefixes: `b:` Block Id → Location, `h:` Height →
 Block Id, `t:` Transaction Id → site, `o:<txid>:<index>` → Output (what lets a
 spend resolve in one lookup).
