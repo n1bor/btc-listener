@@ -18,9 +18,9 @@ blocks each one.
 | `key_io_valid.json` | `domain/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
 | `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
 | `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
-| `script_assets_test.json` | not a file — `main taproottest` | 3737 | fetched and run at run time |
+| `script_assets_test.json` | `domain/assetcases1..9.av` | 3737 | `tools/script_assets_to_aver.py` |
 
-Between them **2,201 verify cases**, and 3,737 more run by `main taproottest`, and every entry these files hold is either
+Between them **5,938 verify cases**, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
 
 | file | entries | read | left out |
@@ -506,3 +506,24 @@ the whole Transaction — had never been checked in either direction before.
 What is still missing is a re-check: the answer is recorded but nothing runs it
 again. That needs a way to raise the budget for a case known to be expensive,
 which `aver verify` has no flag for. Asked for upstream as jasisz/aver#1071.
+
+## Refreshing, when Core moves
+
+One command fetches every corpus above and regenerates the case files for any
+that changed upstream:
+
+```bash
+tools/refresh_corpora.sh          # fetch, compare, regenerate what moved
+tools/refresh_corpora.sh --all    # regenerate everything regardless
+```
+
+The two families keep their disciplines. The pinned family (sighash, key_io,
+base58, BIP341, script_assets) re-emits from Core's file, whose values are the
+expectations. The probe family (script_tests, its Witness rows, tx_valid and
+tx_invalid) records what this engine answers today, so regenerating it runs
+the engine over the fetched rows — ADR 0005's regression discipline.
+
+The script only regenerates; judging the result is the ordinary gates plus
+the diff. A new Core row this engine refuses is a finding — the invariant is
+0 cases where we refuse what Core accepts — and a changed expectation in the
+probe family means the engine changed, which the diff should already explain.

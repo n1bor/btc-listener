@@ -64,8 +64,8 @@ Three flags are load-bearing and easy to drop:
   still needs its own `aver.toml` with an **absolute** provider path, or
   every case that reaches the curve fails.
 
-The thirteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
-`tx`, `spend`, `audit`, `prune`, `reindex`, `taproottest`, listen, `help`), their ordering
+The twelve CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `show`,
+`tx`, `spend`, `audit`, `prune`, `reindex`, listen, `help`), their ordering
 constraints and their output formats are documented in README.md.
 
 ## Architecture
@@ -141,13 +141,15 @@ is unwired because the held chain stops below its activation.
 for outcomes it cannot yet produce, so adding Schnorr/witness evaluation will
 make the compiler name every caller that must change.
 
-**Test corpus**: Bitcoin Core's `script_tests.json` and `sighash.json` are
-compiled into `domain/scriptcases1-5.av` / `sighashcases1-2.av` by
-`tools/script_tests_to_aver.py`. Python assembles, the engine answers — the
-generator never decides expected values. Regenerate with `--fetch` /
-`--assemble` / `--emit` (see its docstring). The invariant to protect: **0
-cases where we refuse what Core accepts**; the 96 in the other direction are
-deliberate (post-hoc verification flags this engine doesn't apply — ADR 0005).
+**Test corpus**: Bitcoin Core's published test data — `script_tests.json`,
+`sighash.json`, `tx_valid`/`tx_invalid`, `key_io`, `base58`, the BIP341
+vectors, and `script_assets_test.json` (3,737 tapscript tests) — is compiled
+into generated `domain/*cases*.av` files by the `tools/*_to_aver.py`
+generators. Python assembles, the engine answers — a generator never decides
+expected values. **`tools/refresh_corpora.sh` fetches every corpus and
+regenerates whatever changed upstream** (docs/core-corpora.md has the
+per-corpus detail). The invariant to protect: **0 cases where we refuse what
+Core accepts**; refusals in the other direction are deliberate (ADR 0005).
 
 ## Conventions
 
