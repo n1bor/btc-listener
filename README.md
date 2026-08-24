@@ -821,10 +821,17 @@ assumed:
   within a bucket, precisely so a Peer answering `getaddr` with a thousand
   addresses it controls cannot choose who you connect to next. That is
   [#118](https://github.com/n1bor/btc-listener/issues/118).
-- **A Candidate that does not answer stalls the loop** for however long the
-  operating system takes to give up on the connection — measured at about
-  three minutes against a dead signet address. `Tcp.connect` has no timeout to
-  pass. That is [#119](https://github.com/n1bor/btc-listener/issues/119).
+- **A Candidate that does not answer stalls the loop for five seconds.**
+  `Tcp.connect` carries a deadline after all — not a parameter but deployment
+  policy, `[effects.Tcp] connect_timeout_secs` in `aver.toml`, defaulting to 5
+  — which this file now sets explicitly so the number is written down where
+  it acts. The "about three minutes" this bullet used to claim was a misread:
+  two log lines with no timestamps, and the gap between them was the loop's
+  own 150-second idle poll plus the 5-second dial. Measured properly, a dead
+  address costs 5.0 s ([#119](https://github.com/n1bor/btc-listener/issues/119),
+  corrected in [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118)).
+  What remains open there is the better shape: a connect that reports through
+  `Tcp.poll`, so dialling stops being a special case in the schedule.
 
 ### When a Peer does not play fair
 
