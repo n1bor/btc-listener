@@ -12,7 +12,7 @@ module Download
         "so stopping is always safe and restarting costs at most the batch"
         "that was in flight."
     exposes [Grown, headers, headersOn]
-    depends [Domain.Address, Domain.Block, Domain.Index, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
+    depends [Domain.Address, Domain.Block, Domain.HeaderTree, Domain.Index, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -67,7 +67,7 @@ fn headerSession(pool: Pool, store: Store) -> Result<Grown, String>
         Time.unixMs,
     ]
     seeded = withGenesis(pool.network, store)?
-    have = heightsHeld(seeded, 0)?
+    have = tipHeight(seeded)?
     _said = Console.print("have {have} headers; asking for more")
     headerBatch(pool, soleKey(), seeded, have)
 
@@ -106,42 +106,28 @@ fn heightNamed(network: Network, store: Store, held: Bool) -> Result<Store, Stri
         true -> Result.Ok(store)
         false -> Infra.Store.put(store, Domain.Index.heightKey(0), Domain.Block.genesisBlockId(network))
 
-fn heightsHeld(store: Store, height: Int) -> Result<Int, String>
-    ? "How many Heights the Index already names, counting up from genesis."
-      "Walking beats keeping a tip record: a lookup is cheap, and a count that"
-      "cannot disagree with the entries is worth more than one that can."
-      "What is counted is checked, but only for presence. A Height that names"
-      "nothing is not a Height the Index names."
+fn tipHeight(store: Store) -> Result<Int, String>
+    ? "How many Heights the Index names, read off the tip record rather than"
+      "counted. The tip is what h: is derived from (#24), so the walk up from"
+      "genesis this replaced could only ever agree with it or be the drift"
+      "this asks about -- 318,981 reads on signet against these two (#113)."
     ! [Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
-    match named
-        Option.None -> Result.Ok(height)
-        Option.Some(blockId) -> heightAfter(store, height, blockId)
+    tip = Infra.Headers.tipOf(store)?
+    Result.Ok(heightsOf(tip))
 
-verify heightsHeld
-    heightsHeld(Infra.Store.fixture([]), 0) => Result.Ok(0)
-    heightsHeld(Infra.Store.fixture([("h:00000000", "aa")]), 0) => Result.Ok(1)
-    heightsHeld(Infra.Store.fixture([("h:00000000", "aa"), ("h:00000001", "bb")]), 0) => Result.Ok(2)
-    heightsHeld(Infra.Store.fixture([("h:00000001", "bb")]), 0) => Result.Ok(0)
-    heightsHeld(Infra.Store.fixture([("h:00000000", "")]), 0) => Result.Err("index has no Block Id at height 0")
+fn heightsOf(tip: Option<Placement>) -> Int
+    ? "A tip at Height h means h + 1 Heights are named; no tip record, none."
+      "A directory from before the Header tree has h: entries and no tip"
+      "record; answering zero starts headers from genesis, which is exactly"
+      "what rebuilds the tree such a directory is missing."
+    match tip
+        Option.None -> 0
+        Option.Some(placement) -> placement.height + 1
 
-fn heightAfter(store: Store, height: Int, blockId: String) -> Result<Int, String>
-    ? "A Height has to name something, then the walk carries on."
-      "Presence rather than a decode, and the difference is measured rather than"
-      "assumed. Reading the value instead of only asking whether the key is there"
-      "costs 0.2 seconds per sixty thousand Heights; decoding each one as well"
-      "costs 3.2, which is near a minute on a finished Index and is paid on every"
-      "run, including a resume that then fetches nothing. The Locator decodes the"
-      "Block Ids it actually uses, so a malformed one is still caught -- there,"
-      "where it is about to be sent, rather than here where it is being counted."
-    ! [Infra.Kv.get]
-    match String.len(blockId) > 0
-        false -> Result.Err("index has no Block Id at height {height}")
-        true -> heightsHeld(store, height + 1)
-
-verify heightAfter
-    heightAfter(Infra.Store.fixture([]), 0, "aa") => Result.Ok(1)
-    heightAfter(Infra.Store.fixture([]), 0, "") => Result.Err("index has no Block Id at height 0")
+verify heightsOf
+    heightsOf(Option.None) => 0
+    heightsOf(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1))) => 4
+    heightsOf(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 0, work = 1))) => 1
 
 fn headerBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
