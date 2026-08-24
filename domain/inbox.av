@@ -29,7 +29,7 @@ module Inbox
         "live beside the buffer. What replaced it is smaller -- the buffer is"
         "the queue -- and it costs a caller nothing, because a caller waiting"
         "on one Message discards the others exactly as it always did."
-    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, seated, addressesHeld, faultyIn, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
+    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, saidBytes, seated, addressesHeld, faultyIn, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
     depends [Bytes, Domain.Message, Domain.Network]
     effects []
 
@@ -46,6 +46,8 @@ record Standing
     buffer: List<Int>
     version: Int
     agent: String
+    sent: Int
+    received: Int
 
 record Popped
     standing: Map<Int, Standing>
@@ -170,11 +172,11 @@ fn seated(standing: Map<Int, Standing>, key: Int, address: String) -> Map<Int, S
       "same reason the queue went: a Map value has Eq and Hash derived for it"
       "and an opaque record satisfies neither. Nothing here parses it, so"
       "text is what it is for."
-    Map.set(standing, key, Standing(address = address, buffer = [], version = 0, agent = ""))
+    Map.set(standing, key, Standing(address = address, buffer = [], version = 0, agent = "", sent = 0, received = 0))
 
 verify seated
     Map.len(seated(noStanding(), 0, "192.0.2.1:8333")) => 1
-    standingAt(seated(noStanding(), 0, "192.0.2.1:8333"), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = ""))
+    standingAt(seated(noStanding(), 0, "192.0.2.1:8333"), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = "", sent = 0, received = 0))
 
 fn addressesHeld(standing: Map<Int, Standing>) -> List<String>
     ? "Where every Peer currently held can be reached."
@@ -224,7 +226,7 @@ fn absorbedInto(standing: Map<Int, Standing>, key: Int, arrived: List<Int>) -> M
     ? "Bytes just read from one Peer, onto the end of its buffer."
     match Map.get(standing, key)
         Option.None -> standing
-        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = List.concat(held.buffer, arrived), version = held.version, agent = held.agent))
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = List.concat(held.buffer, arrived), version = held.version, agent = held.agent, sent = held.sent, received = held.received + List.len(arrived)))
 
 verify absorbedInto
     absorbedInto(noStanding(), 0, [1, 2]) => noStanding()
@@ -240,7 +242,7 @@ fn popped(network: Network, standing: Map<Int, Standing>, key: Int) -> Result<Op
 verify popped
     popped(Network.Signet, noStanding(), 0) => Result.Ok(Option.None)
     popped(Network.Signet, oneSeated(), 0) => Result.Ok(Option.None)
-    popped(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage()), 0) => Result.Ok(Option.Some(Popped(standing = oneSeated(), frame = Frame(command = "verack", body = []))))
+    popped(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage()), 0) => Result.Ok(Option.Some(Popped(standing = oneRead(), frame = Frame(command = "verack", body = []))))
     popped(Network.Signet, absorbedInto(oneSeated(), 0, overLong()), 0) => Result.Err("a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows")
     popped(Network.Signet, absorbedInto(oneSeated(), 0, corrupted()), 0) => Result.Err("a Message did not match the checksum its own header carries")
 
@@ -258,7 +260,7 @@ fn poppedOne(standing: Map<Int, Standing>, key: Int, held: Standing, one: Option
     ? "The Message off the front, and the buffer shortened by exactly it."
     match one
         Option.None -> Result.Ok(Option.None)
-        Option.Some(taken) -> Result.Ok(Option.Some(Popped(standing = Map.set(standing, key, Standing(address = held.address, buffer = taken.rest, version = held.version, agent = held.agent)), frame = taken.frame)))
+        Option.Some(taken) -> Result.Ok(Option.Some(Popped(standing = Map.set(standing, key, Standing(address = held.address, buffer = taken.rest, version = held.version, agent = held.agent, sent = held.sent, received = held.received)), frame = taken.frame)))
 
 verify poppedOne
     poppedOne(oneSeated(), 0, emptyStanding(), Option.None) => Result.Ok(Option.None)
@@ -278,8 +280,8 @@ fn poppedAny(network: Network, standing: Map<Int, Standing>) -> Result<Option<Po
 verify poppedAny
     poppedAny(Network.Signet, noStanding()) => Result.Ok(Option.None)
     poppedAny(Network.Signet, oneSeated()) => Result.Ok(Option.None)
-    poppedAny(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = oneSeated(), key = 0, frame = Frame(command = "verack", body = []))))
-    poppedAny(Network.Signet, absorbedInto(seated(oneSeated(), 1, "192.0.2.2:8333"), 1, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = seated(oneSeated(), 1, "192.0.2.2:8333"), key = 1, frame = Frame(command = "verack", body = []))))
+    poppedAny(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = oneRead(), key = 0, frame = Frame(command = "verack", body = []))))
+    poppedAny(Network.Signet, absorbedInto(seated(oneSeated(), 1, "192.0.2.2:8333"), 1, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = Map.set(seated(oneSeated(), 1, "192.0.2.2:8333"), 1, Standing(address = "192.0.2.2:8333", buffer = [], version = 0, agent = "", sent = 0, received = 24)), key = 1, frame = Frame(command = "verack", body = []))))
 
 fn firstWith(network: Network, standing: Map<Int, Standing>, keys: List<Int>) -> Result<Option<PoppedAt>, String>
     ? "The first Peer, in identifier order, with a whole Message waiting."
@@ -289,7 +291,7 @@ fn firstWith(network: Network, standing: Map<Int, Standing>, keys: List<Int>) ->
 
 verify firstWith
     firstWith(Network.Signet, oneSeated(), []) => Result.Ok(Option.None)
-    firstWith(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage()), [0]) => Result.Ok(Option.Some(PoppedAt(standing = oneSeated(), key = 0, frame = Frame(command = "verack", body = []))))
+    firstWith(Network.Signet, absorbedInto(oneSeated(), 0, oneMessage()), [0]) => Result.Ok(Option.Some(PoppedAt(standing = oneRead(), key = 0, frame = Frame(command = "verack", body = []))))
 
 fn orNext(network: Network, standing: Map<Int, Standing>, key: Int, rest: List<Int>, found: Result<Option<Popped>, String>) -> Result<Option<PoppedAt>, String>
     ? "This Peer had something, or the next one is asked."
@@ -345,11 +347,24 @@ verify faultyOrNext
     faultyOrNext(Network.Signet, absorbedInto(oneSeated(), 0, corrupted()), 0, []) => Option.Some(0)
     faultyOrNext(Network.Signet, oneSeated(), 0, []) => Option.None
 
+fn saidBytes(standing: Map<Int, Standing>, key: Int, count: Int) -> Map<Int, Standing>
+    ? "Count bytes put on one Peer's wire (#131)."
+      "Kept beside the received count absorbedInto keeps, so the two totals"
+      "a Peers Panel shows come from the two places bytes actually cross."
+    match Map.get(standing, key)
+        Option.None -> standing
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = held.buffer, version = held.version, agent = held.agent, sent = held.sent + count, received = held.received))
+
+verify saidBytes
+    standingAt(saidBytes(seated(noStanding(), 0, "a"), 0, 24), 0) => Option.Some(Standing(address = "a", buffer = [], version = 0, agent = "", sent = 24, received = 0))
+    standingAt(saidBytes(saidBytes(seated(noStanding(), 0, "a"), 0, 24), 0, 10), 0) => Option.Some(Standing(address = "a", buffer = [], version = 0, agent = "", sent = 34, received = 0))
+    Map.len(saidBytes(noStanding(), 9, 24)) => 0
+
 fn greeted(standing: Map<Int, Standing>, key: Int, version: Int, agent: String) -> Map<Int, Standing>
     ? "What a Peer told us about itself once its Handshake completed."
     match Map.get(standing, key)
         Option.None -> standing
-        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = held.buffer, version = version, agent = agent))
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = held.buffer, version = version, agent = agent, sent = held.sent, received = held.received))
 
 verify greeted
     standingAgent(greeted(oneSeated(), 0, 70016, "/Satoshi:27.0.0/"), 0) => "/Satoshi:27.0.0/"
@@ -404,7 +419,18 @@ verify corrupted
 
 fn emptyStanding() -> Standing
     ? "A Peer just seated, for the cases here."
-    Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = "")
+    Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = "", sent = 0, received = 0)
+
+fn oneRead() -> Map<Int, Standing>
+    ? "One Peer that has been read once: 24 bytes counted, buffer empty."
+    saidNothing(oneSeated(), 24)
+
+fn saidNothing(standing: Map<Int, Standing>, received: Int) -> Map<Int, Standing>
+    ? "The seated Peer with a received count, for the cases here."
+    Map.set(standing, 0, Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = "", sent = 0, received = received))
+
+verify saidNothing
+    Map.len(saidNothing(oneSeated(), 24)) => 1
 
 fn oneSeated() -> Map<Int, Standing>
     ? "One Peer held under identifier zero, for the cases here."

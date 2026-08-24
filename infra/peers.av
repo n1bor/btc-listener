@@ -213,14 +213,15 @@ fn send(pool: Pool, key: Int, command: String, payload: Bytes) -> Result<Pool, S
     ! [Tcp.writeBytes]
     match Map.get(pool.sockets, key)
         Option.None -> Result.Err("no Peer is held under identifier {key}")
-        Option.Some(connection) -> written(pool, connection, command, payload)
+        Option.Some(connection) -> written(pool, key, connection, command, payload)
 
-fn written(pool: Pool, connection: Tcp.Connection, command: String, payload: Bytes) -> Result<Pool, String>
-    ? "The framed Message, onto the socket."
+fn written(pool: Pool, key: Int, connection: Tcp.Connection, command: String, payload: Bytes) -> Result<Pool, String>
+    ? "The framed Message onto the socket, and its bytes onto the Peer's"
+      "sent count (#131)."
     ! [Tcp.writeBytes]
     framed = Domain.Message.frame(pool.network, command, payload)?
     _sent = Tcp.writeBytes(connection, framed)?
-    Result.Ok(pool)
+    Result.Ok(withStanding(pool, Domain.Inbox.saidBytes(pool.standing, key, List.len(Bytes.octets(framed)))))
 
 fn awaitFrom(pool: Pool, key: Int, wanted: String) -> Result<Waited, String>
     ? "The next Message of this command from this Peer, with the deadline"

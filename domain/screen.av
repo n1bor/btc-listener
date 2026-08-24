@@ -171,14 +171,87 @@ fn linesOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<String>
     ? "The Panel that is up, as its lines."
     match view.panel
         Panel.Overview -> overviewLines(snapshot, nowMs)
-        Panel.Peers -> placeholderLines("Peers", "#131")
+        Panel.Peers -> peersPanelLines(snapshot.company, nowMs)
         Panel.Blocks -> placeholderLines("Blocks", "#132")
         Panel.Transactions -> placeholderLines("Transactions", "#133")
         Panel.Mempool -> placeholderLines("Mempool", "#28")
 
 verify linesOf
     linesOf(View(panel = Panel.Mempool, confirming = false), Domain.Snapshot.started(0), 0) => ["", "waiting for the Mempool Panel (#28)"]
+    List.len(linesOf(View(panel = Panel.Peers, confirming = false), Domain.Snapshot.started(0), 0)) => 5
     List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 4
+
+fn peersPanelLines(company: Company, nowMs: Int) -> List<String>
+    ? "The Peers Panel (#131): the pool one line per Peer, then the Book."
+      "Direction reads out for every Peer because every Peer is one this"
+      "node dialled; inbound Peers arrive with #30, and the column exists"
+      "now so that day changes a value and not a shape."
+    List.concat([
+        "",
+        Domain.Screenlines.peersLine(company, nowMs),
+        "",
+        "key  dir  address                version  sent      received  heard   agent",
+    ], peerLines(company.peers, nowMs, []))
+
+verify peersPanelLines
+    List.len(peersPanelLines(Company(peers = [], candidates = 0), 0)) => 5
+    peersPanelLines(Company(peers = [], candidates = 0), 0) => ["", "0 Peers, 0 Candidates, quietest heard 0s ago", "", "key  dir  address                version  sent      received  heard   agent", "  none connected"]
+
+fn peerLines(peers: List<PeerView>, nowMs: Int, acc: List<String>) -> List<String>
+    ? "One line per Peer, in key order as the pool keeps them."
+    match peers
+        [] -> anyPeers(List.reverse(acc))
+        [head, ..tail] -> peerLines(tail, nowMs, List.prepend(peerLine(head, nowMs), acc))
+
+verify peerLines
+    peerLines([], 0, []) => ["  none connected"]
+    List.len(peerLines([PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 0, sent = 0, received = 0)], 5000, [])) => 1
+
+fn anyPeers(lines: List<String>) -> List<String>
+    ? "No Peers is said, not left blank."
+    match lines
+        [] -> ["  none connected"]
+        [head, ..tail] -> lines
+
+verify anyPeers
+    anyPeers([]) => ["  none connected"]
+    anyPeers(["x"]) => ["x"]
+
+fn peerLine(peer: PeerView, nowMs: Int) -> String
+    ? "One Peer: who, which way, how much has crossed, how fresh."
+    "{padTo(String.fromInt(peer.key), 5)}{padTo("out", 5)}{padTo(peer.address, 23)}{padTo(String.fromInt(peer.version), 9)}{padTo(String.fromInt(peer.sent), 10)}{padTo(String.fromInt(peer.received), 10)}{padTo(agoText(peer.lastHeardMs, nowMs), 8)}{peer.agent}"
+
+verify peerLine
+    peerLine(PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 3000, sent = 120, received = 4096), 5000) => "0    out  1.2.3.4:8333           70016    120       4096      2s ago  /Satoshi/"
+
+fn agoText(atMs: Int, nowMs: Int) -> String
+    ? "How long since this Peer said anything."
+    "{ageText(atMs, nowMs)} ago"
+
+verify agoText
+    agoText(3000, 5000) => "2s ago"
+
+fn padTo(text: String, width: Int) -> String
+    ? "The text, then spaces out to the column width; a value wider than"
+      "its column keeps one space so columns never fuse."
+    match String.len(text) >= width
+        true -> "{text} "
+        false -> "{text}{spaces(width - String.len(text), "")}"
+
+verify padTo
+    padTo("ab", 4) => "ab  "
+    padTo("abcd", 4) => "abcd "
+    padTo("abcde", 4) => "abcde "
+
+fn spaces(count: Int, acc: String) -> String
+    ? "That many spaces."
+    match count <= 0
+        true -> acc
+        false -> spaces(count - 1, "{acc} ")
+
+verify spaces
+    spaces(0, "") => ""
+    spaces(3, "") => "   "
 
 fn placeholderLines(name: String, issue: String) -> List<String>
     ? "A Panel that is not built yet says so, and says where it is coming"
