@@ -1,0 +1,320 @@
+module Snapshot
+    intent =
+        "One picture of the running node, assembled every tick of follow's"
+        "loop and rendered elsewhere -- as lines on stdout today, as a Screen"
+        "when one is asked for (#128). Nothing here draws and nothing here"
+        "reads a clock: the loop hands in what happened and when, and this"
+        "module only folds it up and answers arithmetic about it."
+        "The rings are bounded on purpose: a Snapshot is what the node would"
+        "want to say about now, not a log, so the newest few of everything is"
+        "the whole point and forgetting the rest is correct."
+    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, advanced, freshProgress, withPeers, withCandidates, rateOf, etaSecsOf, percentOf, quietestSecsOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
+    depends []
+    effects []
+
+type Phase
+    Headers
+    Bodies
+    Listening
+
+record Sample
+    atMs: Int
+    done: Int
+
+record Progress
+    done: Int
+    target: Int
+    samples: List<Sample>
+
+record TipView
+    height: Int
+    blockId: String
+    atMs: Int
+
+record PeerView
+    key: Int
+    address: String
+    version: Int
+    agent: String
+    lastHeardMs: Int
+
+record BlockView
+    height: Int
+    blockId: String
+    transactions: Int
+    bytes: Int
+    atMs: Int
+
+record ReorgView
+    forkHeight: Int
+    fromId: String
+    toId: String
+    atMs: Int
+
+record TxView
+    txId: String
+    fee: Int
+    coinbase: Bool
+    atMs: Int
+
+record Company
+    peers: List<PeerView>
+    candidates: Int
+
+record Rings
+    blocks: List<BlockView>
+    reorgs: List<ReorgView>
+    orphans: List<String>
+    transactions: List<TxView>
+
+record Snapshot
+    phase: Phase
+    tip: TipView
+    headers: Progress
+    bodies: Progress
+    company: Company
+    rings: Rings
+
+fn windowMs() -> Int
+    ? "How far back the rate looks."
+      "Sixty seconds: long enough that per-Block jitter averages out, short"
+      "enough that a stall shows within the minute it happens."
+    60000
+
+verify windowMs
+    windowMs() => 60000
+
+fn blockLimit() -> Int
+    ? "How many recent Blocks the Snapshot keeps."
+    8
+
+verify blockLimit
+    blockLimit() => 8
+
+fn reorgLimit() -> Int
+    ? "How many recent Reorganisations the Snapshot keeps."
+    5
+
+verify reorgLimit
+    reorgLimit() => 5
+
+fn orphanLimit() -> Int
+    ? "How many recent Orphan Headers the Snapshot keeps."
+    5
+
+verify orphanLimit
+    orphanLimit() => 5
+
+fn transactionLimit() -> Int
+    ? "How many recently connected Transactions the Snapshot keeps."
+    16
+
+verify transactionLimit
+    transactionLimit() => 16
+
+fn freshProgress() -> Progress
+    ? "A Progress that has not moved yet."
+    Progress(done = 0, target = 0, samples = [])
+
+verify freshProgress
+    freshProgress() => Progress(done = 0, target = 0, samples = [])
+
+fn started(nowMs: Int) -> Snapshot
+    ? "The Snapshot a node begins with: no tip, nothing done, nobody met."
+    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), company = Company(peers = [], candidates = 0), rings = Rings(blocks = [], reorgs = [], orphans = [], transactions = []))
+
+verify started
+    started(5).tip.height => 0
+    started(5).phase => Phase.Headers
+    started(5).company.candidates => 0
+
+fn headersAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
+    ? "The Header count moved; remember when, so a rate can be read off."
+    Snapshot(phase = Phase.Headers, tip = snapshot.tip, headers = advanced(snapshot.headers, done, target, nowMs), bodies = snapshot.bodies, company = snapshot.company, rings = snapshot.rings)
+
+verify headersAt
+    headersAt(started(0), 100, 200, 1000).headers.done => 100
+    headersAt(started(0), 100, 200, 1000).headers.target => 200
+    headersAt(started(0), 100, 200, 1000).phase => Phase.Headers
+
+fn bodiesAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
+    ? "The body count moved, which also means the Header phase is behind us."
+    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = advanced(snapshot.bodies, done, target, nowMs), company = snapshot.company, rings = snapshot.rings)
+
+verify bodiesAt
+    bodiesAt(started(0), 7, 9, 1000).bodies.done => 7
+    bodiesAt(started(0), 7, 9, 1000).phase => Phase.Bodies
+
+fn tipAt(snapshot: Snapshot, height: Int, blockId: String, nowMs: Int) -> Snapshot
+    ? "Caught up: the node stands on this Block, listening."
+    Snapshot(phase = Phase.Listening, tip = TipView(height = height, blockId = blockId, atMs = nowMs), headers = snapshot.headers, bodies = snapshot.bodies, company = snapshot.company, rings = snapshot.rings)
+
+verify tipAt
+    tipAt(started(0), 318980, "aa", 1000).tip.height => 318980
+    tipAt(started(0), 318980, "aa", 1000).tip.blockId => "aa"
+    tipAt(started(0), 318980, "aa", 1000).phase => Phase.Listening
+
+fn advanced(progress: Progress, done: Int, target: Int, nowMs: Int) -> Progress
+    ? "One more reading, with everything older than the window let go."
+    Progress(done = done, target = target, samples = List.prepend(Sample(atMs = nowMs, done = done), recentOf(progress.samples, nowMs - windowMs())))
+
+verify advanced
+    advanced(freshProgress(), 10, 100, 1000).samples => [Sample(atMs = 1000, done = 10)]
+    advanced(advanced(freshProgress(), 10, 100, 1000), 20, 100, 2000).samples => [Sample(atMs = 2000, done = 20), Sample(atMs = 1000, done = 10)]
+    advanced(advanced(freshProgress(), 10, 100, 1000), 20, 100, 62000).samples => [Sample(atMs = 62000, done = 20)]
+
+fn recentOf(samples: List<Sample>, cutoff: Int) -> List<Sample>
+    ? "The Samples still inside the window."
+      "Newest first and taken in order, so the first old one ends the walk."
+    List.reverse(gathered(samples, cutoff, []))
+
+verify recentOf
+    recentOf([], 0) => []
+    recentOf([Sample(atMs = 5, done = 1)], 3) => [Sample(atMs = 5, done = 1)]
+    recentOf([Sample(atMs = 5, done = 1)], 6) => []
+
+fn gathered(samples: List<Sample>, cutoff: Int, acc: List<Sample>) -> List<Sample>
+    ? "The kept Samples, gathered in reverse; the first old one ends the walk."
+    match samples
+        [] -> acc
+        [head, ..tail] -> gatheredIfRecent(head, tail, cutoff, acc)
+
+verify gathered
+    gathered([Sample(atMs = 5, done = 1)], 3, []) => [Sample(atMs = 5, done = 1)]
+    gathered([Sample(atMs = 2, done = 1), Sample(atMs = 1, done = 0)], 3, []) => []
+
+fn gatheredIfRecent(head: Sample, tail: List<Sample>, cutoff: Int, acc: List<Sample>) -> List<Sample>
+    ? "Keep a Sample the window still covers and carry on; stop at the first"
+      "it does not, because newest-first order says the rest are older still."
+    match head.atMs >= cutoff
+        true -> gathered(tail, cutoff, List.prepend(head, acc))
+        false -> acc
+
+verify gatheredIfRecent
+    gatheredIfRecent(Sample(atMs = 5, done = 1), [], 3, []) => [Sample(atMs = 5, done = 1)]
+    gatheredIfRecent(Sample(atMs = 2, done = 1), [Sample(atMs = 1, done = 0)], 3, []) => []
+
+fn rateOf(progress: Progress) -> Int
+    ? "How many items a second, read across the window."
+      "Zero when there is nothing to read a rate off: one Sample is a point,"
+      "not a slope."
+    match progress.samples
+        [] -> 0
+        [newest, ..older] -> slopeOf(newest, lastOf(older, newest))
+
+verify rateOf
+    rateOf(freshProgress()) => 0
+    rateOf(advanced(freshProgress(), 10, 100, 1000)) => 0
+    rateOf(advanced(advanced(freshProgress(), 1000, 9999, 1000), 4000, 9999, 61000)) => 50
+    rateOf(advanced(advanced(freshProgress(), 0, 9, 0), 4, 9, 2000)) => 2
+
+fn slopeOf(newest: Sample, oldest: Sample) -> Int
+    ? "Items a second between two Samples; zero when no time separates them."
+    match newest.atMs - oldest.atMs > 0
+        true -> Result.withDefault(Int.div((newest.done - oldest.done) * 1000, newest.atMs - oldest.atMs), 0)
+        false -> 0
+
+verify slopeOf
+    slopeOf(Sample(atMs = 2000, done = 4), Sample(atMs = 0, done = 0)) => 2
+    slopeOf(Sample(atMs = 1000, done = 4), Sample(atMs = 1000, done = 0)) => 0
+
+fn lastOf(samples: List<Sample>, fallback: Sample) -> Sample
+    ? "The oldest Sample held -- the end of a newest-first list."
+    match samples
+        [] -> fallback
+        [head, ..tail] -> lastOf(tail, head)
+
+verify lastOf
+    lastOf([], Sample(atMs = 1, done = 1)) => Sample(atMs = 1, done = 1)
+    lastOf([Sample(atMs = 2, done = 2), Sample(atMs = 3, done = 3)], Sample(atMs = 1, done = 1)) => Sample(atMs = 3, done = 3)
+
+fn etaSecsOf(progress: Progress) -> Option<Int>
+    ? "Seconds until done at the current rate, or nothing while the rate is"
+      "unreadable. None and zero are different answers: zero means finished,"
+      "None means nobody can yet say."
+    match rateOf(progress) > 0
+        true -> Option.Some(Result.withDefault(Int.div(Int.max(progress.target - progress.done, 0), rateOf(progress)), 0))
+        false -> Option.None
+
+verify etaSecsOf
+    etaSecsOf(freshProgress()) => Option.None
+    etaSecsOf(advanced(advanced(freshProgress(), 1000, 9999, 1000), 4000, 9999, 61000)) => Option.Some(119)
+    etaSecsOf(advanced(advanced(freshProgress(), 8, 9, 0), 9, 9, 1000)) => Option.Some(0)
+
+fn percentOf(progress: Progress) -> Int
+    ? "How far through, in whole percent; zero of an unknown target is zero."
+    match progress.target > 0
+        true -> Result.withDefault(Int.div(progress.done * 100, progress.target), 0)
+        false -> 0
+
+verify percentOf
+    percentOf(freshProgress()) => 0
+    percentOf(Progress(done = 75, target = 200, samples = [])) => 37
+    percentOf(Progress(done = 200, target = 200, samples = [])) => 100
+
+fn notedBlock(snapshot: Snapshot, view: BlockView) -> Snapshot
+    ? "A Block connected: newest first, oldest forgotten."
+    withRings(snapshot, Rings(blocks = List.take(List.prepend(view, snapshot.rings.blocks), blockLimit()), reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, transactions = snapshot.rings.transactions))
+
+verify notedBlock
+    notedBlock(started(0), BlockView(height = 1, blockId = "aa", transactions = 2, bytes = 300, atMs = 5)).rings.blocks => [BlockView(height = 1, blockId = "aa", transactions = 2, bytes = 300, atMs = 5)]
+
+fn notedReorg(snapshot: Snapshot, view: ReorgView) -> Snapshot
+    ? "A Reorganisation happened; the Screen's Blocks Panel wants the last few."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = List.take(List.prepend(view, snapshot.rings.reorgs), reorgLimit()), orphans = snapshot.rings.orphans, transactions = snapshot.rings.transactions))
+
+verify notedReorg
+    notedReorg(started(0), ReorgView(forkHeight = 7, fromId = "aa", toId = "bb", atMs = 5)).rings.reorgs => [ReorgView(forkHeight = 7, fromId = "aa", toId = "bb", atMs = 5)]
+
+fn notedOrphan(snapshot: Snapshot, blockId: String) -> Snapshot
+    ? "A Header arrived whose parent we do not hold."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = List.take(List.prepend(blockId, snapshot.rings.orphans), orphanLimit()), transactions = snapshot.rings.transactions))
+
+verify notedOrphan
+    notedOrphan(started(0), "aa").rings.orphans => ["aa"]
+
+fn notedTransaction(snapshot: Snapshot, view: TxView) -> Snapshot
+    ? "A Transaction connected, its fee already computed by connect."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
+
+verify notedTransaction
+    notedTransaction(started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)).rings.transactions => [TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)]
+
+fn withRings(snapshot: Snapshot, rings: Rings) -> Snapshot
+    ? "The Snapshot, with its rings moved on."
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = snapshot.company, rings = rings)
+
+fn withPeers(snapshot: Snapshot, peers: List<PeerView>) -> Snapshot
+    ? "Who the node is talking to, refreshed whole each tick."
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = Company(peers = peers, candidates = snapshot.company.candidates), rings = snapshot.rings)
+
+verify withPeers
+    List.len(withPeers(started(0), [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 9)]).company.peers) => 1
+
+fn withCandidates(snapshot: Snapshot, count: Int) -> Snapshot
+    ? "How many Candidates the Address Book holds."
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = Company(peers = snapshot.company.peers, candidates = count), rings = snapshot.rings)
+
+verify withCandidates
+    withCandidates(started(0), 41).company.candidates => 41
+
+fn quietestSecsOf(peers: List<PeerView>, nowMs: Int) -> Int
+    ? "How long the least recently heard Peer has been silent, in seconds."
+      "Zero with nobody connected: silence needs someone to be silent."
+    match peers
+        [] -> 0
+        [head, ..tail] -> Int.div(nowMs - earliestHeard(tail, head.lastHeardMs), 1000)
+
+verify quietestSecsOf
+    quietestSecsOf([], 99999) => 0
+    quietestSecsOf([PeerView(key = 0, address = "a", version = 1, agent = "x", lastHeardMs = 4000), PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 1000)], 10000) => 9
+
+fn earliestHeard(peers: List<PeerView>, sofar: Int) -> Int
+    ? "The oldest last-heard among the Peers."
+    match peers
+        [] -> sofar
+        [head, ..tail] -> earliestHeard(tail, Int.min(head.lastHeardMs, sofar))
+
+verify earliestHeard
+    earliestHeard([], 7) => 7
+    earliestHeard([PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 3)], 7) => 3

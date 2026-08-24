@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Waited, WaitedFrom, opened, joined, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, opened, awaitTick, joined, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare]
     depends [Bytes, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -46,6 +46,10 @@ record WaitedFrom
     pool: Pool
     key: Int
     frame: Frame
+
+record Tick
+    pool: Pool
+    arrived: Option<Spare>
 
 fn readChunk() -> Int
     ? "How many bytes to take off a ready socket at once."
@@ -324,6 +328,51 @@ fn pumpedAny(pool: Pool) -> Result<WaitedFrom, String>
     ? "Nothing queued anywhere, so read from every Peer and look again."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
     awaitAnyPeer(pumped(pool)?)
+
+fn awaitTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
+    ? "The next Message from whichever Peer speaks first, or a tick of"
+      "silence -- whichever comes sooner."
+      "The Screen's clock (#129): where awaitAnyPeer waits out the whole"
+      "idle deadline, this returns after tickMs with nothing in hand, so the"
+      "caller gets a turn on which to look at its own clock -- print a due"
+      "progress line, notice a Peer silent too long, redraw. Silence here is"
+      "an answer, never an error: what silence means is the caller's to"
+      "judge, because only the caller knows how long each Peer has been"
+      "quiet."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    match Domain.Inbox.poppedAny(pool.network, pool.standing)
+        Result.Err(why) -> misbehavingTick(pool, tickMs, why)
+        Result.Ok(found) -> orPumpTick(pool, tickMs, found)
+
+fn misbehavingTick(pool: Pool, tickMs: Int, why: String) -> Result<Tick, String>
+    ? "A Peer that broke the protocol costs itself here too."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    match Domain.Inbox.faultyIn(pool.network, pool.standing)
+        Option.None -> Result.Err(why)
+        Option.Some(key) -> droppedTick(pool, tickMs, key, why)
+
+fn droppedTick(pool: Pool, tickMs: Int, key: Int, why: String) -> Result<Tick, String>
+    ? "Close the offender and go back to listening to everybody else."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    _said = Console.error("dropping peer {key}: {why}")
+    awaitTick(dropOne(pool, key)?, tickMs)
+
+fn orPumpTick(pool: Pool, tickMs: Int, found: Option<PoppedAt>) -> Result<Tick, String>
+    ? "A Message already read from somebody, or one bounded poll."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    match found
+        Option.Some(one) -> Result.Ok(Tick(pool = withStanding(pool, one.standing), arrived = Option.Some(Spare(key = one.key, frame = one.frame))))
+        Option.None -> pumpedTick(pool, tickMs)
+
+fn pumpedTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
+    ? "Ask which Peers have something, waiting at most one tick."
+      "A poll that reports nobody is the tick itself, handed back with"
+      "nothing in it."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    ready = Tcp.poll(pool.sockets, tickMs)?
+    match ready
+        [] -> Result.Ok(Tick(pool = pool, arrived = Option.None))
+        [head, ..tail] -> awaitTick(reading(pool, ready)?, tickMs)
 
 fn pumped(pool: Pool) -> Result<Pool, String>
     ? "One turn of the loop: ask which Peers have something, and read them."

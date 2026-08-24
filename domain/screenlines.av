@@ -1,0 +1,138 @@
+module Screenlines
+    intent =
+        "The Snapshot, said in one line at a time."
+        "These are the sentences plain follow prints as it runs -- an IBD"
+        "progress line each minute, a line for every Block connected, Peer"
+        "stats now and then -- and #128's Screen renders the same Snapshot"
+        "instead of these. Everything here is pure: a rendering never reads"
+        "a clock and never decides when it is printed, so every line can be"
+        "pinned by a verify case."
+    exposes [headerLine, bodyLine, blockLine, tipLine, peersLine, reorgLine, orphanLine, transactionLine, spanText, due, minuteMs, peerStatsEveryMs]
+    depends [Domain.Snapshot]
+    effects []
+
+fn minuteMs() -> Int
+    ? "How often the progress line is printed during a catch-up."
+    60000
+
+verify minuteMs
+    minuteMs() => 60000
+
+fn peerStatsEveryMs() -> Int
+    ? "How often the Peer stats line is printed while listening."
+      "Five minutes: often enough to notice the pool thinning, rare enough"
+      "not to bury the Blocks between."
+    300000
+
+verify peerStatsEveryMs
+    peerStatsEveryMs() => 300000
+
+fn due(lastMs: Int, nowMs: Int, everyMs: Int) -> Bool
+    ? "Whether enough time has passed since the last printing."
+    nowMs - lastMs >= everyMs
+
+verify due
+    due(0, 60000, 60000) => true
+    due(0, 59999, 60000) => false
+    due(120000, 130000, 60000) => false
+
+fn headerLine(progress: Progress) -> String
+    ? "The Header catch-up, in one line."
+    progressLine("headers", progress)
+
+verify headerLine
+    headerLine(Domain.Snapshot.advanced(Domain.Snapshot.advanced(Domain.Snapshot.freshProgress(), 1000, 9999, 1000), 4000, 9999, 61000)) => "headers 4000/9999 (40%) 50/s eta 1m59s"
+    headerLine(Domain.Snapshot.freshProgress()) => "headers 0/0 (0%) 0/s eta ?"
+
+fn bodyLine(progress: Progress) -> String
+    ? "The body catch-up, in one line."
+    progressLine("blocks", progress)
+
+verify bodyLine
+    bodyLine(Domain.Snapshot.freshProgress()) => "blocks 0/0 (0%) 0/s eta ?"
+
+fn progressLine(word: String, progress: Progress) -> String
+    ? "done/target, percent, rate and what remains at that rate."
+    "{word} {progress.done}/{progress.target} ({Domain.Snapshot.percentOf(progress)}%) {Domain.Snapshot.rateOf(progress)}/s eta {etaText(Domain.Snapshot.etaSecsOf(progress))}"
+
+fn etaText(eta: Option<Int>) -> String
+    ? "The remaining time, or a question mark while no rate can be read."
+    match eta
+        Option.None -> "?"
+        Option.Some(secs) -> spanText(secs)
+
+verify etaText
+    etaText(Option.None) => "?"
+    etaText(Option.Some(119)) => "1m59s"
+
+fn spanText(secs: Int) -> String
+    ? "A duration a person reads at a glance: seconds, then minutes and"
+      "seconds, then hours and minutes."
+    match secs < 60
+        true -> "{secs}s"
+        false -> minutesText(secs)
+
+verify spanText
+    spanText(0) => "0s"
+    spanText(59) => "59s"
+    spanText(119) => "1m59s"
+    spanText(3599) => "59m59s"
+    spanText(3600) => "1h0m"
+    spanText(4980) => "1h23m"
+
+fn minutesText(secs: Int) -> String
+    ? "Minutes and seconds, or hours and minutes above an hour."
+    match secs < 3600
+        true -> "{Int.div(secs, 60)}m{Int.mod(secs, 60)}s"
+        false -> "{Int.div(secs, 3600)}h{Int.div(Int.mod(secs, 3600), 60)}m"
+
+verify minutesText
+    minutesText(119) => "1m59s"
+    minutesText(3600) => "1h0m"
+    minutesText(4980) => "1h23m"
+
+fn blockLine(view: BlockView) -> String
+    ? "One connected Block: where it sits, its name, and its size."
+    "block {view.height} {view.blockId} {view.transactions} tx {view.bytes} bytes"
+
+verify blockLine
+    blockLine(BlockView(height = 318980, blockId = "00000aa", transactions = 1234, bytes = 998000, atMs = 5)) => "block 318980 00000aa 1234 tx 998000 bytes"
+
+fn tipLine(tip: TipView) -> String
+    ? "Where the node stands once it is listening."
+    "at the tip: Height {tip.height}, Block {tip.blockId}"
+
+verify tipLine
+    tipLine(TipView(height = 318980, blockId = "00000aa", atMs = 5)) => "at the tip: Height 318980, Block 00000aa"
+
+fn peersLine(company: Company, nowMs: Int) -> String
+    ? "The pool and the Address Book, in one line."
+    "{List.len(company.peers)} Peers, {company.candidates} Candidates, quietest heard {Domain.Snapshot.quietestSecsOf(company.peers, nowMs)}s ago"
+
+verify peersLine
+    peersLine(Company(peers = [], candidates = 0), 0) => "0 Peers, 0 Candidates, quietest heard 0s ago"
+    peersLine(Company(peers = [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 4000)], candidates = 41), 10000) => "1 Peers, 41 Candidates, quietest heard 6s ago"
+
+fn reorgLine(view: ReorgView) -> String
+    ? "A Reorganisation: the last agreed Height and the change of Tip."
+    "reorganisation at Height {view.forkHeight}: {view.fromId} gave way to {view.toId}"
+
+verify reorgLine
+    reorgLine(ReorgView(forkHeight = 7, fromId = "aa", toId = "bb", atMs = 5)) => "reorganisation at Height 7: aa gave way to bb"
+
+fn orphanLine(blockId: String) -> String
+    ? "A Header we could not place."
+    "orphan Header {blockId}: parent not held"
+
+verify orphanLine
+    orphanLine("aa") => "orphan Header aa: parent not held"
+
+fn transactionLine(view: TxView) -> String
+    ? "One connected Transaction and what it paid."
+    match view.coinbase
+        true -> "tx {view.txId} coinbase"
+        false -> "tx {view.txId} fee {view.fee} sat"
+
+verify transactionLine
+    transactionLine(TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)) => "tx tt fee 1000 sat"
+    transactionLine(TxView(txId = "cc", fee = 0, coinbase = true, atMs = 5)) => "tx cc coinbase"
