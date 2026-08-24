@@ -183,3 +183,84 @@ jobs:
         run: aver compile main.av --module-root . -o build
       - name: Build the release binary
         run: cargo build --release --manifest-path build/Cargo.toml
+
+  binary:
+    name: publish the binary for main
+    # The download server does not build anything -- it is handed a binary, and
+    # this is where that binary comes from (issue #138). Only on main, and only
+    # behind every gate: a binary that failed verify is worse than none.
+    if: github.ref == 'refs/heads/main'
+    needs: [format, check, verify, provider-tests, compile]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: libclang, for the RocksDB bindings (ADR 0009)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver/aver
+          sudo chown -R "$USER" /home/owensr/aver
+          git -C /home/owensr/aver/aver init --quiet
+          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
+          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
+      # This job's caches are keyed by the runner as well, and deliberately not
+      # shared with the jobs above. Those run on ubuntu-latest; a cached `aver`
+      # or a cached target/ built against a newer glibc than this runner's
+      # would not run here, and the failure would be a linker error rather than
+      # anything that names the cause.
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-path-${{ hashFiles('.aver-version') }}-ubuntu-22.04
+      - name: Install aver from that source
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
+      - name: Cache the generated project's target
+        uses: actions/cache@v4
+        with:
+          path: build/target
+          key: aver-buildtarget-${{ hashFiles('.aver-version', 'providers/**', 'aver.toml') }}-ubuntu-22.04
+      - name: Compile Aver to Rust, and build it
+        run: |
+          aver compile main.av --module-root . -o build
+          cargo build --release --manifest-path build/Cargo.toml
+      # Built on 22.04 rather than on ubuntu-latest on purpose. The binary's
+      # floor is whatever glibc it was built against, and a 24.04 runner would
+      # quietly raise that floor above the servers this is for. 22.04 runs on
+      # 22.04 and on everything newer.
+      - name: What it will and will not run on
+        run: |
+          ldd --version | head -1
+          objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+      - name: Replace the rolling build with this one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd build/target/release && sha256sum main > SHA256SUMS && cd -
+          floor=$(objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1)
+          # Deleted and recreated rather than edited, so the tag names the
+          # commit that actually produced the asset hanging off it.
+          gh release delete main-build --yes --cleanup-tag 2>/dev/null || true
+          gh release create main-build \
+            --target "$GITHUB_SHA" \
+            --title "Build of main — $(git rev-parse --short "$GITHUB_SHA")" \
+            --notes "$(printf '%s\n' \
+              "The compiled node, from \`$GITHUB_SHA\` on main, behind every gate in CI." \
+              "" \
+              "\`\`\`bash" \
+              "curl -sL https://github.com/${GITHUB_REPOSITORY}/releases/download/main-build/main -o main" \
+              "chmod +x main && ./main help" \
+              "\`\`\`" \
+              "" \
+              "Needs **$floor** or newer, so Ubuntu 22.04 and up, x86-64. RocksDB and" \
+              "libsecp256k1 are compiled in; the only shared libraries are stock ones." \
+              "" \
+              "This release is replaced on every push to main. \`SHA256SUMS\` is beside it." \
+              "Setting a server up with it: #138.")" \
+            build/target/release/main build/target/release/SHA256SUMS

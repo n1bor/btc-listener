@@ -76,6 +76,21 @@ because anything that opens the Index is several times faster that way. See
 - A reachable Bitcoin node. Any peer will do; one you run yourself is easier to
   debug against.
 
+A machine that only needs to *run* this needs none of that. Every push to main
+that passes CI publishes the compiled node to the
+[`main-build`](https://github.com/n1bor/btc-listener/releases/tag/main-build)
+release, built on Ubuntu 22.04 so it runs on 22.04 and anything newer:
+
+```bash
+curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/main -o main
+curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/SHA256SUMS -o SHA256SUMS
+sha256sum -c SHA256SUMS && chmod +x main
+```
+
+RocksDB and libsecp256k1 are compiled in, so the only shared libraries are
+stock ones. Standing a download server up that way — and what it costs in disk
+— is [#138](https://github.com/n1bor/btc-listener/issues/138).
+
 ## Running
 
 ```bash
