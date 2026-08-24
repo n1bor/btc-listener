@@ -17,6 +17,7 @@ module Download
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
@@ -35,6 +36,7 @@ fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
@@ -63,6 +65,7 @@ fn headerSession(pool: Pool, store: Store) -> Result<Grown, String>
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
@@ -82,6 +85,7 @@ fn headersOn(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, Str
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
@@ -131,10 +135,34 @@ verify heightsOf
 
 fn headerBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
+      "Each round asks the stop flag first, so a Ctrl-C during a long"
+      "catch-up ends the phase at a batch boundary with what is already"
+      "stored -- and the command's claim is released the ordinary way (#112)."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Process.stopRequested()
+        true -> stoppedBatch(pool, store, have)
+        false -> nextBatch(pool, key, store, have)
+
+fn stoppedBatch(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
+    ? "Asked to stop mid catch-up: keep what is stored and end the phase."
+    ! [Console.print]
+    _said = Console.print("stop requested; headers pause at {have}")
+    Result.Ok(Grown(pool = pool, store = store))
+
+fn nextBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
+    ? "One round: ask, wait, absorb."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
@@ -151,6 +179,7 @@ fn absorb(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHead
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
@@ -172,6 +201,7 @@ fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHead
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
@@ -193,6 +223,7 @@ fn continuing(pool: Pool, key: Int, outcome: Settled) -> Result<Grown, String>
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]

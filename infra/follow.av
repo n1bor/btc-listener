@@ -25,6 +25,7 @@ module Follow
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -43,6 +44,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -264,6 +266,7 @@ fn session(state: Following) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -301,6 +304,7 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -315,6 +319,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -329,6 +334,7 @@ fn onwardWith(state: Following, why: String) -> Result<Following, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -359,6 +365,7 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -426,14 +433,43 @@ verify heightOf
 
 fn listen(state: Following) -> Result<Unit, String>
     ? "Read Messages from every Peer for as long as any of them keeps sending."
-      "This never returns of its own accord: the process runs until it is"
-      "stopped, until every Peer has gone quiet, or until a Block will not"
-      "connect. The call is in tail position, so the recursion does not grow"
-      "the stack however long it runs."
+      "Until n1bor/btc-listener#112 this never returned of its own accord, so"
+      "stopping the node meant a signal and a claim left behind. Now every"
+      "turn asks Process.stopRequested first: a SIGINT or SIGTERM sets the"
+      "flag, the turn in flight finishes, and the loop returns -- through"
+      "releasingAfter, which is what deletes the claim. The check costs one"
+      "read of a flag; a stop during the idle poll waits out at most that"
+      "poll. A kill -9 still leaves the claim, and the claim's pid is what"
+      "makes that one decidable. The call is in tail position, so the"
+      "recursion does not grow the stack however long it runs."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match Process.stopRequested()
+        true -> stopping(state)
+        false -> turning(state)
+
+fn stopping(state: Following) -> Result<Unit, String>
+    ? "Asked to stop: close every Peer and return, so the claim is released"
+      "the way it is for every command that finishes."
+    ! [Console.print, Tcp.close]
+    _said = Console.print("stop requested; closing the pool and releasing the claim")
+    _closed = Infra.Peers.closeAll(state.pool)
+    Result.Ok(Unit)
+
+fn turning(state: Following) -> Result<Unit, String>
+    ? "One ordinary turn of the loop."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -455,6 +491,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -476,6 +513,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -495,6 +533,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -535,6 +574,7 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
@@ -549,6 +589,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
