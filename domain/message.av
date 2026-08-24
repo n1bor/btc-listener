@@ -5,7 +5,7 @@ module Message
         "layer is covered by verify blocks against known-good vectors rather than"
         "by a live Peer. A Peer is only needed to prove the socket, not the format."
     exposes [frame, littleEndian, bigEndian, readLittleEndian, asciiBytes, asciiText, headerLength, payloadLengthAt, commandAt, checksumAt, checksumOf, magicAt]
-    depends [Bytes, Crypto.Digest32, Domain.Hash, Domain.Network]
+    depends [Bytes, Crypto.Digest32, Domain.Hash, Domain.Network, Domain.Text]
     effects []
 
 fn headerLength() -> Int
@@ -75,7 +75,7 @@ fn asciiInto(chars: List<String>, acc: List<Int>) -> List<Int>
     ? "Accumulator form so the recursion stays in tail position."
     match chars
         [] -> List.reverse(acc)
-        [head, ..tail] -> asciiInto(tail, List.prepend(Char.toCode(head), acc))
+        [head, ..tail] -> asciiInto(tail, List.prepend(Domain.Text.codePointOf(head), acc))
 
 verify asciiInto
     asciiInto(["a", "b"], []) => [97, 98]
@@ -104,7 +104,7 @@ verify padRight
 
 fn checksumOf(payload: Bytes) -> List<Int>
     ? "The first four bytes of the payload's double-SHA256."
-    List.take(Bytes.toList(Crypto.Digest32.toBytes(Domain.Hash.doubleSha(payload))), 4)
+    List.take(Bytes.octets(Crypto.Digest32.bytes(Domain.Hash.doubleSha(payload))), 4)
 
 verify checksumOf
     checksumOf(Bytes.fromList([])) => [93, 246, 224, 226]
@@ -112,7 +112,7 @@ verify checksumOf
 
 fn frame(network: Network, command: String, payload: Bytes) -> Result<Bytes, String>
     ? "Wrap a payload in its header, ready to put on the wire."
-    body = Bytes.toList(payload)
+    body = Bytes.octets(payload)
     header = List.concat(List.concat(Domain.Network.magicOf(network), commandField(command)), List.concat(littleEndian(List.len(body), 4), checksumOf(payload)))
     Bytes.fromList(List.concat(header, body))
 
@@ -167,7 +167,7 @@ fn asciiTextInto(bytes: List<Int>, acc: String) -> String
     ? "Accumulator form so the recursion stays in tail position."
     match bytes
         [] -> acc
-        [head, ..tail] -> asciiTextInto(tail, acc + Option.withDefault(Char.fromCode(head), "?"))
+        [head, ..tail] -> asciiTextInto(tail, acc + Option.withDefault(String.fromCodePoint(head), "?"))
 
 verify asciiTextInto
     asciiTextInto([118, 101], "") => "ve"

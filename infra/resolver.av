@@ -70,7 +70,22 @@ fn discover(network: Network) -> Result<PeerAddress, String>
 fn pick(candidates: List<String>, fallback: String) -> String
     ? "One of the candidates, chosen at random."
     ! [Random.int]
-    itemAt(candidates, Random.int(0, List.len(candidates) - 1), fallback)
+    chosen(candidates, Random.int(0, List.len(candidates) - 1), fallback)
+
+fn chosen(candidates: List<String>, roll: Result<Int, String>, fallback: String) -> String
+    ? "A roll nobody could make is a list with nothing in it to choose from."
+      "Random.int over a computed range answers a Result since"
+      "jasisz/aver#1109, and the only way this range is invalid is an empty"
+      "list -- its upper bound is one less than the length. Both callers have"
+      "already matched a non-empty list, so this cannot happen; naming what it"
+      "would mean is cheaper than asserting that it will not."
+    match roll
+        Result.Err(why) -> fallback
+        Result.Ok(index) -> itemAt(candidates, index, fallback)
+
+verify chosen
+    chosen(["a", "b"], Result.Ok(1), "z") => "b"
+    chosen([], Result.Err("empty range"), "z") => "z"
 
 fn itemAt(candidates: List<String>, index: Int, fallback: String) -> String
     ? "The candidate at this position, or the fallback if there is none."
@@ -85,7 +100,17 @@ fn chooseAddress(addresses: List<List<Int>>, port: Int) -> Result<PeerAddress, S
     ! [Random.int]
     match addresses
         [] -> Result.Err("the seed returned no addresses")
-        [head, ..tail] -> Domain.Address.fromOctetsOn(octetsAt(addresses, Random.int(0, List.len(addresses) - 1), head), port)
+        [head, ..tail] -> Domain.Address.fromOctetsOn(octetsChosen(addresses, Random.int(0, List.len(addresses) - 1), head), port)
+
+fn octetsChosen(addresses: List<List<Int>>, roll: Result<Int, String>, fallback: List<Int>) -> List<Int>
+    ? "The same, for the addresses a seed answered with."
+    match roll
+        Result.Err(why) -> fallback
+        Result.Ok(index) -> octetsAt(addresses, index, fallback)
+
+verify octetsChosen
+    octetsChosen([[1], [2]], Result.Ok(1), [9]) => [2]
+    octetsChosen([], Result.Err("empty range"), [9]) => [9]
 
 fn octetsAt(addresses: List<List<Int>>, index: Int, fallback: List<Int>) -> List<Int>
     ? "The address at this position, or the first if there is none."
@@ -112,7 +137,7 @@ fn exchange(connection: Tcp.Connection, name: String) -> Result<List<List<Int>>,
     ? "Send the question, then read the length-prefixed answer."
     ! [Random.int, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
     question = Domain.Dns.question(name, Random.int(0, 65535))?
-    framed = Bytes.fromList(List.concat(lengthPrefix(List.len(Bytes.toList(question))), Bytes.toList(question)))?
+    framed = Bytes.fromList(List.concat(lengthPrefix(List.len(Bytes.octets(question))), Bytes.octets(question)))?
     _written = Tcp.writeBytes(connection, framed)?
     readAnswer(connection)
 
@@ -132,9 +157,9 @@ fn readAnswer(connection: Tcp.Connection) -> Result<List<List<Int>>, String>
     ! [Tcp.poll, Tcp.readBytes]
     ready = Tcp.poll(Map.fromList([(0, connection)]), answerDeadlineMs())?
     _got = answered(List.len(ready) > 0)?
-    size = Bytes.toList(Tcp.readBytes(connection, 2)?)
+    size = Bytes.octets(Tcp.readBytes(connection, 2)?)
     body = Tcp.readBytes(connection, sizeOf(size))?
-    Result.Ok(Domain.Dns.addressesOf(Bytes.toList(body)))
+    Result.Ok(Domain.Dns.addressesOf(Bytes.octets(body)))
 
 fn answered(ready: Bool) -> Result<Unit, String>
     ? "Whether the resolver had anything to say before the deadline."
