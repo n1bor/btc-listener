@@ -39,7 +39,7 @@ not yet made.
 | 2 | the UTXO Set, its Undo Data, and the Assume-valid Height | [#25](https://github.com/n1bor/btc-listener/issues/25) — **shipped** |
 | 3 | Script completeness above the Assume-valid Height | [#20](https://github.com/n1bor/btc-listener/issues/20), [#12](https://github.com/n1bor/btc-listener/issues/12) — **shipped** |
 | 4 | following the tip on one Peer | [#26](https://github.com/n1bor/btc-listener/issues/26) — **shipped** |
-| 5 | many Peers, and the Peer Address gossip | [#27](https://github.com/n1bor/btc-listener/issues/27) |
+| 5 | many Peers, and the Peer Address gossip | [#27](https://github.com/n1bor/btc-listener/issues/27) — **shipped** |
 | 6 | the Mempool, and Transaction relay | [#28](https://github.com/n1bor/btc-listener/issues/28) |
 | 7 | compact Blocks | [#29](https://github.com/n1bor/btc-listener/issues/29) |
 | 8 | inbound Peers, and serving the chain | [#30](https://github.com/n1bor/btc-listener/issues/30) |
