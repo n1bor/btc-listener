@@ -782,6 +782,50 @@ listener are pools of one. A Message is read off a wire in one place in this
 program rather than two, so a bulk download and a following node cannot drift
 into different ideas of what a Message is.
 
+### Finding its own Peers
+
+A node that only knows the Peers it was told about on the command line has one
+way in and one way to be cut off. So `follow` asks each Peer, once, for the
+Peers it knows — `getaddr` — and listens for the `addr` Messages that arrive
+unasked afterwards. What comes back are **Candidates**: Peer Addresses somebody
+claimed exist. A Candidate becomes a Peer when a Handshake completes and not
+before, which is the whole reason the two words are different.
+
+```
+peer 0 is 135.180.99.74:38333
+headers complete: 319148 known
+the Address Book holds 486 Candidate(s), up 486
+peer 1 is 88.99.167.175:38333, from the Address Book
+```
+
+The node keeps up to **eight** Peers, which is Bitcoin Core's outbound default
+and chosen for the same reason: enough that losing one is routine and that no
+single Peer decides what chain we see, few enough not to be a burden on the
+Network. It dials at most one Candidate per turn of the loop, because a
+Handshake is a conversation and this loop is the only thing that can have one.
+
+Only IPv4 is read. An `addr` entry carries sixteen bytes of address and a
+`PeerAddress` is four, so IPv4 arrives as an IPv4-mapped IPv6 address; anything
+else is skipped rather than refused, because a Peer offering an IPv6 address is
+being helpful rather than wrong.
+
+The Address Book is **not persisted**. A node that restarts asks its Peers
+again, which costs one round trip and is how it would learn about changes
+anyway.
+
+Two things it does not do, both recorded as issues rather than left to be
+assumed:
+
+- **Selection is first-untried, so it is a convenience and not a defence.**
+  Core buckets addresses by where they were heard from and picks randomly
+  within a bucket, precisely so a Peer answering `getaddr` with a thousand
+  addresses it controls cannot choose who you connect to next. That is
+  [#118](https://github.com/n1bor/btc-listener/issues/118).
+- **A Candidate that does not answer stalls the loop** for however long the
+  operating system takes to give up on the connection — measured at about
+  three minutes against a dead signet address. `Tcp.connect` has no timeout to
+  pass. That is [#119](https://github.com/n1bor/btc-listener/issues/119).
+
 ## Reclaiming space
 
 `prune` deletes the Blocks below a Height. It needs no Peer.
