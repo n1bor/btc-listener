@@ -75,7 +75,7 @@ continues that on purpose: each stage names what it needs before it needs it.
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
 | a bounded dial | [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118) — `Tcp.connect` has no deadline, so one dead address stalls the loop for minutes (n1bor/btc-listener#119) | Stage 5's gossip, and Stage 6's scoring |
 | a connect that reports through the poll | [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125) — `beginConnect`/`dialled`, the dial as one more key in `Tcp.poll`; until then a dead Candidate costs a budgeted 5 s (`connect_timeout_secs`, pinned in aver.toml) | Peer scoring, then Stages 6–8 |
-| `Tcp.listen` / `Tcp.accept` | to be filed; same family as the poll | Stage 8 |
+| `Tcp.listen` / `Tcp.accept` | [jasisz/aver#1131](https://github.com/jasisz/aver/issues/1131) — filed 24 August 2026: `Tcp` can dial but cannot answer, so Stage 8 cannot start. The ask is a non-blocking accept the existing poll can see, an accepted socket that is an ordinary `Tcp.Connection`, and the remote address | Stage 8, and nothing else |
 
 ## The disciplines that carry over
 
