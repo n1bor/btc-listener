@@ -17,7 +17,7 @@ module UtxoStore
         "The value format is Domain.Index's, unchanged. An Output is an amount"
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
-    exposes [Unspent, Reached, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity]
+    exposes [Unspent, Reached, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
     depends [Domain.Index]
     effects []
 
@@ -192,6 +192,29 @@ verify unspentAt
     unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false).value => 5
     unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false).height => 7
     unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, true).coinbase => true
+
+fn neverSpendable(scriptHex: String) -> Bool
+    ? "Whether no witness could ever satisfy this Output Script."
+      "Core's IsUnspendable, and the reason its chainstate is smaller than a"
+      "naive one: a Script that begins with OP_RETURN refuses in the"
+      "interpreter's first step, and one longer than the 10,000 byte Script"
+      "size limit is refused before any step runs. Such an Output is history"
+      "-- o: records it, because o: answers what a Block created -- but it is"
+      "not an unspent Output, and the UTXO Set never holds it (#111)."
+      "Every SegWit coinbase carries one: the witness commitment, an"
+      "OP_RETURN paying zero. On a chain of SegWit coinbases that is one"
+      "unreachable entry per Block, roughly doubling the Set."
+    match String.startsWith(scriptHex, "6a")
+        true -> true
+        false -> String.len(scriptHex) > 20000
+
+verify neverSpendable
+    neverSpendable("6a") => true
+    neverSpendable("6a24aa21a9ed94aab4ac1f8e2a3ad0ab53b0f2a0fa2a2c1cba4f21d55d2eb3e33e2e3fd3") => true
+    neverSpendable("76a914a31c06bd463e3923bc1aadbde48b16976c08071788ac") => false
+    neverSpendable("51") => false
+    neverSpendable("") => false
+    neverSpendable("006a") => false
 
 fn maturity() -> Int
     ? "How many Blocks a coinbase Output waits before it can be spent."

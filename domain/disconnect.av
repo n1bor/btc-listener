@@ -109,7 +109,21 @@ fn keysOf(txid: String, outputs: List<Output>, index: Int, acc: List<String>) ->
     ? "One key per Output, counting positions."
     match outputs
         [] -> acc
-        [head, ..tail] -> keysOf(txid, tail, index + 1, List.prepend(Domain.UtxoStore.unspentKey(txid, index), acc))
+        [head, ..tail] -> keysOf(txid, tail, index + 1, keyIfSpendable(txid, index, head, acc))
+
+fn keyIfSpendable(txid: String, index: Int, output: Output, acc: List<String>) -> List<String>
+    ? "An Output the connect never added has no key to delete."
+      "Deleting an absent key would be harmless -- the Store says so -- but a"
+      "removed count that included Outputs the Set never held would drift"
+      "from what the disconnect actually did, and the two paths must agree"
+      "on what the Set is (#111)."
+    match Domain.UtxoStore.neverSpendable(output.script)
+        true -> acc
+        false -> List.prepend(Domain.UtxoStore.unspentKey(txid, index), acc)
+
+verify keyIfSpendable
+    keyIfSpendable("t1", 0, Output(value = 0, script = "6a"), []) => []
+    keyIfSpendable("t1", 1, Output(value = 5, script = "51"), []) => ["u:t1:00001"]
 
 verify keysOf
     keysOf("t1", [], 0, []) => []
