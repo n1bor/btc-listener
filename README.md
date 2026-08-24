@@ -21,8 +21,8 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Fourteen of them. Only the first three need a Peer; everything else reads what
-those wrote and works offline.
+Fifteen of them. Only the four marked below need a Peer; everything else reads
+what those wrote and works offline.
 
 | command | what it does | Peer |
 |---|---|---|
@@ -37,6 +37,7 @@ those wrote and works offline.
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
 | `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
+| `follow <peer> <dir>` | [stay](#following-the-tip) on the tip of one Peer, and never stop | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -51,6 +52,10 @@ headers ─→ bodies ─→ txindex
 `show` and `prune` then need `bodies`. `tx`, `spend` and the spend half of
 `audit` need `txindex` as well — without it every Input reads as unresolved,
 which is an answer rather than an error.
+
+`follow` is the first two plus `utxo`, run again every time the Peer says a
+Block arrived, so it both catches an empty directory up and keeps a caught-up
+one current.
 
 Everything but the listener takes a `<dir>`, where the Index and the Segments
 live. Point them all at the same one.
@@ -631,6 +636,22 @@ sends its body and its Output cannot be spent, which is why the fifty coins of
 Block 0 are missing from the supply that can ever move. Bitcoin Core leaves it
 out of the UTXO Set for the same reason.
 
+One deliberate difference from Bitcoin Core: this Set keeps **provably
+unspendable Outputs** and Core does not. Every SegWit coinbase carries a
+witness commitment paying zero to an `OP_RETURN`, which nothing can ever spend,
+and Core leaves it out of its chainstate on those grounds. Measured on a
+regtest chain at Height 103, Core's `gettxoutsetinfo` reports 103 entries where
+this holds 206 — the same 5150 BTC of value, and one extra zero-value entry per
+Block. It costs nothing in correctness and roughly doubles the entry count on a
+SegWit chain, so it is worth revisiting before mainnet.
+
+The Set records **which Block it stands on**, not only which Height. A Height
+alone means "built along whatever the Index named at the time", and the Index
+is the one thing a reorganisation rewrites — so a Height alone stops being true
+the moment the chain changes its mind, and nothing on disk can say that it has.
+A Set written before this was kept is refused with an explanation rather than
+read as though the question never mattered.
+
 ### The Assume-valid Height
 
 ```bash
@@ -658,6 +679,77 @@ There is no default. Bitcoin Core ships a constant per Network; this does not,
 because a constant nobody here can check is the kind of borrowed claim the rest
 of the project refuses. Unset means every Script runs, and every `utxo` run says
 that too.
+
+## Following the tip
+
+Everything above is a chain you were handed. `follow` is the one that stays
+current:
+
+```bash
+./target/release/main signet follow 192.0.2.1 ~/chain
+```
+
+It handshakes with one Peer, catches the directory up — Headers, then bodies,
+then the UTXO Set — and then waits. When the Peer announces a Block it does the
+same three phases again, and the run says where that left it:
+
+```
+handshake complete: protocol 70016, agent /Satoshi:27.0.0/
+following at Height 318980: 4 connected, 0 disconnected, set +9 -6
+2026-08-24 11:42:07  1 Block(s) announced
+following at Height 318981: 1 connected, 0 disconnected, set +2 -1
+```
+
+An `inv` naming a Block is answered with **getheaders**, not `getdata`. A Block
+whose Header the tree has not placed cannot be connected, and cannot even be
+told apart from a Block on a Branch we are not following — so asking for the
+body first buys nothing and loses the ordering. The `getdata` still happens; it
+is what the body phase is, one Header later. Bitcoin Core answers an unexpected
+`inv` the same way, for the same reason.
+
+A Transaction announced down the same `inv` is not asked for. There is nowhere
+to put one until the Mempool arrives, and asking for what cannot be kept would
+be a lie about what this program does.
+
+### When the chain changes its mind
+
+This is the part the earlier stages could only detect. The Header tree picks
+the Branch with the most Chain Work and re-points the Index at it; the Set is
+then standing on Blocks that are no longer on the chain, and they have to come
+off before anything new goes on.
+
+The walk back reads the Set's own Branch out of `k:`, parent by parent, because
+the Index no longer leads there — and stops at the first Height where the two
+still agree. That Height is the fork. Everything above it is disconnected,
+highest first, each Block from the Undo Data it wrote on the way in; then the
+bodies of the new Branch are fetched and connected:
+
+```
+REORGANISED: the Set stands on a branch the chain has left; taking it back to
+Height 318979, disconnecting 2 Block(s)
+  height 318981 disconnected: set +3 -4
+  height 318980 disconnected: set +2 -3
+following at Height 318982: 3 connected, 2 disconnected, set +7 -5
+```
+
+Highest first is not a detail: each Block's Undo Data restores what its own
+Inputs spent, so the Set has to reach a Block in the state that Block left it.
+
+A fork **below the Undo window** stops the node:
+
+```
+error: the chain forked below Height 318693, which is further back than the
+Undo window reaches; the UTXO Set cannot be taken back that far and has to be
+rebuilt
+```
+
+That is the price of a bounded window, and it is deliberate (decision D8). 288
+Blocks is two days. The deepest reorganisation Bitcoin has ever had was 24
+Blocks, in March 2013, and that was a consensus split rather than mining.
+
+`follow` holds the directory for as long as it runs, so a `prune` or a second
+follower cannot write the same keys from a different idea of where the tip is.
+One Peer and one socket: many Peers are the next stage.
 
 ## Reclaiming space
 
@@ -799,50 +891,70 @@ the same hand, agree with each other whether or not they agree with Bitcoin.
 
 ## Layout
 
-Fifty-four files. Grouped by what they are for rather than listed:
+123 Aver modules. Grouped by what they are for rather than listed:
 
 ```
 CONTEXT.md          glossary — the vocabulary this project commits to
 aver.toml           the provider bindings — see Providers
 docs/adr/           architecture decisions
+docs/full-node-plan.md  the stages, and what each asks of Aver
 tools/              the generator that turns Core's test vectors into cases
 main.av             argv entrypoint, deliberately thin
 
-app/                cli.av argument handling, show.av / lookup.av /
-                    maintain.av one per group of commands
+app/                cli.av argument handling, usage.av the help text,
+                    show.av / lookup.av / maintain.av one per group of
+                    commands, node.av the commands that never stop
 
 domain/  the wire
   address.av network.av message.av version.av inventory.av dns.av
   transaction.av    the SegWit-aware decoder
-  compactsize.av hash.av text.av
+  compactsize.av hash.av text.av json.av
 
 domain/  addresses
   script.av         recognising output scripts, naming who they pay
-  base58.av bech32.av
+  readaddress.av payto.av base58.av bech32.av bech32decode.av
 
 domain/  the chain
   block.av          Block Headers: reading, naming, asking for more
-  checks.av segment.av index.av spend.av
+  headertree.av     every Header seen, and which Branch has the most work
+  chainwork.av blockwork.av reorg.av rewind.av
+  headerbytes.av treestore.av index.av segment.av
+  checks.av rules.av locktime.av spend.av txcheck.av
+
+domain/  the UTXO Set
+  connect.av        a Block into the Set: spends out, Outputs in, fees
+  disconnect.av     a Block back out of it, from its Undo Data
+  utxostore.av subsidy.av assumevalid.av
 
 domain/  Script
   opcode.av scriptparse.av stackitem.av scriptstate.av scriptmath.av
-  scriptstep.av scriptops.av
+  scriptnumops.av scriptstep.av scriptops.av scriptwork.av
   interp.av         the walk: one recursion over a Script, and only one
   spendscript.av    the Input's Script then the Output's, in that order
-  sighash.av bip143.av   what a signature is actually over
-  ecdsa.av checksig.av   the seam a curve will plug into
-  scriptcases1-5.av sighashcases1-2.av  Core's vectors, 1,618 of them
+  witness.av witnessuse.av taproot.av tapsig.av tagged.av policy.av
+  sighash.av bip143.av bip341.av  what a signature is actually over
+  ecdsa.av schnorr.av checksig.av multisig.av checkwork.av
+  primitives.av     the seam the curve and RIPEMD-160 plug into
+  scriptcases*.av assetcases*.av sighashcases*.av txcases*.av and the
+                   rest: Core's own vectors, thousands of them
 
 infra/  the network
-  peer.av           the Peer session: handshake and listen loop
-  resolver.av download.av
+  peer.av           the Peer session: handshake, and the listen loop
+  framing.av        one wanted Message, past whatever else turns up
+  download.av       the Header phase
+  bodies.av         the body phase
+  follow.av         the node that stays on the tip
+  resolver.av
 
 infra/  the disk
   store.av          keyed store over two backends, one opaque API
   reindex.av        every Block's Location, rebuilt from the Segments
   kv.av             the key-value database capability contract
-  blocks.av chain.av txindex.av lock.av prune.av
-  spends.av audit.av
+  headers.av        the Header tree, written down
+  chainstate.av     the UTXO Set, built forward
+  rewind.av         the UTXO Set, taken back to a fork
+  utxo.av blocks.av chain.av txindex.av outputs.av lock.av prune.av
+  spends.av audit.av pace.av
 ```
 
 The split is deliberate: only `infra/` touches the network or the disk, and

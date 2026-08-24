@@ -29,6 +29,21 @@ disagree, check `git log upstream/main` before believing it is a live bug.
 grep the repo for `jasisz/aver#` and retire every workaround whose issue has
 closed, in the same PR.
 
+**Two failures that only `cargo build` finds.** Both survive `check`, `verify`
+and `compile`.
+
+- A type named after a builtin is silently resolved to the builtin
+  (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
+  not proof a module compiles** — only reachability from `main.av` is, so
+  wiring a new module into the CLI is part of writing it, not a step after.
+- Every module in a `depends` list is glob-imported into the generated Rust.
+  Two of them defining the same name is usually harmless — this repo has 157
+  such pairs — but it becomes `E0659` the moment a **parameter or binding**
+  takes that name, because rustc has to rule the identifier out as a unit
+  pattern first (`Infra.Rewind.standing` against `Domain.AssumeValid.standing`
+  through `Infra.ChainState`, #26). Renaming either the helper or the binding
+  fixes it.
+
 ## Commands
 
 ```bash
@@ -64,10 +79,10 @@ Three flags are load-bearing and easy to drop:
   still needs its own `aver.toml` with an **absolute** provider path, or
   every case that reaches the curve fails.
 
-The fourteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `utxo`,
-`assumevalid`, `show`, `tx`, `spend`, `audit`, `prune`, `reindex`, listen,
-`help`), their ordering constraints and their output formats are documented in
-README.md.
+The fifteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `utxo`,
+`assumevalid`, `follow`, `show`, `tx`, `spend`, `audit`, `prune`, `reindex`,
+listen, `help`), their ordering constraints and their output formats are
+documented in README.md.
 
 ## Architecture
 
@@ -120,6 +135,19 @@ Chain Work — never the longest. `Domain.Chainwork` is the arithmetic (pinned
 against Core's chainwork for mainnet Block 0), `Domain.HeaderTree` is the tree,
 `Domain.Reorg` tells growth from a Reorganisation, and `Infra.Headers` is the
 only part that touches a Store.
+
+**Following the tip** (#26, Stage 4): `follow` is the header, body and Set
+phases run again every time a Peer announces a Block. An `inv` naming a Block
+is answered with `getheaders`, not `getdata` — a Block whose Header the tree
+has not placed cannot be connected and cannot be told from one on a Branch we
+do not follow; the `getdata` is the body phase, one Header later. The Set
+therefore has to know which Block it stands on and not merely which Height, so
+`meta:setTo` holds `{height}:{blockId}`; a record holding a bare Height was
+written before #26 and is **refused**, because a Height alone cannot say
+whether `h:` was re-pointed underneath it. `Domain.Rewind` plans the walk back
+to the fork and `Infra.Rewind` carries it out, reading the Set's own Branch out
+of `k:` because `h:` no longer leads there. A fork below the 288-Block Undo
+window stops the node with a report (D8) rather than being guessed past.
 
 **Three-valued answers, everywhere.** The project's central discipline is
 never collapsing "cannot tell" into pass or fail:

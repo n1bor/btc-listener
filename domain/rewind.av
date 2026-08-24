@@ -1,0 +1,117 @@
+module Rewind
+    intent =
+        "How far back the UTXO Set has to be taken, when the chain has changed"
+        "its mind underneath it."
+        "The Set is built by connecting Blocks in order, so it stands on one"
+        "particular Block and not merely at one Height. A reorganisation"
+        "rewrites h:, and from that moment the Set describes Blocks that are"
+        "no longer on the chain. Putting it right means disconnecting them,"
+        "highest first, until what the Set stands on is a Block h: still names"
+        "-- the fork -- and connecting forward from there."
+        "The walk down is the Set's own branch, read from k: parent by parent,"
+        "because h: no longer leads there. What arrives here is that branch"
+        "paired with whatever h: records at each Height, tip first, which is"
+        "the same Standing the header side already uses -- so the Store is"
+        "read by the caller and never by this."
+        "Nothing here disconnects anything. It says which Blocks have to go"
+        "and in what order; Infra.Utxo does the work, one Block at a time,"
+        "from the Undo Data each of them wrote on the way in."
+    exposes [Rewinding, rewinding]
+    depends [Domain.HeaderTree, Domain.Reorg]
+    effects []
+
+type Rewinding
+    Aligned(Int)
+    Dropping(Int, List<Placement>)
+    Stranded(Int)
+
+fn rewinding(branch: List<Standing>) -> Rewinding
+    ? "What has to come off the Set, for the branch it stands on beside h:."
+      "The branch arrives tip first. Everything above the highest Height that"
+      "still agrees with h: has to be disconnected, in exactly that order:"
+      "each Block's Undo Data restores the Outputs its own Inputs spent, so"
+      "the Set has to arrive at each Block in the state that Block left it."
+      "A branch that agrees nowhere is Stranded -- the caller walked as far as"
+      "it was willing to and never found the fork, which for a bounded walk"
+      "means the fork is below the Undo window and this program cannot get"
+      "back to it."
+    match branch
+        [] -> Rewinding.Stranded(0 - 1)
+        [head, ..tail] -> from(head, tail, [])
+
+verify rewinding
+    rewinding([]) => Rewinding.Stranded(0 - 1)
+    rewinding([agreeingAt(3)]) => Rewinding.Aligned(3)
+    rewinding([differingAt(3), agreeingAt(2)]) => Rewinding.Dropping(2, [branchAt(3)])
+    rewinding([differingAt(3), differingAt(2), agreeingAt(1)]) => Rewinding.Dropping(1, [branchAt(3), branchAt(2)])
+    rewinding([differingAt(3), differingAt(2)]) => Rewinding.Stranded(2)
+
+fn from(one: Standing, rest: List<Standing>, acc: List<Placement>) -> Rewinding
+    ? "This Height agrees, or it comes off and the walk carries on below it."
+    match Domain.Reorg.agrees(one)
+        true -> settledAt(one.placement.height, acc)
+        false -> onwards(one, rest, List.prepend(one.placement, acc))
+
+verify from
+    from(agreeingAt(3), [], []) => Rewinding.Aligned(3)
+    from(differingAt(3), [agreeingAt(2)], []) => Rewinding.Dropping(2, [branchAt(3)])
+    from(differingAt(3), [], []) => Rewinding.Stranded(3)
+
+fn settledAt(height: Int, acc: List<Placement>) -> Rewinding
+    ? "The fork is found; nothing gathered means the Set was already on it."
+      "The two are kept apart rather than collapsed into a Dropping of no"
+      "Blocks, because they are different events: one is a node that has"
+      "nothing to do, the other is a node undoing a reorganisation."
+    match acc
+        [] -> Rewinding.Aligned(height)
+        [head, ..tail] -> Rewinding.Dropping(height, List.reverse(acc))
+
+verify settledAt
+    settledAt(2, []) => Rewinding.Aligned(2)
+    settledAt(2, [branchAt(3)]) => Rewinding.Dropping(2, [branchAt(3)])
+    settledAt(1, [branchAt(2), branchAt(3)]) => Rewinding.Dropping(1, [branchAt(3), branchAt(2)])
+
+fn onwards(one: Standing, rest: List<Standing>, acc: List<Placement>) -> Rewinding
+    ? "Running out of branch before running out of disagreement is Stranded."
+      "The Height reported is the lowest one looked at, which is how far back"
+      "the caller was prepared to go."
+    match rest
+        [] -> Rewinding.Stranded(one.placement.height)
+        [head, ..tail] -> from(head, tail, acc)
+
+verify onwards
+    onwards(differingAt(3), [], [branchAt(3)]) => Rewinding.Stranded(3)
+    onwards(differingAt(3), [agreeingAt(2)], [branchAt(3)]) => Rewinding.Dropping(2, [branchAt(3)])
+
+fn trunkAt(height: Int) -> String
+    ? "The Block Id h: records at a Height, for the cases here."
+    "trunk{height}"
+
+verify trunkAt
+    trunkAt(3) => "trunk3"
+
+fn branchAt(height: Int) -> Placement
+    ? "The Set's own branch at a Height, for the cases here."
+      "The work is the Height plus one at the genesis difficulty, which is"
+      "what a branch of equal-difficulty Blocks carries; nothing here compares"
+      "work, so only its being a whole number matters."
+    Placement(blockId = "branch{height}", parentId = "branch{height - 1}", height = height, work = (height + 1) * 4295032833)
+
+verify branchAt
+    branchAt(3).blockId => "branch3"
+    branchAt(3).parentId => "branch2"
+    branchAt(3).height => 3
+
+fn agreeingAt(height: Int) -> Standing
+    ? "A Height where h: still names the Block the Set stands on."
+    Standing(placement = branchAt(height), recorded = Option.Some("branch{height}"))
+
+verify agreeingAt
+    Domain.Reorg.agrees(agreeingAt(3)) => true
+
+fn differingAt(height: Int) -> Standing
+    ? "A Height where h: has moved on to another Block."
+    Standing(placement = branchAt(height), recorded = Option.Some(trunkAt(height)))
+
+verify differingAt
+    Domain.Reorg.agrees(differingAt(3)) => false

@@ -234,11 +234,22 @@ fn prunedUndo(store: Store, tipHeight: Int) -> Result<Store, String>
     below = Infra.Store.get(store, Domain.UtxoStore.undoWindowKey())?
     sweeping(store, Domain.Index.prunedBelowOf(below)?, Domain.Disconnect.windowFrom(tipHeight), [])
 
+verify prunedUndo
+    Infra.Store.get(prunedUndo(Infra.Store.fixture([]), 300)?, "meta:undoBelow") => Result.Ok(Option.Some("13"))
+    Infra.Store.get(prunedUndo(Infra.Store.fixture([("meta:undoBelow", "100")]), 300)?, "meta:undoBelow") => Result.Ok(Option.Some("100"))
+    prunedUndo(Infra.Store.fixture([("meta:undoBelow", "x")]), 300) => Result.Err("Height must be a whole number, got 'x'")
+
 fn sweeping(store: Store, from: Int, target: Int, acc: List<String>) -> Result<Store, String>
     ? "One Height at a time up to the window's new floor."
+      "What gets recorded is where the walk actually got to, which is the"
+      "target when it started below it and the floor it already had when it"
+      "did not. The floor only ever rises: a reorganisation lowers the tip and"
+      "so lowers the target, but the Undo Data the last sweep deleted does not"
+      "come back, and a floor that followed the target down would be claiming"
+      "records that are gone."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
     match from >= target
-        true -> marked(store, target, acc)
+        true -> marked(store, from, acc)
         false -> undoAt(store, from, target, acc)
 
 fn undoAt(store: Store, from: Int, target: Int, acc: List<String>) -> Result<Store, String>
@@ -257,11 +268,11 @@ verify gathered
     gathered(Option.None, []) => []
     gathered(Option.Some("aa"), []) => ["d:aa"]
 
-fn marked(store: Store, target: Int, acc: List<String>) -> Result<Store, String>
+fn marked(store: Store, reached: Int, acc: List<String>) -> Result<Store, String>
     ? "Delete what was gathered and record how far the window now reaches."
     ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
     swept = Infra.Store.deleteAll(store, acc)?
-    Infra.Store.putAll(swept, [Entry(key = Domain.UtxoStore.undoWindowKey(), value = Domain.Index.encodeHeight(target))])
+    Infra.Store.putAll(swept, [Entry(key = Domain.UtxoStore.undoWindowKey(), value = Domain.Index.encodeHeight(reached))])
 
 fn coinbaseTx() -> Transaction
     ? "A coinbase, for the cases here."

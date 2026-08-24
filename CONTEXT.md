@@ -112,6 +112,13 @@ decides which Branch to follow — Height does not, because a longer Branch of
 easier Blocks is worth less than a shorter Branch of harder ones.
 _Avoid_: difficulty, total difficulty, weight, score, length
 
+**Fork Height**:
+The highest Height at which two Branches still name the same Block — the last
+thing they agree about, and so the point a Reorganisation has to take
+everything derived from the chain back to. Below it nothing changed and nothing
+needs undoing.
+_Avoid_: split point, common ancestor, base, divergence
+
 **Height**:
 A Block's distance from the first Block. A position rather than an identity: the
 chain may reassign one, so a Height names a slot and never a Block.
@@ -203,6 +210,14 @@ The Outputs a Block removed from the UTXO Set, kept so the removal can be
 reversed if that Block leaves the chain. Without it the UTXO Set cannot go
 backwards, and a reorganisation would mean rebuilding it from the start.
 _Avoid_: rev data, rollback log, spent journal
+
+**Undo Window**:
+How far back the Undo Data still reaches — 288 Blocks, two days. A
+Reorganisation whose Fork Height is inside it can be undone; one below it
+cannot, and the node stops and says so rather than guessing. The bound is a
+deliberate trade: keeping Undo Data for the whole chain would cost more than
+the chain.
+_Avoid_: reorg depth, rollback limit, history window
 
 **Assume-valid Height**:
 The Height below which a syncing node takes Scripts as settled and does not run

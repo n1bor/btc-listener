@@ -1,0 +1,110 @@
+module Node
+    intent =
+        "The commands that make this program a node rather than a downloader."
+        "A downloader is told a range and stops at the end of it; a node is"
+        "told nothing and never stops. Held apart from the adapter that"
+        "dispatches everything else because it is the half that grows with the"
+        "full-node plan -- one Peer here now, many at Stage 5, inbound ones at"
+        "Stage 8 -- and the adapter should not grow with it."
+    exposes [follow]
+    depends [App.Usage, Domain.Address, Domain.Network, Infra.Blocks, Infra.Follow, Infra.Lock, Infra.Store]
+    effects [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+
+fn follow(network: Network, rest: List<String>) -> Unit
+    ? "Stay on the tip of one Peer until the process is stopped."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match rest
+        [] -> App.Usage.print()
+        [address, ..more] -> withDir(network, address, more)
+
+fn withDir(network: Network, address: String, more: List<String>) -> Unit
+    ? "A Peer and a directory; neither has a sensible default."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match more
+        [] -> App.Usage.print()
+        [dir, ..extra] -> parsed(network, Domain.Address.fromStringOn(address, Domain.Network.portOf(network)), dir)
+
+fn parsed(network: Network, address: Result<PeerAddress, String>, dir: String) -> Unit
+    ? "Follow the tip, or say why the address was rejected."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match address
+        Result.Err(message) -> Console.error("error: {message}")
+        Result.Ok(peer) -> said(claimed(network, peer, dir))
+
+fn claimed(network: Network, address: PeerAddress, dir: String) -> Result<String, String>
+    ? "Take the directory for the life of the process."
+      "A follower holds the claim until it stops, which is the point: the"
+      "Index, the Segments and the UTXO Set are all being written as Blocks"
+      "arrive, and a prune or a second follower running beside it would be"
+      "writing the same keys from a different idea of where the tip is."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    _claimed = Infra.Lock.claim(dir, "follow")?
+    Infra.Lock.releasingAfter(dir, following(network, address, dir))
+
+fn following(network: Network, address: PeerAddress, dir: String) -> Result<String, String>
+    ? "Open everything the three phases write to, then hand over to the loop."
+      "This returns only when the loop stops, and the loop stops only on a"
+      "read that failed, a Peer that went silent, or a Block that would not"
+      "connect. All three are reasons rather than results, so there is no"
+      "success line to write: the Ok is unreachable and the Err is the report."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    store = Infra.Store.open(dir)?
+    blocks = Infra.Blocks.open(blocksPath(dir))?
+    _followed = Infra.Follow.follow(network, address, store, blocks)?
+    Result.Ok("stopped following")
+
+fn blocksPath(dir: String) -> String
+    ? "Where the Segments live."
+    "{dir}/blocks"
+
+verify blocksPath
+    blocksPath("chain") => "chain/blocks"
+
+fn said(outcome: Result<String, String>) -> Unit
+    ? "Report what the node finished with."
+    ! [Console.error, Console.print]
+    match outcome
+        Result.Ok(line) -> Console.print(line)
+        Result.Err(message) -> Console.error("error: {message}")

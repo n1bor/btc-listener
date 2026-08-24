@@ -4,7 +4,7 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [App.Lookup, App.Maintain, App.Show, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [App.Lookup, App.Maintain, App.Node, App.Show, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Bodies, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
@@ -58,7 +58,12 @@ fn run(args: List<String>) -> Unit
         [head, ..rest] -> maybeNetwork(head, rest)
 
 fn maybeNetwork(head: String, rest: List<String>) -> Unit
-    ? "A leading `signet` chooses the Network; anything else is mainnet as before."
+    ? "A leading Network name chooses the Network; anything else is mainnet as before."
+      "regtest is here for the same reason the other three are -- it is a"
+      "Network this program can speak, and every part below already knew its"
+      "magic, its port, its genesis and its halving interval. What it adds is"
+      "a chain whose reorganisations can be asked for rather than waited for,"
+      "which is how the follow loop's disconnect path was measured (#26)."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
@@ -70,6 +75,7 @@ fn maybeNetwork(head: String, rest: List<String>) -> Unit
     ]
     match head
         "signet" -> onNetwork(Network.Signet, rest)
+        "regtest" -> onNetwork(Network.Regtest, rest)
         _ -> dispatch(Network.Mainnet, head, rest)
 
 fn onNetwork(network: Network, args: List<String>) -> Unit
@@ -105,6 +111,7 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
         "txindex" -> App.Maintain.txIndex(rest)
         "outputs" -> App.Maintain.outputs(rest)
         "utxo" -> App.Maintain.utxo(network, rest)
+        "follow" -> App.Node.follow(network, rest)
         "assumevalid" -> App.Maintain.assumeValid(rest)
         "audit" -> App.Maintain.audit(network, rest)
         "reindex" -> App.Maintain.reindex(rest)
@@ -310,7 +317,7 @@ fn bodiesDone(network: Network, address: PeerAddress, dir: String, span: Span) -
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    progress = Infra.Download.bodies(network, address, store, blocks, span.from, span.to)?
+    progress = Infra.Bodies.bodies(network, address, store, blocks, span.from, span.to)?
     bodiesReport(progress.count, Infra.Blocks.currentSegment(progress.blocks), Infra.Chain.withoutBodies(progress.store, span.from, span.to, 0)?)
 
 fn bodiesReport(stored: Int, segment: Int, empty: Int) -> Result<String, String>

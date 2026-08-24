@@ -4,7 +4,7 @@ module Inventory
         "A Peer offers Transactions by identifier only; the Transaction itself"
         "arrives after a getdata asks for it. Asking with the witness type is"
         "what makes the reply SegWit-serialised, which the decoder needs."
-    exposes [txHashesOf, getDataPayload, entrySize, witnessTxType, witnessBlockType]
+    exposes [txHashesOf, blockHashesOf, getDataPayload, entrySize, witnessTxType, witnessBlockType]
     depends [Bytes, Domain.CompactSize, Domain.Message]
     effects []
 
@@ -21,6 +21,16 @@ fn txType() -> Int
 
 verify txType
     txType() => 1
+
+fn blockType() -> Int
+    ? "The inventory type meaning a Block."
+      "What a Peer announces a new tip with. The witness variant exists only"
+      "in a getdata: a Peer offers the Block, and the asking side says which"
+      "serialisation it wants back."
+    2
+
+verify blockType
+    blockType() => 2
 
 fn witnessTxType() -> Int
     ? "The inventory type asking for the SegWit-serialised Transaction."
@@ -39,11 +49,25 @@ verify witnessBlockType
 
 fn txHashesOf(body: List<Int>) -> List<List<Int>>
     ? "Every Transaction identifier offered in an Announcement."
-    collect(entriesOf(body), [])
+    collect(entriesOf(body), txType(), [])
 
 verify txHashesOf
     List.len(txHashesOf(List.concat([1], List.concat([1, 0, 0, 0], thirtyTwo())))) => 1
+    List.len(txHashesOf(List.concat([1], List.concat([2, 0, 0, 0], thirtyTwo())))) => 0
     List.len(txHashesOf([0])) => 0
+
+fn blockHashesOf(body: List<Int>) -> List<List<Int>>
+    ? "Every Block identifier offered in an Announcement."
+      "The same Announcement carries both kinds, and a node following the tip"
+      "wants only one of them, so the kind is what the walk filters on rather"
+      "than something the caller has to strip afterwards."
+    collect(entriesOf(body), blockType(), [])
+
+verify blockHashesOf
+    List.len(blockHashesOf(List.concat([1], List.concat([2, 0, 0, 0], thirtyTwo())))) => 1
+    List.len(blockHashesOf(List.concat([1], List.concat([1, 0, 0, 0], thirtyTwo())))) => 0
+    List.len(blockHashesOf([0])) => 0
+    blockHashesOf(List.concat([1], List.concat([2, 0, 0, 0], thirtyTwo()))) => [thirtyTwo()]
 
 fn thirtyTwo() -> List<Int>
     ? "A stand-in 32-byte identifier for the verify cases."
@@ -70,34 +94,37 @@ verify countWidth
     countWidth([253]) => 3
     countWidth([]) => 0
 
-fn collect(entries: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
-    ? "Walk the entries, keeping the identifiers that name Transactions."
+fn collect(entries: List<Int>, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Walk the entries, keeping the identifiers of the kind asked for."
     match List.len(entries) < entrySize()
         true -> List.reverse(acc)
-        false -> collectOne(entries, acc)
+        false -> collectOne(entries, wanted, acc)
 
 verify collect
-    List.len(collect(List.concat([1, 0, 0, 0], thirtyTwo()), [])) => 1
-    List.len(collect([1, 2], [])) => 0
+    List.len(collect(List.concat([1, 0, 0, 0], thirtyTwo()), txType(), [])) => 1
+    List.len(collect(List.concat([2, 0, 0, 0], thirtyTwo()), blockType(), [])) => 1
+    List.len(collect([1, 2], txType(), [])) => 0
 
-fn collectOne(entries: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
-    ? "Keep this entry's identifier if it names a Transaction."
+fn collectOne(entries: List<Int>, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Keep this entry's identifier if it is of the kind asked for."
     kind = Domain.Message.readLittleEndian(List.take(entries, 4))
-    collect(List.drop(entries, entrySize()), keepIfTx(kind, List.take(List.drop(entries, 4), 32), acc))
+    collect(List.drop(entries, entrySize()), wanted, keepIfWanted(kind, wanted, List.take(List.drop(entries, 4), 32), acc))
 
 verify collectOne
-    List.len(collectOne(List.concat([1, 0, 0, 0], thirtyTwo()), [])) => 1
-    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), [])) => 0
+    List.len(collectOne(List.concat([1, 0, 0, 0], thirtyTwo()), txType(), [])) => 1
+    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), txType(), [])) => 0
+    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), blockType(), [])) => 1
 
-fn keepIfTx(kind: Int, hash: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
-    ? "Blocks and other kinds are offered too; only Transactions are wanted."
-    match kind == txType()
+fn keepIfWanted(kind: Int, wanted: Int, hash: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "An Announcement mixes kinds, and a caller wants one of them."
+    match kind == wanted
         true -> List.prepend(hash, acc)
         false -> acc
 
-verify keepIfTx
-    List.len(keepIfTx(1, [7], [])) => 1
-    List.len(keepIfTx(2, [7], [])) => 0
+verify keepIfWanted
+    List.len(keepIfWanted(1, 1, [7], [])) => 1
+    List.len(keepIfWanted(2, 1, [7], [])) => 0
+    List.len(keepIfWanted(2, 2, [7], [])) => 1
 
 fn getDataPayload(kind: Int, hashes: List<List<Int>>) -> Result<Bytes, String>
     ? "The request that asks for everything named, in the form the kind selects."

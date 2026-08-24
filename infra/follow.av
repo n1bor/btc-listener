@@ -1,0 +1,228 @@
+module Follow
+    intent =
+        "Following the tip on one Peer: the listen loop grown from"
+        "Transactions to Blocks."
+        "Stages 1 to 3 make a node that can check the chain it is handed. This"
+        "is the one that stays current. It is the same three phases the"
+        "download commands run -- Headers, then bodies, then the UTXO Set --"
+        "only driven by a Peer saying something arrived rather than by a range"
+        "somebody typed, and run again every time it does."
+        "An Announcement of a Block is answered with getheaders rather than"
+        "getdata, which is a deliberate departure from how it was first"
+        "written down (#26). A Block whose Header the tree has not placed"
+        "cannot be connected and cannot even be told from a Block on a branch"
+        "we are not following, so asking for the body first buys nothing and"
+        "loses the ordering. Headers first is also what Bitcoin Core does with"
+        "an inv it did not expect, and for the same reason. The getdata still"
+        "happens -- it is what the body phase is -- one Header later."
+        "Exactly one Peer and one blocking socket, so nothing here waits on"
+        "the concurrency answer. The Mempool, many Peers and compact Blocks"
+        "are Stages 5 to 7; a Transaction announced here is simply not asked"
+        "for, because there is nowhere yet to put one."
+    exposes [follow]
+    depends [Bytes, Domain.Address, Domain.HeaderTree, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peer, Infra.Rewind, Infra.Store]
+    effects [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+
+record Following
+    store: Store
+    blocks: BlockStore
+
+fn follow(network: Network, address: PeerAddress, store: Store, blocks: BlockStore) -> Result<Unit, String>
+    ? "Connect, catch up, then stay caught up until the process is stopped."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
+    outcome = session(connection, network, address, store, blocks)
+    closeAfter(connection, outcome)
+
+fn closeAfter(connection: Tcp.Connection, outcome: Result<Unit, String>) -> Result<Unit, String>
+    ? "Always release the socket, whatever the session did."
+    ! [Tcp.close]
+    _closed = Tcp.close(connection)
+    outcome
+
+fn session(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store, blocks: BlockStore) -> Result<Unit, String>
+    ? "Introduce ourselves, catch up on what was missed, then listen."
+      "The catch-up before the first Announcement is not optional. A node that"
+      "waited would sit idle for as long as it took the next Block to be"
+      "mined, and would then connect it onto a Set that was hours or years"
+      "behind -- which is to say it would refuse it, correctly, and stop."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    greeting = Infra.Peer.introduce(connection, network, address)?
+    _reported = Console.print("handshake complete: protocol {greeting.version}, agent {greeting.agent}")
+    started = caughtUp(connection, network, Following(store = store, blocks = blocks))?
+    listen(connection, network, started)
+
+fn caughtUp(connection: Tcp.Connection, network: Network, state: Following) -> Result<Following, String>
+    ? "The three phases in the one order they can go in."
+      "Headers first, because nothing below can act on a Block it cannot"
+      "place. Then the Set is taken back off any branch the Headers have just"
+      "abandoned, because the bodies to fetch are the ones above the fork and"
+      "not the ones above where the Set happened to stand. Then the bodies,"
+      "then the Set forward over them."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    have = haveOf(state.store)?
+    grown = Infra.Download.headersOn(connection, network, state.store, have)?
+    tipHeight = tipHeightOf(grown)?
+    aligned = Infra.Rewind.realigned(grown, state.blocks)?
+    fetched = Infra.Bodies.bodiesOn(connection, network, aligned.store, state.blocks, aligned.from, tipHeight)?
+    connected(network, Following(store = fetched.store, blocks = fetched.blocks), tipHeight)
+
+fn connected(network: Network, state: Following, tipHeight: Int) -> Result<Following, String>
+    ? "The Set forward to the tip, and one line saying where that leaves it."
+    ! [
+        Console.print,
+        Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Time.now, Time.unixMs,
+    ]
+    built = Infra.ChainState.build(network, state.store, state.blocks, tipHeight)?
+    _said = Console.print("following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
+    Result.Ok(Following(store = built.store, blocks = state.blocks))
+
+fn haveOf(store: Store) -> Result<Int, String>
+    ? "How many Heights the Header tree already reaches, for the Locator."
+      "One more than the tip's Height, counting genesis -- so one for a tree"
+      "that holds nothing yet, because the phase below plants genesis before"
+      "it asks for anything. The download phase gets the same number by"
+      "counting h: up from genesis, which is a walk of the whole chain and is"
+      "not something to do every time a Block is announced."
+    ! [Infra.Kv.get]
+    tip = Infra.Headers.tipOf(store)?
+    Result.Ok(heightOf(tip) + 1)
+
+verify haveOf
+    haveOf(Infra.Store.fixture([])) => Result.Ok(1)
+    haveOf(Infra.Store.fixture([("meta:bestTip", "aa"), ("k:aa", "318980:1:pp:hh")])) => Result.Ok(318981)
+
+fn tipHeightOf(store: Store) -> Result<Int, String>
+    ? "The Height of the branch with the most work."
+    ! [Infra.Kv.get]
+    tip = Infra.Headers.tipOf(store)?
+    Result.Ok(heightOf(tip))
+
+verify tipHeightOf
+    tipHeightOf(Infra.Store.fixture([])) => Result.Ok(0)
+    tipHeightOf(Infra.Store.fixture([("meta:bestTip", "aa"), ("k:aa", "318980:1:pp:hh")])) => Result.Ok(318980)
+
+fn heightOf(tip: Option<Placement>) -> Int
+    ? "Where a tip sits, or genesis when there is no tip yet."
+      "Zero for nothing planted is right rather than convenient: the Header"
+      "phase plants genesis before it asks anything, so a tree with no tip is"
+      "a tree about to have genesis for one."
+    match tip
+        Option.None -> 0
+        Option.Some(placement) -> placement.height
+
+verify heightOf
+    heightOf(Option.None) => 0
+    heightOf(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 7, work = 1))) => 7
+
+fn listen(connection: Tcp.Connection, network: Network, state: Following) -> Result<Unit, String>
+    ? "Read Messages for as long as the Peer keeps sending them."
+      "This never returns of its own accord: the process runs until it is"
+      "stopped, until a read fails, or until a Block will not connect. The"
+      "call is in tail position, so the recursion does not grow the stack"
+      "however long it runs."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    frame = Infra.Peer.readFrame(connection)?
+    handle(connection, network, state, frame.command, frame.body)
+
+fn handle(connection: Tcp.Connection, network: Network, state: Following, command: String, body: List<Int>) -> Result<Unit, String>
+    ? "The three Messages this loop acts on; every other one is ignored."
+      "A ping has to be answered or the Peer eventually drops the connection."
+      "An unsolicited headers is treated exactly as an Announcement: a Peer"
+      "that was sent no sendheaders should not be sending one, and a Peer that"
+      "does is still telling us the chain moved."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match command
+        "inv" -> onAnnouncement(connection, network, state, body)
+        "headers" -> onMoved(connection, network, state, "a Peer sent Headers unasked")
+        "ping" -> onPing(connection, network, state, body)
+        _ -> listen(connection, network, state)
+
+fn onAnnouncement(connection: Tcp.Connection, network: Network, state: Following, body: List<Int>) -> Result<Unit, String>
+    ? "An Announcement carrying no Blocks changes nothing here."
+      "Transactions are announced down the same Message and are not asked for:"
+      "there is no Mempool to put one in until Stage 6, and asking for what"
+      "cannot be kept would be noise on the wire and a lie about what this"
+      "program does."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    announced = Domain.Inventory.blockHashesOf(body)
+    match announced
+        [] -> listen(connection, network, state)
+        [head, ..tail] -> onMoved(connection, network, state, "{List.len(announced)} Block(s) announced")
+
+fn onMoved(connection: Tcp.Connection, network: Network, state: Following, why: String) -> Result<Unit, String>
+    ? "The chain says it has moved, so go and find out how far."
+      "What arrived is not trusted to be the new tip, or to be on the branch"
+      "with the most work, or to be anything but a Block Id -- the Header"
+      "phase settles all three, and a Peer that announced something already"
+      "held simply moves nothing."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    _said = Console.print("{Time.now()}  {why}")
+    moved = caughtUp(connection, network, state)?
+    listen(connection, network, moved)
+
+fn onPing(connection: Tcp.Connection, network: Network, state: Following, body: List<Int>) -> Result<Unit, String>
+    ? "Reply with the same nonce the Peer sent."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    payload = Bytes.fromList(body)?
+    _written = Infra.Peer.send(connection, network, "pong", payload)?
+    listen(connection, network, state)

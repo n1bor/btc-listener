@@ -16,7 +16,7 @@ module Headers
         "what changing to it means is Domain.Reorg, and both are covered by"
         "verify blocks over Maps and Lists. This module is the part that has"
         "to touch a Store."
-    exposes [Settled, seeded, absorbed]
+    exposes [Settled, seeded, absorbed, tipOf]
     depends [Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.Network, Domain.Reorg, Domain.TreeStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
@@ -168,6 +168,29 @@ fn bestAfter(store: Store, decoded: List<BlockHeader>, known: Map<String, Placem
     ! [Infra.Kv.get]
     standing = tipHeld(store)?
     Result.Ok(Domain.HeaderTree.bestOf(candidates(decoded, known, standing)))
+
+fn tipOf(store: Store) -> Result<Option<Placement>, String>
+    ? "Where the branch with the most work now ends, if anything is planted."
+      "Two reads, against the walk up from genesis that the download phase"
+      "does: the tip is a record, and the record is what h: is derived from,"
+      "so anything that wants only the Height has no reason to count."
+    ! [Infra.Kv.get]
+    Result.Ok(onlyTip(tipHeld(store)?))
+
+verify tipOf
+    tipOf(Infra.Store.fixture([])) => Result.Ok(Option.None)
+    tipOf(Infra.Store.fixture([("meta:bestTip", "aa"), ("k:aa", "3:1:pp:hh")])) => Result.Ok(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)))
+    tipOf(Infra.Store.fixture([("meta:bestTip", "aa")])) => Result.Ok(Option.None)
+
+fn onlyTip(standing: List<Placement>) -> Option<Placement>
+    ? "The one Placement the tip record found, if it found one."
+    match standing
+        [] -> Option.None
+        [head, ..tail] -> Option.Some(head)
+
+verify onlyTip
+    onlyTip([]) => Option.None
+    onlyTip([Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)]) => Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1))
 
 fn tipHeld(store: Store) -> Result<List<Placement>, String>
     ? "The Placement the best-tip record names, if there is one."

@@ -1,17 +1,18 @@
 module Download
     intent =
-        "Downloading the chain from one Peer, in two phases."
-        "Headers first, because a getdata names Block Ids and never Heights, so"
-        "the chain has to be known before any body can be asked for. Every Header"
-        "is fetched — all of them fit comfortably — and each one records a Height"
-        "against a Block Id in the Index."
-        "Bodies second, for a range of Heights the caller chooses, written to"
-        "Segments with their Locations recorded against their Block Ids."
-        "Both phases resume. Neither holds anything it has not already written"
-        "down, so stopping is always safe and restarting costs at most the batch"
-        "or the Block that was in flight."
-    exposes [Progress, headers, bodies]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.Index, Domain.Inventory, Domain.Message, Domain.Network, Domain.Reorg, Infra.Blocks, Infra.Headers, Infra.Peer, Infra.Store]
+        "The Header phase: learning the chain from one Peer."
+        "It comes first because a getdata names Block Ids and never Heights, so"
+        "the chain has to be known before any body can be asked for. Every"
+        "Header is fetched — all of them fit comfortably — and each one is"
+        "placed in the tree, which is what decides the Branch h: then names."
+        "The body phase that follows it is Infra.Bodies; the two were one"
+        "module until the file outgrew what a reader can hold at once, and"
+        "they share nothing but a socket and the frame reader."
+        "The phase resumes. It holds nothing it has not already written down,"
+        "so stopping is always safe and restarting costs at most the batch"
+        "that was in flight."
+    exposes [headers, headersOn]
+    depends [Domain.Address, Domain.Block, Domain.Index, Domain.Network, Domain.Reorg, Infra.Framing, Infra.Headers, Infra.Peer, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -20,34 +21,6 @@ module Download
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
         Time.unixMs,
     ]
-
-record Progress
-    store: Store
-    blocks: BlockStore
-    pending: List<Entry>
-    waiting: Int
-    count: Int
-
-fn locationBatch() -> Int
-    ? "How many Locations to hold before writing them."
-      "A Store hands back a copy of itself, so one put per Block costs the size"
-      "of the whole Index per Block, and the Index holds a Height for every Block"
-      "in the chain. Writing in batches trades a wider crash window for that: a"
-      "crash loses up to this many Locations, and the Blocks they name are"
-      "fetched again on the next run, which is the direction that is safe."
-    2000
-
-verify locationBatch
-    locationBatch() => 2000
-
-fn frameBudget() -> Int
-    ? "How many unrelated Messages to read before giving up on the one wanted."
-      "A Peer sends ping, inv and addr traffic whenever it likes, so the reply to"
-      "a request is rarely the next thing to arrive."
-    200
-
-verify frameBudget
-    frameBudget() => 200
 
 fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store, String>
     ? "Fetch every Block Header the Peer has, recording Height against Block Id."
@@ -83,6 +56,22 @@ fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddr
     seeded = withGenesis(network, store)?
     have = heightsHeld(seeded, 0)?
     _said = Console.print("have {have} headers; asking for more")
+    headerBatch(connection, network, seeded, have)
+
+fn headersOn(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
+    ? "The same catch-up on a connection somebody else introduced, and with"
+      "the Height already known."
+      "A node following the tip runs this every time a Peer announces a Block,"
+      "so it can neither open its own socket nor walk h: from genesis to find"
+      "out where it is -- both are cheap once and neither is cheap every ten"
+      "minutes for the life of the process."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+    ]
+    seeded = withGenesis(network, store)?
     headerBatch(connection, network, seeded, have)
 
 fn withGenesis(network: Network, store: Store) -> Result<Store, String>
@@ -151,7 +140,7 @@ fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have:
     locator = locatorFor(network, store, have)?
     payload = Domain.Block.getHeadersPayload(locator)?
     _sent = Infra.Peer.send(connection, network, "getheaders", payload)?
-    frame = awaitFrame(connection, network, "headers", frameBudget())?
+    frame = Infra.Framing.awaitFrame(connection, network, "headers", Infra.Framing.frameBudget())?
     decoded = Domain.Block.headersOf(frame.body)?
     absorb(connection, network, store, have, decoded)
 
@@ -232,13 +221,13 @@ fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int
     ! [Infra.Kv.get]
     ids = idsHeld(store, have)?
     match ids
-        [] -> Result.Ok([wireOrder(Domain.Block.genesisBlockId(network))?])
+        [] -> Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(network))?])
         [head, ..tail] -> Result.Ok(ids)
 
 verify locatorFor
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
     locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
     locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
@@ -292,194 +281,9 @@ verify prependId
 
 fn prependDecoded(id: String, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Index named a Block Id, which still has to be one."
-    wire = wireOrder(id)?
+    wire = Infra.Framing.wireOrder(id)?
     Result.Ok(List.prepend(wire, acc))
 
 verify prependDecoded
     prependDecoded("0102", []) => Result.Ok([[2, 1]])
     prependDecoded("zz", []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-
-fn wireOrder(blockId: String) -> Result<List<Int>, String>
-    ? "A Block Id goes back to front on the wire, being displayed reversed."
-      "Hex that will not decode is an error rather than an empty entry. It used"
-      "to be swallowed, on the grounds that every Block Id here comes from a"
-      "genesisBlockId literal or from Domain.Hash.identifierOf over a digest and"
-      "so cannot be malformed -- true, but it made the one thing that could go"
-      "wrong go wrong invisibly. Neither getHeadersPayload nor getDataPayload"
-      "checks that an entry is thirty-two bytes, so a short one would be sent as"
-      "it stands, the count prefix would disagree with the bytes after it, and"
-      "the Peer would answer a malformed Message with silence. That surfaced as"
-      "'no headers after 200 messages', naming neither the Block Id nor the hex."
-      "Reading it back out of the Store is what makes this reachable: the Index"
-      "is a file, and a file can be truncated, edited or corrupted between runs."
-    bytes = Bytes.fromHex(blockId)?
-    Result.Ok(List.reverse(Bytes.toList(bytes)))
-
-verify wireOrder
-    wireOrder("0102") => Result.Ok([2, 1])
-    wireOrder("") => Result.Ok([])
-    wireOrder("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
-    wireOrder("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
-
-fn awaitFrame(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
-    ? "Read until the wanted Message arrives, dealing with whatever else turns up."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match budget <= 0
-        true -> Result.Err("no {wanted} after {frameBudget()} messages")
-        false -> matching(connection, network, wanted, budget)
-
-fn matching(connection: Tcp.Connection, network: Network, wanted: String, budget: Int) -> Result<Frame, String>
-    ? "One frame: the one wanted, or another turn of the loop."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    frame = Infra.Peer.readFrame(connection)?
-    keepOrSkip(connection, network, wanted, budget, frame)
-
-fn keepOrSkip(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
-    ? "Keep the frame if it is the one asked for."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match frame.command == wanted
-        true -> Result.Ok(frame)
-        false -> skip(connection, network, wanted, budget, frame)
-
-fn skip(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
-    ? "A ping has to be answered even while waiting for something else."
-      "A Peer drops a connection that stops answering, and fetching every Header"
-      "takes long enough — some hundreds of round trips — that one will arrive."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match frame.command
-        "ping" -> pongThen(connection, network, wanted, budget, frame)
-        _ -> awaitFrame(connection, network, wanted, budget - 1)
-
-fn pongThen(connection: Tcp.Connection, network: Network, wanted: String, budget: Int, frame: Frame) -> Result<Frame, String>
-    ? "Echo the nonce back, then carry on waiting."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    payload = Bytes.fromList(frame.body)?
-    _sent = Infra.Peer.send(connection, network, "pong", payload)?
-    awaitFrame(connection, network, wanted, budget - 1)
-
-fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
-    ? "Fetch the Blocks for a range of Heights and write them to Segments."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    outcome = bodySession(connection, network, address, store, blocks, from, to)
-    closeBodies(connection, outcome)
-
-fn closeBodies(connection: Tcp.Connection, outcome: Result<Progress, String>) -> Result<Progress, String>
-    ? "Always release the socket, whatever the session did."
-    ! [Tcp.close]
-    _closed = Tcp.close(connection)
-    outcome
-
-fn bodySession(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
-    ? "Handshake, then walk the range one Block at a time."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Random.int,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    _greeting = Infra.Peer.introduce(connection, network, address)?
-    walked = walk(connection, network, Progress(store = store, blocks = blocks, pending = [], waiting = 0, count = 0), from, to)?
-    settled(walked)
-
-fn settled(progress: Progress) -> Result<Progress, String>
-    ? "Write whatever Locations are still held back."
-    ! [Infra.Kv.putAll]
-    grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Progress(store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count))
-
-fn walk(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
-    ? "Each Height in turn, until the range is exhausted."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    match height > to
-        true -> Result.Ok(progress)
-        false -> atHeight(connection, network, progress, height, to)
-
-fn atHeight(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int) -> Result<Progress, String>
-    ? "A Height the Index does not name cannot be fetched, and ends the walk."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    named = Infra.Store.get(progress.store, Domain.Index.heightKey(height))?
-    match named
-        Option.None -> Result.Err("no header for height {height}; run the header phase first")
-        Option.Some(blockId) -> maybeFetch(connection, network, progress, height, to, blockId)
-
-fn maybeFetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
-    ? "A Block already held is skipped, which is what makes the phase resumable."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    held = Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))?
-    match held
-        true -> walk(connection, network, progress, height + 1, to)
-        false -> fetch(connection, network, progress, height, to, blockId)
-
-fn fetch(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String) -> Result<Progress, String>
-    ? "Ask for one Block and wait for it."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    wanted = wireOrder(blockId)?
-    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wanted])?
-    _sent = Infra.Peer.send(connection, network, "getdata", payload)?
-    frame = awaitFrame(connection, network, "block", frameBudget())?
-    keep(connection, network, progress, height, to, blockId, frame)
-
-fn keep(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Progress, String>
-    ? "Write the Block to a Segment, then record where it went."
-      "The bytes are on disk before the Index names them, so a crash between the"
-      "two costs a Block that is fetched again rather than an entry pointing at"
-      "nothing."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    payload = Bytes.fromList(frame.body)?
-    appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Progress(store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.Index.blockKey(blockId), value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
-    written = maybeWrite(held)?
-    announce(connection, network, written, height, to, List.len(frame.body))
-
-fn maybeWrite(progress: Progress) -> Result<Progress, String>
-    ? "Write the batch once it is big enough, and start a new one."
-    ! [Infra.Kv.putAll]
-    match progress.waiting >= locationBatch()
-        false -> Result.Ok(progress)
-        true -> settled(progress)
-
-fn announce(connection: Tcp.Connection, network: Network, progress: Progress, height: Int, to: Int, size: Int) -> Result<Progress, String>
-    ? "Say what arrived, then move on."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-    ]
-    _said = Console.print("block {height}  {size} bytes  segment {Infra.Blocks.currentSegment(progress.blocks)}")
-    walk(connection, network, progress, height + 1, to)

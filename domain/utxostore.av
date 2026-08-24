@@ -17,7 +17,7 @@ module UtxoStore
         "The value format is Domain.Index's, unchanged. An Output is an amount"
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
-    exposes [Unspent, unspentKey, undoKey, undoWindowKey, setHeightKey, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity]
+    exposes [Unspent, Reached, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity]
     depends [Domain.Index]
     effects []
 
@@ -28,6 +28,10 @@ record Unspent
     script: String
     height: Int
     coinbase: Bool
+
+record Reached
+    height: Int
+    blockId: String
 
 fn unspentKey(txid: String, index: Int) -> String
     ? "Where one unspent Output lives, keyed the way an Input names it."
@@ -69,17 +73,111 @@ fn undoWindowKey() -> String
 verify undoWindowKey
     undoWindowKey() => "meta:undoBelow"
 
-fn setHeightKey() -> String
-    ? "The single record naming the Height the Set has been built to."
+fn reachedKey() -> String
+    ? "The single record naming the Block the Set has been built up to."
       "A UTXO Set has no meaningful range: it is the state after connecting"
-      "every Block up to one Height, so where it has got to is the only thing"
-      "that says what it means. Absent means nothing has been connected, which"
-      "is a Set holding nothing rather than a Set at Height zero -- genesis's"
+      "every Block up to one, so where it has got to is the only thing that"
+      "says what it means. Absent means nothing has been connected, which is a"
+      "Set holding nothing rather than a Set at Height zero -- genesis's"
       "Output has to be connected like any other."
     "meta:setTo"
 
-verify setHeightKey
-    setHeightKey() => "meta:setTo"
+verify reachedKey
+    reachedKey() => "meta:setTo"
+
+fn encodeReached(reached: Reached) -> String
+    ? "Where the Set stands: a Height, and the Block it stands on."
+      "The Block Id is not decoration beside the Height. A Height alone says"
+      "the Set was built along whatever branch h: named at the time, and h: is"
+      "the one keyspace a reorganisation rewrites -- so a Height alone stops"
+      "being true the moment the chain changes its mind, and nothing on disk"
+      "can tell that it has. Naming the Block makes it checkable, and it is"
+      "also the only way back down: Undo Data is keyed by Block Id."
+    "{reached.height}:{reached.blockId}"
+
+verify encodeReached
+    encodeReached(Reached(height = 0, blockId = "aa")) => "0:aa"
+    encodeReached(Reached(height = 4000, blockId = "00000086d6b2636cb2a392d45edc4ec544a10024d30141c9adf4bfd9de533b53")) => "4000:00000086d6b2636cb2a392d45edc4ec544a10024d30141c9adf4bfd9de533b53"
+
+fn decodeReached(text: String) -> Result<Reached, String>
+    ? "Read it back, refusing a record written before the Block Id was kept."
+      "A bare Height is the pre-#26 spelling, and it is refused rather than"
+      "read as a Height on the branch h: names now. That reading would be a"
+      "guess: if h: was reorganised after the Set was built, the Set describes"
+      "Blocks that are no longer on the chain, and the old record holds"
+      "nothing that could say so. Rebuilding is cheap; a Set quietly"
+      "describing the wrong branch is not."
+    reachedParts(text, String.split(text, ":"))
+
+verify decodeReached
+    decodeReached("0:aa") => Result.Ok(Reached(height = 0, blockId = "aa"))
+    decodeReached("4000:bb") => Result.Ok(Reached(height = 4000, blockId = "bb"))
+    decodeReached("4000") => Result.Err("the Set records Height 4000 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
+    decodeReached("") => Result.Err("Set standing must be height:blockId, got ''")
+    decodeReached("x:aa") => Result.Err("Set standing must name a whole Height, got 'x:aa'")
+    decodeReached("0:aa:bb") => Result.Err("Set standing must be height:blockId, got '0:aa:bb'")
+
+fn reachedParts(text: String, split: List<String>) -> Result<Reached, String>
+    ? "The Height comes first."
+    match split
+        [] -> Result.Err("Set standing must be height:blockId, got '{text}'")
+        [height, ..rest] -> afterReachedHeight(text, height, rest)
+
+verify reachedParts
+    reachedParts("0:aa", ["0", "aa"]) => Result.Ok(Reached(height = 0, blockId = "aa"))
+    reachedParts("", []) => Result.Err("Set standing must be height:blockId, got ''")
+
+fn afterReachedHeight(text: String, height: String, rest: List<String>) -> Result<Reached, String>
+    ? "One field and no more is either the old spelling or not a standing at all."
+    match rest
+        [] -> soleField(text, Domain.Index.decodeHeight(height))
+        [blockId, ..extra] -> afterReachedBlock(text, height, blockId, extra)
+
+verify afterReachedHeight
+    afterReachedHeight("0:aa", "0", ["aa"]) => Result.Ok(Reached(height = 0, blockId = "aa"))
+    afterReachedHeight("7", "7", []) => Result.Err("the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
+    afterReachedHeight("", "", []) => Result.Err("Set standing must be height:blockId, got ''")
+
+fn soleField(text: String, height: Result<Int, String>) -> Result<Reached, String>
+    ? "A lone whole number is what this program wrote before it kept the Block"
+      "Id, and is named as such so the reader is told to rebuild rather than"
+      "left to guess at corruption. Anything else never was a standing."
+    match height
+        Result.Ok(at) -> Result.Err(onlyHeight(text))
+        Result.Err(why) -> Result.Err("Set standing must be height:blockId, got '{text}'")
+
+verify soleField
+    soleField("7", Result.Ok(7)) => Result.Err("the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
+    soleField("", Result.Err("no")) => Result.Err("Set standing must be height:blockId, got ''")
+
+fn onlyHeight(text: String) -> String
+    ? "What to say about a Set whose standing predates the Block Id."
+    "the Set records Height {text} but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again"
+
+verify onlyHeight
+    onlyHeight("7") => "the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again"
+
+fn afterReachedBlock(text: String, height: String, blockId: String, extra: List<String>) -> Result<Reached, String>
+    ? "Refuse a third field, then read the Height."
+      "A Block Id is hexadecimal and holds no colon, so a third field means"
+      "the text was never a standing."
+    match extra
+        [] -> reachedWith(text, Domain.Index.decodeHeight(height), blockId)
+        [head, ..tail] -> Result.Err("Set standing must be height:blockId, got '{text}'")
+
+verify afterReachedBlock
+    afterReachedBlock("0:aa", "0", "aa", []) => Result.Ok(Reached(height = 0, blockId = "aa"))
+    afterReachedBlock("0:aa:bb", "0", "aa", ["bb"]) => Result.Err("Set standing must be height:blockId, got '0:aa:bb'")
+
+fn reachedWith(text: String, height: Result<Int, String>, blockId: String) -> Result<Reached, String>
+    ? "The Height has to be a whole number."
+    match height
+        Result.Err(why) -> Result.Err("Set standing must name a whole Height, got '{text}'")
+        Result.Ok(at) -> Result.Ok(Reached(height = at, blockId = blockId))
+
+verify reachedWith
+    reachedWith("0:aa", Result.Ok(0), "aa") => Result.Ok(Reached(height = 0, blockId = "aa"))
+    reachedWith("x:aa", Result.Err("no"), "aa") => Result.Err("Set standing must name a whole Height, got 'x:aa'")
 
 fn unspentAt(txid: String, index: Int, output: SpentOutput, height: Int, coinbase: Bool) -> Unspent
     ? "An Output of a Transaction, as the Set holds it."
