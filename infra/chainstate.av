@@ -21,7 +21,7 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Bytes, Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.readBytesAt,
@@ -37,6 +37,7 @@ record Built
     fees: Int
     reached: Int
     dropped: Int
+    views: List<BlockView>
 
 record Walk
     blocks: BlockStore
@@ -57,7 +58,7 @@ fn build(network: Network, store: Store, blocks: BlockStore, to: Int) -> Result<
     ]
     aligned = Infra.Rewind.realigned(store, blocks)?
     _said = saidRange(aligned.from, to)
-    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped), pace = Infra.Pace.pacedFrom(Time.unixMs())), aligned.from, to)?
+    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = []), pace = Infra.Pace.pacedFrom(Time.unixMs())), aligned.from, to)?
     swept = Infra.Utxo.prunedUndo(walked.counted.store, walked.counted.reached)?
     _told = claimTold(swept, walked.counted.reached)?
     Result.Ok(counting(walked.counted, swept))
@@ -78,7 +79,7 @@ fn counting(counted: Built, store: Store) -> Built
       "Handed back rather than dropped because a caller that goes round again"
       "-- a node following a tip does, every Block -- has to carry the Store"
       "the last round left, exactly as every other phase in this program does."
-    Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped)
+    Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped, views = counted.views)
 
 fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn, stopping at the first one the chain cannot supply."
@@ -132,9 +133,9 @@ fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: Stri
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
     applied = Infra.Utxo.connectBlock(network, state.counted.store, height, blockId, transactions)?
-    recorded(network, state, height, to, blockId, applied)
+    recorded(network, state, height, to, blockId, applied, BlockView(height = height, blockId = blockId, transactions = List.len(transactions), bytes = location.length, atMs = Time.unixMs()))
 
-fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String, applied: Applied) -> Result<Walk, String>
+fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String, applied: Applied, view: BlockView) -> Result<Walk, String>
     ? "Count it, write where the Set now stands, and go on."
       "Written every Block rather than at the end, because a walk that stopped"
       "would otherwise leave a Set whose contents and whose recorded standing"
@@ -148,7 +149,7 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Time.now, Time.unixMs,
     ]
     marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
-    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped)
+    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()))
     stepped = maybeReport(height, counted, state.pace)?
     walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped), height + 1, to)
 

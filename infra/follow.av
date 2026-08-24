@@ -20,7 +20,7 @@ module Follow
         "are Stages 5 to 7; a Transaction announced here is simply not asked"
         "for, because there is nowhere yet to put one."
     exposes [follow]
-    depends [Domain.Index, Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Inventory, Domain.Network, Domain.TreeStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -37,6 +37,38 @@ record Following
     blocks: BlockStore
     book: Map<String, Candidate>
     nextKey: Int
+    watch: Watching
+
+record Watching
+    snapshot: Snapshot
+    heard: Map<Int, Int>
+    anyHeardMs: Int
+    saidPeersMs: Int
+
+fn freshWatch(nowMs: Int) -> Watching
+    ? "What the loop knows about its own watching, before anything happens:"
+      "an empty Snapshot, nobody heard yet -- but the clock starts now, so"
+      "silence is measured from joining and not from 1970."
+    Watching(snapshot = Domain.Snapshot.started(nowMs), heard = Map.fromList([]), anyHeardMs = nowMs, saidPeersMs = nowMs)
+
+verify freshWatch
+    freshWatch(5).anyHeardMs => 5
+    freshWatch(5).saidPeersMs => 5
+    Map.len(freshWatch(5).heard) => 0
+
+fn tickMs() -> Int
+    ? "How long one turn of the listen loop waits before looking at its own"
+      "clock. One second: fast enough that a due line prints when it is due"
+      "and a stop request is noticed promptly, slow enough that an idle node"
+      "costs nothing worth measuring."
+    1000
+
+verify tickMs
+    tickMs() => 1000
+
+fn withWatch(state: Following, watch: Watching) -> Following
+    ? "The state, with what the loop knows about its watching moved on."
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch)
 
 fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
@@ -51,7 +83,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     ]
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Map.keys(pool.sockets))?
-    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses)))
+    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs())))
     closeAfter(asked, outcome)
 
 fn targetPeers() -> Int
@@ -92,7 +124,7 @@ fn drainSpare(state: Following) -> Following
       "the two questions are asked seconds apart, and the answers do not"
       "arrive in the order they were asked. The pool keeps what it was not"
       "asked for; this is where it is looked at, and emptied."
-    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey)
+    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey, watch = state.watch)
 
 fn bookAfter(book: Map<String, Candidate>, spare: List<Spare>) -> Map<String, Candidate>
     ? "The Address Book, grown by whatever those Messages said."
@@ -167,7 +199,7 @@ fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey)
+    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch)
     match parsed
         Result.Err(why) -> Result.Ok(tried)
         Result.Ok(peer) -> reaching(tried, address, peer)
@@ -195,7 +227,7 @@ fn reached(state: Following, address: String, joined: Pool) -> Result<Following,
     ! [Console.error, Console.print, Tcp.writeBytes]
     _said = Console.print("peer {state.nextKey} is {address}, from the Address Book")
     asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
-    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1))
+    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -326,7 +358,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
     ]
     _said = Console.error("dropping peer {key}: {why}")
     shrunk = Infra.Peers.dropOne(state.pool, key)?
-    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey), why)
+    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch), why)
 
 fn onwardWith(state: Following, why: String) -> Result<Following, String>
     ? "Another Peer to ask, or nobody left and the reason the last one gave."
@@ -372,17 +404,21 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     ]
     have = haveOf(state.store)?
     grown = Infra.Download.headersOn(state.pool, key, state.store, have)?
-    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))
+    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch))
     _heard = saidBook(Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
     afterHeaders = toppedUp(drained)?
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight)?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey), tipHeight)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = afterHeaders.watch), tipHeight)?
     toppedUp(drainSpare(upToTip))
 
 fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
     ? "The Set forward to the tip, and one line saying where that leaves it."
+      "When only a few Blocks moved -- a node at the tip, hearing one Block"
+      "every ten minutes -- each one gets its own line, because those are the"
+      "Blocks a watcher is watching for. A catch-up of thousands stays with"
+      "the walk's own minute lines instead."
     ! [
         Console.print,
         Disk.readBytesAt,
@@ -390,8 +426,69 @@ fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
         Time.now, Time.unixMs,
     ]
     built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight)?
+    _each = saidBlocks(blockLinesOf(built.blocks, built.views))
     _said = Console.print("following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
-    Result.Ok(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch), watchAfterBuild(state.watch, built.views)))
+
+fn blockLinesOf(connectedCount: Int, views: List<BlockView>) -> List<String>
+    ? "A line per Block, but only when every connected Block is in the ring"
+      "-- otherwise lines for the newest eight of thousands would be noise"
+      "pretending to be news."
+    match connectedCount > Domain.Snapshot.blockLimit()
+        true -> []
+        false -> blockLines(List.reverse(views), [])
+
+verify blockLinesOf
+    blockLinesOf(9000, []) => []
+    blockLinesOf(1, [BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 0)]) => ["block 5 aa 2 tx 300 bytes"]
+
+fn blockLines(oldestFirst: List<BlockView>, acc: List<String>) -> List<String>
+    ? "Each view rendered, oldest first, the order they connected in."
+    match oldestFirst
+        [] -> List.reverse(acc)
+        [head, ..tail] -> blockLines(tail, List.prepend(Domain.Screenlines.blockLine(head), acc))
+
+verify blockLines
+    blockLines([], []) => []
+    blockLines([BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 0)], []) => ["block 5 aa 2 tx 300 bytes"]
+
+fn saidBlocks(lines: List<String>) -> Unit
+    ? "Print each line in turn."
+    ! [Console.print]
+    match lines
+        [] -> Unit
+        [head, ..tail] -> saidNext(head, tail)
+
+fn saidNext(line: String, rest: List<String>) -> Unit
+    ? "One line, then the rest."
+    ! [Console.print]
+    _printed = Console.print(line)
+    saidBlocks(rest)
+
+fn watchAfterBuild(watch: Watching, views: List<BlockView>) -> Watching
+    ? "The Blocks that just connected, into the Snapshot's ring and its tip."
+      "Nothing connected moves nothing: the usual announce of a Block already"
+      "held leaves the Snapshot exactly as it was."
+    match views
+        [] -> watch
+        [newest, ..older] -> Watching(snapshot = Domain.Snapshot.tipAt(ringed(watch.snapshot, List.reverse(views)), newest.height, newest.blockId, newest.atMs), heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs)
+
+verify watchAfterBuild
+    watchAfterBuild(freshWatch(0), []).snapshot.tip.height => 0
+    watchAfterBuild(freshWatch(0), [BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 9)]).snapshot.tip.height => 5
+    watchAfterBuild(freshWatch(0), [BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 9)]).snapshot.tip.blockId => "aa"
+    List.len(watchAfterBuild(freshWatch(0), [BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 9)]).snapshot.rings.blocks) => 1
+
+fn ringed(snapshot: Snapshot, oldestFirst: List<BlockView>) -> Snapshot
+    ? "Each connected Block into the ring, oldest first so the newest ends"
+      "up at the front."
+    match oldestFirst
+        [] -> snapshot
+        [head, ..tail] -> ringed(Domain.Snapshot.notedBlock(snapshot, head), tail)
+
+verify ringed
+    ringed(Domain.Snapshot.started(0), []).rings.blocks => []
+    List.len(ringed(Domain.Snapshot.started(0), [BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 9)]).rings.blocks) => 1
 
 fn haveOf(store: Store) -> Result<Int, String>
     ? "How many Heights the Header tree already reaches, for the Locator."
@@ -465,6 +562,11 @@ fn stopping(state: Following) -> Result<Unit, String>
 
 fn turning(state: Following) -> Result<Unit, String>
     ? "One ordinary turn of the loop."
+      "The wait is one tick rather than the whole idle deadline (#129): a"
+      "Message from any Peer ends it early and is handled exactly as before,"
+      "and a tick of silence hands the loop to its own clock -- the silence"
+      "rule, the Snapshot, and whichever lines have come due. The deadline"
+      "means what it meant; it is only noticed in one-second steps now."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -476,8 +578,123 @@ fn turning(state: Following) -> Result<Unit, String>
     ]
     drained = drainSpare(state)
     topped = toppedUp(drained)?
-    waited = Infra.Peers.awaitAnyPeer(topped.pool)?
-    handle(Following(pool = waited.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey), waited.key, waited.frame.command, waited.frame.body)
+    ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
+    onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch), topped.watch), ticked.arrived)
+
+fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
+    ? "A Message to handle, or a moment to look at the clock."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match arrived
+        Option.None -> quietTurn(state, Time.unixMs())
+        Option.Some(spare) -> handle(heardFrom(state, spare.key, Time.unixMs()), spare.key, spare.frame.command, spare.frame.body)
+
+fn heardFrom(state: Following, key: Int, nowMs: Int) -> Following
+    ? "This Peer just spoke; remember when, for it and for the pool."
+    withWatch(state, heardAt(state.watch, key, nowMs))
+
+fn heardAt(watch: Watching, key: Int, nowMs: Int) -> Watching
+    ? "One Peer's voice moves its own timestamp and the pool's."
+    Watching(snapshot = watch.snapshot, heard = Map.set(watch.heard, key, nowMs), anyHeardMs = nowMs, saidPeersMs = watch.saidPeersMs)
+
+verify heardAt
+    heardAt(freshWatch(0), 3, 900).anyHeardMs => 900
+    Map.get(heardAt(freshWatch(0), 3, 900).heard, 3) => Option.Some(900)
+    heardAt(freshWatch(7), 3, 900).saidPeersMs => 7
+
+fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
+    ? "A tick with nothing on it: check the silence rule, bring the"
+      "Snapshot's company up to date, say what has come due, and go round."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    _somebody = anyoneLeft(Map.len(state.pool.sockets))?
+    _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
+    listen(saidStats(refreshed(state, nowMs), nowMs))
+
+fn anyoneLeft(held: Int) -> Result<Unit, String>
+    ? "A pool with nobody in it ends the run."
+      "The top-up a moment ago was this turn's chance to refill it, so an"
+      "empty pool here means the Address Book had nothing left to dial."
+    match held > 0
+        true -> Result.Ok(Unit)
+        false -> Result.Err("every Peer is gone and the Address Book has nothing left to dial")
+
+verify anyoneLeft
+    anyoneLeft(1) => Result.Ok(Unit)
+    anyoneLeft(0) => Result.Err("every Peer is gone and the Address Book has nothing left to dial")
+
+fn stillHeard(silentMs: Int) -> Result<Unit, String>
+    ? "Whether anybody has said anything inside the idle deadline."
+      "The same rule the pool's own poll enforced before the tick (#129):"
+      "silence from everybody for the whole deadline is a node no longer"
+      "connected to anything that is still talking."
+    match silentMs < Infra.Peers.idleDeadlineMs()
+        true -> Result.Ok(Unit)
+        false -> Result.Err("no Peer said anything for {Int.div(Infra.Peers.idleDeadlineMs(), 1000)} seconds")
+
+verify stillHeard
+    stillHeard(0) => Result.Ok(Unit)
+    stillHeard(149999) => Result.Ok(Unit)
+    stillHeard(150000) => Result.Err("no Peer said anything for 150 seconds")
+
+fn refreshed(state: Following, nowMs: Int) -> Following
+    ? "The Snapshot's company brought up to date: who is connected, how"
+      "long each has been quiet, and how many Candidates are on the shelf."
+    withWatch(state, Watching(snapshot = Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, peerViews(state.pool.standing, state.watch, Map.keys(state.pool.sockets), [])), Domain.AddressBook.sizeOf(state.book)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs))
+
+fn peerViews(standing: Map<Int, Standing>, watch: Watching, keys: List<Int>, acc: List<PeerView>) -> List<PeerView>
+    ? "One PeerView per connected Peer, oldest key first."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> peerViews(standing, watch, tail, List.prepend(peerView(standing, watch, head), acc))
+
+verify peerViews
+    peerViews(Domain.Inbox.noStanding(), freshWatch(0), [], []) => []
+    peerViews(Map.fromList([(0, Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/"))]), freshWatch(5), [0], []) => [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 5)]
+
+fn peerView(standing: Map<Int, Standing>, watch: Watching, key: Int) -> PeerView
+    ? "What the Snapshot shows of one Peer."
+      "A Peer somehow missing from the standing renders as unknown rather"
+      "than being invented; a Peer never heard from is shown heard at the"
+      "moment the pool last heard anything, which errs towards patience."
+    viewOf(key, Domain.Inbox.standingAt(standing, key), Option.withDefault(Map.get(watch.heard, key), watch.anyHeardMs))
+
+fn viewOf(key: Int, standing: Option<Standing>, heardMs: Int) -> PeerView
+    ? "The Standing folded into a view, or the unknown Peer."
+    match standing
+        Option.None -> PeerView(key = key, address = "unknown", version = 0, agent = "", lastHeardMs = heardMs)
+        Option.Some(one) -> PeerView(key = key, address = one.address, version = one.version, agent = one.agent, lastHeardMs = heardMs)
+
+verify viewOf
+    viewOf(2, Option.None, 7) => PeerView(key = 2, address = "unknown", version = 0, agent = "", lastHeardMs = 7)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/")), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7)
+
+fn saidStats(state: Following, nowMs: Int) -> Following
+    ? "The Peer stats line, when it has come due and not before."
+    ! [Console.print]
+    match Domain.Screenlines.due(state.watch.saidPeersMs, nowMs, Domain.Screenlines.peerStatsEveryMs())
+        false -> state
+        true -> saidStatsNow(state, nowMs)
+
+fn saidStatsNow(state: Following, nowMs: Int) -> Following
+    ? "Say it, and remember when it was said."
+    ! [Console.print]
+    _said = Console.print(Domain.Screenlines.peersLine(state.watch.snapshot.company, nowMs))
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = nowMs))
 
 fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this loop acts on; every other one is ignored."
@@ -541,7 +758,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
     offered = Domain.Addr.addressesOf(body)
     grown = Domain.AddressBook.heardAll(state.book, renderedAll(offered, []), key)
     _said = saidHeard(List.len(offered), key, Domain.AddressBook.sizeOf(grown))
-    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey))
+    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch))
 
 fn saidHeard(offered: Int, key: Int, held: Int) -> Unit
     ? "Say what was heard, unless nothing was."
@@ -596,4 +813,4 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ]
     payload = Bytes.fromList(body)?
     sent = Infra.Peers.send(state.pool, key, "pong", payload)?
-    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch))

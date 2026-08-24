@@ -12,7 +12,7 @@ module Bodies
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
     exposes [Progress, bodies, bodiesOn]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screenlines, Infra.Pace]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -30,6 +30,7 @@ record Progress
     pending: List<Entry>
     waiting: Int
     count: Int
+    pace: Pace
 
 fn locationBatch() -> Int
     ? "How many Locations to hold before writing them."
@@ -84,14 +85,14 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    walked = walk(Progress(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0), key, from, to)?
+    walked = walk(Progress(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs())), key, from, to)?
     settled(walked)
 
 fn settled(progress: Progress) -> Result<Progress, String>
     ? "Write whatever Locations are still held back."
     ! [Infra.Kv.putAll]
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Progress(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count))
+    Result.Ok(Progress(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace))
 
 fn walk(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, String>
     ? "Each Height in turn, until the range is exhausted."
@@ -158,7 +159,7 @@ fn fetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) ->
 
 fn asked(progress: Progress, pool: Pool) -> Progress
     ? "The walk, carrying the pool the last question left."
-    Progress(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count)
+    Progress(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace)
 
 fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Progress, String>
     ? "Write the Block to a Segment, then record where it went."
@@ -176,7 +177,7 @@ fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, fra
     payload = Bytes.fromList(frame.body)?
     _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
     appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
+    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace)
     written = maybeWrite(held)?
     announce(written, key, height, to, List.len(frame.body))
 
@@ -212,7 +213,11 @@ fn maybeWrite(progress: Progress) -> Result<Progress, String>
         true -> settled(progress)
 
 fn announce(progress: Progress, key: Int, height: Int, to: Int, size: Int) -> Result<Progress, String>
-    ? "Say what arrived, then move on."
+    ? "A progress line each minute, rather than a line for every Block."
+      "The walk fetches thousands of Blocks a minute at the start of the"
+      "chain, and a reader watching it wants where it is, how fast it is"
+      "going and how long is left (#129) -- not one line per Block. The line"
+      "goes through the same minute gate every long walk uses."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -221,5 +226,62 @@ fn announce(progress: Progress, key: Int, height: Int, to: Int, size: Int) -> Re
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    _said = Console.print("block {height}  {size} bytes  segment {Infra.Blocks.currentSegment(progress.blocks)}")
-    walk(progress, key, height + 1, to)
+    saying(progress, key, height, to, Time.unixMs())
+
+fn saying(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Progress, String>
+    ? "Say where the walk is when a line is due, and stay quiet otherwise."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Infra.Pace.due(progress.pace, nowMs, progress.count - 1)
+        false -> walk(progress, key, height + 1, to)
+        true -> said(progress, key, height, to, nowMs)
+
+fn said(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Progress, String>
+    ? "The line, and the Pace the next one measures from."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _said = Console.print("{paceLine(height, to, progress.count, progress.pace, nowMs)}")
+    walk(Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0)), key, height + 1, to)
+
+fn paceLine(height: Int, to: Int, count: Int, pace: Pace, nowMs: Int) -> String
+    ? "Where the walk is, how fast it is going, and how long is left at that"
+      "speed -- the sentence a chain download is watched by (#129)."
+    "blocks {height}/{to} ({percentAt(height, to)}%) {Infra.Pace.perSecond(count - pace.lastBlocks, nowMs - pace.lastMs)}/s eta {etaText(to - height, count - pace.lastBlocks, nowMs - pace.lastMs)}"
+
+verify paceLine
+    paceLine(300, 1000, 240, Infra.Pace.advanced(Infra.Pace.pacedFrom(0), 0, 0, 0), 60000) => "blocks 300/1000 (30%) 4.0/s eta 2m55s"
+    paceLine(1000, 1000, 240, Infra.Pace.advanced(Infra.Pace.pacedFrom(0), 0, 240, 0), 60000) => "blocks 1000/1000 (100%) 0.0/s eta ?"
+
+fn percentAt(height: Int, to: Int) -> Int
+    ? "How far up the range the walk has reached, in whole percent."
+    match to > 0
+        true -> Result.withDefault(Int.div(height * 100, to), 0)
+        false -> 0
+
+verify percentAt
+    percentAt(300, 1000) => 30
+    percentAt(0, 0) => 0
+
+fn etaText(remaining: Int, recent: Int, elapsedMs: Int) -> String
+    ? "How long the rest takes at the recent rate, or a question mark while"
+      "there is no rate to read."
+    match recent > 0
+        true -> Domain.Screenlines.spanText(Result.withDefault(Int.div(remaining * elapsedMs, recent * 1000), 0))
+        false -> "?"
+
+verify etaText
+    etaText(700, 240, 60000) => "2m55s"
+    etaText(0, 240, 60000) => "0s"
+    etaText(700, 0, 60000) => "?"

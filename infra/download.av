@@ -12,7 +12,7 @@ module Download
         "so stopping is always safe and restarting costs at most the batch"
         "that was in flight."
     exposes [Grown, headers, headersOn]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Pace, Infra.Peers, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -72,7 +72,7 @@ fn headerSession(pool: Pool, store: Store) -> Result<Grown, String>
     seeded = withGenesis(pool.network, store)?
     have = tipHeight(seeded)?
     _said = Console.print("have {have} headers; asking for more")
-    headerBatch(pool, soleKey(), seeded, have)
+    headerBatch(pool, soleKey(), seeded, have, Infra.Pace.pacedFrom(Time.unixMs()))
 
 fn headersOn(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
     ? "The same catch-up on a pool somebody else opened, and with the Height"
@@ -90,7 +90,7 @@ fn headersOn(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, Str
         Time.unixMs,
     ]
     seeded = withGenesis(pool.network, store)?
-    headerBatch(pool, key, seeded, have)
+    headerBatch(pool, key, seeded, have, Infra.Pace.pacedFrom(Time.unixMs()))
 
 fn withGenesis(network: Network, store: Store) -> Result<Store, String>
     ? "Put the first Block in the Index, because no Peer will send it."
@@ -133,11 +133,15 @@ verify heightsOf
     heightsOf(Option.Some(Placement(blockId = "aa", parentId = "bb", height = 3, work = 1))) => 4
     heightsOf(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 0, work = 1))) => 1
 
-fn headerBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
+fn headerBatch(pool: Pool, key: Int, store: Store, have: Int, pace: Pace) -> Result<Grown, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
       "Each round asks the stop flag first, so a Ctrl-C during a long"
       "catch-up ends the phase at a batch boundary with what is already"
       "stored -- and the command's claim is released the ordinary way (#112)."
+      "Each round also owes the reader a line once a minute (#129): how many"
+      "Headers are held and how fast they are arriving. No target and no"
+      "ETA, because a Peer never says how many it has -- the phase ends when"
+      "a batch stops moving the tip, and only then is the count a total."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -148,7 +152,41 @@ fn headerBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, S
     ]
     match Process.stopRequested()
         true -> stoppedBatch(pool, store, have)
-        false -> nextBatch(pool, key, store, have)
+        false -> pacedBatch(pool, key, store, have, pace, Time.unixMs())
+
+fn pacedBatch(pool: Pool, key: Int, store: Store, have: Int, pace: Pace, nowMs: Int) -> Result<Grown, String>
+    ? "The minute line when it is due, then the round itself."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Infra.Pace.due(pace, nowMs, 1)
+        false -> nextBatch(pool, key, store, have, pace)
+        true -> saidBatch(pool, key, store, have, pace, nowMs)
+
+fn saidBatch(pool: Pool, key: Int, store: Store, have: Int, pace: Pace, nowMs: Int) -> Result<Grown, String>
+    ? "Say it, and measure the next line from now."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _said = Console.print("{headerPaceLine(have, pace, nowMs)}")
+    nextBatch(pool, key, store, have, Infra.Pace.advanced(pace, nowMs, have, 0))
+
+fn headerPaceLine(have: Int, pace: Pace, nowMs: Int) -> String
+    ? "How many Headers are held and how fast they are arriving."
+    "headers {have} held, {Infra.Pace.perSecond(have - pace.lastBlocks, nowMs - pace.lastMs)}/s"
+
+verify headerPaceLine
+    headerPaceLine(120000, Infra.Pace.advanced(Infra.Pace.pacedFrom(0), 0, 30000, 0), 60000) => "headers 120000 held, 1500.0/s"
 
 fn stoppedBatch(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
     ? "Asked to stop mid catch-up: keep what is stored and end the phase."
@@ -156,7 +194,7 @@ fn stoppedBatch(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
     _said = Console.print("stop requested; headers pause at {have}")
     Result.Ok(Grown(pool = pool, store = store))
 
-fn nextBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
+fn nextBatch(pool: Pool, key: Int, store: Store, have: Int, pace: Pace) -> Result<Grown, String>
     ? "One round: ask, wait, absorb."
     ! [
         Console.error, Console.print,
@@ -171,9 +209,9 @@ fn nextBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, Str
     sent = Infra.Peers.send(pool, key, "getheaders", payload)?
     waited = Infra.Peers.awaitFrom(sent, key, "headers")?
     decoded = Domain.Block.headersOf(waited.frame.body)?
-    absorb(waited.pool, key, store, have, decoded)
+    absorb(waited.pool, key, store, have, decoded, pace)
 
-fn absorb(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Grown, String>
+fn absorb(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>, pace: Pace) -> Result<Grown, String>
     ? "An empty batch means the Peer has nothing after what we hold."
     ! [
         Console.error, Console.print,
@@ -185,7 +223,7 @@ fn absorb(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHead
     ]
     match decoded
         [] -> done(pool, store, have)
-        [head, ..tail] -> stored(pool, key, store, have, decoded)
+        [head, ..tail] -> stored(pool, key, store, have, decoded, pace)
 
 fn done(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
     ? "Report where the Index now reaches and stop."
@@ -193,7 +231,7 @@ fn done(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
     _said = Console.print("headers complete: {have} known")
     Result.Ok(Grown(pool = pool, store = store))
 
-fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Grown, String>
+fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>, pace: Pace) -> Result<Grown, String>
     ? "Write the batch in one append, then ask for the next."
       "One putAll rather than a put per Header: a Store hands back a copy of"
       "itself, so a batch of two thousand costs one copy instead of two thousand."
@@ -207,9 +245,9 @@ fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHead
     ]
     outcome = Infra.Headers.absorbed(store, decoded)?
     _told = announced(outcome)
-    continuing(pool, key, outcome)
+    continuing(pool, key, outcome, pace)
 
-fn continuing(pool: Pool, key: Int, outcome: Settled) -> Result<Grown, String>
+fn continuing(pool: Pool, key: Int, outcome: Settled, pace: Pace) -> Result<Grown, String>
     ? "Ask for more only while the batch is moving the tip."
       "The Height to carry forward used to be the old one plus however many"
       "Headers arrived, which always went up. It is now the tip's Height,"
@@ -229,8 +267,8 @@ fn continuing(pool: Pool, key: Int, outcome: Settled) -> Result<Grown, String>
     ]
     match outcome.movement
         Movement.Unchanged -> done(pool, outcome.store, outcome.tipHeight + 1)
-        Movement.Extended(added) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1)
-        Movement.Reorganised(forkHeight, displaced) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1)
+        Movement.Extended(added) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1, pace)
+        Movement.Reorganised(forkHeight, displaced) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1, pace)
 
 fn announced(outcome: Settled) -> Unit
     ? "Say where the tip now is, and say so differently when it moved sideways."
