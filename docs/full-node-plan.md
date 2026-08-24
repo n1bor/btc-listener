@@ -34,11 +34,11 @@ not yet made.
 
 | stage | what | issue |
 |---|---|---|
-| 0 | signet, the Network the node grows up on | [#23](https://github.com/n1bor/btc-listener/issues/23) |
-| 1 | a tree of Headers, and the most-work tip | [#24](https://github.com/n1bor/btc-listener/issues/24) |
-| 2 | the UTXO Set, its Undo Data, and the Assume-valid Height | [#25](https://github.com/n1bor/btc-listener/issues/25) |
-| 3 | Script completeness above the Assume-valid Height | [#20](https://github.com/n1bor/btc-listener/issues/20), [#12](https://github.com/n1bor/btc-listener/issues/12) |
-| 4 | following the tip on one Peer | [#26](https://github.com/n1bor/btc-listener/issues/26) |
+| 0 | signet, the Network the node grows up on | [#23](https://github.com/n1bor/btc-listener/issues/23) — **shipped** |
+| 1 | a tree of Headers, and the most-work tip | [#24](https://github.com/n1bor/btc-listener/issues/24) — **shipped** |
+| 2 | the UTXO Set, its Undo Data, and the Assume-valid Height | [#25](https://github.com/n1bor/btc-listener/issues/25) — **shipped** |
+| 3 | Script completeness above the Assume-valid Height | [#20](https://github.com/n1bor/btc-listener/issues/20), [#12](https://github.com/n1bor/btc-listener/issues/12) — **shipped** |
+| 4 | following the tip on one Peer | [#26](https://github.com/n1bor/btc-listener/issues/26) — **shipped** |
 | 5 | many Peers, and the Peer Address gossip | [#27](https://github.com/n1bor/btc-listener/issues/27) |
 | 6 | the Mempool, and Transaction relay | [#28](https://github.com/n1bor/btc-listener/issues/28) |
 | 7 | compact Blocks | [#29](https://github.com/n1bor/btc-listener/issues/29) |
@@ -70,7 +70,7 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ask | upstream | gates |
 |---|---|---|
 | a concurrency direction | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) — **answered**: independent products plus poll-shaped effects; see [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md) | nothing any more |
-| ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #26/#27 |
+| ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #27 |
 | a readiness poll over connections | [jasisz/aver#1013](https://github.com/jasisz/aver/issues/1013) | Stage 5 |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
 | `Tcp.listen` / `Tcp.accept` | to be filed; same family as the poll | Stage 8 |
