@@ -259,7 +259,7 @@ fn answeredPing(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Fr
 fn awaitAny(pool: Pool, key: Int, deadlineMs: Int) -> Result<Waited, String>
     ? "The next Message this Peer has for us, whatever it is."
     ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
-    match Domain.Inbox.popped(pool.standing, key)
+    match Domain.Inbox.popped(pool.network, pool.standing, key)
         Result.Err(why) -> Result.Err("peer {key}: {why}")
         Result.Ok(found) -> orPump(pool, key, deadlineMs, found)
 
@@ -287,21 +287,42 @@ fn awaitAnyPeer(pool: Pool) -> Result<WaitedFrom, String>
       "waited for, so nothing is put back and nothing is skipped. The only"
       "deadline is the pool's own -- silence from everybody, which is a node"
       "that is no longer connected to the Network."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome]
-    match Domain.Inbox.poppedAny(pool.standing)
-        Result.Err(why) -> Result.Err(why)
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    match Domain.Inbox.poppedAny(pool.network, pool.standing)
+        Result.Err(why) -> misbehaving(pool, why)
         Result.Ok(found) -> orPumpAny(pool, found)
+
+fn misbehaving(pool: Pool, why: String) -> Result<WaitedFrom, String>
+    ? "A Peer that broke the protocol costs itself, not the node."
+      "With one Peer there was nothing to do but stop. With several, a stream"
+      "this program will not read on from is a fact about one Peer: it is"
+      "dropped, said out loud, and the node carries on with the others. The"
+      "run ends only when the last Peer has gone, which the pump reports."
+      "Every fault detectable here -- a Message framed for another Network, a"
+      "payload that does not match its own checksum, a length no Message may"
+      "have -- is one Bitcoin Core disconnects on outright rather than"
+      "scoring, so there is nothing here a counter would usefully count."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    match Domain.Inbox.faultyIn(pool.network, pool.standing)
+        Option.None -> Result.Err(why)
+        Option.Some(key) -> dropped(pool, key, why)
+
+fn dropped(pool: Pool, key: Int, why: String) -> Result<WaitedFrom, String>
+    ? "Close the offender and go back to listening to everybody else."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
+    _said = Console.error("dropping peer {key}: {why}")
+    awaitAnyPeer(dropOne(pool, key)?)
 
 fn orPumpAny(pool: Pool, found: Option<PoppedAt>) -> Result<WaitedFrom, String>
     ? "A Message already read from somebody, or another turn of the loop."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
     match found
         Option.Some(one) -> Result.Ok(WaitedFrom(pool = withStanding(pool, one.standing), key = one.key, frame = one.frame))
         Option.None -> pumpedAny(pool)
 
 fn pumpedAny(pool: Pool) -> Result<WaitedFrom, String>
     ? "Nothing queued anywhere, so read from every Peer and look again."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome]
     awaitAnyPeer(pumped(pool)?)
 
 fn pumped(pool: Pool) -> Result<Pool, String>

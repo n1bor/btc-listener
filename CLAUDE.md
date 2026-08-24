@@ -152,6 +152,18 @@ deadlines, not one: 150s of silence from the whole pool, and 60s for a Peer to
 answer the question it was asked, because with several Peers those stopped
 being the same fact.
 
+**A Peer that misbehaves costs itself** (#27, Stage 5): every frame's magic
+bytes and checksum are verified in `domain/inbox.av` — neither was checked
+anywhere before, so a corrupted payload reached the decoders and surfaced as
+whatever they made of the wreckage. A Block body must hash to the Block Id it
+was requested under (`Domain.Block.idOfWholeBlock`, not `blockIdOf` — the
+former takes a whole Block, and getting that wrong accuses every honest Peer).
+A Peer that breaks the protocol is dropped and the node carries on; a catch-up
+that fails against a Peer drops it and retries on whoever is left, because
+otherwise the first Peer named on the command line can end the node by lying
+once. No banscore counter: every fault detectable here is one Core disconnects
+on outright, so a threshold would only ever count to one.
+
 **The Address Book** (#27, Stage 5): `follow` sends `getaddr` on joining and
 folds arriving `addr` Messages into `domain/addressbook.av` as **Candidates** —
 Peer Addresses claimed to exist, which become Peers only on a completed

@@ -48,14 +48,14 @@ fn listen(pool: Pool) -> Result<Unit, String>
       "This never returns of its own accord: the program runs until it is"
       "stopped, or until a read fails. The call is in tail position, so the"
       "recursion does not grow the stack however long it runs."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     waited = Infra.Peers.awaitAnyPeer(pool)?
     handle(waited.pool, waited.key, waited.frame)
 
 fn handle(pool: Pool, key: Int, frame: Frame) -> Result<Unit, String>
     ? "The three Messages this program acts on; every other one is ignored."
       "A ping must be answered, or the Peer eventually drops the connection."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     match frame.command
         "inv" -> onAnnouncement(pool, key, frame.body)
         "tx" -> onTransaction(pool, key, frame.body)
@@ -64,27 +64,27 @@ fn handle(pool: Pool, key: Int, frame: Frame) -> Result<Unit, String>
 
 fn onAnnouncement(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Ask for every Transaction the Peer just offered."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     hashes = Domain.Inventory.txHashesOf(body)
     request(pool, key, hashes)
 
 fn request(pool: Pool, key: Int, hashes: List<List<Int>>) -> Result<Unit, String>
     ? "An Announcement carrying no Transactions needs no reply."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     match hashes
         [] -> listen(pool)
         [head, ..tail] -> sendGetData(pool, key, hashes)
 
 fn sendGetData(pool: Pool, key: Int, hashes: List<List<Int>>) -> Result<Unit, String>
     ? "Send the getdata that turns identifiers into Transactions."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
     sent = Infra.Peers.send(pool, key, "getdata", payload)?
     listen(sent)
 
 fn onTransaction(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Decode and print the Transaction, then go back to listening."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     _shown = show(pool.network, Domain.Transaction.decode(body))
     listen(pool)
 
@@ -100,7 +100,7 @@ fn show(network: Network, decoded: Result<Transaction, String>) -> Unit
 
 fn onPing(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Reply with the same nonce the Peer sent."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     payload = Bytes.fromList(body)?
     sent = Infra.Peers.send(pool, key, "pong", payload)?
     listen(sent)

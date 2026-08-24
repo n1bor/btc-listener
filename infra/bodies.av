@@ -163,10 +163,35 @@ fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, fra
         Time.unixMs,
     ]
     payload = Bytes.fromList(frame.body)?
+    _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
     appended = Infra.Blocks.append(progress.blocks, payload)?
     held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.Index.blockKey(blockId), value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
     written = maybeWrite(held)?
     announce(written, key, height, to, List.len(frame.body))
+
+fn matchesRequest(key: Int, wanted: String, arrived: String) -> Result<Unit, String>
+    ? "The Block that arrived has to be the Block that was asked for."
+      "A getdata names a Block Id and a Peer answers with bytes. Nothing made"
+      "those the same thing: until this check, whatever arrived was written"
+      "to a Segment and the Index was told it was the Block we wanted, so one"
+      "dishonest or confused Peer could put anything under any Block Id."
+      "It is cheap -- one double-SHA256 over eighty bytes -- and it is the"
+      "difference between an Index that records what a Peer said and one that"
+      "records what it checked. show has always verified this on the way back"
+      "out, which is how it would eventually have been noticed, a long way"
+      "from the Peer that did it."
+      "idOfWholeBlock rather than blockIdOf: a Block is its eighty-byte"
+      "Header followed by its Transactions and only the Header is hashed."
+      "Written the wrong way round first, which accused an honest Bitcoin"
+      "Core node of sending the wrong Block for every Block it sent -- the"
+      "check was right and the thing being compared was not."
+    match wanted == arrived
+        true -> Result.Ok(Unit)
+        false -> Result.Err("peer {key} was asked for Block {wanted} and sent {arrived}")
+
+verify matchesRequest
+    matchesRequest(0, "aa", "aa") => Result.Ok(Unit)
+    matchesRequest(3, "aa", "bb") => Result.Err("peer 3 was asked for Block aa and sent bb")
 
 fn maybeWrite(progress: Progress) -> Result<Progress, String>
     ? "Write the batch once it is big enough, and start a new one."

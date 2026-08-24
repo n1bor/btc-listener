@@ -138,7 +138,7 @@ fn toppedUp(state: Following) -> Result<Following, String>
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match Map.len(state.pool.sockets) >= targetPeers()
@@ -150,7 +150,7 @@ fn dialling(state: Following, chosen: Option<String>) -> Result<Following, Strin
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match chosen
@@ -162,7 +162,7 @@ fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey)
@@ -175,7 +175,7 @@ fn reaching(state: Following, address: String, peer: PeerAddress) -> Result<Foll
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match Infra.Peers.joined(state.pool, state.nextKey, peer)
@@ -204,7 +204,7 @@ fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, S
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match addresses
@@ -219,7 +219,7 @@ fn joiningOne(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: In
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match Infra.Peers.joined(pool, key, address)
@@ -231,7 +231,7 @@ fn refused(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int, 
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     _said = Console.error("peer {Domain.Address.toString(address)} refused: {why}")
@@ -242,7 +242,7 @@ fn accepted(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int)
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     _said = Console.print("peer {key} is {Domain.Address.toString(address)}")
@@ -265,7 +265,7 @@ fn session(state: Following) -> Result<Unit, String>
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     started = caughtUp(state, firstKey(state.pool))?
@@ -286,6 +286,58 @@ verify lowestKey
     lowestKey([0, 1]) => Result.Ok(0)
 
 fn caughtUp(state: Following, key: Int) -> Result<Following, String>
+    ? "Catch up on one Peer, and if that Peer will not do it, on another."
+      "A Peer being asked for Headers or bodies can fail in ways that are"
+      "facts about it rather than about the chain: a Message that does not"
+      "match its own checksum, one framed for another Network, a Block that"
+      "is not the Block that was asked for, or simply no answer at all before"
+      "the deadline. With one Peer there was nothing to do but stop, and this"
+      "program did. With several, stopping would mean the first Peer named on"
+      "the command line can end the node by lying once -- which is what the"
+      "misbehaviour test found it doing."
+      "So the Peer is dropped and the catch-up tried again on whoever is"
+      "left. Each attempt removes a Peer, so the retrying stops."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match catchingUp(state, key)
+        Result.Ok(moved) -> Result.Ok(moved)
+        Result.Err(why) -> withoutPeer(state, key, why)
+
+fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, String>
+    ? "Drop the Peer that would not do it, then look for another."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    _said = Console.error("dropping peer {key}: {why}")
+    shrunk = Infra.Peers.dropOne(state.pool, key)?
+    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey), why)
+
+fn onwardWith(state: Following, why: String) -> Result<Following, String>
+    ? "Another Peer to ask, or nobody left and the reason the last one gave."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    match Map.keys(state.pool.sockets)
+        [] -> Result.Err("no Peer could bring the chain up to date; the last said: {why}")
+        [head, ..tail] -> caughtUp(state, head)
+
+fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     ? "The three phases in the one order they can go in, asking one Peer."
       "Headers first, because nothing below can act on a Block it cannot"
       "place. Then the Set is taken back off any branch the Headers have just"
@@ -308,7 +360,7 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     have = haveOf(state.store)?
@@ -383,7 +435,7 @@ fn listen(state: Following) -> Result<Unit, String>
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     drained = drainSpare(state)
@@ -404,7 +456,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     match command
@@ -425,7 +477,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     announced = Domain.Inventory.blockHashesOf(body)
@@ -444,7 +496,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     offered = Domain.Addr.addressesOf(body)
@@ -484,7 +536,7 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     _said = Console.print("{Time.now()}  {why}")
@@ -498,7 +550,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     payload = Bytes.fromList(body)?

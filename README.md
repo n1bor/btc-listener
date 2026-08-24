@@ -636,14 +636,14 @@ sends its body and its Output cannot be spent, which is why the fifty coins of
 Block 0 are missing from the supply that can ever move. Bitcoin Core leaves it
 out of the UTXO Set for the same reason.
 
-One deliberate difference from Bitcoin Core: this Set keeps **provably
-unspendable Outputs** and Core does not. Every SegWit coinbase carries a
-witness commitment paying zero to an `OP_RETURN`, which nothing can ever spend,
-and Core leaves it out of its chainstate on those grounds. Measured on a
-regtest chain at Height 103, Core's `gettxoutsetinfo` reports 103 entries where
-this holds 206 — the same 5150 BTC of value, and one extra zero-value entry per
-Block. It costs nothing in correctness and roughly doubles the entry count on a
-SegWit chain, so it is worth revisiting before mainnet.
+**Provably unspendable Outputs are declined**, on Core's own rule. Every SegWit
+coinbase carries a witness commitment paying zero to an `OP_RETURN`, which
+nothing can ever spend, and an Output nothing can spend has no business in a
+set of Outputs that can be spent. This was measured before it was fixed: on a
+regtest chain at Height 103, Core's `gettxoutsetinfo` reported 103 entries
+where this held 206 — the same 5150 BTC of value, and one extra zero-value
+entry per Block, which is roughly double the entry count on a SegWit chain.
+[#111](https://github.com/n1bor/btc-listener/issues/111).
 
 The Set records **which Block it stands on**, not only which Height. A Height
 alone means "built along whatever the Index named at the time", and the Index
@@ -825,6 +825,35 @@ assumed:
   operating system takes to give up on the connection — measured at about
   three minutes against a dead signet address. `Tcp.connect` has no timeout to
   pass. That is [#119](https://github.com/n1bor/btc-listener/issues/119).
+
+### When a Peer does not play fair
+
+Every Message is checked before anything is made of it. The four magic bytes
+must be this Network's, and the payload must hash to the checksum its own
+header carries — four bytes of double-SHA256, which every other Bitcoin
+implementation checks and this one did not until Stage 5. A Block body must
+also hash to the Block Id it was asked for; without that, a `getdata` names a
+Block Id and a Peer answers with bytes, and nothing makes those the same thing.
+
+A Peer that fails one of those is dropped, and the node goes on with the
+others. Run against a deliberately hostile Peer beside an honest one:
+
+```
+peer 0 is 127.0.0.1:18455
+peer 1 is 127.0.0.1:18444
+dropping peer 0: a Message did not match the checksum its own header carries
+following at Height 107: 107 connected, 0 disconnected, set +107 -0
+```
+
+A catch-up that fails against a Peer drops it and tries the next, so the first
+Peer named on the command line cannot end the node by lying once — which is
+what it did before this, and what the hostile-Peer test found.
+
+There is no misbehaviour score. Bitcoin Core keeps one because it has graded
+offences; every fault this program can currently detect is one Core disconnects
+on outright, so a counter with a threshold would be a counter that only ever
+reaches one. When a graded offence appears — Stage 6's Mempool has several —
+the score can appear with it.
 
 ## Reclaiming space
 
