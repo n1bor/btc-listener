@@ -329,16 +329,41 @@ fn session(state: Following, screened: Bool) -> Result<Unit, String>
 
 fn screenedInto(state: Following, screened: Bool) -> Result<Following, String>
     ? "Take the terminal and open the Overview, when a Screen was asked for."
-    ! [Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor]
+    ! [
+        Infra.Kv.get,
+        Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor,
+        Time.unixMs,
+    ]
     match screened
         false -> Result.Ok(state)
         true -> takenTerminal(state)
 
 fn takenTerminal(state: Following) -> Result<Following, String>
-    ? "Raw mode on, and the View into the state the loop carries."
-    ! [Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor]
+    ? "Raw mode on, the Snapshot stood at the tip, and the View into the"
+      "state the loop carries."
+      "The tip is read here because a catch-up that found nothing to do"
+      "never moves the Snapshot -- and a Screen opened over an up-to-date"
+      "chain should say where the node stands, not show a catch-up of"
+      "nothing."
+    ! [
+        Infra.Kv.get,
+        Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor,
+        Time.unixMs,
+    ]
     _taken = Infra.Screen.entered()?
-    Result.Ok(withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()))))
+    placed = Infra.Headers.tipOf(state.store)?
+    Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()))))
+
+fn atTip(snapshot: Snapshot, placed: Option<Placement>, nowMs: Int) -> Snapshot
+    ? "The Snapshot standing on the tree's best tip, when the tree has one."
+    match placed
+        Option.None -> snapshot
+        Option.Some(one) -> Domain.Snapshot.tipAt(snapshot, one.height, one.blockId, nowMs)
+
+verify atTip
+    atTip(Domain.Snapshot.started(0), Option.None, 5).tip.height => 0
+    atTip(Domain.Snapshot.started(0), Option.Some(Placement(blockId = "aa", parentId = "pp", height = 7, work = 1)), 5).tip.height => 7
+    atTip(Domain.Snapshot.started(0), Option.Some(Placement(blockId = "aa", parentId = "pp", height = 7, work = 1)), 5).phase => Phase.Listening
 
 fn firstKey(pool: Pool) -> Int
     ? "Which Peer to ask first, before any of them has announced anything."
