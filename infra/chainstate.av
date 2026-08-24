@@ -21,7 +21,7 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.readBytesAt,
@@ -100,7 +100,7 @@ fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    named = Infra.Store.get(state.counted.store, Domain.IndexKeys.heightKey(height)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(state.counted.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Ok(state)
         Option.Some(blockId) -> atBlock(network, state, height, to, blockId)
@@ -120,7 +120,7 @@ fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String)
         Option.None -> Result.Ok(state)
         Option.Some(text) -> connecting(network, state, height, to, blockId, text)
 
-fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: String, stored: Bytes) -> Result<Walk, String>
     ? "Read the Block and put it into the Set."
     ! [
         Console.print,
@@ -128,7 +128,7 @@ fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: Stri
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    location = Domain.Index.decodeLocation(text)?
+    location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
     applied = Infra.Utxo.connectBlock(network, state.counted.store, height, blockId, transactions)?
@@ -147,7 +147,7 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId)))])?
+    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
     counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped)
     stepped = maybeReport(height, counted, state.pace)?
     walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped), height + 1, to)
@@ -177,16 +177,16 @@ fn claimTold(store: Store, reached: Int) -> Result<Unit, String>
     claim = claimIn(held)?
     standingTold(store, claim, reached)
 
-fn claimIn(held: Option<String>) -> Result<Option<Claim>, String>
+fn claimIn(held: Option<Bytes>) -> Result<Option<Claim>, String>
     ? "The claim the Store holds, if it holds one."
     match held
         Option.None -> Result.Ok(Option.None)
-        Option.Some(text) -> someClaim(Domain.AssumeValid.decodeClaim(text))
+        Option.Some(stored) -> someClaim(Domain.AssumeValid.decodeClaim(stored))
 
 verify claimIn
     claimIn(Option.None) => Result.Ok(Option.None)
-    claimIn(Option.Some("100:aa")) => Result.Ok(Option.Some(Claim(height = 100, blockId = "aa")))
-    claimIn(Option.Some("x:aa")) => Result.Err("Assume-valid Height must be a whole number, got 'x:aa'")
+    claimIn(Option.Some(Domain.AssumeValid.encodeClaim(Claim(height = 100, blockId = "aa"))?)) => Result.Ok(Option.Some(Claim(height = 100, blockId = "aa")))
+    claimIn(Option.Some(Domain.Index.emptyBytes())) => Result.Err("an Assume-valid claim is at least 4 bytes, got 0")
 
 fn someClaim(decoded: Result<Claim, String>) -> Result<Option<Claim>, String>
     ? "A claim that will not decode is corruption."
@@ -209,7 +209,11 @@ fn heldAt(store: Store, claim: Option<Claim>) -> Result<Option<String>, String>
     ! [Infra.Kv.get]
     match claim
         Option.None -> Result.Ok(Option.None)
-        Option.Some(held) -> Infra.Store.get(store, Domain.IndexKeys.heightKey(held.height)?)
+        Option.Some(held) -> namedAt(Infra.Store.get(store, Domain.IndexKeys.heightKey(held.height)?))
+
+fn namedAt(found: Result<Option<Bytes>, String>) -> Result<Option<String>, String>
+    ? "The Block Id h: holds at the claimed Height, spelled the way the report reads it."
+    Result.Ok(Domain.Index.blockIdIn(found?))
 
 fn said(standing: Standing, skipped: Int) -> Unit
     ? "One line, and a loud one when the claim has been undermined."

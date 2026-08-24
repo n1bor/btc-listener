@@ -19,7 +19,7 @@ module Spends
         "lookups was tried and made an audit of two thousand Blocks go from two"
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Work, Pending, resolved, scriptsAcross, resolve]
-    depends [Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store, Domain.IndexKeys]
     effects [Disk.readBytesAt, Infra.Kv.get]
 
 record Checked
@@ -208,18 +208,18 @@ fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int
     ! [Disk.readBytesAt, Infra.Kv.get]
     direct = Infra.Store.get(store, Domain.IndexKeys.outputKey(previousTxid, position)?)?
     match direct
-        Option.Some(text) -> spent(text)
+        Option.Some(stored) -> spent(stored)
         Option.None -> throughTransaction(store, blocks, previousTxid, position)
 
-fn spent(text: String) -> Result<Spend, String>
+fn spent(stored: Bytes) -> Result<Spend, String>
     ? "An Output read straight out of the o: keyspace."
-    output = Domain.Index.decodeSpentOutput(text)?
+    output = Domain.Index.decodeSpentOutput(stored)?
     Result.Ok(Spend.Resolved(output.value, output.script))
 
 verify spent
-    spent("5000:51") => Result.Ok(Spend.Resolved(5000, "51"))
-    spent("5000:") => Result.Ok(Spend.Resolved(5000, ""))
-    spent("nope") => Result.Err("Output record has no separator: 'nope'")
+    spent(Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5000, script = "51"))?) => Result.Ok(Spend.Resolved(5000, "51"))
+    spent(Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5000, script = ""))?) => Result.Ok(Spend.Resolved(5000, ""))
+    spent(Domain.Index.emptyBytes()) => Result.Err("an Output record is at least 8 bytes, got 0")
 
 fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, position: Int) -> Result<Spend, String>
     ? "The longer route: find the parent Transaction, then the Block holding it."
@@ -232,19 +232,19 @@ fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, po
         Option.None -> Result.Ok(Spend.Unknown("transaction {previousTxid} is not indexed"))
         Option.Some(text) -> atSite(store, blocks, text, position)
 
-fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Result<Spend, String>
+fn atSite(store: Store, blocks: BlockStore, stored: Bytes, position: Int) -> Result<Spend, String>
     ? "The site names a Block; the Index says whether its bytes are held."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    site = Domain.Index.decodeTxSite(text)?
+    site = Domain.Index.decodeTxSite(stored)?
     located = Infra.Store.get(store, Domain.IndexKeys.blockKey(site.blockId)?)?
     match located
         Option.None -> Result.Ok(Spend.Unknown("block {site.blockId} is not held"))
         Option.Some(where) -> inBlock(blocks, where, site, position)
 
-fn inBlock(blocks: BlockStore, where: String, site: TxSite, position: Int) -> Result<Spend, String>
+fn inBlock(blocks: BlockStore, stored: Bytes, site: TxSite, position: Int) -> Result<Spend, String>
     ? "Read the Block and take the Transaction the site points at."
     ! [Disk.readBytesAt]
-    location = Domain.Index.decodeLocation(where)?
+    location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
     Result.Ok(outputAt(nth(transactions, site.position), site, position))

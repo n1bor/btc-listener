@@ -37,7 +37,7 @@ fn seeded(network: Network, store: Store) -> Result<Store, String>
     held = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     plantedUnless(network, store, blockId, held)
 
-fn plantedUnless(network: Network, store: Store, blockId: String, held: Option<String>) -> Result<Store, String>
+fn plantedUnless(network: Network, store: Store, blockId: String, held: Option<Bytes>) -> Result<Store, String>
     ? "Plant it only where nothing is planted."
     ! [Infra.Kv.putAll]
     match held
@@ -49,7 +49,7 @@ fn planted(network: Network, store: Store, blockId: String) -> Result<Store, Str
     ! [Infra.Kv.putAll]
     root = Domain.HeaderTree.rootedAt(blockId, Domain.HeaderBytes.genesisBitsFor(network))
     kept = Domain.TreeStore.heldFor(root, Domain.HeaderBytes.genesisHexFor(network))
-    Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.headerKey(blockId)?, value = Domain.TreeStore.encodeHeld(kept)), Entry(key = Domain.TreeStore.bestTipKey()?, value = blockId)])
+    Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.headerKey(blockId)?, value = Domain.TreeStore.encodeHeld(kept)?), Entry(key = Domain.TreeStore.bestTipKey()?, value = Domain.Index.encodeBlockId(blockId)?)])
 
 fn absorbed(store: Store, decoded: List<BlockHeader>) -> Result<Settled, String>
     ? "A batch of Headers into the tree, and h: pointed at the best branch."
@@ -76,7 +76,7 @@ fn repointed(store: Store, tip: Placement, placed: Int, orphans: Int) -> Result<
     plan = Domain.Reorg.repointing(standings)
     moved = Infra.Store.putAll(store, heightEntries(plan.changed, [])?)?
     swept = cleared(moved, plan.staleFrom, [])?
-    named = Infra.Store.putAll(swept, [Entry(key = Domain.TreeStore.bestTipKey()?, value = tip.blockId)])?
+    named = Infra.Store.putAll(swept, [Entry(key = Domain.TreeStore.bestTipKey()?, value = Domain.Index.encodeBlockId(tip.blockId)?)])?
     Result.Ok(Settled(store = named, placed = placed, orphans = orphans, movement = Domain.Reorg.movementOf(plan), tipHeight = tip.height))
 
 fn treeFor(store: Store, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
@@ -100,7 +100,7 @@ fn withParent(store: Store, header: BlockHeader, rest: List<BlockHeader>, known:
     seededWith = withFetched(known, header.previousBlockId, text)?
     treeFor(store, rest, placedInto(seededWith, header))
 
-fn withFetched(known: Map<String, Placement>, parentId: String, text: Option<String>) -> Result<Map<String, Placement>, String>
+fn withFetched(known: Map<String, Placement>, parentId: String, text: Option<Bytes>) -> Result<Map<String, Placement>, String>
     ? "The fetched parent into the batch's Map, or the Map unchanged."
       "Unchanged means the parent is nowhere, so the Header placed against it"
       "will come out an Orphan, which is the right answer and not an error."
@@ -110,8 +110,8 @@ fn withFetched(known: Map<String, Placement>, parentId: String, text: Option<Str
 
 verify withFetched
     Map.len(withFetched(Map.fromList([]), "aa", Option.None)?) => 0
-    Map.len(withFetched(Map.fromList([]), "aa", Option.Some("0:1:pp:hh"))?) => 1
-    withFetched(Map.fromList([]), "aa", Option.Some("nonsense")) => Result.Err("Header record must be height:work:parent:header, got 'nonsense'")
+    Map.len(withFetched(Map.fromList([]), "aa", Option.Some(Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bb", height = 0, work = 1), "01"))?))?) => 1
+    withFetched(Map.fromList([]), "aa", Option.Some(Domain.Index.emptyBytes())) => Result.Err("a Header record is at least 4 bytes, got 0")
 
 fn withDecoded(known: Map<String, Placement>, parentId: String, held: Result<Held, String>) -> Result<Map<String, Placement>, String>
     ? "A k: entry that will not decode is corruption and stops the phase."
@@ -120,7 +120,7 @@ fn withDecoded(known: Map<String, Placement>, parentId: String, held: Result<Hel
         Result.Ok(kept) -> Result.Ok(Map.set(known, parentId, kept.placement))
 
 verify withDecoded
-    Map.len(withDecoded(Map.fromList([]), "aa", Domain.TreeStore.decodeHeld("aa", "0:1:pp:hh"))?) => 1
+    Map.len(withDecoded(Map.fromList([]), "aa", Domain.TreeStore.decodeHeld("aa", Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bb", height = 0, work = 1), "01"))?))?) => 1
     withDecoded(Map.fromList([]), "aa", Result.Err("no")) => Result.Err("no")
     withDecoded(Map.fromList([]), "aa", Result.Ok(Domain.TreeStore.heldFor(Placement(blockId = "aa", parentId = "pp", height = 0, work = 1), "hh")))? => Map.set(Map.fromList([]), "aa", Placement(blockId = "aa", parentId = "pp", height = 0, work = 1))
 
@@ -156,11 +156,11 @@ verify entryFor
 fn withHex(header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>, acc: List<Entry>, placement: Placement) -> Result<List<Entry>, String>
     ? "The Placement and the Header's own bytes, as one record."
     hex = Domain.HeaderBytes.hexOf(header)?
-    entriesFor(rest, known, List.prepend(Entry(key = Domain.TreeStore.headerKey(header.blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(placement, hex))), acc))
+    entriesFor(rest, known, List.prepend(Entry(key = Domain.TreeStore.headerKey(header.blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(placement, hex))?), acc))
 
 verify withHex
     List.len(withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())?) => 1
-    withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())? => [Entry(key = Domain.TreeStore.headerKey(sampleHeader().blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(samplePlacement(), Domain.HeaderBytes.genesisHexFor(Network.Mainnet))))]
+    withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())? => [Entry(key = Domain.TreeStore.headerKey(sampleHeader().blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(samplePlacement(), Domain.HeaderBytes.genesisHexFor(Network.Mainnet)))?)]
     withHex(BlockHeader(blockId = "bb", version = 1, previousBlockId = "aa", merkleRoot = "zz", timestamp = 0, bits = 0, nonce = 0), [], Map.fromList([("bb", Placement(blockId = "bb", parentId = "aa", height = 1, work = 2))]), [], Placement(blockId = "bb", parentId = "aa", height = 1, work = 2)) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn bestAfter(store: Store, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Option<Placement>, String>
@@ -179,8 +179,8 @@ fn tipOf(store: Store) -> Result<Option<Placement>, String>
 
 verify tipOf
     tipOf(Infra.Store.fixture([])) => Result.Ok(Option.None)
-    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, "aa"), (Domain.TreeStore.headerKey("aa")?, "3:1:pp:hh")])) => Result.Ok(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)))
-    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, "aa")])) => Result.Ok(Option.None)
+    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("aa")?), (Domain.TreeStore.headerKey("aa")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bb", height = 3, work = 1), "01"))?)])) => Result.Ok(Option.Some(Placement(blockId = "aa", parentId = "bb", height = 3, work = 1)))
+    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("aa")?)])) => Result.Ok(Option.None)
 
 fn onlyTip(standing: List<Placement>) -> Option<Placement>
     ? "The one Placement the tip record found, if it found one."
@@ -190,7 +190,7 @@ fn onlyTip(standing: List<Placement>) -> Option<Placement>
 
 verify onlyTip
     onlyTip([]) => Option.None
-    onlyTip([Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)]) => Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1))
+    onlyTip([Placement(blockId = "aa", parentId = "bb", height = 3, work = 1)]) => Option.Some(Placement(blockId = "aa", parentId = "bb", height = 3, work = 1))
 
 fn tipHeld(store: Store) -> Result<List<Placement>, String>
     ? "The Placement the best-tip record names, if there is one."
@@ -198,12 +198,12 @@ fn tipHeld(store: Store) -> Result<List<Placement>, String>
     named = Infra.Store.get(store, Domain.TreeStore.bestTipKey()?)?
     tipNamed(store, named)
 
-fn tipNamed(store: Store, named: Option<String>) -> Result<List<Placement>, String>
+fn tipNamed(store: Store, named: Option<Bytes>) -> Result<List<Placement>, String>
     ? "Follow the name to its Placement."
     ! [Infra.Kv.get]
     match named
         Option.None -> Result.Ok([])
-        Option.Some(blockId) -> placementAt(store, blockId)
+        Option.Some(blockId) -> placementAt(store, Domain.Index.decodeBlockId(blockId))
 
 fn placementAt(store: Store, blockId: String) -> Result<List<Placement>, String>
     ? "One Placement as a list, so it can join the candidates."
@@ -214,7 +214,7 @@ fn placementAt(store: Store, blockId: String) -> Result<List<Placement>, String>
     text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     listed(blockId, text)
 
-fn listed(blockId: String, text: Option<String>) -> Result<List<Placement>, String>
+fn listed(blockId: String, text: Option<Bytes>) -> Result<List<Placement>, String>
     ? "The decoded Placement, or nothing."
     match text
         Option.None -> Result.Ok([])
@@ -222,8 +222,8 @@ fn listed(blockId: String, text: Option<String>) -> Result<List<Placement>, Stri
 
 verify listed
     listed("aa", Option.None) => Result.Ok([])
-    List.len(listed("aa", Option.Some("0:1:pp:hh"))?) => 1
-    listed("aa", Option.Some("nonsense")) => Result.Err("Header record must be height:work:parent:header, got 'nonsense'")
+    List.len(listed("aa", Option.Some(Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bb", height = 0, work = 1), "01"))?))?) => 1
+    listed("aa", Option.Some(Domain.Index.emptyBytes())) => Result.Err("a Header record is at least 4 bytes, got 0")
 
 fn onlyPlacement(held: Result<Held, String>) -> Result<List<Placement>, String>
     ? "A record that will not decode stops the phase."
@@ -232,7 +232,7 @@ fn onlyPlacement(held: Result<Held, String>) -> Result<List<Placement>, String>
         Result.Ok(kept) -> Result.Ok([kept.placement])
 
 verify onlyPlacement
-    List.len(onlyPlacement(Domain.TreeStore.decodeHeld("aa", "0:1:pp:hh"))?) => 1
+    List.len(onlyPlacement(Domain.TreeStore.decodeHeld("aa", Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bb", height = 0, work = 1), "01"))?))?) => 1
     onlyPlacement(Result.Err("no")) => Result.Err("no")
     onlyPlacement(Result.Ok(Domain.TreeStore.heldFor(Placement(blockId = "aa", parentId = "pp", height = 0, work = 1), "hh"))) => Result.Ok([Placement(blockId = "aa", parentId = "pp", height = 0, work = 1)])
 
@@ -268,7 +268,7 @@ fn standingsFor(store: Store, blockId: String, acc: List<Standing>) -> Result<Li
     text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     downFrom(store, blockId, text, acc)
 
-fn downFrom(store: Store, blockId: String, text: Option<String>, acc: List<Standing>) -> Result<List<Standing>, String>
+fn downFrom(store: Store, blockId: String, text: Option<Bytes>, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "A Block the tree does not hold ends the walk."
     ! [Infra.Kv.get]
     match text
@@ -285,7 +285,7 @@ fn atPlacement(store: Store, held: Result<Held, String>, acc: List<Standing>) ->
 fn beside(store: Store, placement: Placement, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "This Height of the branch, beside the Block Id h: holds there."
     ! [Infra.Kv.get]
-    recorded = Infra.Store.get(store, Domain.IndexKeys.heightKey(placement.height)?)?
+    recorded = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(placement.height)?)?)
     onwards(store, Standing(placement = placement, recorded = recorded), acc)
 
 fn onwards(store: Store, standing: Standing, acc: List<Standing>) -> Result<List<Standing>, String>
@@ -302,11 +302,11 @@ fn heightEntries(changed: List<Placement>, acc: List<Entry>) -> Result<List<Entr
     ? "One h: entry per Height the new branch claims."
     match changed
         [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> heightEntries(tail, List.prepend(Entry(key = Domain.IndexKeys.heightKey(head.height)?, value = head.blockId), acc))
+        [head, ..tail] -> heightEntries(tail, List.prepend(Entry(key = Domain.IndexKeys.heightKey(head.height)?, value = Domain.Index.encodeBlockId(head.blockId)?), acc))
 
 verify heightEntries
     heightEntries([], []) => Result.Ok([])
-    heightEntries([Domain.HeaderTree.rootedAt("aa", 486604799)], []) => Result.Ok([Entry(key = Domain.IndexKeys.heightKey(0)?, value = "aa")])
+    heightEntries([Domain.HeaderTree.rootedAt("aa", 486604799)], []) => Result.Ok([Entry(key = Domain.IndexKeys.heightKey(0)?, value = Domain.Index.encodeBlockId("aa")?)])
 
 fn cleared(store: Store, height: Int, acc: List<Bytes>) -> Result<Store, String>
     ? "Heights above the new tip that still name a Block, deleted."
@@ -317,7 +317,7 @@ fn cleared(store: Store, height: Int, acc: List<Bytes>) -> Result<Store, String>
     named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     sweeping(store, height, named, acc)
 
-fn sweeping(store: Store, height: Int, named: Option<String>, acc: List<Bytes>) -> Result<Store, String>
+fn sweeping(store: Store, height: Int, named: Option<Bytes>, acc: List<Bytes>) -> Result<Store, String>
     ? "Carry on while Heights are named; delete what was gathered when they stop."
     ! [Infra.Kv.deleteAll, Infra.Kv.get]
     match named
@@ -350,7 +350,7 @@ verify sampleKnown
     Map.len(sampleKnown()) => 1
     Map.has(sampleKnown(), sampleHeader().blockId) => true
 
-fn trunkPairs() -> Result<List<Tuple<Bytes, String>>, String>
+fn trunkPairs() -> Result<List<Tuple<Bytes, Bytes>>, String>
     ? "A Store already following a three-Block chain, for the cases here."
       "Three k: entries, the three Heights they sit at, and a best-tip record"
       "naming the top. Ids are runs of one byte rather than real Block Ids:"
@@ -358,12 +358,12 @@ fn trunkPairs() -> Result<List<Tuple<Bytes, String>>, String>
       "bookkeeping and not the hashing, which Domain.HeaderBytes covers."
       "The pairs rather than the Store, because a Store is opaque out here and"
       "a list can carry its own cases."
-    Result.Ok([(Domain.TreeStore.headerKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?, "0:4295032833:0000000000000000000000000000000000000000000000000000000000000000:"), (Domain.TreeStore.headerKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?, "1:8590065666:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:"), (Domain.TreeStore.headerKey("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?, "2:12885098499:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:"), (Domain.IndexKeys.heightKey(0)?, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), (Domain.IndexKeys.heightKey(1)?, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), (Domain.IndexKeys.heightKey(2)?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), (Domain.TreeStore.bestTipKey()?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")])
+    Result.Ok([(Domain.TreeStore.headerKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "0000000000000000000000000000000000000000000000000000000000000000", height = 0, work = 4295032833), ""))?), (Domain.TreeStore.headerKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", height = 1, work = 8590065666), ""))?), (Domain.TreeStore.headerKey("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", height = 2, work = 12885098499), ""))?), (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?), (Domain.IndexKeys.heightKey(1)?, Domain.Index.encodeBlockId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?), (Domain.IndexKeys.heightKey(2)?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?), (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?)])
 
 verify trunkPairs
     List.len(trunkPairs()?) => 7
-    List.contains(trunkPairs()?, (Domain.TreeStore.bestTipKey()?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")) => true
-    List.contains(trunkPairs()?, (Domain.IndexKeys.heightKey(0)?, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) => true
+    List.contains(trunkPairs()?, (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?)) => true
+    List.contains(trunkPairs()?, (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?)) => true
 
 fn branchHeaders() -> List<BlockHeader>
     ? "Three Headers forking from Height 0, one longer than the trunk."
@@ -377,7 +377,7 @@ verify branchHeaders
 fn heightNames(outcome: Settled, height: Int) -> Result<Option<String>, String>
     ? "What h: names at a Height once a batch has been absorbed."
     ! [Infra.Kv.get]
-    Infra.Store.get(outcome.store, Domain.IndexKeys.heightKey(height)?)
+    Result.Ok(Domain.Index.blockIdIn(Infra.Store.get(outcome.store, Domain.IndexKeys.heightKey(height)?)?))
 
 verify heightNames
     heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))

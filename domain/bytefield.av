@@ -1,0 +1,114 @@
+module ByteField
+    intent =
+        "Fixed-width and length-prefixed fields, for the records this program"
+        "keeps in a database."
+        "Keys and values are both bytes now (n1bor/btc-listener#45, #46), and"
+        "both are built the same way: numbers of a known width, identifiers of"
+        "a known length, and at most one field whose length is not known until"
+        "it is read. Written once here rather than five times over."
+        "Numbers are big-endian throughout. For a key that is load-bearing --"
+        "the database orders keys bytewise, so a scan sees numeric order only"
+        "if the bytes are most-significant-first. For a value it does not"
+        "matter at all, and the same order is used anyway: two spellings of a"
+        "number in one program is one more than anybody can keep straight."
+    exposes [number, numberIn, at, after, prefixed, prefixedIn, afterPrefixed]
+    depends []
+    effects []
+
+fn number(value: Int, width: Int) -> List<Int>
+    ? "A number as this many bytes, most significant first."
+    numberInto(value, width, [])
+
+verify number
+    number(0, 4) => [0, 0, 0, 0]
+    number(1, 4) => [0, 0, 0, 1]
+    number(256, 4) => [0, 0, 1, 0]
+    number(4294967295, 4) => [255, 255, 255, 255]
+    number(5000000000, 8) => [0, 0, 0, 1, 42, 5, 242, 0]
+
+fn numberInto(value: Int, width: Int, acc: List<Int>) -> List<Int>
+    ? "Take the low byte, shift down, and build the answer back to front."
+    match width <= 0
+        true -> acc
+        false -> numberInto(Int.div(value, 256), width - 1, List.prepend(Int.mod(value, 256), acc))
+
+verify numberInto
+    numberInto(0, 1, []) => [0]
+    numberInto(258, 2, []) => [1, 2]
+    numberInto(5, 0, []) => []
+
+fn numberIn(bytes: List<Int>) -> Int
+    ? "Those bytes back into the number they were written from."
+    numberFrom(bytes, 0)
+
+verify numberIn
+    numberIn([]) => 0
+    numberIn([0, 0, 0, 1]) => 1
+    numberIn([0, 0, 1, 0]) => 256
+    numberIn(number(962268, 4)) => 962268
+    numberIn(number(5000000000, 8)) => 5000000000
+    numberIn(number(2099999997690000, 8)) => 2099999997690000
+
+fn numberFrom(bytes: List<Int>, acc: Int) -> Int
+    ? "Fold the most significant byte in first."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> numberFrom(tail, acc * 256 + head)
+
+verify numberFrom
+    numberFrom([], 7) => 7
+    numberFrom([1, 2], 0) => 258
+
+fn at(bytes: List<Int>, offset: Int, width: Int) -> List<Int>
+    ? "One fixed-width field, by where it starts and how wide it is."
+    List.take(List.drop(bytes, offset), width)
+
+verify at
+    at([1, 2, 3, 4], 0, 2) => [1, 2]
+    at([1, 2, 3, 4], 2, 2) => [3, 4]
+    at([1, 2], 0, 8) => [1, 2]
+
+fn after(bytes: List<Int>, offset: Int) -> List<Int>
+    ? "Everything past the fixed part, which is at most one field per record."
+    List.drop(bytes, offset)
+
+verify after
+    after([1, 2, 3], 1) => [2, 3]
+    after([1, 2, 3], 9) => []
+
+fn prefixed(body: List<Int>) -> List<Int>
+    ? "A field whose length is not known in advance, behind one byte saying it."
+      "One byte, so at most 255. Used for a quantity of Chain Work, which is"
+      "an arbitrary-precision Int in this program and so has no width a record"
+      "could fix: a 256-bit target gives 32 bytes today and the type promises"
+      "nothing. A ceiling written into the format would be a ceiling the"
+      "arithmetic does not have."
+    List.prepend(List.len(body), body)
+
+verify prefixed
+    prefixed([]) => [0]
+    prefixed([7]) => [1, 7]
+    prefixed([1, 2, 3]) => [3, 1, 2, 3]
+
+fn prefixedIn(bytes: List<Int>) -> List<Int>
+    ? "The field a length byte introduces."
+    match bytes
+        [] -> []
+        [head, ..tail] -> List.take(tail, head)
+
+verify prefixedIn
+    prefixedIn([]) => []
+    prefixedIn(prefixed([1, 2, 3])) => [1, 2, 3]
+    prefixedIn(prefixed([])) => []
+    prefixedIn(List.concat(prefixed([9]), [8, 8])) => [9]
+
+fn afterPrefixed(bytes: List<Int>) -> List<Int>
+    ? "Everything past a length-prefixed field."
+    match bytes
+        [] -> []
+        [head, ..tail] -> List.drop(tail, head)
+
+verify afterPrefixed
+    afterPrefixed([]) => []
+    afterPrefixed(prefixed([1, 2, 3])) => []
+    afterPrefixed(List.concat(prefixed([9]), [8, 8])) => [8, 8]

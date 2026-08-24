@@ -17,8 +17,8 @@ module Index
         "LevelDB, because hexadecimal is exactly what a compressor eats."
         "Everything here is a pure transformation, so the whole encoding is"
         "covered by verify blocks rather than by a Store."
-    depends [Domain.Text]
-    exposes [BodyState, Location, TxSite, SpentOutput, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    depends [Bytes, Domain.ByteField, Domain.Text]
+    exposes [BodyState, Location, TxSite, SpentOutput, emptyBytes, encodeBlockId, decodeBlockId, blockIdIn, idWidth, heightWidth, amountWidth, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
     effects []
 
 record Location
@@ -35,7 +35,112 @@ type BodyState
     Missing
     Pruned
 
-fn encodeTxSite(site: TxSite) -> String
+fn idWidth() -> Int
+    ? "How many bytes a Block Id or a Transaction Id takes in a record."
+    32
+
+verify idWidth
+    idWidth() => 32
+
+fn heightWidth() -> Int
+    ? "How many bytes a Height takes in a record."
+    4
+
+verify heightWidth
+    heightWidth() => 4
+
+fn amountWidth() -> Int
+    ? "How many bytes an amount takes."
+      "Eight, which is what Bitcoin gives an amount on the wire and more than"
+      "the twenty-one million coins can fill. It was up to twenty decimal"
+      "digits."
+    8
+
+verify amountWidth
+    amountWidth() => 8
+
+fn encodeHeight(height: Int) -> Bytes
+    ? "A Height as the four bytes a record keeps it in."
+    Result.withDefault(Bytes.fromList(Domain.ByteField.number(height, heightWidth())), emptyBytes())
+
+verify encodeHeight
+    Bytes.octets(encodeHeight(0)) => [0, 0, 0, 0]
+    Bytes.octets(encodeHeight(962268)) => Domain.ByteField.number(962268, 4)
+
+fn emptyBytes() -> Bytes
+    ? "No bytes at all, for the fallback that a fixed-width number never takes."
+    Bytes.fromList([])
+
+verify emptyBytes
+    Bytes.octets(emptyBytes()) => []
+
+fn decodeHeight(stored: Bytes) -> Result<Int, String>
+    ? "Read a Height back, refusing a record that is not one."
+    heightIn(Bytes.octets(stored))
+
+verify decodeHeight
+    decodeHeight(encodeHeight(0)) => Result.Ok(0)
+    decodeHeight(encodeHeight(962268)) => Result.Ok(962268)
+    decodeHeight(emptyBytes()) => Result.Err("a Height record is 4 bytes, got 0")
+
+fn heightIn(octets: List<Int>) -> Result<Int, String>
+    ? "Four bytes and no other number of them."
+    match List.len(octets) == heightWidth()
+        false -> Result.Err("a Height record is {heightWidth()} bytes, got {List.len(octets)}")
+        true -> Result.Ok(Domain.ByteField.numberIn(octets))
+
+verify heightIn
+    heightIn([0, 0, 0, 1]) => Result.Ok(1)
+    heightIn([]) => Result.Err("a Height record is 4 bytes, got 0")
+    heightIn([1, 2]) => Result.Err("a Height record is 4 bytes, got 2")
+
+fn prunedBelowOf(below: Option<Bytes>) -> Result<Int, String>
+    ? "The Prune Watermark a Store holds, or zero where it holds none."
+      "Absent means nothing was ever pruned, which is a Watermark of zero"
+      "rather than a missing answer."
+    match below
+        Option.None -> Result.Ok(0)
+        Option.Some(stored) -> decodeHeight(stored)
+
+verify prunedBelowOf
+    prunedBelowOf(Option.None) => Result.Ok(0)
+    prunedBelowOf(Option.Some(encodeHeight(7))) => Result.Ok(7)
+    prunedBelowOf(Option.Some(emptyBytes())) => Result.Err("a Height record is 4 bytes, got 0")
+
+fn encodeBlockId(blockId: String) -> Result<Bytes, String>
+    ? "A Block Id as the thirty-two bytes it names."
+      "The h: keyspace holds one against every Height, and n: holds a Height"
+      "against one. They were sixty-four characters of hexadecimal, which is"
+      "twice what the Id is."
+    Bytes.fromHex(blockId)
+
+verify encodeBlockId
+    Bytes.octets(encodeBlockId("aa")?) => [170]
+    encodeBlockId("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn decodeBlockId(stored: Bytes) -> String
+    ? "Read one back. Any bytes are a Block Id; there is nothing to refuse."
+    Bytes.toHex(stored)
+
+verify decodeBlockId
+    decodeBlockId(encodeBlockId("aa")?) => "aa"
+    decodeBlockId(emptyBytes()) => ""
+
+fn blockIdIn(stored: Option<Bytes>) -> Option<String>
+    ? "A stored Block Id, where there may not be one."
+      "Every keyspace that answers with a Block Id -- h: naming the Block at a"
+      "Height, meta:bestTip naming the tip -- reads back through here, so the"
+      "hexadecimal spelling the rest of the program uses is arrived at in one"
+      "place rather than at each caller."
+    match stored
+        Option.None -> Option.None
+        Option.Some(bytes) -> Option.Some(decodeBlockId(bytes))
+
+verify blockIdIn
+    blockIdIn(Option.None) => Option.None
+    blockIdIn(Option.Some(encodeBlockId("aa")?)) => Option.Some("aa")
+
+fn encodeTxSite(site: TxSite) -> Result<Bytes, String>
     ? "A Transaction is named by its Block and its position in it."
       "The Block rather than the Height, because a Block Id names one Block"
       "and a Height does not: two chains can both have a Block at 300000 and"
@@ -44,279 +149,141 @@ fn encodeTxSite(site: TxSite) -> String
       "sits in its own chain -- but it does change which Block a Transaction"
       "is in, and a Transaction can be in two Blocks at different Heights with"
       "only one of them on the best chain. Naming the Block leaves no doubt."
-    "{site.blockId}:{site.position}"
+      "The Block Id takes a fixed 32 bytes and the position follows it, so an"
+      "Id of any other length is refused here rather than written. The fields"
+      "are positional: a short Id would shift the position into the bytes"
+      "after it, and the record would read back as a different site instead"
+      "of as a fault. decodeTxSite refuses a record of the wrong length, so"
+      "writing one would only move the complaint to whoever read it next."
+    sited(Bytes.octets(Bytes.fromHex(site.blockId)?), site.position)
 
 verify encodeTxSite
-    encodeTxSite(TxSite(blockId = "aa", position = 0)) => "aa:0"
-    encodeTxSite(TxSite(blockId = "00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee", position = 1)) => "00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee:1"
+    List.len(Bytes.octets(encodeTxSite(TxSite(blockId = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", position = 0))?)) => 36
+    encodeTxSite(TxSite(blockId = "aa", position = 0)) => Result.Err("a Transaction site names its Block by 32 bytes, got 1")
+    encodeTxSite(TxSite(blockId = "zz", position = 0)) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn decodeTxSite(text: String) -> Result<TxSite, String>
-    ? "Read a Transaction's whereabouts back."
-    siteParts(text, String.split(text, ":"))
+fn sited(id: List<Int>, position: Int) -> Result<Bytes, String>
+    ? "The Id has to be the width the record reserves for it."
+    match List.len(id) == idWidth()
+        false -> Result.Err("a Transaction site names its Block by {idWidth()} bytes, got {List.len(id)}")
+        true -> Bytes.fromList(List.concat(id, Domain.ByteField.number(position, heightWidth())))
+
+verify sited
+    List.len(Bytes.octets(sited(Bytes.octets(Bytes.fromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")?), 3)?)) => 36
+    sited([], 0) => Result.Err("a Transaction site names its Block by 32 bytes, got 0")
+
+fn decodeTxSite(stored: Bytes) -> Result<TxSite, String>
+    ? "Read one back: the Block Id, then the position."
+    siteIn(Bytes.octets(stored))
 
 verify decodeTxSite
-    decodeTxSite("aa:0") => Result.Ok(TxSite(blockId = "aa", position = 0))
-    decodeTxSite("aa:12") => Result.Ok(TxSite(blockId = "aa", position = 12))
-    decodeTxSite("aa") => Result.Err("Transaction site must be blockId:position, got 'aa'")
-    decodeTxSite("") => Result.Err("Transaction site must be blockId:position, got ''")
-    decodeTxSite("aa:0:1") => Result.Err("Transaction site must be blockId:position, got 'aa:0:1'")
-    decodeTxSite("aa:x") => Result.Err("Transaction position must be a whole number, got 'aa:x'")
-    decodeTxSite("aa:-1") => Result.Err("Transaction position must be a whole number, got 'aa:-1'")
+    decodeTxSite(encodeTxSite(TxSite(blockId = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", position = 3))?) => Result.Ok(TxSite(blockId = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", position = 3))
+    decodeTxSite(emptyBytes()) => Result.Err("a Transaction site record is 36 bytes, got 0")
 
-fn siteParts(text: String, split: List<String>) -> Result<TxSite, String>
-    ? "Exactly two colon-separated fields, and no more."
-    match split
-        [] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
-        [blockId, ..rest] -> afterBlockId(text, blockId, rest)
+fn siteIn(octets: List<Int>) -> Result<TxSite, String>
+    ? "A Block Id and a position, and nothing else."
+    match List.len(octets) == idWidth() + heightWidth()
+        false -> Result.Err("a Transaction site record is {idWidth() + heightWidth()} bytes, got {List.len(octets)}")
+        true -> siteFrom(Domain.ByteField.at(octets, 0, idWidth()), Domain.ByteField.after(octets, idWidth()))
 
-verify siteParts
-    siteParts("aa:0", ["aa", "0"]) => Result.Ok(TxSite(blockId = "aa", position = 0))
-    siteParts("", []) => Result.Err("Transaction site must be blockId:position, got ''")
+verify siteIn
+    siteIn([]) => Result.Err("a Transaction site record is 36 bytes, got 0")
 
-fn afterBlockId(text: String, blockId: String, rest: List<String>) -> Result<TxSite, String>
-    ? "The position follows, and nothing follows that."
-    match rest
-        [] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
-        [position, ..extra] -> lastPart(text, blockId, position, extra)
-
-verify afterBlockId
-    afterBlockId("aa:0", "aa", ["0"]) => Result.Ok(TxSite(blockId = "aa", position = 0))
-    afterBlockId("aa", "aa", []) => Result.Err("Transaction site must be blockId:position, got 'aa'")
-
-fn lastPart(text: String, blockId: String, position: String, extra: List<String>) -> Result<TxSite, String>
-    ? "A third field means this is not a Transaction site."
-    match extra
-        [] -> siteFrom(text, blockId, position)
-        [head, ..tail] -> Result.Err("Transaction site must be blockId:position, got '{text}'")
-
-verify lastPart
-    lastPart("aa:0", "aa", "0", []) => Result.Ok(TxSite(blockId = "aa", position = 0))
-    lastPart("aa:0:1", "aa", "0", ["1"]) => Result.Err("Transaction site must be blockId:position, got 'aa:0:1'")
-
-fn siteFrom(text: String, blockId: String, position: String) -> Result<TxSite, String>
-    ? "The position has to be a whole number."
-    match whole(position)
-        Option.None -> Result.Err("Transaction position must be a whole number, got '{text}'")
-        Option.Some(value) -> Result.Ok(TxSite(blockId = blockId, position = value))
+fn siteFrom(id: List<Int>, position: List<Int>) -> Result<TxSite, String>
+    ? "The two fields, once their widths are known to be right."
+    Result.Ok(TxSite(blockId = Bytes.toHex(Bytes.fromList(id)?), position = Domain.ByteField.numberIn(position)))
 
 verify siteFrom
-    siteFrom("aa:0", "aa", "0") => Result.Ok(TxSite(blockId = "aa", position = 0))
-    siteFrom("aa:x", "aa", "x") => Result.Err("Transaction position must be a whole number, got 'aa:x'")
+    siteFrom([170], [0, 0, 0, 3]) => Result.Ok(TxSite(blockId = "aa", position = 3))
+
+fn encodeSpentOutput(output: SpentOutput) -> Result<Bytes, String>
+    ? "What an Output is worth and what has to be satisfied to spend it."
+      "The whole Output rather than a pointer at one. A pointer would still"
+      "cost the Block decode this keyspace exists to avoid; what is saved by"
+      "holding less is spent again on every read."
+      "The amount is eight bytes and the Script is the rest, which is why the"
+      "Script goes last: it is the one field whose length the record does not"
+      "say, so nothing may follow it."
+    Bytes.fromList(List.concat(Domain.ByteField.number(output.value, amountWidth()), Bytes.octets(Bytes.fromHex(output.script)?)))
+
+verify encodeSpentOutput
+    Bytes.octets(encodeSpentOutput(SpentOutput(value = 5000000000, script = ""))?) => Domain.ByteField.number(5000000000, 8)
+    Bytes.octets(encodeSpentOutput(SpentOutput(value = 5000, script = "76a914"))?) => List.concat(Domain.ByteField.number(5000, 8), [118, 169, 20])
+
+fn decodeSpentOutput(stored: Bytes) -> Result<SpentOutput, String>
+    ? "Read an Output back."
+    spentIn(Bytes.octets(stored))
+
+verify decodeSpentOutput
+    decodeSpentOutput(encodeSpentOutput(SpentOutput(value = 5000, script = "76a914"))?) => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
+    decodeSpentOutput(encodeSpentOutput(SpentOutput(value = 5000000000, script = ""))?) => Result.Ok(SpentOutput(value = 5000000000, script = ""))
+    decodeSpentOutput(emptyBytes()) => Result.Err("an Output record is at least 8 bytes, got 0")
+
+fn spentIn(octets: List<Int>) -> Result<SpentOutput, String>
+    ? "An amount, then whatever Script follows it."
+    match List.len(octets) < amountWidth()
+        true -> Result.Err("an Output record is at least {amountWidth()} bytes, got {List.len(octets)}")
+        false -> spentFrom(Domain.ByteField.at(octets, 0, amountWidth()), Domain.ByteField.after(octets, amountWidth()))
+
+verify spentIn
+    spentIn([]) => Result.Err("an Output record is at least 8 bytes, got 0")
+
+fn spentFrom(value: List<Int>, script: List<Int>) -> Result<SpentOutput, String>
+    ? "The amount and the Script, once the record is long enough to hold both."
+    Result.Ok(SpentOutput(value = Domain.ByteField.numberIn(value), script = Bytes.toHex(Bytes.fromList(script)?)))
+
+verify spentFrom
+    spentFrom([0, 0, 0, 0, 0, 0, 0, 5], []) => Result.Ok(SpentOutput(value = 5, script = ""))
+    spentFrom([0, 0, 0, 0, 0, 0, 0, 5], [118]) => Result.Ok(SpentOutput(value = 5, script = "76"))
+
+fn segmentWidth() -> Int
+    ? "How many bytes a Segment number takes."
+    4
+
+verify segmentWidth
+    segmentWidth() => 4
+
+fn offsetWidth() -> Int
+    ? "How many bytes a byte offset within a Segment takes."
+      "Eight, because a Segment is a file and a file's length is not something"
+      "four bytes should be trusted with."
+    8
+
+verify offsetWidth
+    offsetWidth() => 8
+
+fn encodeLocation(location: Location) -> Bytes
+    ? "A Location is its Segment, the byte offset of the Block's bytes within"
+      "it, and how many bytes they are."
+    Result.withDefault(Bytes.fromList(List.concat(Domain.ByteField.number(location.segment, segmentWidth()), List.concat(Domain.ByteField.number(location.offset, offsetWidth()), Domain.ByteField.number(location.length, segmentWidth())))), emptyBytes())
+
+verify encodeLocation
+    List.len(Bytes.octets(encodeLocation(Location(segment = 0, offset = 4, length = 285)))) => 16
+    Bytes.octets(encodeLocation(Location(segment = 7, offset = 1234, length = 80))) => List.concat(Domain.ByteField.number(7, 4), List.concat(Domain.ByteField.number(1234, 8), Domain.ByteField.number(80, 4)))
+
+fn decodeLocation(stored: Bytes) -> Result<Location, String>
+    ? "Read a Location back, rejecting anything that is not the three fields."
+    locationIn(Bytes.octets(stored))
+
+verify decodeLocation
+    decodeLocation(encodeLocation(Location(segment = 7, offset = 1234, length = 80))) => Result.Ok(Location(segment = 7, offset = 1234, length = 80))
+    decodeLocation(emptyBytes()) => Result.Err("a Location record is 16 bytes, got 0")
+
+fn locationIn(octets: List<Int>) -> Result<Location, String>
+    ? "Three fixed fields and nothing else."
+    match List.len(octets) == segmentWidth() + offsetWidth() + segmentWidth()
+        false -> Result.Err("a Location record is {segmentWidth() + offsetWidth() + segmentWidth()} bytes, got {List.len(octets)}")
+        true -> Result.Ok(Location(segment = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, segmentWidth())), offset = Domain.ByteField.numberIn(Domain.ByteField.at(octets, segmentWidth(), offsetWidth())), length = Domain.ByteField.numberIn(Domain.ByteField.at(octets, segmentWidth() + offsetWidth(), segmentWidth()))))
+
+verify locationIn
+    locationIn([]) => Result.Err("a Location record is 16 bytes, got 0")
+    locationIn(Bytes.octets(encodeLocation(Location(segment = 1, offset = 2, length = 3)))) => Result.Ok(Location(segment = 1, offset = 2, length = 3))
 
 record SpentOutput
     value: Int
     script: String
 
-fn encodeSpentOutput(output: SpentOutput) -> String
-    ? "What an Output is worth and what has to be satisfied to spend it."
-      "The whole Output rather than a pointer at one. A pointer would still cost"
-      "the Block decode this keyspace exists to avoid; what is saved by holding"
-      "less is spent again on every read."
-    "{output.value}:{output.script}"
-
-verify encodeSpentOutput
-    encodeSpentOutput(SpentOutput(value = 5000000000, script = "")) => "5000000000:"
-    encodeSpentOutput(SpentOutput(value = 5000, script = "76a914")) => "5000:76a914"
-
-fn decodeSpentOutput(text: String) -> Result<SpentOutput, String>
-    ? "Read an Output back."
-    spentParts(text, String.split(text, ":"))
-
-verify decodeSpentOutput
-    decodeSpentOutput("5000:76a914") => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
-    decodeSpentOutput("5000:") => Result.Ok(SpentOutput(value = 5000, script = ""))
-    decodeSpentOutput("5000") => Result.Err("Output record has no separator: '5000'")
-    decodeSpentOutput("x:76a914") => Result.Err("Output value must be a whole number, got 'x:76a914'")
-
-fn spentParts(text: String, pieces: List<String>) -> Result<SpentOutput, String>
-    ? "A value and a Script, separated once."
-    match pieces
-        [] -> Result.Err("Output record has no separator: '{text}'")
-        [value, ..rest] -> spentFrom(text, value, rest)
-
-verify spentParts
-    spentParts("5000:76a914", ["5000", "76a914"]) => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
-    spentParts("5000", ["5000"]) => Result.Err("Output record has no separator: '5000'")
-    spentParts("", []) => Result.Err("Output record has no separator: ''")
-
-fn spentFrom(text: String, value: String, rest: List<String>) -> Result<SpentOutput, String>
-    ? "The value has to be a whole number; everything after it is the Script."
-    match rest
-        [] -> Result.Err("Output record has no separator: '{text}'")
-        [script, ..extra] -> spentValued(text, whole(value), script)
-
-verify spentFrom
-    spentFrom("5000:76a914", "5000", ["76a914"]) => Result.Ok(SpentOutput(value = 5000, script = "76a914"))
-    spentFrom("5000", "5000", []) => Result.Err("Output record has no separator: '5000'")
-
-fn spentValued(text: String, value: Option<Int>, script: String) -> Result<SpentOutput, String>
-    ? "Refuse a value that is not a whole number."
-    match value
-        Option.None -> Result.Err("Output value must be a whole number, got '{text}'")
-        Option.Some(satoshis) -> Result.Ok(SpentOutput(value = satoshis, script = script))
-
-verify spentValued
-    spentValued("5000:a", Option.Some(5000), "a") => Result.Ok(SpentOutput(value = 5000, script = "a"))
-    spentValued("x:a", Option.None, "a") => Result.Err("Output value must be a whole number, got 'x:a'")
-
-fn encodeLocation(location: Location) -> String
-    ? "A Location is its Segment, the byte offset of the Block's bytes within"
-      "it, and how many bytes they are."
-    "{location.segment}:{location.offset}:{location.length}"
-
-verify encodeLocation
-    encodeLocation(Location(segment = 0, offset = 4, length = 285)) => "0:4:285"
-    encodeLocation(Location(segment = 7, offset = 1234, length = 80)) => "7:1234:80"
-
-fn decodeLocation(text: String) -> Result<Location, String>
-    ? "Read a Location back, rejecting anything that is not three whole numbers."
-    parts(text, String.split(text, ":"))
-
-verify decodeLocation
-    decodeLocation("0:4:285") => Result.Ok(Location(segment = 0, offset = 4, length = 285))
-    decodeLocation("7:1234:80") => Result.Ok(Location(segment = 7, offset = 1234, length = 80))
-    decodeLocation("") => Result.Err("Location must be segment:offset:length, got ''")
-    decodeLocation("7") => Result.Err("Location must be segment:offset:length, got '7'")
-    decodeLocation("7:12") => Result.Err("Location must be segment:offset:length, got '7:12'")
-    decodeLocation("7:12:3:4") => Result.Err("Location must be segment:offset:length, got '7:12:3:4'")
-    decodeLocation("a:1:2") => Result.Err("Location must be three whole numbers, got 'a:1:2'")
-    decodeLocation("7:b:2") => Result.Err("Location must be three whole numbers, got '7:b:2'")
-    decodeLocation("7:1:c") => Result.Err("Location must be three whole numbers, got '7:1:c'")
-    decodeLocation("-1:0:2") => Result.Err("Location must be three whole numbers, got '-1:0:2'")
-    decodeLocation("0:-1:2") => Result.Err("Location must be three whole numbers, got '0:-1:2'")
-
-fn parts(text: String, split: List<String>) -> Result<Location, String>
-    ? "Exactly three colon-separated fields, and no more."
-    match split
-        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
-        [segment, ..rest] -> afterSegment(text, segment, rest)
-
-verify parts
-    parts("7:1:2", ["7", "1", "2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    parts("x", []) => Result.Err("Location must be segment:offset:length, got 'x'")
-    parts("7:1", ["7", "1"]) => Result.Err("Location must be segment:offset:length, got '7:1'")
-    parts("7:1:2:3", ["7", "1", "2", "3"]) => Result.Err("Location must be segment:offset:length, got '7:1:2:3'")
-
-fn afterSegment(text: String, segment: String, rest: List<String>) -> Result<Location, String>
-    ? "The second field is the offset."
-    match rest
-        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
-        [offset, ..more] -> afterOffset(text, segment, offset, more)
-
-verify afterSegment
-    afterSegment("7:1:2", "7", ["1", "2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    afterSegment("7", "7", []) => Result.Err("Location must be segment:offset:length, got '7'")
-
-fn afterOffset(text: String, segment: String, offset: String, more: List<String>) -> Result<Location, String>
-    ? "The third field is the length; a fourth means the text was not a Location."
-    match more
-        [] -> Result.Err("Location must be segment:offset:length, got '{text}'")
-        [length, ..extra] -> afterLength(text, segment, offset, length, extra)
-
-verify afterOffset
-    afterOffset("7:1:2", "7", "1", ["2"]) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    afterOffset("7:1", "7", "1", []) => Result.Err("Location must be segment:offset:length, got '7:1'")
-
-fn afterLength(text: String, segment: String, offset: String, length: String, extra: List<String>) -> Result<Location, String>
-    ? "Reject a fourth field before reading the numbers."
-    match extra
-        [] -> located(text, whole(segment), whole(offset), whole(length))
-        [head, ..tail] -> Result.Err("Location must be segment:offset:length, got '{text}'")
-
-verify afterLength
-    afterLength("7:1:2", "7", "1", "2", []) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    afterLength("7:1:2:3", "7", "1", "2", ["3"]) => Result.Err("Location must be segment:offset:length, got '7:1:2:3'")
-
-fn located(text: String, segment: Option<Int>, offset: Option<Int>, length: Option<Int>) -> Result<Location, String>
-    ? "All three fields must have parsed as non-negative whole numbers."
-    match segment
-        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
-        Option.Some(s) -> withSegment(text, s, offset, length)
-
-verify located
-    located("7:1:2", Option.Some(7), Option.Some(1), Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    located("a:1:2", Option.None, Option.Some(1), Option.Some(2)) => Result.Err("Location must be three whole numbers, got 'a:1:2'")
-
-fn withSegment(text: String, segment: Int, offset: Option<Int>, length: Option<Int>) -> Result<Location, String>
-    ? "The Segment parsed; the offset still has to."
-    match offset
-        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
-        Option.Some(o) -> withOffset(text, segment, o, length)
-
-verify withSegment
-    withSegment("7:1:2", 7, Option.Some(1), Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    withSegment("7:b:2", 7, Option.None, Option.Some(2)) => Result.Err("Location must be three whole numbers, got '7:b:2'")
-
-fn withOffset(text: String, segment: Int, offset: Int, length: Option<Int>) -> Result<Location, String>
-    ? "The offset parsed; the length still has to."
-    match length
-        Option.None -> Result.Err("Location must be three whole numbers, got '{text}'")
-        Option.Some(l) -> Result.Ok(Location(segment = segment, offset = offset, length = l))
-
-verify withOffset
-    withOffset("7:1:2", 7, 1, Option.Some(2)) => Result.Ok(Location(segment = 7, offset = 1, length = 2))
-    withOffset("7:1:c", 7, 1, Option.None) => Result.Err("Location must be three whole numbers, got '7:1:c'")
-
-fn whole(text: String) -> Option<Int>
-    ? "A non-negative whole number, or nothing. Negative fields are not Locations."
-    match Int.fromString(text)
-        Result.Err(e) -> Option.None
-        Result.Ok(value) -> nonNegative(value)
-
-verify whole
-    whole("0") => Option.Some(0)
-    whole("1234") => Option.Some(1234)
-    whole("a") => Option.None
-    whole("") => Option.None
-    whole("-1") => Option.None
-
-fn nonNegative(value: Int) -> Option<Int>
-    ? "Keep the value only if it is zero or above."
-    match value >= 0
-        true -> Option.Some(value)
-        false -> Option.None
-
-verify nonNegative
-    nonNegative(0) => Option.Some(0)
-    nonNegative(5) => Option.Some(5)
-    nonNegative(0 - 1) => Option.None
-
-fn encodeHeight(height: Int) -> String
-    ? "A Height stored as a value rather than a key needs no padding."
-    String.fromInt(height)
-
-verify encodeHeight
-    encodeHeight(0) => "0"
-    encodeHeight(962268) => "962268"
-
-fn decodeHeight(text: String) -> Result<Int, String>
-    ? "Read a Height back, rejecting anything that is not a whole number."
-    match whole(text)
-        Option.None -> Result.Err("Height must be a whole number, got '{text}'")
-        Option.Some(value) -> Result.Ok(value)
-
-verify decodeHeight
-    decodeHeight("0") => Result.Ok(0)
-    decodeHeight("962268") => Result.Ok(962268)
-    decodeHeight("") => Result.Err("Height must be a whole number, got ''")
-    decodeHeight("x") => Result.Err("Height must be a whole number, got 'x'")
-    decodeHeight("-1") => Result.Err("Height must be a whole number, got '-1'")
-
-fn prunedBelowOf(stored: Option<String>) -> Result<Int, String>
-    ? "The Prune Watermark a Store holds, or zero when it holds none."
-      "A Store with no such record has never pruned, which is the same thing as"
-      "a Watermark of zero — so a fresh Index needs no initialisation."
-    match stored
-        Option.None -> Result.Ok(0)
-        Option.Some(text) -> decodeHeight(text)
-
-verify prunedBelowOf
-    prunedBelowOf(Option.None) => Result.Ok(0)
-    prunedBelowOf(Option.Some("0")) => Result.Ok(0)
-    prunedBelowOf(Option.Some("962268")) => Result.Ok(962268)
-    prunedBelowOf(Option.Some("x")) => Result.Err("Height must be a whole number, got 'x'")
-
-fn bodyStateOf(stored: Option<String>, height: Int, prunedBelow: Int) -> Result<BodyState, String>
+fn bodyStateOf(stored: Option<Bytes>, height: Int, prunedBelow: Int) -> Result<BodyState, String>
     ? "Why a Block's body is absent, which decides what to do about it."
       "An entry means we hold the bytes. No entry below the Prune Watermark means"
       "we deleted them deliberately and must not fetch them again; no entry at or"
@@ -326,20 +293,20 @@ fn bodyStateOf(stored: Option<String>, height: Int, prunedBelow: Int) -> Result<
         Option.None -> Result.Ok(absent(height, prunedBelow))
 
 verify bodyStateOf
-    bodyStateOf(Option.Some("7:1234:80"), 100, 0) => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
+    bodyStateOf(Option.Some(encodeLocation(Location(segment = 7, offset = 1234, length = 80))), 100, 0) => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
     bodyStateOf(Option.None, 100, 0) => Result.Ok(BodyState.Missing)
     bodyStateOf(Option.None, 100, 500) => Result.Ok(BodyState.Pruned)
     bodyStateOf(Option.None, 500, 500) => Result.Ok(BodyState.Missing)
-    bodyStateOf(Option.Some("nonsense"), 100, 0) => Result.Err("Location must be segment:offset:length, got 'nonsense'")
+    bodyStateOf(Option.Some(emptyBytes()), 100, 0) => Result.Err("a Location record is 16 bytes, got 0")
 
-fn asStored(text: String) -> Result<BodyState, String>
+fn asStored(stored: Bytes) -> Result<BodyState, String>
     ? "An entry is a Location, and a Location that will not decode is corruption."
-    location = decodeLocation(text)?
+    location = decodeLocation(stored)?
     Result.Ok(BodyState.Stored(location))
 
 verify asStored
-    asStored("7:1234:80") => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
-    asStored("bad") => Result.Err("Location must be segment:offset:length, got 'bad'")
+    asStored(encodeLocation(Location(segment = 7, offset = 1234, length = 80))) => Result.Ok(BodyState.Stored(Location(segment = 7, offset = 1234, length = 80)))
+    asStored(emptyBytes()) => Result.Err("a Location record is 16 bytes, got 0")
 
 fn absent(height: Int, prunedBelow: Int) -> BodyState
     ? "Below the Prune Watermark the bytes were discarded; at or above it they never arrived."

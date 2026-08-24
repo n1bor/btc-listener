@@ -44,7 +44,7 @@ fn written(store: Store, blockId: String, connection: Connecting) -> Result<Appl
 fn applying(store: Store, blockId: String, change: Change) -> Result<Applied, String>
     ? "The Outputs, the spends and the Undo Data, in that order."
     ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
-    grown = Infra.Store.putAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed))])?)?
+    grown = Infra.Store.putAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed)?)])?)?
     shrunk = Infra.Store.deleteAll(grown, keysOf(change.removed, [])?)?
     Result.Ok(Applied(store = shrunk, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees))
 
@@ -52,12 +52,12 @@ fn entriesFor(added: List<Unspent>, acc: List<Entry>) -> Result<List<Entry>, Str
     ? "One Set entry per Output the Block leaves unspent."
     match added
         [] -> Result.Ok(acc)
-        [head, ..tail] -> entriesFor(tail, List.prepend(Entry(key = Domain.UtxoStore.keyOf(head)?, value = Domain.UtxoStore.encodeCoin(head)), acc))
+        [head, ..tail] -> entriesFor(tail, List.prepend(Entry(key = Domain.UtxoStore.keyOf(head)?, value = Domain.UtxoStore.encodeCoin(head)?), acc))
 
 verify entriesFor
     entriesFor([], []) => Result.Ok([])
     List.len(entriesFor([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], [])?) => 1
-    entriesFor([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], []) => Result.Ok([Entry(key = Domain.UtxoStore.unspentKey("aa", 0)?, value = "5::1:0")])
+    entriesFor([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)], []) => Result.Ok([Entry(key = Domain.UtxoStore.unspentKey("aa", 0)?, value = Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?)])
 
 fn keysOf(unspents: List<Unspent>, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "Where each of these Outputs lived."
@@ -131,18 +131,18 @@ fn oneResolved(store: Store, key: Bytes, rest: List<Bytes>, acc: Map<String, Uns
     carried = keptIfFound(key, text, acc)?
     resolved(store, rest, carried)
 
-fn keptIfFound(key: Bytes, text: Option<String>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+fn keptIfFound(key: Bytes, stored: Option<Bytes>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
     ? "A Set entry that will not decode is corruption and stops the walk."
-    match text
+    match stored
         Option.None -> Result.Ok(acc)
         Option.Some(value) -> decodedInto(key, value, acc)
 
 verify keptIfFound
     Map.len(keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.None, Map.fromList([]))?) => 0
-    Map.len(keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some("5::1:0"), Map.fromList([]))?) => 1
-    keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some("nonsense"), Map.fromList([])) => Result.Err("Set entry must be value:script:height:coinbase, got 'nonsense'")
+    Map.len(keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?), Map.fromList([]))?) => 1
+    keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some(Domain.Index.emptyBytes()), Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
 
-fn decodedInto(key: Bytes, value: String, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+fn decodedInto(key: Bytes, value: Bytes, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
     ? "The entry, keyed as the caller will ask for it."
       "The Transaction Id and position are read back out of the key, because"
       "the Set does not repeat them in the value."
@@ -151,9 +151,9 @@ fn decodedInto(key: Bytes, value: String, acc: Map<String, Unspent>) -> Result<M
         Result.Ok(unspent) -> Result.Ok(Map.set(acc, Domain.UtxoStore.indexOf(key), unspent))
 
 verify decodedInto
-    Map.len(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, "5::1:0", Map.fromList([]))?) => 1
-    Map.get(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, "5::1:0", Map.fromList([]))?, Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?)) => Option.Some(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))
-    decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, "nonsense", Map.fromList([])) => Result.Err("Set entry must be value:script:height:coinbase, got 'nonsense'")
+    Map.len(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?, Map.fromList([]))?) => 1
+    Map.get(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?, Map.fromList([]))?, Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?)) => Option.Some(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))
+    decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.Index.emptyBytes(), Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
 
 fn txidIn(key: Bytes) -> String
     ? "The Transaction Id a Set key names."
@@ -208,12 +208,12 @@ fn disconnectBlock(store: Store, blockId: String, transactions: List<Transaction
     held = Infra.Store.get(store, Domain.UtxoStore.undoKey(blockId)?)?
     reversing(store, blockId, transactions, held)
 
-fn reversing(store: Store, blockId: String, transactions: List<Transaction>, held: Option<String>) -> Result<Applied, String>
+fn reversing(store: Store, blockId: String, transactions: List<Transaction>, held: Option<Bytes>) -> Result<Applied, String>
     ? "No Undo Data means the Block was never connected, or the window has passed it."
     ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
     match held
         Option.None -> Result.Err("Block {blockId} has no Undo Data, so it cannot be disconnected")
-        Option.Some(text) -> undoing(store, blockId, transactions, Domain.UtxoStore.decodeUndo(text))
+        Option.Some(stored) -> undoing(store, blockId, transactions, Domain.UtxoStore.decodeUndo(stored))
 
 fn undoing(store: Store, blockId: String, transactions: List<Transaction>, undo: Result<List<Unspent>, String>) -> Result<Applied, String>
     ? "Undo Data that will not decode is corruption."
@@ -241,9 +241,9 @@ fn prunedUndo(store: Store, tipHeight: Int) -> Result<Store, String>
     sweeping(store, Domain.Index.prunedBelowOf(below)?, Domain.Disconnect.windowFrom(tipHeight), [])
 
 verify prunedUndo
-    Infra.Store.get(prunedUndo(Infra.Store.fixture([]), 300)?, Domain.UtxoStore.undoWindowKey()?) => Result.Ok(Option.Some("13"))
-    Infra.Store.get(prunedUndo(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, "100")]), 300)?, Domain.UtxoStore.undoWindowKey()?) => Result.Ok(Option.Some("100"))
-    prunedUndo(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, "x")]), 300) => Result.Err("Height must be a whole number, got 'x'")
+    Infra.Store.get(prunedUndo(Infra.Store.fixture([]), 300)?, Domain.UtxoStore.undoWindowKey()?) => Result.Ok(Option.Some(Domain.Index.encodeHeight(13)))
+    Infra.Store.get(prunedUndo(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, Domain.Index.encodeHeight(100))]), 300)?, Domain.UtxoStore.undoWindowKey()?) => Result.Ok(Option.Some(Domain.Index.encodeHeight(100)))
+    prunedUndo(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, Domain.Index.emptyBytes())]), 300) => Result.Err("a Height record is 4 bytes, got 0")
 
 fn sweeping(store: Store, from: Int, target: Int, acc: List<Bytes>) -> Result<Store, String>
     ? "One Height at a time up to the window's new floor."
@@ -261,7 +261,7 @@ fn sweeping(store: Store, from: Int, target: Int, acc: List<Bytes>) -> Result<St
 fn undoAt(store: Store, from: Int, target: Int, acc: List<Bytes>) -> Result<Store, String>
     ? "The Block this Height names, and its Undo Data record."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
-    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(from)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(from)?)?)
     sweeping(store, from + 1, target, gathered(named, acc)?)
 
 fn gathered(named: Option<String>, acc: List<Bytes>) -> Result<List<Bytes>, String>

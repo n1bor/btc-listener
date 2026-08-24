@@ -19,7 +19,7 @@ module TxIndex
         "than in Blocks, because a Block near the tip holds several thousand"
         "Transactions and one near genesis holds one."
     exposes [Built, build]
-    depends [Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store, Domain.IndexKeys]
     effects [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
 
 record Built
@@ -69,7 +69,7 @@ fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
     ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
-    named = Infra.Store.get(state.store, Domain.IndexKeys.heightKey(height)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(state.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Ok(state)
         Option.Some(blockId) -> atBlock(state, height, to, blockId)
@@ -82,10 +82,10 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
         Option.None -> walk(state, height + 1, to)
         Option.Some(text) -> indexBody(state, height, to, blockId, text)
 
-fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+fn indexBody(state: Walk, height: Int, to: Int, blockId: String, stored: Bytes) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
     ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
-    location = Domain.Index.decodeLocation(text)?
+    location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
     entries = sitesFor(Domain.Block.txidsOf(transactions), blockId, 0, List.prepend(heightEntry(blockId, height)?, state.pending))?
@@ -119,8 +119,8 @@ fn heightEntry(blockId: String, height: Int) -> Result<Entry, String>
     Result.Ok(Entry(key = Domain.IndexKeys.blockHeightKey(blockId)?, value = Domain.Index.encodeHeight(height)))
 
 verify heightEntry
-    heightEntry("aa", 0) => Result.Ok(Entry(key = Domain.IndexKeys.blockHeightKey("aa")?, value = "0"))
-    heightEntry("aa", 300000) => Result.Ok(Entry(key = Domain.IndexKeys.blockHeightKey("aa")?, value = "300000"))
+    heightEntry("aa", 0) => Result.Ok(Entry(key = Domain.IndexKeys.blockHeightKey("aa")?, value = Domain.Index.encodeHeight(0)))
+    heightEntry("aa", 300000) => Result.Ok(Entry(key = Domain.IndexKeys.blockHeightKey("aa")?, value = Domain.Index.encodeHeight(300000)))
 
 fn sitesFor(txids: List<String>, blockId: String, position: Int, acc: List<Entry>) -> Result<List<Entry>, String>
     ? "One entry per Transaction: this Id sits at this place in this Block."
@@ -128,11 +128,11 @@ fn sitesFor(txids: List<String>, blockId: String, position: Int, acc: List<Entry
       "round; the batch is reversed once, when it is written."
     match txids
         [] -> Result.Ok(acc)
-        [head, ..tail] -> sitesFor(tail, blockId, position + 1, List.prepend(Entry(key = Domain.IndexKeys.txKey(head)?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = blockId, position = position))), acc))
+        [head, ..tail] -> sitesFor(tail, blockId, position + 1, List.prepend(Entry(key = Domain.IndexKeys.txKey(head)?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = blockId, position = position))?), acc))
 
 verify sitesFor
-    sitesFor([], "aa", 0, []) => Result.Ok([])
-    sitesFor(["cc"], "aa", 0, []) => Result.Ok([Entry(key = Domain.IndexKeys.txKey("cc")?, value = "aa:0")])
-    List.reverse(sitesFor(["cc", "dd"], "aa", 0, [])?) => [Entry(key = Domain.IndexKeys.txKey("cc")?, value = "aa:0"), Entry(key = Domain.IndexKeys.txKey("dd")?, value = "aa:1")]
-    sitesFor(["cc"], "aa", 7, []) => Result.Ok([Entry(key = Domain.IndexKeys.txKey("cc")?, value = "aa:7")])
-    List.len(sitesFor(["cc"], "aa", 0, [Entry(key = Domain.IndexKeys.txKey("cc")?, value = "aa:9")])?) => 2
+    sitesFor([], "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 0, []) => Result.Ok([])
+    sitesFor(["cc"], "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 0, []) => Result.Ok([Entry(key = Domain.IndexKeys.txKey("cc")?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", position = 0))?)])
+    List.reverse(sitesFor(["cc", "dd"], "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 0, [])?) => [Entry(key = Domain.IndexKeys.txKey("cc")?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", position = 0))?), Entry(key = Domain.IndexKeys.txKey("dd")?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", position = 1))?)]
+    sitesFor(["cc"], "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 7, []) => Result.Ok([Entry(key = Domain.IndexKeys.txKey("cc")?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", position = 7))?)])
+    List.len(sitesFor(["cc"], "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 0, [Entry(key = Domain.IndexKeys.txKey("cc")?, value = Domain.Index.encodeTxSite(Domain.Index.TxSite(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", position = 9))?)])?) => 2

@@ -18,7 +18,7 @@ module UtxoStore
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
     exposes [Unspent, Reached, indexOf, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
-    depends [Bytes, Domain.Index, Domain.IndexKeys]
+    depends [Bytes, Domain.ByteField, Domain.Index, Domain.IndexKeys]
     effects []
 
 record Unspent
@@ -32,6 +32,187 @@ record Unspent
 record Reached
     height: Int
     blockId: String
+
+fn coinbaseFlag() -> Int
+    ? "The byte that says an Output was minted rather than paid."
+    1
+
+verify coinbaseFlag
+    coinbaseFlag() => 1
+
+fn encodeCoin(unspent: Unspent) -> Result<Bytes, String>
+    ? "What the Set holds against a key: the amount, the Height that made it,"
+      "whether it was minted rather than paid, and the Script."
+      "The Transaction Id and the position are the key and are not repeated."
+      "The Script goes last because it is the one field whose length the"
+      "record does not say."
+    Bytes.fromList(List.concat(Domain.ByteField.number(unspent.value, Domain.Index.amountWidth()), List.concat(Domain.ByteField.number(unspent.height, Domain.Index.heightWidth()), List.concat([flagByte(unspent.coinbase)], Bytes.octets(Bytes.fromHex(unspent.script)?)))))
+
+verify encodeCoin
+    Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))
+    Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(0, 4), [1]))
+
+fn flagByte(coinbase: Bool) -> Int
+    ? "The coinbase flag, as one byte."
+    match coinbase
+        true -> coinbaseFlag()
+        false -> 0
+
+verify flagByte
+    flagByte(true) => 1
+    flagByte(false) => 0
+
+fn coinWidth() -> Int
+    ? "How many bytes a Set entry takes before its Script."
+    Domain.Index.amountWidth() + Domain.Index.heightWidth() + 1
+
+verify coinWidth
+    coinWidth() => 13
+
+fn decodeCoin(txid: String, index: Int, stored: Bytes) -> Result<Unspent, String>
+    ? "Read one back, given the key that named it."
+    coinIn(txid, index, Bytes.octets(stored))
+
+verify decodeCoin
+    decodeCoin("aa", 0, encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
+    decodeCoin("aa", 0, encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))?) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))
+    decodeCoin("aa", 0, Domain.Index.emptyBytes()) => Result.Err("a Set entry is at least 13 bytes, got 0")
+
+fn coinIn(txid: String, index: Int, octets: List<Int>) -> Result<Unspent, String>
+    ? "A record shorter than its fixed part is corruption."
+    match List.len(octets) < coinWidth()
+        true -> Result.Err("a Set entry is at least {coinWidth()} bytes, got {List.len(octets)}")
+        false -> coinFrom(txid, index, octets)
+
+verify coinIn
+    coinIn("aa", 0, []) => Result.Err("a Set entry is at least 13 bytes, got 0")
+
+fn coinFrom(txid: String, index: Int, octets: List<Int>) -> Result<Unspent, String>
+    ? "The four fields, once the record is long enough to hold them."
+    script = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, coinWidth()))?)
+    Result.Ok(Unspent(txid = txid, index = index, value = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.amountWidth())), script = script, height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, Domain.Index.amountWidth(), Domain.Index.heightWidth())), coinbase = Domain.ByteField.numberIn(Domain.ByteField.at(octets, coinWidth() - 1, 1)) == coinbaseFlag()))
+
+verify coinFrom
+    coinFrom("aa", 0, List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
+
+fn encodeUndo(removed: List<Unspent>) -> Result<Bytes, String>
+    ? "Everything a Block took out of the Set, as one record."
+      "Each Output is its key material and then the entry the Set held, both"
+      "length-prefixed so the walk back out needs no separator. It was"
+      "semicolon-joined text, which worked only because every field was"
+      "hexadecimal and so could not contain one."
+    Bytes.fromList(undoInto(removed, [])?)
+
+verify encodeUndo
+    Bytes.octets(encodeUndo([])?) => []
+    List.len(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?)) => 22
+
+fn undoInto(removed: List<Unspent>, acc: List<Int>) -> Result<List<Int>, String>
+    ? "One Output at a time, in the order they were taken."
+    match removed
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> undoInto(tail, List.concat(acc, oneUndo(head)?))
+
+verify undoInto
+    undoInto([], []) => Result.Ok([])
+
+fn oneUndo(unspent: Unspent) -> Result<List<Int>, String>
+    ? "One removed Output: where it was, then what the Set held about it."
+    key = Domain.ByteField.prefixed(Bytes.octets(unspentKey(unspent.txid, unspent.index)?))
+    entry = Domain.ByteField.prefixed(Bytes.octets(encodeCoin(unspent)?))
+    Result.Ok(List.concat(key, entry))
+
+verify oneUndo
+    List.len(oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => 22
+
+fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
+    ? "Read a Block's Undo Data back."
+    eachUndo(Bytes.octets(stored), [])
+
+verify decodeUndo
+    decodeUndo(Domain.Index.emptyBytes()) => Result.Ok([])
+    decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
+    decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
+
+fn eachUndo(octets: List<Int>, acc: List<Unspent>) -> Result<List<Unspent>, String>
+    ? "One length-prefixed pair at a time, until the record runs out."
+    match octets
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> undoThen(octets, acc)
+
+verify eachUndo
+    eachUndo([], []) => Result.Ok([])
+
+fn undoThen(octets: List<Int>, acc: List<Unspent>) -> Result<List<Unspent>, String>
+    ? "The key, then the entry, then whatever follows them."
+    key = Domain.ByteField.prefixedIn(octets)
+    rest = Domain.ByteField.afterPrefixed(octets)
+    entry = Domain.ByteField.prefixedIn(rest)
+    one = fromUndo(key, entry)?
+    eachUndo(Domain.ByteField.afterPrefixed(rest), List.prepend(one, acc))
+
+verify undoThen
+    undoThen(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?), []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
+
+fn fromUndo(key: List<Int>, entry: List<Int>) -> Result<Unspent, String>
+    ? "One Output, from the key that named it and the entry the Set held."
+      "Split apart here and decoded by decodeCoin, so an Undo entry and a Set"
+      "entry cannot drift into two different spellings of one Output."
+    decodeCoin(txidInKey(key), indexInKey(key), Bytes.fromList(entry)?)
+
+verify fromUndo
+    fromUndo(Bytes.octets(unspentKey("aa", 0)?), Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?)) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
+
+fn txidInKey(key: List<Int>) -> String
+    ? "The Transaction Id an Undo record's key names."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(Domain.ByteField.at(key, 1, List.len(key) - 1 - Domain.IndexKeys.indexWidth())), Domain.Index.emptyBytes()))
+
+verify txidInKey
+    txidInKey(Bytes.octets(unspentKey("aa", 0)?)) => "aa"
+
+fn indexInKey(key: List<Int>) -> Int
+    ? "The Output position an Undo record's key names."
+    Domain.ByteField.numberIn(Domain.ByteField.after(key, List.len(key) - Domain.IndexKeys.indexWidth()))
+
+verify indexInKey
+    indexInKey(Bytes.octets(unspentKey("aa", 12)?)) => 12
+
+fn encodeReached(reached: Reached) -> Result<Bytes, String>
+    ? "Where the Set stands: a Height, and the Block it stands on."
+      "The Block Id is not decoration beside the Height. A Height alone says"
+      "the Set was built along whatever branch h: named at the time, and h: is"
+      "the one keyspace a reorganisation rewrites -- so a Height alone stops"
+      "being true the moment the chain changes its mind, and nothing on disk"
+      "can tell that it has. Naming the Block makes it checkable, and it is"
+      "also the only way back down: Undo Data is keyed by Block Id."
+    Bytes.fromList(List.concat(Domain.ByteField.number(reached.height, Domain.Index.heightWidth()), Bytes.octets(Bytes.fromHex(reached.blockId)?)))
+
+verify encodeReached
+    Bytes.octets(encodeReached(Reached(height = 0, blockId = "aa"))?) => [0, 0, 0, 0, 170]
+    Bytes.octets(encodeReached(Reached(height = 4000, blockId = ""))?) => Domain.ByteField.number(4000, 4)
+
+fn decodeReached(stored: Bytes) -> Result<Reached, String>
+    ? "Read it back."
+      "There is no old spelling to refuse any more. A record written before"
+      "the Block Id was kept could be told apart when both were text; the"
+      "directory is rebuilt rather than migrated (#42), so what would have"
+      "read one is simply not there."
+    reachedIn(Bytes.octets(stored))
+
+verify decodeReached
+    decodeReached(encodeReached(Reached(height = 0, blockId = "aa"))?) => Result.Ok(Reached(height = 0, blockId = "aa"))
+    decodeReached(encodeReached(Reached(height = 4000, blockId = "bb"))?) => Result.Ok(Reached(height = 4000, blockId = "bb"))
+    decodeReached(Domain.Index.emptyBytes()) => Result.Err("a Set standing is at least 4 bytes, got 0")
+
+fn reachedIn(octets: List<Int>) -> Result<Reached, String>
+    ? "A Height, then the Block Id that follows it."
+    match List.len(octets) < Domain.Index.heightWidth()
+        true -> Result.Err("a Set standing is at least {Domain.Index.heightWidth()} bytes, got {List.len(octets)}")
+        false -> Result.Ok(Reached(height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), blockId = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, Domain.Index.heightWidth()))?)))
+
+verify reachedIn
+    reachedIn([]) => Result.Err("a Set standing is at least 4 bytes, got 0")
+    reachedIn([0, 0, 0, 1, 170]) => Result.Ok(Reached(height = 1, blockId = "aa"))
 
 fn unspentTag() -> Int
     ? "The byte that begins every Set entry: ASCII 'u'."
@@ -111,100 +292,6 @@ fn reachedKey() -> Result<Bytes, String>
 verify reachedKey
     reachedKey() => Domain.IndexKeys.metaKey("setTo")
 
-fn encodeReached(reached: Reached) -> String
-    ? "Where the Set stands: a Height, and the Block it stands on."
-      "The Block Id is not decoration beside the Height. A Height alone says"
-      "the Set was built along whatever branch h: named at the time, and h: is"
-      "the one keyspace a reorganisation rewrites -- so a Height alone stops"
-      "being true the moment the chain changes its mind, and nothing on disk"
-      "can tell that it has. Naming the Block makes it checkable, and it is"
-      "also the only way back down: Undo Data is keyed by Block Id."
-    "{reached.height}:{reached.blockId}"
-
-verify encodeReached
-    encodeReached(Reached(height = 0, blockId = "aa")) => "0:aa"
-    encodeReached(Reached(height = 4000, blockId = "00000086d6b2636cb2a392d45edc4ec544a10024d30141c9adf4bfd9de533b53")) => "4000:00000086d6b2636cb2a392d45edc4ec544a10024d30141c9adf4bfd9de533b53"
-
-fn decodeReached(text: String) -> Result<Reached, String>
-    ? "Read it back, refusing a record written before the Block Id was kept."
-      "A bare Height is the pre-#26 spelling, and it is refused rather than"
-      "read as a Height on the branch h: names now. That reading would be a"
-      "guess: if h: was reorganised after the Set was built, the Set describes"
-      "Blocks that are no longer on the chain, and the old record holds"
-      "nothing that could say so. Rebuilding is cheap; a Set quietly"
-      "describing the wrong branch is not."
-    reachedParts(text, String.split(text, ":"))
-
-verify decodeReached
-    decodeReached("0:aa") => Result.Ok(Reached(height = 0, blockId = "aa"))
-    decodeReached("4000:bb") => Result.Ok(Reached(height = 4000, blockId = "bb"))
-    decodeReached("4000") => Result.Err("the Set records Height 4000 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
-    decodeReached("") => Result.Err("Set standing must be height:blockId, got ''")
-    decodeReached("x:aa") => Result.Err("Set standing must name a whole Height, got 'x:aa'")
-    decodeReached("0:aa:bb") => Result.Err("Set standing must be height:blockId, got '0:aa:bb'")
-
-fn reachedParts(text: String, split: List<String>) -> Result<Reached, String>
-    ? "The Height comes first."
-    match split
-        [] -> Result.Err("Set standing must be height:blockId, got '{text}'")
-        [height, ..rest] -> afterReachedHeight(text, height, rest)
-
-verify reachedParts
-    reachedParts("0:aa", ["0", "aa"]) => Result.Ok(Reached(height = 0, blockId = "aa"))
-    reachedParts("", []) => Result.Err("Set standing must be height:blockId, got ''")
-
-fn afterReachedHeight(text: String, height: String, rest: List<String>) -> Result<Reached, String>
-    ? "One field and no more is either the old spelling or not a standing at all."
-    match rest
-        [] -> soleField(text, Domain.Index.decodeHeight(height))
-        [blockId, ..extra] -> afterReachedBlock(text, height, blockId, extra)
-
-verify afterReachedHeight
-    afterReachedHeight("0:aa", "0", ["aa"]) => Result.Ok(Reached(height = 0, blockId = "aa"))
-    afterReachedHeight("7", "7", []) => Result.Err("the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
-    afterReachedHeight("", "", []) => Result.Err("Set standing must be height:blockId, got ''")
-
-fn soleField(text: String, height: Result<Int, String>) -> Result<Reached, String>
-    ? "A lone whole number is what this program wrote before it kept the Block"
-      "Id, and is named as such so the reader is told to rebuild rather than"
-      "left to guess at corruption. Anything else never was a standing."
-    match height
-        Result.Ok(at) -> Result.Err(onlyHeight(text))
-        Result.Err(why) -> Result.Err("Set standing must be height:blockId, got '{text}'")
-
-verify soleField
-    soleField("7", Result.Ok(7)) => Result.Err("the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again")
-    soleField("", Result.Err("no")) => Result.Err("Set standing must be height:blockId, got ''")
-
-fn onlyHeight(text: String) -> String
-    ? "What to say about a Set whose standing predates the Block Id."
-    "the Set records Height {text} but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again"
-
-verify onlyHeight
-    onlyHeight("7") => "the Set records Height 7 but not the Block it stands on; it was built before the Block Id was kept, so delete the Set and run utxo again"
-
-fn afterReachedBlock(text: String, height: String, blockId: String, extra: List<String>) -> Result<Reached, String>
-    ? "Refuse a third field, then read the Height."
-      "A Block Id is hexadecimal and holds no colon, so a third field means"
-      "the text was never a standing."
-    match extra
-        [] -> reachedWith(text, Domain.Index.decodeHeight(height), blockId)
-        [head, ..tail] -> Result.Err("Set standing must be height:blockId, got '{text}'")
-
-verify afterReachedBlock
-    afterReachedBlock("0:aa", "0", "aa", []) => Result.Ok(Reached(height = 0, blockId = "aa"))
-    afterReachedBlock("0:aa:bb", "0", "aa", ["bb"]) => Result.Err("Set standing must be height:blockId, got '0:aa:bb'")
-
-fn reachedWith(text: String, height: Result<Int, String>, blockId: String) -> Result<Reached, String>
-    ? "The Height has to be a whole number."
-    match height
-        Result.Err(why) -> Result.Err("Set standing must name a whole Height, got '{text}'")
-        Result.Ok(at) -> Result.Ok(Reached(height = at, blockId = blockId))
-
-verify reachedWith
-    reachedWith("0:aa", Result.Ok(0), "aa") => Result.Ok(Reached(height = 0, blockId = "aa"))
-    reachedWith("x:aa", Result.Err("no"), "aa") => Result.Err("Set standing must name a whole Height, got 'x:aa'")
-
 fn unspentAt(txid: String, index: Int, output: SpentOutput, height: Int, coinbase: Bool) -> Unspent
     ? "An Output of a Transaction, as the Set holds it."
       "The Height and the coinbase flag travel with the Output because a"
@@ -268,224 +355,3 @@ verify matured
     matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), 100) => false
     matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), 101) => true
     matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true), 100) => true
-
-fn encodeCoin(unspent: Unspent) -> String
-    ? "What the Set holds against a key: the amount, the Script, the Height"
-      "that made it, and whether it was minted rather than paid."
-      "The Transaction Id and the position are the key and are not repeated."
-    "{unspent.value}:{unspent.script}:{unspent.height}:{flagOf(unspent.coinbase)}"
-
-verify encodeCoin
-    encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)) => "5:76:7:0"
-    encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true)) => "5::0:1"
-
-fn flagOf(coinbase: Bool) -> String
-    ? "The coinbase flag, as one character."
-    match coinbase
-        true -> "1"
-        false -> "0"
-
-verify flagOf
-    flagOf(true) => "1"
-    flagOf(false) => "0"
-
-fn decodeCoin(txid: String, index: Int, text: String) -> Result<Unspent, String>
-    ? "Read one back, given the key that named it."
-    coinParts(txid, index, text, String.split(text, ":"))
-
-verify decodeCoin
-    decodeCoin("aa", 0, "5:76:7:0") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    decodeCoin("aa", 0, "5::0:1") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))
-    decodeCoin("aa", 0, "5:76:7") => Result.Err("Set entry must be value:script:height:coinbase, got '5:76:7'")
-    decodeCoin("aa", 0, "5:76:7:0:x") => Result.Err("Set entry must be value:script:height:coinbase, got '5:76:7:0:x'")
-    decodeCoin("aa", 0, "x:76:7:0") => Result.Err("Set entry must hold whole numbers, got 'x:76:7:0'")
-    decodeCoin("aa", 0, "5:76:x:0") => Result.Err("Set entry must hold whole numbers, got '5:76:x:0'")
-
-fn coinParts(txid: String, index: Int, text: String, split: List<String>) -> Result<Unspent, String>
-    ? "The amount comes first."
-    match split
-        [] -> Result.Err("Set entry must be value:script:height:coinbase, got '{text}'")
-        [value, ..rest] -> afterValue(txid, index, text, value, rest)
-
-verify coinParts
-    coinParts("aa", 0, "5:76:7:0", ["5", "76", "7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    coinParts("aa", 0, "", []) => Result.Err("Set entry must be value:script:height:coinbase, got ''")
-
-fn afterValue(txid: String, index: Int, text: String, value: String, rest: List<String>) -> Result<Unspent, String>
-    ? "Then the Script."
-    match rest
-        [] -> Result.Err("Set entry must be value:script:height:coinbase, got '{text}'")
-        [script, ..more] -> afterScript(txid, index, text, value, script, more)
-
-verify afterValue
-    afterValue("aa", 0, "5:76:7:0", "5", ["76", "7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    afterValue("aa", 0, "5", "5", []) => Result.Err("Set entry must be value:script:height:coinbase, got '5'")
-
-fn afterScript(txid: String, index: Int, text: String, value: String, script: String, more: List<String>) -> Result<Unspent, String>
-    ? "Then the Height that made it."
-    match more
-        [] -> Result.Err("Set entry must be value:script:height:coinbase, got '{text}'")
-        [height, ..last] -> afterHeight(txid, index, text, value, script, height, last)
-
-verify afterScript
-    afterScript("aa", 0, "5:76:7:0", "5", "76", ["7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    afterScript("aa", 0, "5:76", "5", "76", []) => Result.Err("Set entry must be value:script:height:coinbase, got '5:76'")
-
-fn afterHeight(txid: String, index: Int, text: String, value: String, script: String, height: String, last: List<String>) -> Result<Unspent, String>
-    ? "The flag is last, and nothing follows it."
-    match last
-        [] -> Result.Err("Set entry must be value:script:height:coinbase, got '{text}'")
-        [flag, ..extra] -> afterFlag(txid, index, text, value, script, height, flag, extra)
-
-verify afterHeight
-    afterHeight("aa", 0, "5:76:7:0", "5", "76", "7", ["0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    afterHeight("aa", 0, "5:76:7", "5", "76", "7", []) => Result.Err("Set entry must be value:script:height:coinbase, got '5:76:7'")
-
-fn afterFlag(txid: String, index: Int, text: String, value: String, script: String, height: String, flag: String, extra: List<String>) -> Result<Unspent, String>
-    ? "Refuse a fifth field, then read the two numbers."
-    match extra
-        [] -> numbered(txid, index, text, Domain.Index.decodeHeight(value), script, Domain.Index.decodeHeight(height), flag)
-        [head, ..tail] -> Result.Err("Set entry must be value:script:height:coinbase, got '{text}'")
-
-verify afterFlag
-    afterFlag("aa", 0, "5:76:7:0", "5", "76", "7", "0", []) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    afterFlag("aa", 0, "5:76:7:0:x", "5", "76", "7", "0", ["x"]) => Result.Err("Set entry must be value:script:height:coinbase, got '5:76:7:0:x'")
-
-fn numbered(txid: String, index: Int, text: String, value: Result<Int, String>, script: String, height: Result<Int, String>, flag: String) -> Result<Unspent, String>
-    ? "The amount has to be a whole number."
-    match value
-        Result.Err(why) -> Result.Err("Set entry must hold whole numbers, got '{text}'")
-        Result.Ok(amount) -> withValue(txid, index, text, amount, script, height, flag)
-
-verify numbered
-    numbered("aa", 0, "5:76:7:0", Result.Ok(5), "76", Result.Ok(7), "0") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    numbered("aa", 0, "x:76:7:0", Result.Err("no"), "76", Result.Ok(7), "0") => Result.Err("Set entry must hold whole numbers, got 'x:76:7:0'")
-
-fn withValue(txid: String, index: Int, text: String, value: Int, script: String, height: Result<Int, String>, flag: String) -> Result<Unspent, String>
-    ? "So does the Height."
-    match height
-        Result.Err(why) -> Result.Err("Set entry must hold whole numbers, got '{text}'")
-        Result.Ok(made) -> Result.Ok(Unspent(txid = txid, index = index, value = value, script = script, height = made, coinbase = flag == "1"))
-
-verify withValue
-    withValue("aa", 0, "5:76:7:0", 5, "76", Result.Ok(7), "0") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    withValue("aa", 0, "5:76:7:1", 5, "76", Result.Ok(7), "1") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = true))
-    withValue("aa", 0, "5:76:x:0", 5, "76", Result.Err("no"), "0") => Result.Err("Set entry must hold whole numbers, got '5:76:x:0'")
-
-fn encodeUndo(removed: List<Unspent>) -> String
-    ? "Everything a Block took out of the Set, as one record."
-      "Semicolons between Outputs, and each Output is its key material"
-      "followed by the same four fields the Set holds -- so restoring one is"
-      "putting back exactly what was taken, Height and coinbase flag"
-      "included. A Script and a Transaction Id are both hexadecimal, so"
-      "neither separator can appear inside a field, and the empty list is the"
-      "empty string, which is what a Block of nothing but a coinbase removes."
-    joined(removed, "")
-
-verify encodeUndo
-    encodeUndo([]) => ""
-    encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)]) => "aa:0:5:76:7:0"
-    encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)]) => "aa:0:5:76:7:0;bb:2:7::1:1"
-
-fn joined(removed: List<Unspent>, acc: String) -> String
-    ? "One Output at a time, separated where there is something to separate."
-    match removed
-        [] -> acc
-        [head, ..tail] -> joined(tail, appended(acc, oneUndo(head)))
-
-verify joined
-    joined([], "") => ""
-    joined([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)], "") => "aa:0:5:76:7:0"
-
-fn appended(acc: String, piece: String) -> String
-    ? "A separator only between pieces, never before the first."
-    match String.len(acc) == 0
-        true -> piece
-        false -> "{acc};{piece}"
-
-verify appended
-    appended("", "x") => "x"
-    appended("x", "y") => "x;y"
-
-fn oneUndo(unspent: Unspent) -> String
-    ? "One removed Output: where it was, and everything the Set held about it."
-    "{unspent.txid}:{unspent.index}:{encodeCoin(unspent)}"
-
-verify oneUndo
-    oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)) => "aa:0:5:76:7:0"
-    oneUndo(Unspent(txid = "aa", index = 3, value = 0, script = "", height = 0, coinbase = true)) => "aa:3:0::0:1"
-
-fn decodeUndo(text: String) -> Result<List<Unspent>, String>
-    ? "Read a Block's Undo Data back."
-    match String.len(text) == 0
-        true -> Result.Ok([])
-        false -> eachUndo(String.split(text, ";"), [])
-
-verify decodeUndo
-    decodeUndo("") => Result.Ok([])
-    decodeUndo("aa:0:5:76:7:0") => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
-    decodeUndo("aa:0:5:76:7:0;bb:2:7::1:1") => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
-    decodeUndo("aa:0:5") => Result.Err("Set entry must be value:script:height:coinbase, got '5'")
-    decodeUndo("aa") => Result.Err("Undo entry must be txid:index followed by the Set entry, got 'aa'")
-    decodeUndo("aa:x:5:76:7:0") => Result.Err("Undo entry must name a whole Output position, got 'aa:x:5:76:7:0'")
-
-fn eachUndo(pieces: List<String>, acc: List<Unspent>) -> Result<List<Unspent>, String>
-    ? "One piece at a time, in the order they were written."
-    match pieces
-        [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> undoThen(head, tail, acc)
-
-verify eachUndo
-    eachUndo([], []) => Result.Ok([])
-    eachUndo(["aa:0:5:76:7:0"], []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
-    eachUndo(["aa:x:5:76:7:0"], []) => Result.Err("Undo entry must name a whole Output position, got 'aa:x:5:76:7:0'")
-
-fn undoThen(piece: String, rest: List<String>, acc: List<Unspent>) -> Result<List<Unspent>, String>
-    ? "Decode this one, then carry on."
-    match oneDecoded(piece)
-        Result.Err(why) -> Result.Err(why)
-        Result.Ok(unspent) -> eachUndo(rest, List.prepend(unspent, acc))
-
-verify undoThen
-    undoThen("aa:0:5:76:7:0", [], []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
-    undoThen("bad", [], []) => Result.Err("Undo entry must be txid:index followed by the Set entry, got 'bad'")
-
-fn oneDecoded(piece: String) -> Result<Unspent, String>
-    ? "The Transaction Id and the position, then the Set entry behind them."
-      "Split apart here and decoded by decodeCoin, so an Undo entry and a Set"
-      "entry cannot drift into two different spellings of one Output."
-    undoParts(piece, String.split(piece, ":"))
-
-verify oneDecoded
-    oneDecoded("aa:0:5:76:7:0") => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    oneDecoded("aa") => Result.Err("Undo entry must be txid:index followed by the Set entry, got 'aa'")
-
-fn undoParts(piece: String, split: List<String>) -> Result<Unspent, String>
-    ? "The Transaction Id comes first."
-    match split
-        [] -> Result.Err("Undo entry must be txid:index followed by the Set entry, got '{piece}'")
-        [txid, ..rest] -> afterTxid(piece, txid, rest)
-
-verify undoParts
-    undoParts("aa:0:5:76:7:0", ["aa", "0", "5", "76", "7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    undoParts("", []) => Result.Err("Undo entry must be txid:index followed by the Set entry, got ''")
-
-fn afterTxid(piece: String, txid: String, rest: List<String>) -> Result<Unspent, String>
-    ? "Then which Output of it, then everything else is the Set entry."
-    match rest
-        [] -> Result.Err("Undo entry must be txid:index followed by the Set entry, got '{piece}'")
-        [index, ..coin] -> withPosition(piece, txid, Domain.Index.decodeHeight(index), coin)
-
-verify afterTxid
-    afterTxid("aa:0:5:76:7:0", "aa", ["0", "5", "76", "7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    afterTxid("aa", "aa", []) => Result.Err("Undo entry must be txid:index followed by the Set entry, got 'aa'")
-
-fn withPosition(piece: String, txid: String, index: Result<Int, String>, coin: List<String>) -> Result<Unspent, String>
-    ? "The position has to be a whole number; the rest is the Set entry, rejoined."
-    match index
-        Result.Err(why) -> Result.Err("Undo entry must name a whole Output position, got '{piece}'")
-        Result.Ok(at) -> decodeCoin(txid, at, String.join(coin, ":"))
-
-verify withPosition
-    withPosition("aa:0:5:76:7:0", "aa", Result.Ok(0), ["5", "76", "7", "0"]) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    withPosition("aa:x:5:76:7:0", "aa", Result.Err("no"), ["5", "76", "7", "0"]) => Result.Err("Undo entry must name a whole Output position, got 'aa:x:5:76:7:0'")

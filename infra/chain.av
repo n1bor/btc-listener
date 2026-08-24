@@ -36,13 +36,13 @@ fn networkOf(store: Store) -> Result<Option<Network>, String>
       "what an unrecognised Script already gets."
     ! [Infra.Kv.get]
     seeded = Infra.Store.get(store, Domain.IndexKeys.heightKey(0)?)?
-    Result.Ok(recognised(seeded))
+    Result.Ok(recognised(Domain.Index.blockIdIn(seeded)))
 
 verify networkOf
     networkOf(Infra.Store.fixture([])) => Result.Ok(Option.None)
-    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")])) => Result.Ok(Option.Some(Network.Mainnet))
-    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6")])) => Result.Ok(Option.Some(Network.Signet))
-    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "nonsense")])) => Result.Ok(Option.None)
+    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?)])) => Result.Ok(Option.Some(Network.Mainnet))
+    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6")?)])) => Result.Ok(Option.Some(Network.Signet))
+    networkOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, Domain.Index.emptyBytes())])) => Result.Ok(Option.None)
 
 fn recognised(seeded: Option<String>) -> Option<Network>
     ? "A Height zero the Index does not name says as little as one it does not recognise."
@@ -58,7 +58,7 @@ verify recognised
 fn at(store: Store, blocks: BlockStore, height: Int) -> Result<Found, String>
     ? "Everything known about one Height, including why its body is absent."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
         Option.Some(blockId) -> withBlockId(store, blocks, height, blockId)
@@ -84,22 +84,22 @@ fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
 verify parentOf
     parentOf(Infra.Store.fixture([]), 0) => Result.Ok(Option.None)
     parentOf(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
-    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, Domain.Index.encodeBlockId("aa")?)]), 5) => Result.Ok(Option.Some("aa"))
     parentOf(Infra.Store.fixture([]), 0 - 4) => Result.Ok(Option.None)
-    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "")]), 5) => Result.Err("index has no Block Id at height 4")
+    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, Domain.Index.emptyBytes())]), 5) => Result.Err("index has no Block Id at height 4")
 
 fn parentNamed(store: Store, height: Int) -> Result<Option<String>, String>
     ? "A Height below the one asked about may name a Block, or may be gone."
     ! [Infra.Kv.get]
-    held = Infra.Store.get(store, Domain.IndexKeys.heightKey(height - 1)?)?
+    held = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height - 1)?)?)
     match held
         Option.None -> Result.Ok(Option.None)
         Option.Some(blockId) -> parentIsNamed(height, blockId)
 
 verify parentNamed
     parentNamed(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
-    parentNamed(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "aa")]), 5) => Result.Ok(Option.Some("aa"))
-    parentNamed(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "")]), 5) => Result.Err("index has no Block Id at height 4")
+    parentNamed(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, Domain.Index.encodeBlockId("aa")?)]), 5) => Result.Ok(Option.Some("aa"))
+    parentNamed(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, Domain.Index.emptyBytes())]), 5) => Result.Err("index has no Block Id at height 4")
 
 fn parentIsNamed(height: Int, blockId: String) -> Result<Option<String>, String>
     ? "A Height that names nothing is a damaged Index, not a missing parent."
@@ -120,8 +120,8 @@ fn watermark(store: Store) -> Result<Int, String>
 
 verify watermark
     watermark(Infra.Store.fixture([])) => Result.Ok(0)
-    watermark(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, "500")])) => Result.Ok(500)
-    watermark(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, "x")])) => Result.Err("Height must be a whole number, got 'x'")
+    watermark(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, Domain.Index.encodeHeight(500))])) => Result.Ok(500)
+    watermark(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, Domain.Index.emptyBytes())])) => Result.Err("a Height record is 4 bytes, got 0")
 
 fn bodyFor(blocks: BlockStore, height: Int, blockId: String, parent: Option<String>, state: BodyState) -> Result<Found, String>
     ? "Read the bytes when there are bytes, and say why when there are not."
@@ -149,23 +149,23 @@ fn transactionAt(store: Store, blocks: BlockStore, txid: String) -> Result<Found
         Option.None -> Result.Err("no record of transaction {txid}; index the Heights that hold it first")
         Option.Some(text) -> blockOfSite(store, blocks, text)
 
-fn blockOfSite(store: Store, blocks: BlockStore, text: String) -> Result<Found, String>
+fn blockOfSite(store: Store, blocks: BlockStore, stored: Bytes) -> Result<Found, String>
     ? "The site names a Block; the Index says where its bytes are."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    site = Domain.Index.decodeTxSite(text)?
+    site = Domain.Index.decodeTxSite(stored)?
     located = Infra.Store.get(store, Domain.IndexKeys.blockKey(site.blockId)?)?
     match located
         Option.None -> Result.Err("transaction is in block {site.blockId}, whose body is not held")
         Option.Some(where) -> heldAt(store, blocks, site.blockId, where)
 
-fn heldAt(store: Store, blocks: BlockStore, blockId: String, where: String) -> Result<Found, String>
+fn heldAt(store: Store, blocks: BlockStore, blockId: String, stored: Bytes) -> Result<Found, String>
     ? "Read the Block the site named, and ask what Height it sits at."
       "The Height decides which soft forks were in force, so a Transaction"
       "reached by its Id cannot be judged without it. The n: keyspace answers,"
       "having been written by the same phase that wrote the t: entry this"
       "lookup arrived through."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    location = Domain.Index.decodeLocation(where)?
+    location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(blocks, location)?
     height = heightOf(store, blockId)?
     Result.Ok(Found(height = height, blockId = blockId, parentBlockId = Option.None, body = Body.Held(location, payload)))
@@ -184,10 +184,10 @@ fn heightOf(store: Store, blockId: String) -> Result<Int, String>
 
 verify heightOf
     heightOf(Infra.Store.fixture([]), "aa") => Result.Ok(0 - 1)
-    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, "300000")]), "aa") => Result.Ok(300000)
-    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, "0")]), "aa") => Result.Ok(0)
-    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("bb")?, "300000")]), "aa") => Result.Ok(0 - 1)
-    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, "x")]), "aa") => Result.Err("Height must be a whole number, got 'x'")
+    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, Domain.Index.encodeHeight(300000))]), "aa") => Result.Ok(300000)
+    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, Domain.Index.encodeHeight(0))]), "aa") => Result.Ok(0)
+    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("bb")?, Domain.Index.encodeHeight(300000))]), "aa") => Result.Ok(0 - 1)
+    heightOf(Infra.Store.fixture([(Domain.IndexKeys.blockHeightKey("aa")?, Domain.Index.emptyBytes())]), "aa") => Result.Err("a Height record is 4 bytes, got 0")
 
 fn withoutBodies(store: Store, from: Int, to: Int, acc: Int) -> Result<Int, String>
     ? "How many Heights in a range the Index names but holds no body for."
@@ -211,7 +211,7 @@ verify withoutBodies
 fn withoutBody(store: Store, from: Int, to: Int, acc: Int) -> Result<Int, String>
     ? "One Height: named and held, named and empty, or not named at all."
     ! [Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(from)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(from)?)?)
     match named
         Option.None -> withoutBodies(store, from + 1, to, acc)
         Option.Some(blockId) -> countedIfEmpty(store, from, to, acc, blockId)
@@ -229,4 +229,4 @@ fn countedIfEmpty(store: Store, from: Int, to: Int, acc: Int, blockId: String) -
 
 verify countedIfEmpty
     countedIfEmpty(Infra.Store.fixture([]), 1, 1, 0, "aa") => Result.Ok(1)
-    countedIfEmpty(Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, "0:0")]), 1, 1, 0, "aa") => Result.Ok(0)
+    countedIfEmpty(Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, Domain.Index.emptyBytes())]), 1, 1, 0, "aa") => Result.Ok(0)

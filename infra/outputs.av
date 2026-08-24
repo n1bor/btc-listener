@@ -19,7 +19,7 @@ module Outputs
         "reason, and by its own command, because indexing Transactions and"
         "indexing Outputs are separately useful and separately expensive."
     exposes [Built, build]
-    depends [Domain.Block, Infra.Pace, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Block, Infra.Pace, Domain.Index, Domain.Transaction, Infra.Blocks, Infra.Store, Domain.IndexKeys]
     effects [Console.print, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll, Time.now, Time.unixMs]
 
 record Built
@@ -84,8 +84,8 @@ fn watermark(store: Store) -> Result<Int, String>
 
 verify watermark
     watermark(Infra.Store.fixture([])) => Result.Ok(0)
-    watermark(Infra.Store.fixture([(Domain.IndexKeys.outputsBelowKey()?, "1234")])) => Result.Ok(1234)
-    watermark(Infra.Store.fixture([(Domain.IndexKeys.outputsBelowKey()?, "x")])) => Result.Err("Height must be a whole number, got 'x'")
+    watermark(Infra.Store.fixture([(Domain.IndexKeys.outputsBelowKey()?, Domain.Index.encodeHeight(1234))])) => Result.Ok(1234)
+    watermark(Infra.Store.fixture([(Domain.IndexKeys.outputsBelowKey()?, Domain.Index.emptyBytes())])) => Result.Err("a Height record is 4 bytes, got 0")
 
 fn resumeFrom(from: Int, below: Int, to: Int) -> Int
     ? "Where to actually start, given what has been built already."
@@ -150,9 +150,9 @@ fn marked(pending: List<Entry>, reached: Int, advancing: Bool) -> Result<List<En
 
 verify marked
     marked([], 7, false) => Result.Ok([])
-    marked([], 7, true) => Result.Ok([Entry(key = Domain.IndexKeys.outputsBelowKey()?, value = "7")])
-    marked([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = "5:51")], 7, false) => Result.Ok([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = "5:51")])
-    marked([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = "5:51")], 400000, true) => Result.Ok([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = "5:51"), Entry(key = Domain.IndexKeys.outputsBelowKey()?, value = "400000")])
+    marked([], 7, true) => Result.Ok([Entry(key = Domain.IndexKeys.outputsBelowKey()?, value = Domain.Index.encodeHeight(7))])
+    marked([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5, script = "51"))?)], 7, false) => Result.Ok([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5, script = "51"))?)])
+    marked([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5, script = "51"))?)], 400000, true) => Result.Ok([Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5, script = "51"))?), Entry(key = Domain.IndexKeys.outputsBelowKey()?, value = Domain.Index.encodeHeight(400000))])
 
 fn flushed(state: Walk) -> Result<Store, String>
     ? "Write whatever is still held back."
@@ -171,7 +171,7 @@ fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
     ! [Console.print, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll, Time.now, Time.unixMs]
-    named = Infra.Store.get(state.store, Domain.IndexKeys.heightKey(height)?)?
+    named = Domain.Index.blockIdIn(Infra.Store.get(state.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Ok(state)
         Option.Some(blockId) -> atBlock(state, height, to, blockId)
@@ -184,10 +184,10 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
         Option.None -> walk(state, height + 1, to)
         Option.Some(text) -> indexBody(state, height, to, blockId, text)
 
-fn indexBody(state: Walk, height: Int, to: Int, blockId: String, text: String) -> Result<Walk, String>
+fn indexBody(state: Walk, height: Int, to: Int, blockId: String, stored: Bytes) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
     ! [Console.print, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll, Time.now, Time.unixMs]
-    location = Domain.Index.decodeLocation(text)?
+    location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
     entries = outputsFor(Domain.Block.txidsOf(transactions), transactions, state.pending)?
@@ -250,11 +250,11 @@ verify entriesFor
 
 fn entryFor(txid: String, index: Int, output: Output) -> Result<Entry, String>
     ? "This Output, under the name an Input will call it by."
-    Result.Ok(Entry(key = Domain.IndexKeys.outputKey(txid, index)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = Domain.Transaction.valueOf(output), script = Domain.Transaction.outputScriptOf(output)))))
+    Result.Ok(Entry(key = Domain.IndexKeys.outputKey(txid, index)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = Domain.Transaction.valueOf(output), script = Domain.Transaction.outputScriptOf(output)))?))
 
 verify entryFor
-    entryFor("aa", 0, sampleOutput()) => Result.Ok(Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = "5000:51"))
-    entryFor("aa", 3, sampleOutput()) => Result.Ok(Entry(key = Domain.IndexKeys.outputKey("aa", 3)?, value = "5000:51"))
+    entryFor("aa", 0, sampleOutput()) => Result.Ok(Entry(key = Domain.IndexKeys.outputKey("aa", 0)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5000, script = "51"))?))
+    entryFor("aa", 3, sampleOutput()) => Result.Ok(Entry(key = Domain.IndexKeys.outputKey("aa", 3)?, value = Domain.Index.encodeSpentOutput(Domain.Index.SpentOutput(value = 5000, script = "51"))?))
 
 fn sampleOutput() -> Output
     ? "One Output, for the blocks above."

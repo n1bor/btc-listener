@@ -17,7 +17,7 @@ module AssumeValid
         "borrowed claim the rest of the project refuses. Unset means every"
         "Script runs, which is the auditor's stance and the safe one."
     exposes [Claim, Standing, claimKey, encodeClaim, decodeClaim, runsScriptsAt, standing, skippedBelow]
-    depends [Bytes, Domain.Index, Domain.IndexKeys]
+    depends [Bytes, Domain.ByteField, Domain.Index, Domain.IndexKeys]
     effects []
 
 record Claim
@@ -36,66 +36,6 @@ fn claimKey() -> Result<Bytes, String>
 verify claimKey
     claimKey() => Domain.IndexKeys.metaKey("assumeValid")
 
-fn encodeClaim(claim: Claim) -> String
-    ? "The Height, and the Block the Index held there when the claim was made."
-    "{claim.height}:{claim.blockId}"
-
-verify encodeClaim
-    encodeClaim(Claim(height = 0, blockId = "aa")) => "0:aa"
-    encodeClaim(Claim(height = 700000, blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")) => "700000:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-
-fn decodeClaim(text: String) -> Result<Claim, String>
-    ? "Read it back."
-    claimParts(text, String.split(text, ":"))
-
-verify decodeClaim
-    decodeClaim("0:aa") => Result.Ok(Claim(height = 0, blockId = "aa"))
-    decodeClaim("700000:bb") => Result.Ok(Claim(height = 700000, blockId = "bb"))
-    decodeClaim("") => Result.Err("Assume-valid claim must be height:blockId, got ''")
-    decodeClaim("700000") => Result.Err("Assume-valid claim must be height:blockId, got '700000'")
-    decodeClaim("700000:bb:cc") => Result.Err("Assume-valid claim must be height:blockId, got '700000:bb:cc'")
-    decodeClaim("x:bb") => Result.Err("Assume-valid Height must be a whole number, got 'x:bb'")
-
-fn claimParts(text: String, split: List<String>) -> Result<Claim, String>
-    ? "The Height comes first."
-    match split
-        [] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
-        [height, ..rest] -> afterHeight(text, height, rest)
-
-verify claimParts
-    claimParts("0:aa", ["0", "aa"]) => Result.Ok(Claim(height = 0, blockId = "aa"))
-    claimParts("", []) => Result.Err("Assume-valid claim must be height:blockId, got ''")
-
-fn afterHeight(text: String, height: String, rest: List<String>) -> Result<Claim, String>
-    ? "The Block Id is last, and nothing follows it."
-    match rest
-        [] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
-        [blockId, ..extra] -> afterBlockId(text, height, blockId, extra)
-
-verify afterHeight
-    afterHeight("0:aa", "0", ["aa"]) => Result.Ok(Claim(height = 0, blockId = "aa"))
-    afterHeight("0", "0", []) => Result.Err("Assume-valid claim must be height:blockId, got '0'")
-
-fn afterBlockId(text: String, height: String, blockId: String, extra: List<String>) -> Result<Claim, String>
-    ? "Refuse a third field, then read the Height."
-    match extra
-        [] -> numbered(text, Domain.Index.decodeHeight(height), blockId)
-        [head, ..tail] -> Result.Err("Assume-valid claim must be height:blockId, got '{text}'")
-
-verify afterBlockId
-    afterBlockId("0:aa", "0", "aa", []) => Result.Ok(Claim(height = 0, blockId = "aa"))
-    afterBlockId("0:aa:bb", "0", "aa", ["bb"]) => Result.Err("Assume-valid claim must be height:blockId, got '0:aa:bb'")
-
-fn numbered(text: String, height: Result<Int, String>, blockId: String) -> Result<Claim, String>
-    ? "The Height has to be a whole number."
-    match height
-        Result.Err(why) -> Result.Err("Assume-valid Height must be a whole number, got '{text}'")
-        Result.Ok(at) -> Result.Ok(Claim(height = at, blockId = blockId))
-
-verify numbered
-    numbered("0:aa", Result.Ok(0), "aa") => Result.Ok(Claim(height = 0, blockId = "aa"))
-    numbered("x:aa", Result.Err("no"), "aa") => Result.Err("Assume-valid Height must be a whole number, got 'x:aa'")
-
 fn runsScriptsAt(height: Int, claim: Option<Claim>) -> Bool
     ? "Whether the Scripts of the Block at this Height are run."
       "Strictly above the claimed Height, so the pinned Block itself is one of"
@@ -113,6 +53,35 @@ verify runsScriptsAt
     runsScriptsAt(100, Option.Some(Claim(height = 100, blockId = "aa"))) => false
     runsScriptsAt(99, Option.Some(Claim(height = 100, blockId = "aa"))) => false
     runsScriptsAt(101, Option.Some(Claim(height = 100, blockId = "aa"))) => true
+
+fn encodeClaim(claim: Claim) -> Result<Bytes, String>
+    ? "The Height, and the Block the Index held there when the claim was made."
+      "The same shape as the Set's own standing, and for the same reason: a"
+      "Height alone cannot say whether the chain moved underneath it."
+    Bytes.fromList(List.concat(Domain.ByteField.number(claim.height, Domain.Index.heightWidth()), Bytes.octets(Bytes.fromHex(claim.blockId)?)))
+
+verify encodeClaim
+    Bytes.octets(encodeClaim(Claim(height = 0, blockId = "aa"))?) => [0, 0, 0, 0, 170]
+    Bytes.octets(encodeClaim(Claim(height = 700000, blockId = ""))?) => Domain.ByteField.number(700000, 4)
+
+fn decodeClaim(stored: Bytes) -> Result<Claim, String>
+    ? "Read it back."
+    claimIn(Bytes.octets(stored))
+
+verify decodeClaim
+    decodeClaim(encodeClaim(Claim(height = 0, blockId = "aa"))?) => Result.Ok(Claim(height = 0, blockId = "aa"))
+    decodeClaim(encodeClaim(Claim(height = 700000, blockId = "bb"))?) => Result.Ok(Claim(height = 700000, blockId = "bb"))
+    decodeClaim(Domain.Index.emptyBytes()) => Result.Err("an Assume-valid claim is at least 4 bytes, got 0")
+
+fn claimIn(octets: List<Int>) -> Result<Claim, String>
+    ? "A Height, then the Block Id that follows it."
+    match List.len(octets) < Domain.Index.heightWidth()
+        true -> Result.Err("an Assume-valid claim is at least {Domain.Index.heightWidth()} bytes, got {List.len(octets)}")
+        false -> Result.Ok(Claim(height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), blockId = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, Domain.Index.heightWidth()))?)))
+
+verify claimIn
+    claimIn([]) => Result.Err("an Assume-valid claim is at least 4 bytes, got 0")
+    claimIn([0, 0, 0, 1, 170]) => Result.Ok(Claim(height = 1, blockId = "aa"))
 
 fn standing(claim: Option<Claim>, namedNow: Option<String>) -> Standing
     ? "Whether the claim still describes the chain the Index is following."

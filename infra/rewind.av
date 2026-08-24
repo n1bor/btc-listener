@@ -15,7 +15,7 @@ module Rewind
         "Nothing here decides anything. It reads the branch, hands it to"
         "Domain.Rewind, and carries out what comes back."
     exposes [Realigned, realigned, branchOf]
-    depends [Domain.Block, Domain.Disconnect, Domain.HeaderTree, Domain.Index, Domain.Reorg, Domain.Rewind, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.Block, Domain.Disconnect, Domain.HeaderTree, Domain.Index, Domain.Reorg, Domain.Rewind, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
 record Realigned
@@ -29,7 +29,7 @@ fn realigned(store: Store, blocks: BlockStore) -> Result<Realigned, String>
     held = Infra.Store.get(store, Domain.UtxoStore.reachedKey()?)?
     standsOn(store, blocks, held)
 
-fn standsOn(store: Store, blocks: BlockStore, held: Option<String>) -> Result<Realigned, String>
+fn standsOn(store: Store, blocks: BlockStore, held: Option<Bytes>) -> Result<Realigned, String>
     ? "Nothing recorded means nothing connected, so the walk starts at Height 1."
       "One rather than zero, because genesis is not a Block that connects. It"
       "is the base the chain is measured from: no Peer will send its body, and"
@@ -39,7 +39,7 @@ fn standsOn(store: Store, blocks: BlockStore, held: Option<String>) -> Result<Re
     ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
     match held
         Option.None -> Result.Ok(Realigned(store = store, from = 1, dropped = 0))
-        Option.Some(text) -> decoded(store, blocks, Domain.UtxoStore.decodeReached(text))
+        Option.Some(stored) -> decoded(store, blocks, Domain.UtxoStore.decodeReached(stored))
 
 fn decoded(store: Store, blocks: BlockStore, reached: Result<Reached, String>) -> Result<Realigned, String>
     ? "A standing that will not decode stops the walk before it touches the Set."
@@ -64,8 +64,8 @@ fn undoFloor(store: Store) -> Result<Int, String>
 
 verify undoFloor
     undoFloor(Infra.Store.fixture([])) => Result.Ok(0)
-    undoFloor(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, "712")])) => Result.Ok(712)
-    undoFloor(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, "x")])) => Result.Err("Height must be a whole number, got 'x'")
+    undoFloor(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, Domain.Index.encodeHeight(712))])) => Result.Ok(712)
+    undoFloor(Infra.Store.fixture([(Domain.UtxoStore.undoWindowKey()?, Domain.Index.emptyBytes())])) => Result.Err("a Height record is 4 bytes, got 0")
 
 fn branchOf(store: Store, blockId: String, floor: Int, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "The branch down from a Block, each Height beside what h: records there."
@@ -85,17 +85,17 @@ verify branchOf
     branchOf(sample()?, "ff", 0, []) => Result.Err("the Set stands on Block ff, which the Header tree does not hold; the Index and the Set describe different chains, so rebuild the Set")
     branchOf(sample()?, "zz", 0, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn atPlacement(store: Store, blockId: String, text: String, floor: Int, acc: List<Standing>) -> Result<List<Standing>, String>
+fn atPlacement(store: Store, blockId: String, stored: Bytes, floor: Int, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "A k: record that will not decode is corruption."
     ! [Infra.Kv.get]
-    match Domain.TreeStore.decodeHeld(blockId, text)
+    match Domain.TreeStore.decodeHeld(blockId, stored)
         Result.Err(why) -> Result.Err(why)
         Result.Ok(named) -> beside(store, named.placement, floor, acc)
 
 fn beside(store: Store, placement: Placement, floor: Int, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "This Height of the branch, beside the Block Id h: holds there."
     ! [Infra.Kv.get]
-    recorded = Infra.Store.get(store, Domain.IndexKeys.heightKey(placement.height)?)?
+    recorded = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(placement.height)?)?)
     onwards(store, Standing(placement = placement, recorded = recorded), floor, acc)
 
 fn onwards(store: Store, one: Standing, floor: Int, acc: List<Standing>) -> Result<List<Standing>, String>
@@ -183,14 +183,14 @@ fn parked(store: Store, height: Int, blockId: String) -> Result<Store, String>
       "Set holds. The Block below the one just disconnected is its parent,"
       "which the tree recorded beside it precisely so this needs no lookup."
     ! [Infra.Kv.putAll]
-    Infra.Store.putAll(store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId)))])
+    Infra.Store.putAll(store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])
 
 fn sample() -> Result<Store, String>
     ? "A two-Block branch whose tip h: has stopped naming, for the cases here."
       "aa sits at Height 1 and h: still names it; bb sits at Height 2 and h:"
       "names cc there instead, which is exactly what a reorganisation leaves"
       "behind for the Set to walk back through."
-    Result.Ok(Infra.Store.fixture([(Domain.TreeStore.headerKey("aa")?, "1:8590065666:00:0100"), (Domain.TreeStore.headerKey("bb")?, "2:12885098499:aa:0200"), (Domain.IndexKeys.heightKey(1)?, "aa"), (Domain.IndexKeys.heightKey(2)?, "cc")]))
+    Result.Ok(Infra.Store.fixture([(Domain.TreeStore.headerKey("aa")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "00", height = 1, work = 8590065666), "0100"))?), (Domain.TreeStore.headerKey("bb")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "aa", height = 2, work = 12885098499), "0200"))?), (Domain.IndexKeys.heightKey(1)?, Domain.Index.encodeBlockId("aa")?), (Domain.IndexKeys.heightKey(2)?, Domain.Index.encodeBlockId("cc")?)]))
 
 fn agreeing() -> Standing
     ? "Height 1 of that branch, which h: still names."
