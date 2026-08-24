@@ -29,6 +29,18 @@ disagree, check `git log upstream/main` before believing it is a live bug.
 grep the repo for `jasisz/aver#` and retire every workaround whose issue has
 closed, in the same PR.
 
+**Test against a real node before you commit.** `aver verify` checks this
+program against fixtures its own authors wrote, and a fixture cannot disagree
+with the assumption that produced it. `docs/regtest-testing.md` is the standing
+end-to-end test on a local regtest node: every command in order, real spending
+Transactions across all four address types, a reorganisation summoned with
+`invalidateblock`, and a Block-Id comparison against Core itself. It takes a few
+minutes and it is the only evidence here that comes from outside the project. A
+change that passes every gate and breaks the reorganisation path is a change
+that passes every gate. **When you test something that document does not cover,
+add it there** — the coverage only grows if each person leaves behind what they
+had to work out.
+
 **Two failures that only `cargo build` finds.** Both survive `check`, `verify`
 and `compile`.
 

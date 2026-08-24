@@ -566,6 +566,35 @@ Not one undecided script in 2.1 million. Six months ago the same walk left
 13.8 million of them, every one the same sentence — *output is a witness
 program and needs the witness evaluated*.
 
+## Reorganisations, on demand
+
+A signet reorganisation cannot be summoned; you wait, and it may never come.
+`bitcoin-cli -regtest invalidateblock` produces one whenever you like, which
+matters because disconnecting a Block is the only path that reads **Undo Data**
+back, rewrites the `h:` keyspace and rolls the UTXO Set backwards. A change can
+break all three and pass every other test in this repository.
+
+```
+headers to 167  REORGANISED: 5 Height(s) re-pointed above 155
+REORGANISED: the Set stands on a branch the chain has left; taking it back to
+  Height 155, disconnecting 5 Block(s)
+  height 160 disconnected: set +0 -1
+  ...
+following at Height 167: 12 connected, 0 disconnected, set +12 -0
+```
+
+[docs/regtest-testing.md](docs/regtest-testing.md) is the standing end-to-end
+test: every command in order against a local node, real spending Transactions
+across all four address types, the reorganisation above, and a Block-Id
+comparison against Core itself. It also carries `tools/regtest/liar.py`, a Peer
+built to lie — Core is cooperative by construction, so the paths that exist for
+Peers that misbehave need one that will. Run it before committing, and when you
+test something it does not cover, add it there.
+
+One warning it repeats, because it is easy to fool yourself: an audit over
+coinbase-only Blocks reports `0 spends, 0 scripts` and says **CLEAN**. Read the
+counts, not the word.
+
 ## Checking a range
 
 `audit` runs every check over a range of Heights: each Block against its Header,
