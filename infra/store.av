@@ -49,7 +49,7 @@ type Store
     Database(Infra.Kv.Handle)
 
 record Entry
-    key: String
+    key: Bytes
     value: String
 
 fn open(dir: String) -> Result<Store, String>
@@ -122,7 +122,7 @@ fn empty() -> Map<String, String>
 verify empty
     Map.len(empty()) => 0
 
-fn get(store: Store, key: String) -> Result<Option<String>, String>
+fn get(store: Store, key: Bytes) -> Result<Option<String>, String>
     ? "What is stored under a key, if anything."
       "A key the rules refuse is refused rather than answered with None. The two"
       "are not the same thing: absent is a fact about the data, a malformed key"
@@ -131,48 +131,48 @@ fn get(store: Store, key: String) -> Result<Option<String>, String>
       "reads enforcing it too is what makes it a contract."
     ! [Infra.Kv.get]
     match usableKey(key)
-        false -> Result.Err(keyRefused(key))
+        false -> Result.Err(keyRefused())
         true -> looked(store, key)
 
 verify get
-    get(fixture([("a", "b")]), "a") => Result.Ok(Option.Some("b"))
-    get(fixture([]), "a") => Result.Ok(Option.None)
-    get(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
-    get(fixture([]), "a\tb") => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
+    get(fixture([(keyed("a"), "b")]), keyed("a")) => Result.Ok(Option.Some("b"))
+    get(fixture([]), keyed("a")) => Result.Ok(Option.None)
+    get(fixture([]), keyed("")) => Result.Err("Store key must not be empty")
+    get(fixture([]), keyed("a\tb")) => Result.Ok(Option.None)
 
-fn looked(store: Store, key: String) -> Result<Option<String>, String>
+fn looked(store: Store, key: Bytes) -> Result<Option<String>, String>
     ? "The key is usable, so whichever backend holds the entries answers from them."
     ! [Infra.Kv.get]
     match store
-        Store.Memory(held) -> Result.Ok(Map.get(held, key))
-        Store.Database(handle) -> asText(Infra.Kv.get(handle, asBytes(key)))
+        Store.Memory(held) -> Result.Ok(Map.get(held, indexed(key)))
+        Store.Database(handle) -> asText(Infra.Kv.get(handle, key))
 
 verify looked
-    looked(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
-    looked(Store.Memory(Map.fromList([])), "a") => Result.Ok(Option.None)
+    looked(Store.Memory(Map.fromList([(indexed(keyed("a")), "b")])), keyed("a")) => Result.Ok(Option.Some("b"))
+    looked(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(Option.None)
 
-fn has(store: Store, key: String) -> Result<Bool, String>
+fn has(store: Store, key: Bytes) -> Result<Bool, String>
     ? "Whether a key is present, refusing one that could never have been stored."
     ! [Infra.Kv.get]
     match usableKey(key)
-        false -> Result.Err(keyRefused(key))
+        false -> Result.Err(keyRefused())
         true -> present(store, key)
 
 verify has
-    has(fixture([("a", "b")]), "a") => Result.Ok(true)
-    has(fixture([]), "a") => Result.Ok(false)
-    has(fixture([]), "") => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    has(fixture([(keyed("a"), "b")]), keyed("a")) => Result.Ok(true)
+    has(fixture([]), keyed("a")) => Result.Ok(false)
+    has(fixture([]), keyed("")) => Result.Err("Store key must not be empty")
 
-fn present(store: Store, key: String) -> Result<Bool, String>
+fn present(store: Store, key: Bytes) -> Result<Bool, String>
     ? "The key is usable, so ask the entries the backend holds."
     ! [Infra.Kv.get]
     match store
-        Store.Memory(held) -> Result.Ok(Map.has(held, key))
-        Store.Database(handle) -> wasFound(Infra.Kv.get(handle, asBytes(key)))
+        Store.Memory(held) -> Result.Ok(Map.has(held, indexed(key)))
+        Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
 
 verify present
-    present(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(true)
-    present(Store.Memory(Map.fromList([])), "a") => Result.Ok(false)
+    present(Store.Memory(Map.fromList([(indexed(keyed("a")), "b")])), keyed("a")) => Result.Ok(true)
+    present(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(false)
 
 fn wasFound(found: Result<Option<Bytes>, String>) -> Result<Bool, String>
     ? "Whether a lookup found anything."
@@ -205,7 +205,7 @@ fn size(store: Store) -> Result<Int, String>
         Store.Memory(held) -> Result.Ok(Map.len(held))
         Store.Database(handle) -> Infra.Kv.count(handle)
 
-fn fixture(pairs: List<Tuple<String, String>>) -> Store
+fn fixture(pairs: List<Tuple<Bytes, String>>) -> Store
     ? "A Store holding exactly these pairs, for verify blocks in other modules."
       "An opaque Store cannot be built from outside, and functions elsewhere that"
       "take one still have to be checked, so the seam supplies the fixture rather"
@@ -213,14 +213,14 @@ fn fixture(pairs: List<Tuple<String, String>>) -> Store
       "It touches no disk, and says so in the type. A Store made this way refuses"
       "the same keys the database does and can be written to; what it cannot do"
       "is outlive the call."
-    Store.Memory(Map.fromList(pairs))
+    Store.Memory(Map.fromList(asIndexed(pairs, [])))
 
 verify fixture
     fixture([]) => Store.Memory(Map.fromList([]))
-    fixture([("a", "b")]) => Store.Memory(Map.set(Map.fromList([]), "a", "b"))
-    fixture([("a", "b"), ("c", "d")]) => Store.Memory(Map.fromList([("a", "b"), ("c", "d")]))
+    fixture([(keyed("a"), "b")]) => Store.Memory(Map.set(Map.fromList([]), indexed(keyed("a")), "b"))
+    fixture([(keyed("a"), "b"), (keyed("c"), "d")]) => Store.Memory(Map.fromList([(indexed(keyed("a")), "b"), (indexed(keyed("c")), "d")]))
 
-fn put(store: Store, key: String, value: String) -> Result<Store, String>
+fn put(store: Store, key: Bytes, value: String) -> Result<Store, String>
     ? "Record one key."
       "Convenience for a single change. Anything in bulk should go through"
       "putAll: one putAll is one write batch, and a loop over put pays a round"
@@ -248,12 +248,53 @@ fn asPairs(entries: List<Entry>, acc: List<Tuple<Bytes, Bytes>>) -> List<Tuple<B
     ? "The batch as the pairs the contract carries."
     match entries
         [] -> List.reverse(acc)
-        [head, ..tail] -> asPairs(tail, List.prepend((asBytes(head.key), asBytes(head.value)), acc))
+        [head, ..tail] -> asPairs(tail, List.prepend((head.key, asBytes(head.value)), acc))
 
 verify asPairs
     asPairs([], []) => []
-    asPairs([Entry(key = "a", value = "b")], []) => [(asBytes("a"), asBytes("b"))]
-    asPairs([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")], []) => [(asBytes("a"), asBytes("b")), (asBytes("c"), asBytes("d"))]
+    asPairs([Entry(key = keyed("a"), value = "b")], []) => [(asBytes("a"), asBytes("b"))]
+    asPairs([Entry(key = keyed("a"), value = "b"), Entry(key = keyed("c"), value = "d")], []) => [(asBytes("a"), asBytes("b")), (asBytes("c"), asBytes("d"))]
+
+fn asIndexed(pairs: List<Tuple<Bytes, String>>, acc: List<Tuple<String, String>>) -> List<Tuple<String, String>>
+    ? "The fixture's pairs, keyed the way the in-memory backing finds them."
+    match pairs
+        [] -> List.reverse(acc)
+        [head, ..tail] -> asIndexed(tail, List.prepend(indexedPair(head), acc))
+
+verify asIndexed
+    asIndexed([], []) => []
+    asIndexed([(keyed("a"), "b")], []) => [("61", "b")]
+
+fn indexedPair(pair: Tuple<Bytes, String>) -> Tuple<String, String>
+    ? "One fixture pair, keyed the way the in-memory backing finds it."
+    match pair
+        (key, value) -> (indexed(key), value)
+
+verify indexedPair
+    indexedPair((keyed("a"), "b")) => ("61", "b")
+
+fn indexed(key: Bytes) -> String
+    ? "How the in-memory backing indexes a key."
+      "Hexadecimal, because Aver's Map cannot key on Bytes: the generated"
+      "Rust derives neither Eq nor Hash for it (jasisz/aver#1127). The"
+      "Store's keys are bytes and the database sees them as bytes; this is"
+      "only how a fixture's Map finds one, and it is one-to-one, so nothing"
+      "about which keys are distinct changes."
+    Bytes.toHex(key)
+
+verify indexed
+    indexed(keyed("a")) => "61"
+    indexed(keyed("")) => ""
+
+fn keyed(text: String) -> Bytes
+    ? "A key spelled as text, for the cases in this module."
+      "Only the cases. Every real key is built by Domain.IndexKeys and arrives"
+      "already bytes; this exists so a case about the Store can say which key"
+      "it means without naming an encoding the Store does not own."
+    String.toUtf8(text)
+
+verify keyed
+    Bytes.octets(keyed("a")) => [97]
 
 fn asBytes(text: String) -> Bytes
     ? "A key or a value on its way to the database."
@@ -322,11 +363,11 @@ fn heldPut(held: Map<String, String>, entries: List<Entry>) -> Result<Store, Str
     Result.Ok(Store.Memory(absorbAll(entries, held)))
 
 verify heldPut
-    heldPut(empty(), [Entry(key = "a", value = "b")]) => Result.Ok(Store.Memory(Map.set(empty(), "a", "b")))
-    heldPut(empty(), [Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
-    heldPut(empty(), [Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
+    heldPut(empty(), [Entry(key = keyed("a"), value = "b")]) => Result.Ok(Store.Memory(Map.set(empty(), indexed(keyed("a")), "b")))
+    heldPut(empty(), [Entry(key = keyed("a\tb"), value = "c")]) => Result.Ok(Store.Memory(Map.set(empty(), indexed(keyed("a\tb")), "c")))
+    heldPut(empty(), [Entry(key = keyed("a"), value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
 
-fn delete(store: Store, key: String) -> Result<Store, String>
+fn delete(store: Store, key: Bytes) -> Result<Store, String>
     ? "Forget one key."
       "Pruning needs this: a Block whose Segment was deleted must have no Location"
       "entry, or the Prune Watermark could not tell a discarded Block from one"
@@ -334,7 +375,7 @@ fn delete(store: Store, key: String) -> Result<Store, String>
     ! [Infra.Kv.deleteAll]
     deleteAll(store, [key])
 
-fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
+fn deleteAll(store: Store, keys: List<Bytes>) -> Result<Store, String>
     ? "Forget several keys in one batch, as putAll records several in one."
       "Pruning drops the Location of every Block in a deleted Segment, which is"
       "tens of thousands of keys at once, and one batch is one round trip."
@@ -343,53 +384,58 @@ fn deleteAll(store: Store, keys: List<String>) -> Result<Store, String>
         Store.Memory(held) -> heldDelete(held, keys)
         Store.Database(handle) -> storedDelete(handle, keys)
 
-fn storedDelete(handle: Infra.Kv.Handle, keys: List<String>) -> Result<Store, String>
+fn storedDelete(handle: Infra.Kv.Handle, keys: List<Bytes>) -> Result<Store, String>
     ? "Ask the database to forget the keys, in one batch."
     ! [Infra.Kv.deleteAll]
     _checked = acceptableKeys(keys)?
-    _removed = Infra.Kv.deleteAll(handle, asKeyBytes(keys, []))?
+    _removed = Infra.Kv.deleteAll(handle, keys)?
     Result.Ok(Store.Database(handle))
 
-fn heldDelete(held: Map<String, String>, keys: List<String>) -> Result<Store, String>
+fn heldDelete(held: Map<String, String>, keys: List<Bytes>) -> Result<Store, String>
     ? "Forget the keys in memory, refusing any the Store could never have held."
     _checked = acceptableKeys(keys)?
     Result.Ok(Store.Memory(forgetAll(keys, held)))
 
 verify heldDelete
-    heldDelete(Map.set(empty(), "a", "b"), ["a"]) => Result.Ok(Store.Memory(empty()))
-    heldDelete(empty(), [""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    heldDelete(Map.set(empty(), indexed(keyed("a")), "b"), [keyed("a")]) => Result.Ok(Store.Memory(empty()))
+    heldDelete(empty(), [keyed("")]) => Result.Err("Store key must not be empty")
 
-fn forgetAll(keys: List<String>, into: Map<String, String>) -> Map<String, String>
+fn forgetAll(keys: List<Bytes>, into: Map<String, String>) -> Map<String, String>
     ? "Remove the same keys from the in-memory map."
     match keys
         [] -> into
-        [head, ..tail] -> forgetAll(tail, Map.remove(into, head))
+        [head, ..tail] -> forgetAll(tail, Map.remove(into, indexed(head)))
 
 verify forgetAll
     forgetAll([], empty()) => empty()
-    forgetAll(["a"], Map.set(empty(), "a", "b")) => empty()
-    Map.len(forgetAll(["a"], Map.set(Map.set(empty(), "a", "b"), "c", "d"))) => 1
+    forgetAll([keyed("a")], Map.set(empty(), indexed(keyed("a")), "b")) => empty()
+    Map.len(forgetAll([keyed("a")], Map.set(Map.set(empty(), indexed(keyed("a")), "b"), indexed(keyed("c")), "d"))) => 1
 
 fn absorbAll(entries: List<Entry>, into: Map<String, String>) -> Map<String, String>
     ? "Apply the same entries to the in-memory map, in the order they were given."
     match entries
         [] -> into
-        [head, ..tail] -> absorbAll(tail, Map.set(into, head.key, head.value))
+        [head, ..tail] -> absorbAll(tail, Map.set(into, indexed(head.key), head.value))
 
 verify absorbAll
     absorbAll([], empty()) => empty()
-    absorbAll([Entry(key = "a", value = "b")], empty()) => Map.set(empty(), "a", "b")
-    Map.get(absorbAll([Entry(key = "a", value = "b"), Entry(key = "a", value = "c")], empty()), "a") => Option.Some("c")
+    absorbAll([Entry(key = keyed("a"), value = "b")], empty()) => Map.set(empty(), indexed(keyed("a")), "b")
+    Map.get(absorbAll([Entry(key = keyed("a"), value = "b"), Entry(key = keyed("a"), value = "c")], empty()), indexed(keyed("a"))) => Option.Some("c")
 
-fn keyRefused(key: String) -> String
+fn keyRefused() -> String
     ? "Why a key cannot be used, in the one wording every entry point gives."
       "Reads and writes reject the same keys, so they say so the same way; a"
       "caller that learns the rule from a put should recognise it from a get."
-    "Store key must not be empty or contain a tab or newline, got '{key}'"
+      "One rule is left. A key used to be text and could not hold a tab or a"
+      "newline, because the backing was an append-only log with one record per"
+      "line; that backing went with n1bor/btc-listener#44 and the keys became"
+      "bytes with #45, so there is no byte a key may not contain. Empty is"
+      "still refused: it names nothing, and a caller asking for it has a bug"
+      "rather than a miss."
+    "Store key must not be empty"
 
 verify keyRefused
-    keyRefused("") => "Store key must not be empty or contain a tab or newline, got ''"
-    keyRefused("a\tb") => "Store key must not be empty or contain a tab or newline, got 'a\tb'"
+    keyRefused() => "Store key must not be empty"
 
 fn valueRefused(value: String) -> String
     ? "Why a value cannot be stored, in the one wording every entry point gives."
@@ -409,19 +455,19 @@ fn acceptable(entries: List<Entry>) -> Result<Unit, String>
 
 verify acceptable
     acceptable([]) => Result.Ok(Unit)
-    acceptable([Entry(key = "a", value = "b")]) => Result.Ok(Unit)
-    acceptable([Entry(key = "a\tb", value = "c")]) => Result.Err("Store key must not be empty or contain a tab or newline, got 'a\tb'")
-    acceptable([Entry(key = "a", value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
+    acceptable([Entry(key = keyed("a"), value = "b")]) => Result.Ok(Unit)
+    acceptable([Entry(key = keyed("a\tb"), value = "c")]) => Result.Ok(Unit)
+    acceptable([Entry(key = keyed("a"), value = "b\nc")]) => Result.Err("Store value must not contain a tab or newline, got 'b\nc'")
 
 fn acceptableNext(head: Entry, tail: List<Entry>) -> Result<Unit, String>
     ? "Refuse this entry's key, then its value, then carry on with the rest."
     match usableKey(head.key)
-        false -> Result.Err(keyRefused(head.key))
+        false -> Result.Err(keyRefused())
         true -> acceptableValue(head.value, tail)
 
 verify acceptableNext
-    acceptableNext(Entry(key = "a", value = "b"), []) => Result.Ok(Unit)
-    acceptableNext(Entry(key = "", value = "b"), []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    acceptableNext(Entry(key = keyed("a"), value = "b"), []) => Result.Ok(Unit)
+    acceptableNext(Entry(key = keyed(""), value = "b"), []) => Result.Err("Store key must not be empty")
 
 fn acceptableValue(value: String, tail: List<Entry>) -> Result<Unit, String>
     ? "The key was usable; the value still has to be."
@@ -433,7 +479,7 @@ verify acceptableValue
     acceptableValue("b", []) => Result.Ok(Unit)
     acceptableValue("b\tc", []) => Result.Err("Store value must not contain a tab or newline, got 'b\tc'")
 
-fn acceptableKeys(keys: List<String>) -> Result<Unit, String>
+fn acceptableKeys(keys: List<Bytes>) -> Result<Unit, String>
     ? "Whether every key in a batch could have been stored."
     match keys
         [] -> Result.Ok(Unit)
@@ -441,30 +487,28 @@ fn acceptableKeys(keys: List<String>) -> Result<Unit, String>
 
 verify acceptableKeys
     acceptableKeys([]) => Result.Ok(Unit)
-    acceptableKeys(["a", "b"]) => Result.Ok(Unit)
-    acceptableKeys(["a", ""]) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    acceptableKeys([keyed("a"), keyed("b")]) => Result.Ok(Unit)
+    acceptableKeys([keyed("a"), keyed("")]) => Result.Err("Store key must not be empty")
 
-fn acceptableKeyNext(head: String, tail: List<String>) -> Result<Unit, String>
+fn acceptableKeyNext(head: Bytes, tail: List<Bytes>) -> Result<Unit, String>
     ? "Refuse this key, then carry on with the rest."
     match usableKey(head)
-        false -> Result.Err(keyRefused(head))
+        false -> Result.Err(keyRefused())
         true -> acceptableKeys(tail)
 
 verify acceptableKeyNext
-    acceptableKeyNext("a", []) => Result.Ok(Unit)
-    acceptableKeyNext("", []) => Result.Err("Store key must not be empty or contain a tab or newline, got ''")
+    acceptableKeyNext(keyed("a"), []) => Result.Ok(Unit)
+    acceptableKeyNext(keyed(""), []) => Result.Err("Store key must not be empty")
 
-fn usableKey(key: String) -> Bool
-    ? "A key must be present and must satisfy the same rules as a value."
-    match String.len(key) > 0
-        false -> false
-        true -> usableValue(key)
+fn usableKey(key: Bytes) -> Bool
+    ? "A key must name something."
+    List.len(Bytes.octets(key)) > 0
 
 verify usableKey
-    usableKey("b:aa") => true
-    usableKey("") => false
-    usableKey("a\tb") => false
-    usableKey("a\nb") => false
+    usableKey(keyed("b:aa")) => true
+    usableKey(keyed("")) => false
+    usableKey(keyed("a\tb")) => true
+    usableKey(keyed("a\nb")) => true
 
 fn usableValue(value: String) -> Bool
     ? "No tab or newline, the rule inherited from the log format and kept until"

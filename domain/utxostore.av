@@ -17,8 +17,8 @@ module UtxoStore
         "The value format is Domain.Index's, unchanged. An Output is an amount"
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
-    exposes [Unspent, Reached, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
-    depends [Domain.Index]
+    exposes [Unspent, Reached, indexOf, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
+    depends [Bytes, Domain.Index, Domain.IndexKeys]
     effects []
 
 record Unspent
@@ -33,57 +33,83 @@ record Reached
     height: Int
     blockId: String
 
-fn unspentKey(txid: String, index: Int) -> String
+fn unspentTag() -> Int
+    ? "The byte that begins every Set entry: ASCII 'u'."
+    117
+
+verify unspentTag
+    unspentTag() => 117
+
+fn undoTag() -> Int
+    ? "The byte that begins every Undo Data record: ASCII 'd'."
+    100
+
+verify undoTag
+    undoTag() => 100
+
+fn unspentKey(txid: String, index: Int) -> Result<Bytes, String>
     ? "Where one unspent Output lives, keyed the way an Input names it."
       "The same shape as Domain.Index.outputKey and a different prefix, so the"
       "two keyspaces answer the same question from the same key material and"
       "cannot be confused for one another."
-    "u:{txid}:{Domain.Index.padIndex(index)}"
+    Domain.IndexKeys.tagged(unspentTag(), List.concat(Domain.IndexKeys.idBytes(txid)?, Domain.IndexKeys.scanOrder(index, Domain.IndexKeys.indexWidth())))
 
 verify unspentKey
-    unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0) => "u:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:00000"
-    unspentKey("aa", 1) => "u:aa:00001"
-    unspentKey("aa", 12345) => "u:aa:12345"
+    Bytes.octets(unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")?), Domain.IndexKeys.scanOrder(0, Domain.IndexKeys.indexWidth())))
+    Bytes.octets(unspentKey("aa", 1)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("aa")?), Domain.IndexKeys.scanOrder(1, Domain.IndexKeys.indexWidth())))
+    Bytes.octets(unspentKey("aa", 12345)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("aa")?), Domain.IndexKeys.scanOrder(12345, Domain.IndexKeys.indexWidth())))
 
-fn keyOf(unspent: Unspent) -> String
+fn indexOf(key: Bytes) -> String
+    ? "How a Map in memory finds an Output that the Store finds by its key."
+      "Hexadecimal of the same bytes. Aver's Map cannot key on Bytes -- the"
+      "generated Rust derives neither Eq nor Hash for it (jasisz/aver#1127) --"
+      "and the walk in Domain.Connect has to look up the same Output the Store"
+      "would. One-to-one, so nothing about which Outputs are distinct changes."
+    Bytes.toHex(key)
+
+verify indexOf
+    indexOf(unspentKey("aa", 0)?) => "75aa00000000"
+    indexOf(unspentKey("aa", 1)?) => "75aa00000001"
+
+fn keyOf(unspent: Unspent) -> Result<Bytes, String>
     ? "Where this Output lives."
     unspentKey(unspent.txid, unspent.index)
 
 verify keyOf
-    keyOf(Unspent(txid = "aa", index = 1, value = 5, script = "76", height = 0, coinbase = false)) => "u:aa:00001"
+    keyOf(Unspent(txid = "aa", index = 1, value = 5, script = "76", height = 0, coinbase = false)) => unspentKey("aa", 1)
 
-fn undoKey(blockId: String) -> String
+fn undoKey(blockId: String) -> Result<Bytes, String>
     ? "Where a Block's Undo Data lives."
       "Keyed by Block Id rather than Height: a reorganisation is exactly when"
       "Undo Data is read, and it is exactly when a Height stops naming the"
       "Block it named before."
-    "d:{blockId}"
+    Domain.IndexKeys.tagged(undoTag(), Domain.IndexKeys.idBytes(blockId)?)
 
 verify undoKey
-    undoKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "d:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-    undoKey("") => "d:"
+    Bytes.octets(undoKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?) => List.prepend(undoTag(), Bytes.octets(Bytes.fromHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?))
+    Bytes.octets(undoKey("")?) => List.prepend(undoTag(), Bytes.octets(Bytes.fromHex("")?))
 
-fn undoWindowKey() -> String
+fn undoWindowKey() -> Result<Bytes, String>
     ? "The single record naming the lowest Height whose Undo Data is still kept."
       "Undo Data is bounded: keeping it for the whole chain would cost more"
       "than the chain. A reorganisation reaching below this Height cannot be"
       "undone, and the node has to say so and stop rather than guess."
-    "meta:undoBelow"
+    Domain.IndexKeys.metaKey("undoBelow")
 
 verify undoWindowKey
-    undoWindowKey() => "meta:undoBelow"
+    undoWindowKey() => Domain.IndexKeys.metaKey("undoBelow")
 
-fn reachedKey() -> String
+fn reachedKey() -> Result<Bytes, String>
     ? "The single record naming the Block the Set has been built up to."
       "A UTXO Set has no meaningful range: it is the state after connecting"
       "every Block up to one, so where it has got to is the only thing that"
       "says what it means. Absent means nothing has been connected, which is a"
       "Set holding nothing rather than a Set at Height zero -- genesis's"
       "Output has to be connected like any other."
-    "meta:setTo"
+    Domain.IndexKeys.metaKey("setTo")
 
 verify reachedKey
-    reachedKey() => "meta:setTo"
+    reachedKey() => Domain.IndexKeys.metaKey("setTo")
 
 fn encodeReached(reached: Reached) -> String
     ? "Where the Set stands: a Height, and the Block it stands on."

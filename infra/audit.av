@@ -19,7 +19,7 @@ module Audit
         "Every Block is read through Infra.Blocks.read: one positional read of"
         "exactly its bytes, wherever in whichever Segment it sits."
     exposes [Counts, run, standing, breakdown]
-    depends [Domain.Network, Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store]
+    depends [Domain.Network, Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
@@ -86,22 +86,22 @@ fn parentOf(store: Store, height: Int) -> Result<Option<String>, String>
 
 verify parentOf
     parentOf(Infra.Store.fixture([]), 0) => Result.Ok(Option.None)
-    parentOf(Infra.Store.fixture([("h:00000004", "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "aa")]), 5) => Result.Ok(Option.Some("aa"))
     parentOf(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
-    parentOf(Infra.Store.fixture([("h:00000004", "")]), 5) => Result.Err("index has no Block Id at height 4")
+    parentOf(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "")]), 5) => Result.Err("index has no Block Id at height 4")
 
 fn named(store: Store, height: Int) -> Result<Option<String>, String>
     ? "A Height that names nothing is a damaged Index, not a missing parent."
     ! [Infra.Kv.get]
-    held = Infra.Store.get(store, Domain.Index.heightKey(height - 1))?
+    held = Infra.Store.get(store, Domain.IndexKeys.heightKey(height - 1)?)?
     match held
         Option.None -> Result.Ok(Option.None)
         Option.Some(blockId) -> nonEmpty(height, blockId)
 
 verify named
     named(Infra.Store.fixture([]), 5) => Result.Ok(Option.None)
-    named(Infra.Store.fixture([("h:00000004", "aa")]), 5) => Result.Ok(Option.Some("aa"))
-    named(Infra.Store.fixture([("h:00000004", "")]), 5) => Result.Err("index has no Block Id at height 4")
+    named(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "aa")]), 5) => Result.Ok(Option.Some("aa"))
+    named(Infra.Store.fixture([(Domain.IndexKeys.heightKey(4)?, "")]), 5) => Result.Err("index has no Block Id at height 4")
 
 fn nonEmpty(height: Int, blockId: String) -> Result<Option<String>, String>
     ? "An empty Block Id is corruption."
@@ -235,7 +235,7 @@ fn gathering(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, 
 fn atHeight(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, acc: List<Unchecked>) -> Result<Gathered, String>
     ? "A Height the Index does not name ends the range."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    holding = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    holding = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     match holding
         Option.None -> Result.Ok(Gathered(waiting = List.reverse(acc), next = height, ended = true))
         Option.Some(blockId) -> atBlock(store, blocks, height, to, left, acc, blockId)
@@ -244,7 +244,7 @@ fn atBlock(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, ac
     ? "A Block whose body is not held is stepped over, and does not fill a place."
       "A pruned stretch would otherwise hand the branches a batch of one."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
+    located = Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> gathering(store, blocks, height + 1, to, left, acc)
         Option.Some(text) -> readBlock(store, blocks, height, to, left, acc, blockId, text)

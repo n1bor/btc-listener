@@ -12,7 +12,7 @@ module Download
         "so stopping is always safe and restarting costs at most the batch"
         "that was in flight."
     exposes [Grown, headers, headersOn]
-    depends [Domain.Address, Domain.Block, Domain.HeaderTree, Domain.Index, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -100,7 +100,7 @@ fn withGenesis(network: Network, store: Store) -> Result<Store, String>
       "says so."
     ! [Infra.Kv.get, Infra.Kv.putAll]
     planted = Infra.Headers.seeded(network, store)?
-    held = Infra.Store.has(planted, Domain.Index.heightKey(0))?
+    held = Infra.Store.has(planted, Domain.IndexKeys.heightKey(0)?)?
     heightNamed(network, planted, held)
 
 fn heightNamed(network: Network, store: Store, held: Bool) -> Result<Store, String>
@@ -108,7 +108,7 @@ fn heightNamed(network: Network, store: Store, held: Bool) -> Result<Store, Stri
     ! [Infra.Kv.putAll]
     match held
         true -> Result.Ok(store)
-        false -> Infra.Store.put(store, Domain.Index.heightKey(0), Domain.Block.genesisBlockId(network))
+        false -> Infra.Store.put(store, Domain.IndexKeys.heightKey(0)?, Domain.Block.genesisBlockId(network))
 
 fn tipHeight(store: Store) -> Result<Int, String>
     ? "How many Heights the Index names, read off the tip record rather than"
@@ -261,9 +261,9 @@ fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int
 
 verify locatorFor
     locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([Domain.Block.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
-    locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "0102")]), 1) => Result.Ok([[2, 1]])
     locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([Domain.Block.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
-    locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    locatorFor(Network.Mainnet, Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
     ? "The Block Ids the Index can supply for a Locator."
@@ -274,8 +274,8 @@ fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
 
 verify idsHeld
     idsHeld(Infra.Store.fixture([]), 0) => Result.Ok([])
-    idsHeld(Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
-    idsHeld(Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    idsHeld(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "0102")]), 1) => Result.Ok([[2, 1]])
+    idsHeld(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Block Id held at each Height, in wire order rather than display order."
@@ -286,9 +286,9 @@ fn idsAt(store: Store, heights: List<Int>, acc: List<List<Int>>) -> Result<List<
 
 verify idsAt
     idsAt(Infra.Store.fixture([]), [], []) => Result.Ok([])
-    idsAt(Infra.Store.fixture([("h:00000000", "0102")]), [0], []) => Result.Ok([[2, 1]])
+    idsAt(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "0102")]), [0], []) => Result.Ok([[2, 1]])
     idsAt(Infra.Store.fixture([]), [0], []) => Result.Ok([])
-    idsAt(Infra.Store.fixture([("h:00000000", "zz")]), [0], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    idsAt(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "zz")]), [0], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn nextId(store: Store, height: Int, tail: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Take the Block Id at one Height, then carry on with the rest."
@@ -297,22 +297,22 @@ fn nextId(store: Store, height: Int, tail: List<Int>, acc: List<List<Int>>) -> R
     idsAt(store, tail, grown)
 
 verify nextId
-    nextId(Infra.Store.fixture([("h:00000000", "0102")]), 0, [], []) => Result.Ok([[2, 1]])
+    nextId(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "0102")]), 0, [], []) => Result.Ok([[2, 1]])
     nextId(Infra.Store.fixture([]), 0, [], []) => Result.Ok([])
-    nextId(Infra.Store.fixture([("h:00000000", "zz")]), 0, [], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    nextId(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "zz")]), 0, [], []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn prependId(store: Store, height: Int, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Add the Block Id at a Height, skipping a Height the Index does not name."
     ! [Infra.Kv.get]
-    found = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    found = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     match found
         Option.None -> Result.Ok(acc)
         Option.Some(id) -> prependDecoded(id, acc)
 
 verify prependId
     prependId(Infra.Store.fixture([]), 0, []) => Result.Ok([])
-    prependId(Infra.Store.fixture([("h:00000000", "0102")]), 0, []) => Result.Ok([[2, 1]])
-    prependId(Infra.Store.fixture([("h:00000000", "zz")]), 0, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    prependId(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "0102")]), 0, []) => Result.Ok([[2, 1]])
+    prependId(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "zz")]), 0, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn prependDecoded(id: String, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Index named a Block Id, which still has to be one."

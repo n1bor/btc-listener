@@ -12,7 +12,7 @@ module Bodies
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
     exposes [Progress, bodies, bodiesOn]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -120,7 +120,7 @@ fn atHeight(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progre
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    named = Infra.Store.get(progress.store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(progress.store, Domain.IndexKeys.heightKey(height)?)?
     match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
         Option.Some(blockId) -> maybeFetch(progress, key, height, to, blockId)
@@ -135,7 +135,7 @@ fn maybeFetch(progress: Progress, key: Int, height: Int, to: Int, blockId: Strin
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    held = Infra.Store.has(progress.store, Domain.Index.blockKey(blockId))?
+    held = Infra.Store.has(progress.store, Domain.IndexKeys.blockKey(blockId)?)?
     match held
         true -> walk(progress, key, height + 1, to)
         false -> fetch(progress, key, height, to, blockId)
@@ -176,7 +176,7 @@ fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, fra
     payload = Bytes.fromList(frame.body)?
     _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
     appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.Index.blockKey(blockId), value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
+    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1)
     written = maybeWrite(held)?
     announce(written, key, height, to, List.len(frame.body))
 

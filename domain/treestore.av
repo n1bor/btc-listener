@@ -18,30 +18,37 @@ module TreeStore
         "Block: it lets a walk up the tree read a Placement without decoding a"
         "Header, and this keyspace is walked once per arriving Header."
     exposes [Held, headerKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
-    depends [Domain.HeaderTree, Domain.Index]
+    depends [Bytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys]
     effects []
 
 record Held
     placement: Placement
     headerHex: String
 
-fn headerKey(blockId: String) -> String
+fn headerTag() -> Int
+    ? "The byte that begins every Header record: ASCII 'k'."
+    107
+
+verify headerTag
+    headerTag() => 107
+
+fn headerKey(blockId: String) -> Result<Bytes, String>
     ? "Where a Header and its place in the tree live."
-    "k:{blockId}"
+    Domain.IndexKeys.tagged(headerTag(), Domain.IndexKeys.idBytes(blockId)?)
 
 verify headerKey
-    headerKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "k:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-    headerKey("") => "k:"
+    Bytes.octets(headerKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?) => List.prepend(headerTag(), Bytes.octets(Bytes.fromHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?))
+    Bytes.octets(headerKey("")?) => [headerTag()]
 
-fn bestTipKey() -> String
+fn bestTipKey() -> Result<Bytes, String>
     ? "The single record naming the tip of the branch with the most work."
       "A record rather than a search, because finding the best tip by walking"
       "every Placement is a walk of the whole tree and the answer only changes when"
       "a Header arrives."
-    "meta:bestTip"
+    Domain.IndexKeys.metaKey("bestTip")
 
 verify bestTipKey
-    bestTipKey() => "meta:bestTip"
+    bestTipKey() => Domain.IndexKeys.metaKey("bestTip")
 
 fn heldFor(placement: Placement, headerHex: String) -> Held
     ? "A placed Header, ready to be written down."

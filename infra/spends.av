@@ -19,7 +19,7 @@ module Spends
         "lookups was tried and made an audit of two thousand Blocks go from two"
         "and a half minutes to over ten, because scattered parents miss."
     exposes [Work, Pending, resolved, scriptsAcross, resolve]
-    depends [Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store]
+    depends [Domain.Bip341, Domain.Block, Domain.Rules, Domain.ScriptWork, Domain.Primitives, Domain.Index, Domain.Spend, Domain.SpendContext, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Store, Domain.IndexKeys]
     effects [Disk.readBytesAt, Infra.Kv.get]
 
 record Checked
@@ -206,7 +206,7 @@ fn resolve(store: Store, blocks: BlockStore, previousTxid: String, position: Int
       "position past the end of a Transaction we do hold is Invalid rather"
       "than absent -- a distinction only the longer route can draw."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    direct = Infra.Store.get(store, Domain.Index.outputKey(previousTxid, position))?
+    direct = Infra.Store.get(store, Domain.IndexKeys.outputKey(previousTxid, position)?)?
     match direct
         Option.Some(text) -> spent(text)
         Option.None -> throughTransaction(store, blocks, previousTxid, position)
@@ -227,7 +227,7 @@ fn throughTransaction(store: Store, blocks: BlockStore, previousTxid: String, po
       "Heights someone chose to index, and everything else in the chain is"
       "simply absent from it."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    sited = Infra.Store.get(store, Domain.Index.txKey(previousTxid))?
+    sited = Infra.Store.get(store, Domain.IndexKeys.txKey(previousTxid)?)?
     match sited
         Option.None -> Result.Ok(Spend.Unknown("transaction {previousTxid} is not indexed"))
         Option.Some(text) -> atSite(store, blocks, text, position)
@@ -236,7 +236,7 @@ fn atSite(store: Store, blocks: BlockStore, text: String, position: Int) -> Resu
     ? "The site names a Block; the Index says whether its bytes are held."
     ! [Disk.readBytesAt, Infra.Kv.get]
     site = Domain.Index.decodeTxSite(text)?
-    located = Infra.Store.get(store, Domain.Index.blockKey(site.blockId))?
+    located = Infra.Store.get(store, Domain.IndexKeys.blockKey(site.blockId)?)?
     match located
         Option.None -> Result.Ok(Spend.Unknown("block {site.blockId} is not held"))
         Option.Some(where) -> inBlock(blocks, where, site, position)

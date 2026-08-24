@@ -17,7 +17,7 @@ module Prune
         "the next Block goes, and Blocks.open resumes from the highest Segment"
         "present, so removing it would move the append point backwards."
     exposes [Pruned, run]
-    depends [Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store]
+    depends [Bytes, Domain.Index, Domain.IndexKeys, Infra.Blocks, Infra.Chain, Infra.Store]
     effects [Disk.delete, Disk.exists, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
 record Pruned
@@ -43,7 +43,7 @@ fn run(store: Store, blocks: BlockStore, below: Int) -> Result<Pruned, String>
     segments = Infra.Blocks.prune(blocks, floor)?
     keys = locationsBelow(Sweep(store = store, below = watermark, floor = floor), 0, [])?
     swept = Infra.Store.deleteAll(store, keys)?
-    _marked = Infra.Store.put(swept, Domain.Index.prunedBelowKey(), Domain.Index.encodeHeight(watermark))?
+    _marked = Infra.Store.put(swept, Domain.IndexKeys.prunedBelowKey()?, Domain.Index.encodeHeight(watermark))?
     Result.Ok(Pruned(segments = segments, locations = List.len(keys), watermark = watermark))
 
 fn watermarkFor(store: Store, below: Int) -> Result<Int, String>
@@ -58,9 +58,9 @@ fn watermarkFor(store: Store, below: Int) -> Result<Int, String>
 
 verify watermarkFor
     watermarkFor(Infra.Store.fixture([]), 100) => Result.Ok(100)
-    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "500")]), 100) => Result.Ok(500)
-    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "100")]), 500) => Result.Ok(500)
-    watermarkFor(Infra.Store.fixture([("meta:prunedBelow", "x")]), 100) => Result.Err("Height must be a whole number, got 'x'")
+    watermarkFor(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, "500")]), 100) => Result.Ok(500)
+    watermarkFor(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, "100")]), 500) => Result.Ok(500)
+    watermarkFor(Infra.Store.fixture([(Domain.IndexKeys.prunedBelowKey()?, "x")]), 100) => Result.Err("Height must be a whole number, got 'x'")
 
 fn higher(a: Int, b: Int) -> Int
     ? "The larger of two Heights."
@@ -83,36 +83,36 @@ fn floorSegment(store: Store, below: Int, current: Int) -> Result<Int, String>
 
 verify floorSegment
     floorSegment(Infra.Store.fixture([]), 5, 9) => Result.Ok(9)
-    floorSegment(Infra.Store.fixture([("h:00000005", "aa"), ("b:aa", "3:0:80")]), 5, 9) => Result.Ok(3)
-    floorSegment(Infra.Store.fixture([("h:00000005", "aa"), ("b:aa", "bad")]), 5, 9) => Result.Err("Location must be segment:offset:length, got 'bad'")
+    floorSegment(Infra.Store.fixture([(Domain.IndexKeys.heightKey(5)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "3:0:80")]), 5, 9) => Result.Ok(3)
+    floorSegment(Infra.Store.fixture([(Domain.IndexKeys.heightKey(5)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "bad")]), 5, 9) => Result.Err("Location must be segment:offset:length, got 'bad'")
 
 fn lowestAtOrAbove(store: Store, height: Int, best: Int) -> Result<Int, String>
     ? "Walk the Heights the Index still names, keeping the lowest Segment used."
       "Stops at the first Height with no Block Id, because the Index names a"
       "prefix of the chain and there is nothing above the end of it."
     ! [Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     match named
         Option.None -> Result.Ok(best)
         Option.Some(blockId) -> lowestWith(store, height, blockId, best)
 
 verify lowestAtOrAbove
     lowestAtOrAbove(Infra.Store.fixture([]), 0, 4) => Result.Ok(4)
-    lowestAtOrAbove(Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "1:0:80")]), 0, 4) => Result.Ok(1)
-    lowestAtOrAbove(Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "no")]), 0, 4) => Result.Err("Location must be segment:offset:length, got 'no'")
+    lowestAtOrAbove(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "1:0:80")]), 0, 4) => Result.Ok(1)
+    lowestAtOrAbove(Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "no")]), 0, 4) => Result.Err("Location must be segment:offset:length, got 'no'")
 
 fn lowestWith(store: Store, height: Int, blockId: String, best: Int) -> Result<Int, String>
     ? "A Height the Index names: lower the answer only if its Block is held."
     ! [Infra.Kv.get]
-    located = Infra.Store.get(store, Domain.Index.blockKey(blockId))?
+    located = Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> lowestAtOrAbove(store, height + 1, best)
         Option.Some(text) -> lowerBy(store, height, text, best)
 
 verify lowestWith
     lowestWith(Infra.Store.fixture([]), 0, "aa", 4) => Result.Ok(4)
-    lowestWith(Infra.Store.fixture([("b:aa", "1:0:80")]), 0, "aa", 4) => Result.Ok(1)
-    lowestWith(Infra.Store.fixture([("b:aa", "x")]), 0, "aa", 4) => Result.Err("Location must be segment:offset:length, got 'x'")
+    lowestWith(Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, "1:0:80")]), 0, "aa", 4) => Result.Ok(1)
+    lowestWith(Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, "x")]), 0, "aa", 4) => Result.Err("Location must be segment:offset:length, got 'x'")
 
 fn lowerBy(store: Store, height: Int, text: String, best: Int) -> Result<Int, String>
     ? "The Block is held, so the Segment holding it cannot be deleted."
@@ -135,7 +135,7 @@ verify lower
     lower(3, 5) => 3
     lower(5, 3) => 3
 
-fn locationsBelow(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<String>, String>
+fn locationsBelow(sweep: Sweep, height: Int, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "The b: keys naming Blocks that the deleted Segments were holding."
       "Only Heights below the Watermark are examined: a Height at or above it"
       "sits at or above the floor by the way the floor was chosen, so its"
@@ -147,56 +147,59 @@ fn locationsBelow(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<S
 
 verify locationsBelow
     locationsBelow(Sweep(store = Infra.Store.fixture([]), below = 0, floor = 1), 0, []) => Result.Ok([])
-    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "0:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok(["b:aa"])
-    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "5:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok([])
-    locationsBelow(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "??")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:offset:length, got '??'")
+    locationsBelow(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "0:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok([Domain.IndexKeys.blockKey("aa")?])
+    locationsBelow(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "5:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok([])
+    locationsBelow(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "??")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:offset:length, got '??'")
 
-fn locationAt(sweep: Sweep, height: Int, acc: List<String>) -> Result<List<String>, String>
+fn locationAt(sweep: Sweep, height: Int, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "A Height with no Block Id names nothing to forget."
       "Unlike the walk that finds the floor, this one does not stop at a gap: a"
       "Height the Index has lost still leaves the Heights above it to sweep."
     ! [Infra.Kv.get]
-    named = Infra.Store.get(sweep.store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(sweep.store, Domain.IndexKeys.heightKey(height)?)?
     match named
         Option.None -> locationsBelow(sweep, height + 1, acc)
         Option.Some(blockId) -> locationOf(sweep, height, blockId, acc)
 
 verify locationAt
     locationAt(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, []) => Result.Ok([])
-    locationAt(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "0:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok(["b:aa"])
-    locationAt(Sweep(store = Infra.Store.fixture([("h:00000000", "aa"), ("b:aa", "!")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:offset:length, got '!'")
+    locationAt(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "0:0:80")]), below = 1, floor = 1), 0, []) => Result.Ok([Domain.IndexKeys.blockKey("aa")?])
+    locationAt(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.heightKey(0)?, "aa"), (Domain.IndexKeys.blockKey("aa")?, "!")]), below = 1, floor = 1), 0, []) => Result.Err("Location must be segment:offset:length, got '!'")
 
-fn locationOf(sweep: Sweep, height: Int, blockId: String, acc: List<String>) -> Result<List<String>, String>
+fn locationOf(sweep: Sweep, height: Int, blockId: String, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "A Block Id with no Location has nothing on disk to have lost."
     ! [Infra.Kv.get]
-    located = Infra.Store.get(sweep.store, Domain.Index.blockKey(blockId))?
+    located = Infra.Store.get(sweep.store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> locationsBelow(sweep, height + 1, acc)
         Option.Some(text) -> keepIfGone(sweep, height, blockId, text, acc)
 
 verify locationOf
     locationOf(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", []) => Result.Ok([])
-    locationOf(Sweep(store = Infra.Store.fixture([("b:aa", "0:0:80")]), below = 1, floor = 1), 0, "aa", []) => Result.Ok(["b:aa"])
-    locationOf(Sweep(store = Infra.Store.fixture([("b:aa", "z")]), below = 1, floor = 1), 0, "aa", []) => Result.Err("Location must be segment:offset:length, got 'z'")
+    locationOf(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, "0:0:80")]), below = 1, floor = 1), 0, "aa", []) => Result.Ok([Domain.IndexKeys.blockKey("aa")?])
+    locationOf(Sweep(store = Infra.Store.fixture([(Domain.IndexKeys.blockKey("aa")?, "z")]), below = 1, floor = 1), 0, "aa", []) => Result.Err("Location must be segment:offset:length, got 'z'")
 
-fn keepIfGone(sweep: Sweep, height: Int, blockId: String, text: String, acc: List<String>) -> Result<List<String>, String>
+fn keepIfGone(sweep: Sweep, height: Int, blockId: String, text: String, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "Forget the Location only if its Segment was one of the deleted ones."
     ! [Infra.Kv.get]
     location = Domain.Index.decodeLocation(text)?
-    locationsBelow(sweep, height + 1, dropped(location.segment, sweep.floor, blockId, acc))
+    locationsBelow(sweep, height + 1, dropped(location.segment, sweep.floor, blockId, acc)?)
 
 verify keepIfGone
-    keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "0:0:80", []) => Result.Ok(["b:aa"])
+    keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "0:0:80", []) => Result.Ok([Domain.IndexKeys.blockKey("aa")?])
     keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "1:0:80", []) => Result.Ok([])
     keepIfGone(Sweep(store = Infra.Store.fixture([]), below = 1, floor = 1), 0, "aa", "q", []) => Result.Err("Location must be segment:offset:length, got 'q'")
 
-fn dropped(segment: Int, floor: Int, blockId: String, acc: List<String>) -> List<String>
+fn dropped(segment: Int, floor: Int, blockId: String, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "A Location in a Segment that is gone is a Location to forget."
+      "A Result since n1bor/btc-listener#45: building the key can fail, because"
+      "a Block Id that is not hexadecimal names no key."
     match segment < floor
-        true -> List.prepend(Domain.Index.blockKey(blockId), acc)
-        false -> acc
+        true -> Result.Ok(List.prepend(Domain.IndexKeys.blockKey(blockId)?, acc))
+        false -> Result.Ok(acc)
 
 verify dropped
-    dropped(0, 1, "aa", []) => ["b:aa"]
-    dropped(1, 1, "aa", []) => []
-    dropped(5, 1, "aa", []) => []
+    dropped(0, 1, "aa", []) => Result.Ok([Domain.IndexKeys.blockKey("aa")?])
+    dropped(1, 1, "aa", []) => Result.Ok([])
+    dropped(5, 1, "aa", []) => Result.Ok([])
+    dropped(0, 1, "zz", []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")

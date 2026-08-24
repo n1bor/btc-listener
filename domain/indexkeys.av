@@ -1,0 +1,210 @@
+module IndexKeys
+    intent =
+        "How a key is spelled inside a Store: a one-byte tag naming the"
+        "keyspace, then fixed-width fields."
+        "Keys used to be text. A Transaction Id is thirty-two bytes and was"
+        "written as sixty-four characters; an Output key was seventy-two"
+        "characters where thirty-seven bytes do. Measured at 37% of the"
+        "keyspace over a million Outputs, with the compression the database"
+        "actually runs -- less than the halving n1bor/btc-listener#42"
+        "estimated against an uncompressed LevelDB, because hexadecimal is"
+        "exactly what a compressor eats. tools/keyspace-size is the"
+        "measurement."
+        "Held apart from Domain.Index, which owns the values, because the two"
+        "change for different reasons and together they outgrew what a reader"
+        "can hold at once."
+        "The tags are the ASCII letters the text keyspace used -- o, t, b, h,"
+        "n, m -- so a key dumped out of the database still begins with a"
+        "letter somebody recognises."
+    exposes [tagged, idBytes, outputTag, transactionTag, blockTag, heightTag, blockHeightTag, metaTag, heightWidth, indexWidth, scanOrder, blockKey, txKey, blockHeightKey, heightKey, outputKey, metaKey, prunedBelowKey, outputsBelowKey]
+    depends [Bytes, Domain.Message]
+    effects []
+
+fn heightWidth() -> Int
+    ? "How many bytes a Height takes in a key."
+      "Four, which holds every Height this chain will reach. It was eight"
+      "decimal digits, chosen for the same sorting reason and costing twice"
+      "as much."
+    4
+
+verify heightWidth
+    heightWidth() => 4
+
+fn outputTag() -> Int
+    ? "The byte that begins every Output key."
+      "The ASCII 'o' the text keyspace used, so a key dumped from the database"
+      "still starts with a letter a reader recognises."
+    111
+
+verify outputTag
+    outputTag() => 111
+
+fn transactionTag() -> Int
+    ? "The byte that begins every Transaction key: ASCII 't'."
+    116
+
+verify transactionTag
+    transactionTag() => 116
+
+fn blockTag() -> Int
+    ? "The byte that begins every Block key: ASCII 'b'."
+    98
+
+verify blockTag
+    blockTag() => 98
+
+fn heightTag() -> Int
+    ? "The byte that begins every Height key: ASCII 'h'."
+    104
+
+verify heightTag
+    heightTag() => 104
+
+fn blockHeightTag() -> Int
+    ? "The byte that begins every Block-to-Height key: ASCII 'n'."
+    110
+
+verify blockHeightTag
+    blockHeightTag() => 110
+
+fn metaTag() -> Int
+    ? "The byte that begins every singleton record: ASCII 'm'."
+    109
+
+verify metaTag
+    metaTag() => 109
+
+fn scanOrder(value: Int, width: Int) -> List<Int>
+    ? "A number as bytes that sort in numeric order, most significant first."
+      "Big-endian, and deliberately not Domain.Message.littleEndian, which is"
+      "what every other number in this program uses because that is what"
+      "Bitcoin puts on the wire. Here the bytes are a database key, and the"
+      "database orders keys bytewise: little-endian would put Output 256 before"
+      "Output 1, and the failure would be silent -- a prefixed scan returning"
+      "the right Outputs in the wrong order. The zero-padded decimal this"
+      "replaces sorted correctly for the same reason, which is why it was"
+      "padded at all."
+      "Do not 'fix' this to littleEndian. The cases pin this against"
+      "Domain.Message.littleEndian reversed rather than against bytes written"
+      "out by hand -- the first attempt wrote them by hand and got one wrong,"
+      "which is the whole argument for deriving an expectation from something"
+      "already checked instead of from arithmetic done at the keyboard."
+    scanOrderInto(value, width, [])
+
+verify scanOrder
+    scanOrder(0, 4) => [0, 0, 0, 0]
+    scanOrder(1, 4) => [0, 0, 0, 1]
+    scanOrder(256, 4) => [0, 0, 1, 0]
+    scanOrder(4294967295, 4) => [255, 255, 255, 255]
+    scanOrder(11, 4) => [0, 0, 0, 11]
+    scanOrder(962268, 4) => List.reverse(Domain.Message.littleEndian(962268, 4))
+    scanOrder(1, 4) => List.reverse(Domain.Message.littleEndian(1, 4))
+    scanOrder(4294967295, 4) => List.reverse(Domain.Message.littleEndian(4294967295, 4))
+
+fn scanOrderInto(value: Int, width: Int, acc: List<Int>) -> List<Int>
+    ? "Take the low byte, shift down, and build the answer back to front."
+    match width <= 0
+        true -> acc
+        false -> scanOrderInto(Int.div(value, 256), width - 1, List.prepend(Int.mod(value, 256), acc))
+
+verify scanOrderInto
+    scanOrderInto(0, 1, []) => [0]
+    scanOrderInto(258, 2, []) => [1, 2]
+    scanOrderInto(5, 0, []) => []
+
+fn tagged(tag: Int, body: List<Int>) -> Result<Bytes, String>
+    ? "A one-byte tag, then the body, as the key the database sees."
+    Bytes.fromList(List.prepend(tag, body))
+
+verify tagged
+    Bytes.octets(tagged(98, [1, 2])?) => [98, 1, 2]
+    tagged(98, [256]) => Result.Err("byte 256 at index 1 is outside 0..=255")
+
+fn idBytes(identifier: String) -> Result<List<Int>, String>
+    ? "A Block Id or Transaction Id as the thirty-two bytes it names."
+      "Hexadecimal that will not decode cannot make a key, which is why every"
+      "key builder answers a Result now. It used to interpolate the text and a"
+      "malformed Id made a malformed key that the Store accepted."
+    Result.Ok(Bytes.octets(Bytes.fromHex(identifier)?))
+
+verify idBytes
+    idBytes("0102") => Result.Ok([1, 2])
+    idBytes("") => Result.Ok([])
+    idBytes("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn blockKey(blockId: String) -> Result<Bytes, String>
+    ? "Where a Block's Location lives. Immutable: a Block Id always names the same bytes."
+    tagged(blockTag(), idBytes(blockId)?)
+
+verify blockKey
+    Bytes.octets(blockKey("0102")?) => [98, 1, 2]
+    blockKey("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn txKey(txid: String) -> Result<Bytes, String>
+    ? "Where a Transaction's whereabouts live."
+      "A keyspace beside b: and h:, and immutable like b: rather than mutable"
+      "like h:, because a Transaction Id names the same bytes in the same Block"
+      "whatever else the chain does afterwards."
+    tagged(transactionTag(), idBytes(txid)?)
+
+verify txKey
+    Bytes.octets(txKey("0102")?) => [116, 1, 2]
+
+fn blockHeightKey(blockId: String) -> Result<Bytes, String>
+    ? "Where a Block's own Height lives: the reverse of the h: keyspace."
+    tagged(blockHeightTag(), idBytes(blockId)?)
+
+verify blockHeightKey
+    Bytes.octets(blockHeightKey("0102")?) => [110, 1, 2]
+
+fn heightKey(height: Int) -> Result<Bytes, String>
+    ? "Where a Height's Block Id lives. Rewritten if a reorganisation reassigns it."
+    tagged(heightTag(), scanOrder(height, heightWidth()))
+
+verify heightKey
+    Bytes.octets(heightKey(0)?) => [104, 0, 0, 0, 0]
+    Bytes.octets(heightKey(1)?) => [104, 0, 0, 0, 1]
+    Bytes.octets(heightKey(962268)?) => List.prepend(104, List.reverse(Domain.Message.littleEndian(962268, 4)))
+
+fn outputKey(txid: String, index: Int) -> Result<Bytes, String>
+    ? "Where one Output of one Transaction lives, by the name an Input calls it."
+      "Thirty-seven bytes where the text spelling took seventy-two. The four"
+      "bytes of index also retire a limit rather than restating it: padIndex"
+      "was five digits, which held every Output a Block can contain but not"
+      "every Output the type allows -- Output 100000 and Output 10000 followed"
+      "by a zero were the same key."
+    tagged(outputTag(), List.concat(idBytes(txid)?, scanOrder(index, indexWidth())))
+
+verify outputKey
+    Bytes.octets(outputKey("0102", 0)?) => [111, 1, 2, 0, 0, 0, 0]
+    Bytes.octets(outputKey("0102", 11)?) => [111, 1, 2, 0, 0, 0, 11]
+    outputKey("zz", 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn indexWidth() -> Int
+    ? "How many bytes an Output position takes in a key."
+    4
+
+verify indexWidth
+    indexWidth() => 4
+
+fn metaKey(name: String) -> Result<Bytes, String>
+    ? "Where a singleton record lives, by the name it has always had."
+    Bytes.fromList(List.prepend(metaTag(), Bytes.octets(String.toUtf8(name))))
+
+verify metaKey
+    Bytes.octets(metaKey("prunedBelow")?) => List.prepend(109, Bytes.octets(String.toUtf8("prunedBelow")))
+    Bytes.octets(metaKey("")?) => [109]
+
+fn prunedBelowKey() -> Result<Bytes, String>
+    ? "The single record naming the Prune Watermark."
+    metaKey("prunedBelow")
+
+verify prunedBelowKey
+    Bytes.octets(prunedBelowKey()?) => List.prepend(109, Bytes.octets(String.toUtf8("prunedBelow")))
+
+fn outputsBelowKey() -> Result<Bytes, String>
+    ? "The single record naming how far the outputs phase has reached."
+    metaKey("outputsBelow")
+
+verify outputsBelowKey
+    Bytes.octets(outputsBelowKey()?) => List.prepend(109, Bytes.octets(String.toUtf8("outputsBelow")))

@@ -8,10 +8,17 @@ module Index
         "record of which chain we currently believe, since a reorganisation can"
         "reassign a Height. The `n:` space is its reverse, mapping a Block Id back"
         "to the Height it sits at, and is written where `t:` is."
-        "Everything here is a pure transformation over text, so the whole"
-        "encoding is covered by verify blocks rather than by a Store."
+        "Keys are bytes: a one-byte tag naming the keyspace, then fixed-width"
+        "fields. A Transaction Id is thirty-two bytes and was sixty-four"
+        "characters of hexadecimal; an Output key is thirty-seven bytes where"
+        "it was seventy-two. Measured at 37% of the keyspace on a million"
+        "Outputs with the compression the database actually runs -- less than"
+        "the halving n1bor/btc-listener#42 estimated against an uncompressed"
+        "LevelDB, because hexadecimal is exactly what a compressor eats."
+        "Everything here is a pure transformation, so the whole encoding is"
+        "covered by verify blocks rather than by a Store."
     depends [Domain.Text]
-    exposes [BodyState, Location, TxSite, SpentOutput, txKey, outputKey, padIndex, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, blockKey, blockHeightKey, heightKey, prunedBelowKey, outputsBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
+    exposes [BodyState, Location, TxSite, SpentOutput, encodeSpentOutput, decodeSpentOutput, encodeTxSite, decodeTxSite, blockKey, blockHeightKey, heightKey, prunedBelowKey, outputsBelowKey, encodeLocation, decodeLocation, encodeHeight, decodeHeight, prunedBelowOf, bodyStateOf, scanUsable]
     effects []
 
 record Location
@@ -27,50 +34,6 @@ type BodyState
     Stored(Location)
     Missing
     Pruned
-
-fn heightWidth() -> Int
-    ? "Heights are padded to this many digits so the keyspace sorts by Height."
-    8
-
-verify heightWidth
-    heightWidth() => 8
-
-fn blockKey(blockId: String) -> String
-    ? "Where a Block's Location lives. Immutable: a Block Id always names the same bytes."
-    "b:{blockId}"
-
-verify blockKey
-    blockKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "b:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-    blockKey("") => "b:"
-
-fn txKey(txid: String) -> String
-    ? "Where a Transaction's whereabouts live."
-      "A third keyspace beside b: and h:, and immutable like b: rather than"
-      "mutable like h:, because a Transaction Id names the same bytes in the same"
-      "Block whatever else the chain does afterwards."
-    "t:{txid}"
-
-verify txKey
-    txKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16") => "t:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
-    txKey("") => "t:"
-
-fn blockHeightKey(blockId: String) -> String
-    ? "Where a Block's own Height lives: the reverse of the h: keyspace."
-      "h: answers 'which Block is at this Height' and nothing answered 'which"
-      "Height is this Block at', which is the question a Transaction reached by"
-      "its Id has to ask before its Scripts can be judged -- the rules a spend"
-      "is held to are the rules of the Block that mined it."
-      "Written by the same phase that writes t:, and stale in exactly the same"
-      "way. A reorganisation that moves a Block off the chain leaves both its"
-      "t: entries and its n: entry pointing at a Block no Height names any"
-      "more; re-running the phase over the range corrects both together. That"
-      "is why this is not written with h: during the header phase, where it"
-      "would have to be unwound separately."
-    "n:{blockId}"
-
-verify blockHeightKey
-    blockHeightKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f") => "n:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-    blockHeightKey("") => "n:"
 
 fn encodeTxSite(site: TxSite) -> String
     ? "A Transaction is named by its Block and its position in it."
@@ -144,32 +107,6 @@ record SpentOutput
     value: Int
     script: String
 
-fn outputKey(txid: String, index: Int) -> String
-    ? "Where one Output of one Transaction lives, by the name an Input calls it."
-      "An Input names its parent by Transaction Id and position, so this is the"
-      "question an Input asks, keyed exactly as it is asked. Without it the"
-      "answer costs a t: lookup, a b: lookup and a whole Block decoded, for one"
-      "Output out of however many that Block holds."
-    "o:{txid}:{padIndex(index)}"
-
-verify outputKey
-    outputKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0) => "o:f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:00000"
-    outputKey("aa", 1) => "o:aa:00001"
-    outputKey("aa", 12345) => "o:aa:12345"
-
-fn padIndex(index: Int) -> String
-    ? "Zero-padded, for the reason padHeight gives: a Store that keeps its keys"
-      "in order should keep one Transaction's Outputs in Output order, and"
-      "rekeying a populated Store later costs far more than the digits do now."
-      "Five digits holds every Output a Block can contain."
-    Domain.Text.padLeft(String.fromInt(index), 5)
-
-verify padIndex
-    padIndex(0) => "00000"
-    padIndex(7) => "00007"
-    padIndex(12345) => "12345"
-    padIndex(123456) => "123456"
-
 fn encodeSpentOutput(output: SpentOutput) -> String
     ? "What an Output is worth and what has to be satisfied to spend it."
       "The whole Output rather than a pointer at one. A pointer would still cost"
@@ -221,47 +158,6 @@ fn spentValued(text: String, value: Option<Int>, script: String) -> Result<Spent
 verify spentValued
     spentValued("5000:a", Option.Some(5000), "a") => Result.Ok(SpentOutput(value = 5000, script = "a"))
     spentValued("x:a", Option.None, "a") => Result.Err("Output value must be a whole number, got 'x:a'")
-
-fn heightKey(height: Int) -> String
-    ? "Where a Height's Block Id lives. Rewritten if a reorganisation reassigns the Height."
-    "h:{padHeight(height)}"
-
-verify heightKey
-    heightKey(0) => "h:00000000"
-    heightKey(1) => "h:00000001"
-    heightKey(962268) => "h:00962268"
-    heightKey(99999999) => "h:99999999"
-
-fn padHeight(height: Int) -> String
-    ? "Zero-padded so a Store that keeps its keys in order keeps them in Height order."
-      "Nothing today needs that ordering — resume and the scan both walk Heights"
-      "one at a time — but rekeying a populated Store later would be far more"
-      "expensive than the seven spare digits cost now."
-    Domain.Text.padLeft(String.fromInt(height), heightWidth())
-
-verify padHeight
-    padHeight(0) => "00000000"
-    padHeight(7) => "00000007"
-    padHeight(962268) => "00962268"
-    padHeight(99999999) => "99999999"
-    padHeight(100000000) => "100000000"
-
-fn prunedBelowKey() -> String
-    ? "The single record naming the Prune Watermark."
-    "meta:prunedBelow"
-
-verify prunedBelowKey
-    prunedBelowKey() => "meta:prunedBelow"
-
-fn outputsBelowKey() -> String
-    ? "The single record naming how far the Output keyspace has been built."
-      "Its own watermark rather than the Prune one: pruning says which Blocks"
-      "have been discarded, this says which Heights have had their Outputs"
-      "written down, and a directory can be at two different places in the two."
-    "meta:outputsBelow"
-
-verify outputsBelowKey
-    outputsBelowKey() => "meta:outputsBelow"
 
 fn encodeLocation(location: Location) -> String
     ? "A Location is its Segment, the byte offset of the Block's bytes within"

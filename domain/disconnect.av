@@ -18,11 +18,11 @@ module Disconnect
         "silently disagrees with the chain it claims to be following, which is"
         "the one failure a validating node must never have."
     exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize]
-    depends [Domain.Transaction, Domain.UtxoStore]
+    depends [Bytes, Domain.Transaction, Domain.UtxoStore]
     effects []
 
 record Reversal
-    deleted: List<String>
+    deleted: List<Bytes>
     restored: List<Unspent>
 
 type Undoable
@@ -85,58 +85,58 @@ verify undoable
     undoable(711, 713) => Undoable.TooDeep(712, 713)
     undoable(500, 713) => Undoable.TooDeep(501, 713)
 
-fn reversal(transactions: List<Transaction>, undo: List<Unspent>) -> Reversal
+fn reversal(transactions: List<Transaction>, undo: List<Unspent>) -> Result<Reversal, String>
     ? "What taking this Block back out does to the Set."
-    Reversal(deleted = madeBy(transactions, []), restored = undo)
+    Result.Ok(Reversal(deleted = madeBy(transactions, [])?, restored = undo))
 
 verify reversal
-    reversal([], []) => Reversal(deleted = [], restored = [])
-    List.len(reversal([paying("t1", 2)], []).deleted) => 2
-    List.len(reversal([], [Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)]).restored) => 1
+    reversal([], []) => Result.Ok(Reversal(deleted = [], restored = []))
+    List.len(reversal([paying("a1", 2)], [])?.deleted) => 2
+    List.len(reversal([], [Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)])?.restored) => 1
 
-fn madeBy(transactions: List<Transaction>, acc: List<String>) -> List<String>
+fn madeBy(transactions: List<Transaction>, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "Every key the Block's Outputs were written under."
     match transactions
-        [] -> List.reverse(acc)
-        [head, ..tail] -> madeBy(tail, keysOf(head.txid, head.outputs, 0, acc))
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> madeBy(tail, keysOf(head.txid, head.outputs, 0, acc)?)
 
 verify madeBy
-    madeBy([], []) => []
-    madeBy([paying("t1", 1)], []) => ["u:t1:00000"]
-    madeBy([paying("t1", 1), paying("t2", 1)], []) => ["u:t1:00000", "u:t2:00000"]
+    madeBy([], []) => Result.Ok([])
+    madeBy([paying("a1", 1)], []) => Result.Ok([Domain.UtxoStore.unspentKey("a1", 0)?])
+    madeBy([paying("a1", 1), paying("a2", 1)], []) => Result.Ok([Domain.UtxoStore.unspentKey("a1", 0)?, Domain.UtxoStore.unspentKey("a2", 0)?])
 
-fn keysOf(txid: String, outputs: List<Output>, index: Int, acc: List<String>) -> List<String>
+fn keysOf(txid: String, outputs: List<Output>, index: Int, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "One key per Output, counting positions."
     match outputs
-        [] -> acc
-        [head, ..tail] -> keysOf(txid, tail, index + 1, keyIfSpendable(txid, index, head, acc))
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> keysOf(txid, tail, index + 1, keyIfSpendable(txid, index, head, acc)?)
 
 verify keysOf
-    keysOf("t1", [], 0, []) => []
-    keysOf("t1", [Output(value = 1, script = "")], 0, []) => ["u:t1:00000"]
-    List.len(keysOf("t1", [Output(value = 1, script = ""), Output(value = 2, script = "")], 0, [])) => 2
+    keysOf("a1", [], 0, []) => Result.Ok([])
+    keysOf("a1", [Output(value = 1, script = "")], 0, []) => Result.Ok([Domain.UtxoStore.unspentKey("a1", 0)?])
+    List.len(keysOf("a1", [Output(value = 1, script = ""), Output(value = 2, script = "")], 0, [])?) => 2
 
-fn keyIfSpendable(txid: String, index: Int, output: Output, acc: List<String>) -> List<String>
+fn keyIfSpendable(txid: String, index: Int, output: Output, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "An Output the connect never added has no key to delete."
       "Deleting an absent key would be harmless -- the Store says so -- but a"
       "removed count that included Outputs the Set never held would drift"
       "from what the disconnect actually did, and the two paths must agree"
       "on what the Set is (#111)."
     match Domain.UtxoStore.neverSpendable(output.script)
-        true -> acc
-        false -> List.prepend(Domain.UtxoStore.unspentKey(txid, index), acc)
+        true -> Result.Ok(acc)
+        false -> Result.Ok(List.prepend(Domain.UtxoStore.unspentKey(txid, index)?, acc))
 
 verify keyIfSpendable
-    keyIfSpendable("t1", 0, Output(value = 0, script = "6a"), []) => []
-    keyIfSpendable("t1", 1, Output(value = 5, script = "51"), []) => ["u:t1:00001"]
+    keyIfSpendable("a1", 0, Output(value = 0, script = "6a"), []) => Result.Ok([])
+    keyIfSpendable("a1", 1, Output(value = 5, script = "51"), []) => Result.Ok([Domain.UtxoStore.unspentKey("a1", 1)?])
 
 fn paying(txid: String, outputs: Int) -> Transaction
     ? "A Transaction with that many Outputs, for the cases here."
     Transaction(version = 1, inputs = [], outputs = someOutputs(outputs, []), lockTime = 0, txid = txid, size = 0, isSegWit = false)
 
 verify paying
-    List.len(paying("t1", 2).outputs) => 2
-    paying("t1", 0).txid => "t1"
+    List.len(paying("a1", 2).outputs) => 2
+    paying("a1", 0).txid => "a1"
 
 fn someOutputs(count: Int, acc: List<Output>) -> List<Output>
     ? "That many Outputs of no particular value."

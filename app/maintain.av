@@ -7,7 +7,7 @@ module Maintain
         "reindex is the recovery command: it rewrites every Block's Location"
         "from the Segments, for a directory whose Index was lost (#92, #93)."
     exposes [prune, txIndex, outputs, audit, reindex, utxo, assumeValid]
-    depends [Domain.AssumeValid, Infra.ChainState, Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex]
+    depends [Domain.AssumeValid, Infra.ChainState, Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
@@ -405,7 +405,7 @@ fn assumeValidDone(dir: String, height: Int) -> Result<String, String>
       "of ADR 0007's 'a pinned Block Id, not a bare Height'."
     ! [Disk.exists, Disk.makeDir, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll]
     store = Infra.Store.open(dir)?
-    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     pinned(store, height, named)
 
 fn pinned(store: Store, height: Int, named: Option<String>) -> Result<String, String>
@@ -418,5 +418,5 @@ fn pinned(store: Store, height: Int, named: Option<String>) -> Result<String, St
 fn written(store: Store, height: Int, blockId: String) -> Result<String, String>
     ? "The claim, recorded."
     ! [Infra.Kv.putAll]
-    _stored = Infra.Store.putAll(store, [Entry(key = Domain.AssumeValid.claimKey(), value = Domain.AssumeValid.encodeClaim(Claim(height = height, blockId = blockId)))])?
+    _stored = Infra.Store.putAll(store, [Entry(key = Domain.AssumeValid.claimKey()?, value = Domain.AssumeValid.encodeClaim(Claim(height = height, blockId = blockId)))])?
     Result.Ok("Assume-valid Height {height}, pinned to {blockId}; Scripts at or below it will not be run")

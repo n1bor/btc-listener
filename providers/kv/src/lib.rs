@@ -577,6 +577,61 @@ mod tests {
         }
     }
 
+    /// A prefixed scan must return one Transaction's Outputs in Output order.
+    ///
+    /// This is the property n1bor/btc-listener#45 exists to protect and the
+    /// one nothing else can check: the ordering lives in RocksDB's bytewise
+    /// key comparison, not in Aver, and `prefixed` has no caller in the
+    /// program yet. The index is written big-endian precisely so that
+    /// bytewise order is numeric order. Little-endian would return the right
+    /// Outputs in the wrong order, silently.
+    ///
+    /// Fifteen Outputs, because the mistake only shows above ten: with a
+    /// single digit of index every ordering agrees.
+    #[test]
+    fn a_prefixed_scan_returns_outputs_in_index_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = opened(dir.path());
+        let txid = [0xab_u8; 32];
+
+        // Deliberately inserted out of order, so a scan that simply returned
+        // insertion order would not pass either.
+        let mut entries = Vec::new();
+        for index in [7_u32, 0, 14, 3, 11, 1, 9, 2, 13, 4, 10, 5, 12, 6, 8] {
+            let mut key = vec![b'o'];
+            key.extend_from_slice(&txid);
+            key.extend_from_slice(&index.to_be_bytes());
+            entries.push(ProviderValue::Tuple(vec![
+                ProviderValue::Bytes(key),
+                ProviderValue::Bytes(index.to_string().into_bytes()),
+            ]));
+        }
+        did(call("putAll", &[handle.clone(), ProviderValue::List(entries)]));
+
+        let mut prefix = vec![b'o'];
+        prefix.extend_from_slice(&txid);
+        let found = match okayed(call("prefixed", &[handle, ProviderValue::Bytes(prefix)])) {
+            ProviderValue::List(items) => items,
+            other => panic!("expected a List, got {other:?}"),
+        };
+
+        let order: Vec<u32> = found
+            .iter()
+            .map(|item| match item {
+                ProviderValue::Tuple(parts) => match parts.as_slice() {
+                    [ProviderValue::Bytes(key), _] => {
+                        let tail = &key[key.len() - 4..];
+                        u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]])
+                    }
+                    other => panic!("expected a pair, got {other:?}"),
+                },
+                other => panic!("expected a Tuple, got {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(order, (0..15).collect::<Vec<u32>>());
+    }
+
     /// Opening what cannot be a database is an Err, not a fault: the
     /// directory is the caller's argument and a bad one is its problem.
     #[test]

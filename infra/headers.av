@@ -17,7 +17,7 @@ module Headers
         "verify blocks over Maps and Lists. This module is the part that has"
         "to touch a Store."
     exposes [Settled, seeded, absorbed, tipOf]
-    depends [Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.Network, Domain.Reorg, Domain.TreeStore, Infra.Store]
+    depends [Bytes, Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Domain.TreeStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
 record Settled
@@ -34,7 +34,7 @@ fn seeded(network: Network, store: Store) -> Result<Store, String>
       "without this."
     ! [Infra.Kv.get, Infra.Kv.putAll]
     blockId = Domain.Block.genesisBlockId(network)
-    held = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId))?
+    held = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     plantedUnless(network, store, blockId, held)
 
 fn plantedUnless(network: Network, store: Store, blockId: String, held: Option<String>) -> Result<Store, String>
@@ -49,7 +49,7 @@ fn planted(network: Network, store: Store, blockId: String) -> Result<Store, Str
     ! [Infra.Kv.putAll]
     root = Domain.HeaderTree.rootedAt(blockId, Domain.HeaderBytes.genesisBitsFor(network))
     kept = Domain.TreeStore.heldFor(root, Domain.HeaderBytes.genesisHexFor(network))
-    Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.headerKey(blockId), value = Domain.TreeStore.encodeHeld(kept)), Entry(key = Domain.TreeStore.bestTipKey(), value = blockId)])
+    Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.headerKey(blockId)?, value = Domain.TreeStore.encodeHeld(kept)), Entry(key = Domain.TreeStore.bestTipKey()?, value = blockId)])
 
 fn absorbed(store: Store, decoded: List<BlockHeader>) -> Result<Settled, String>
     ? "A batch of Headers into the tree, and h: pointed at the best branch."
@@ -76,7 +76,7 @@ fn repointed(store: Store, tip: Placement, placed: Int, orphans: Int) -> Result<
     plan = Domain.Reorg.repointing(standings)
     moved = Infra.Store.putAll(store, heightEntries(plan.changed, [])?)?
     swept = cleared(moved, plan.staleFrom, [])?
-    named = Infra.Store.putAll(swept, [Entry(key = Domain.TreeStore.bestTipKey(), value = tip.blockId)])?
+    named = Infra.Store.putAll(swept, [Entry(key = Domain.TreeStore.bestTipKey()?, value = tip.blockId)])?
     Result.Ok(Settled(store = named, placed = placed, orphans = orphans, movement = Domain.Reorg.movementOf(plan), tipHeight = tip.height))
 
 fn treeFor(store: Store, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
@@ -96,7 +96,7 @@ fn treeAfter(store: Store, header: BlockHeader, rest: List<BlockHeader>, known: 
 fn withParent(store: Store, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
     ? "The parent is not in the batch, so ask the Store for it."
     ! [Infra.Kv.get]
-    text = Infra.Store.get(store, Domain.TreeStore.headerKey(header.previousBlockId))?
+    text = Infra.Store.get(store, Domain.TreeStore.headerKey(header.previousBlockId)?)?
     seededWith = withFetched(known, header.previousBlockId, text)?
     treeFor(store, rest, placedInto(seededWith, header))
 
@@ -156,11 +156,11 @@ verify entryFor
 fn withHex(header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>, acc: List<Entry>, placement: Placement) -> Result<List<Entry>, String>
     ? "The Placement and the Header's own bytes, as one record."
     hex = Domain.HeaderBytes.hexOf(header)?
-    entriesFor(rest, known, List.prepend(Entry(key = Domain.TreeStore.headerKey(header.blockId), value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(placement, hex))), acc))
+    entriesFor(rest, known, List.prepend(Entry(key = Domain.TreeStore.headerKey(header.blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(placement, hex))), acc))
 
 verify withHex
     List.len(withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())?) => 1
-    withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())? => [Entry(key = Domain.TreeStore.headerKey(sampleHeader().blockId), value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(samplePlacement(), Domain.HeaderBytes.genesisHexFor(Network.Mainnet))))]
+    withHex(sampleHeader(), [], sampleKnown(), [], samplePlacement())? => [Entry(key = Domain.TreeStore.headerKey(sampleHeader().blockId)?, value = Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(samplePlacement(), Domain.HeaderBytes.genesisHexFor(Network.Mainnet))))]
     withHex(BlockHeader(blockId = "bb", version = 1, previousBlockId = "aa", merkleRoot = "zz", timestamp = 0, bits = 0, nonce = 0), [], Map.fromList([("bb", Placement(blockId = "bb", parentId = "aa", height = 1, work = 2))]), [], Placement(blockId = "bb", parentId = "aa", height = 1, work = 2)) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn bestAfter(store: Store, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Option<Placement>, String>
@@ -179,8 +179,8 @@ fn tipOf(store: Store) -> Result<Option<Placement>, String>
 
 verify tipOf
     tipOf(Infra.Store.fixture([])) => Result.Ok(Option.None)
-    tipOf(Infra.Store.fixture([("meta:bestTip", "aa"), ("k:aa", "3:1:pp:hh")])) => Result.Ok(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)))
-    tipOf(Infra.Store.fixture([("meta:bestTip", "aa")])) => Result.Ok(Option.None)
+    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, "aa"), (Domain.TreeStore.headerKey("aa")?, "3:1:pp:hh")])) => Result.Ok(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 3, work = 1)))
+    tipOf(Infra.Store.fixture([(Domain.TreeStore.bestTipKey()?, "aa")])) => Result.Ok(Option.None)
 
 fn onlyTip(standing: List<Placement>) -> Option<Placement>
     ? "The one Placement the tip record found, if it found one."
@@ -195,7 +195,7 @@ verify onlyTip
 fn tipHeld(store: Store) -> Result<List<Placement>, String>
     ? "The Placement the best-tip record names, if there is one."
     ! [Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.TreeStore.bestTipKey())?
+    named = Infra.Store.get(store, Domain.TreeStore.bestTipKey()?)?
     tipNamed(store, named)
 
 fn tipNamed(store: Store, named: Option<String>) -> Result<List<Placement>, String>
@@ -211,7 +211,7 @@ fn placementAt(store: Store, blockId: String) -> Result<List<Placement>, String>
       "the batch's own Placements still decide, and the record is rewritten"
       "at the end of this batch anyway."
     ! [Infra.Kv.get]
-    text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId))?
+    text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     listed(blockId, text)
 
 fn listed(blockId: String, text: Option<String>) -> Result<List<Placement>, String>
@@ -265,7 +265,7 @@ fn standingsFor(store: Store, blockId: String, acc: List<Standing>) -> Result<Li
       "is what keeps this walk the length of the batch rather than the length"
       "of the chain."
     ! [Infra.Kv.get]
-    text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId))?
+    text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
     downFrom(store, blockId, text, acc)
 
 fn downFrom(store: Store, blockId: String, text: Option<String>, acc: List<Standing>) -> Result<List<Standing>, String>
@@ -285,7 +285,7 @@ fn atPlacement(store: Store, held: Result<Held, String>, acc: List<Standing>) ->
 fn beside(store: Store, placement: Placement, acc: List<Standing>) -> Result<List<Standing>, String>
     ? "This Height of the branch, beside the Block Id h: holds there."
     ! [Infra.Kv.get]
-    recorded = Infra.Store.get(store, Domain.Index.heightKey(placement.height))?
+    recorded = Infra.Store.get(store, Domain.IndexKeys.heightKey(placement.height)?)?
     onwards(store, Standing(placement = placement, recorded = recorded), acc)
 
 fn onwards(store: Store, standing: Standing, acc: List<Standing>) -> Result<List<Standing>, String>
@@ -302,27 +302,27 @@ fn heightEntries(changed: List<Placement>, acc: List<Entry>) -> Result<List<Entr
     ? "One h: entry per Height the new branch claims."
     match changed
         [] -> Result.Ok(List.reverse(acc))
-        [head, ..tail] -> heightEntries(tail, List.prepend(Entry(key = Domain.Index.heightKey(head.height), value = head.blockId), acc))
+        [head, ..tail] -> heightEntries(tail, List.prepend(Entry(key = Domain.IndexKeys.heightKey(head.height)?, value = head.blockId), acc))
 
 verify heightEntries
     heightEntries([], []) => Result.Ok([])
-    heightEntries([Domain.HeaderTree.rootedAt("aa", 486604799)], []) => Result.Ok([Entry(key = Domain.Index.heightKey(0), value = "aa")])
+    heightEntries([Domain.HeaderTree.rootedAt("aa", 486604799)], []) => Result.Ok([Entry(key = Domain.IndexKeys.heightKey(0)?, value = "aa")])
 
-fn cleared(store: Store, height: Int, acc: List<String>) -> Result<Store, String>
+fn cleared(store: Store, height: Int, acc: List<Bytes>) -> Result<Store, String>
     ? "Heights above the new tip that still name a Block, deleted."
       "Only a branch that is shorter in Blocks than the one it replaces leaves"
       "any, and the walk stops at the first Height that names nothing, so on"
       "an ordinary batch this reads one key and deletes none."
     ! [Infra.Kv.deleteAll, Infra.Kv.get]
-    named = Infra.Store.get(store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
     sweeping(store, height, named, acc)
 
-fn sweeping(store: Store, height: Int, named: Option<String>, acc: List<String>) -> Result<Store, String>
+fn sweeping(store: Store, height: Int, named: Option<String>, acc: List<Bytes>) -> Result<Store, String>
     ? "Carry on while Heights are named; delete what was gathered when they stop."
     ! [Infra.Kv.deleteAll, Infra.Kv.get]
     match named
         Option.None -> Infra.Store.deleteAll(store, acc)
-        Option.Some(any) -> cleared(store, height + 1, List.prepend(Domain.Index.heightKey(height), acc))
+        Option.Some(any) -> cleared(store, height + 1, List.prepend(Domain.IndexKeys.heightKey(height)?, acc))
 
 fn sampleHeader() -> BlockHeader
     ? "Mainnet's first Header, for the cases in this module."
@@ -350,7 +350,7 @@ verify sampleKnown
     Map.len(sampleKnown()) => 1
     Map.has(sampleKnown(), sampleHeader().blockId) => true
 
-fn trunkPairs() -> List<Tuple<String, String>>
+fn trunkPairs() -> Result<List<Tuple<Bytes, String>>, String>
     ? "A Store already following a three-Block chain, for the cases here."
       "Three k: entries, the three Heights they sit at, and a best-tip record"
       "naming the top. Ids are runs of one byte rather than real Block Ids:"
@@ -358,12 +358,12 @@ fn trunkPairs() -> List<Tuple<String, String>>
       "bookkeeping and not the hashing, which Domain.HeaderBytes covers."
       "The pairs rather than the Store, because a Store is opaque out here and"
       "a list can carry its own cases."
-    ([("k:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0:4295032833:0000000000000000000000000000000000000000000000000000000000000000:"), ("k:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "1:8590065666:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:"), ("k:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "2:12885098499:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:"), ("h:00000000", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), ("h:00000001", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), ("h:00000002", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), ("meta:bestTip", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")])
+    Result.Ok([(Domain.TreeStore.headerKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?, "0:4295032833:0000000000000000000000000000000000000000000000000000000000000000:"), (Domain.TreeStore.headerKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?, "1:8590065666:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:"), (Domain.TreeStore.headerKey("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?, "2:12885098499:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:"), (Domain.IndexKeys.heightKey(0)?, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), (Domain.IndexKeys.heightKey(1)?, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), (Domain.IndexKeys.heightKey(2)?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), (Domain.TreeStore.bestTipKey()?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")])
 
 verify trunkPairs
-    List.len(trunkPairs()) => 7
-    List.contains(trunkPairs(), ("meta:bestTip", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")) => true
-    List.contains(trunkPairs(), ("h:00000000", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) => true
+    List.len(trunkPairs()?) => 7
+    List.contains(trunkPairs()?, (Domain.TreeStore.bestTipKey()?, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")) => true
+    List.contains(trunkPairs()?, (Domain.IndexKeys.heightKey(0)?, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) => true
 
 fn branchHeaders() -> List<BlockHeader>
     ? "Three Headers forking from Height 0, one longer than the trunk."
@@ -377,11 +377,11 @@ verify branchHeaders
 fn heightNames(outcome: Settled, height: Int) -> Result<Option<String>, String>
     ? "What h: names at a Height once a batch has been absorbed."
     ! [Infra.Kv.get]
-    Infra.Store.get(outcome.store, Domain.Index.heightKey(height))
+    Infra.Store.get(outcome.store, Domain.IndexKeys.heightKey(height)?)
 
 verify heightNames
-    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
-    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 9) => Result.Ok(Option.None)
+    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 9) => Result.Ok(Option.None)
 
 fn absorbedInto(store: Store, headers: List<BlockHeader>) -> Result<Settled, String>
     ? "Absorb a batch, for the cases that assert on what came out."
@@ -394,21 +394,21 @@ fn absorbedInto(store: Store, headers: List<BlockHeader>) -> Result<Settled, Str
     absorbed(store, headers)
 
 verify absorbedInto
-    absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?.movement => Movement.Reorganised(0, 2)
-    absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?.tipHeight => 3
-    absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?.placed => 3
-    absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?.orphans => 0
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerG()])?.movement => Movement.Extended(1)
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerG()])?.tipHeight => 3
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerB()])?.movement => Movement.Unchanged
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerB()])?.placed => 1
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerStray()])?.orphans => 1
-    absorbedInto(Infra.Store.fixture(trunkPairs()), [headerStray()])?.placed => 0
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?, 1) => Result.Ok(Option.Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?, 2) => Result.Ok(Option.Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?, 3) => Result.Ok(Option.Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()), branchHeaders())?, 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()), [headerG()])?, 3) => Result.Ok(Option.Some("1111111111111111111111111111111111111111111111111111111111111111"))
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.movement => Movement.Reorganised(0, 2)
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.tipHeight => 3
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.placed => 3
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.orphans => 0
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?.movement => Movement.Extended(1)
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?.tipHeight => 3
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerB()])?.movement => Movement.Unchanged
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerB()])?.placed => 1
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerStray()])?.orphans => 1
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerStray()])?.placed => 0
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 1) => Result.Ok(Option.Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"))
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 2) => Result.Ok(Option.Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"))
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 3) => Result.Ok(Option.Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?, 3) => Result.Ok(Option.Some("1111111111111111111111111111111111111111111111111111111111111111"))
 
 fn headerB() -> BlockHeader
     ? "The trunk's second Header, which the Store already holds."

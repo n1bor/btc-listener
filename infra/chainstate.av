@@ -21,7 +21,7 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo]
+    depends [Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.readBytesAt,
@@ -100,7 +100,7 @@ fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    named = Infra.Store.get(state.counted.store, Domain.Index.heightKey(height))?
+    named = Infra.Store.get(state.counted.store, Domain.IndexKeys.heightKey(height)?)?
     match named
         Option.None -> Result.Ok(state)
         Option.Some(blockId) -> atBlock(network, state, height, to, blockId)
@@ -115,7 +115,7 @@ fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String)
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    located = Infra.Store.get(state.counted.store, Domain.Index.blockKey(blockId))?
+    located = Infra.Store.get(state.counted.store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> Result.Ok(state)
         Option.Some(text) -> connecting(network, state, height, to, blockId, text)
@@ -147,7 +147,7 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey(), value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId)))])?
+    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId)))])?
     counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped)
     stepped = maybeReport(height, counted, state.pace)?
     walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped), height + 1, to)
@@ -173,7 +173,7 @@ fn claimTold(store: Store, reached: Int) -> Result<Unit, String>
       "Printed at the end of every walk rather than only when it is set,"
       "because a claim nobody restates is a claim nobody checks."
     ! [Console.print, Infra.Kv.get]
-    held = Infra.Store.get(store, Domain.AssumeValid.claimKey())?
+    held = Infra.Store.get(store, Domain.AssumeValid.claimKey()?)?
     claim = claimIn(held)?
     standingTold(store, claim, reached)
 
@@ -209,7 +209,7 @@ fn heldAt(store: Store, claim: Option<Claim>) -> Result<Option<String>, String>
     ! [Infra.Kv.get]
     match claim
         Option.None -> Result.Ok(Option.None)
-        Option.Some(held) -> Infra.Store.get(store, Domain.Index.heightKey(held.height))
+        Option.Some(held) -> Infra.Store.get(store, Domain.IndexKeys.heightKey(held.height)?)
 
 fn said(standing: Standing, skipped: Int) -> Unit
     ? "One line, and a loud one when the claim has been undermined."
