@@ -1,0 +1,88 @@
+module Screen
+    intent =
+        "The one piece of the Screen that touches a terminal."
+        "Domain.Screen decides every character and every cursor position;"
+        "this executes those decisions, owns the raw-mode lifecycle, and"
+        "drains the keyboard. Restoring the terminal ignores errors on"
+        "purpose: restore is the last thing done on every way out, and a"
+        "restore that fails has nowhere better to send its complaint than"
+        "the terminal it failed to restore (#130)."
+    exposes [entered, restored, shown, drainedKeys]
+    depends [Domain.Screen]
+    effects [
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode,
+        Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print,
+        Terminal.readKey, Terminal.showCursor,
+    ]
+
+fn entered() -> Result<Unit, String>
+    ? "Take the terminal: raw mode, no cursor, a clean slate."
+    ! [Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor]
+    _raw = Terminal.enableRawMode()?
+    _hidden = Terminal.hideCursor()?
+    _cleared = Terminal.clear()?
+    Terminal.flush()
+
+fn restored() -> Unit
+    ? "Give the terminal back, whatever state the Screen died in."
+      "Each step is attempted regardless of the one before: a cursor that"
+      "cannot be shown is no reason to leave raw mode on."
+    ! [Terminal.disableRawMode, Terminal.flush, Terminal.showCursor]
+    _cursor = Terminal.showCursor()
+    _raw = Terminal.disableRawMode()
+    _flushed = Terminal.flush()
+    Unit
+
+fn shown(ops: List<DrawOp>) -> Result<Unit, String>
+    ? "One frame onto the terminal, flushed as a whole."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    executing(ops)
+
+fn executing(ops: List<DrawOp>) -> Result<Unit, String>
+    ? "Each operation in order; the flush is the frame ending."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    match ops
+        [] -> Terminal.flush()
+        [head, ..tail] -> stepped(head, tail)
+
+fn stepped(op: DrawOp, rest: List<DrawOp>) -> Result<Unit, String>
+    ? "One operation, then the rest."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    match op
+        DrawOp.ClearAll -> after(Terminal.clear(), rest)
+        DrawOp.MoveTo(x, y) -> after(Terminal.moveTo(x, y), rest)
+        DrawOp.Text(text) -> after(Terminal.print(text), rest)
+
+fn after(done: Result<Unit, String>, rest: List<DrawOp>) -> Result<Unit, String>
+    ? "Carry on only while the terminal is still taking instructions."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    _ok = done?
+    executing(rest)
+
+fn keyBudget() -> Int
+    ? "How many keys one drain will take."
+      "A bound, so a wedged input stream cannot hold the loop; nobody"
+      "presses thirty-two meaningful keys in one second."
+    32
+
+verify keyBudget
+    keyBudget() => 32
+
+fn drainedKeys() -> Result<List<String>, String>
+    ? "Every key pressed since the last drain, oldest first."
+    ! [Terminal.readKey]
+    draining(keyBudget(), [])
+
+fn draining(budget: Int, acc: List<String>) -> Result<List<String>, String>
+    ? "Read until the terminal has nothing more, or the budget is spent."
+    ! [Terminal.readKey]
+    match budget <= 0
+        true -> Result.Ok(List.reverse(acc))
+        false -> drainedOne(budget, acc, Terminal.readKey()?)
+
+fn drainedOne(budget: Int, acc: List<String>, got: Option<String>) -> Result<List<String>, String>
+    ? "One key taken, or the drain complete."
+    ! [Terminal.readKey]
+    match got
+        Option.None -> Result.Ok(List.reverse(acc))
+        Option.Some(key) -> draining(budget - 1, List.prepend(key, acc))

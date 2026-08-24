@@ -1,0 +1,246 @@
+module Screen
+    intent =
+        "What the Screen shows and how keys move it, with nothing that"
+        "touches a terminal."
+        "A frame is a list of draw operations for Infra.Screen to execute --"
+        "the one impure piece. Everything here is arithmetic over the"
+        "Snapshot: which Panel is up, what a key does to that, and the exact"
+        "text of every frame, all of it answerable by a verify case (#130)."
+        "The Panels beyond the Overview arrive with their own issues; until"
+        "each does, its screen says which issue it is waiting for, because a"
+        "blank Panel and a Panel not yet built should not look alike."
+    exposes [DrawOp, Panel, View, Pressed, opened, pressed, frameOf, overviewLines, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
+    depends [Domain.Screenlines, Domain.Snapshot]
+    effects []
+
+type DrawOp
+    ClearAll
+    MoveTo(Int, Int)
+    Text(String)
+
+type Panel
+    Overview
+    Peers
+    Blocks
+    Transactions
+    Mempool
+
+record View
+    panel: Panel
+    confirming: Bool
+
+type Answer
+    Unchanged
+    Redraw
+    StopNode
+
+record Pressed
+    view: View
+    answer: Answer
+
+fn opened() -> View
+    ? "The Screen as it first appears: the Overview, asking nothing."
+    View(panel = Panel.Overview, confirming = false)
+
+verify opened
+    opened() => View(panel = Panel.Overview, confirming = false)
+
+fn pressed(view: View, key: String) -> Pressed
+    ? "What one key does."
+      "While the stop question is open, y stops the node and any other key"
+      "withdraws the question -- a question answered by accident should err"
+      "towards the node staying up."
+    match view.confirming
+        true -> answered(key)
+        false -> switched(view, key)
+
+verify pressed
+    pressed(View(panel = Panel.Overview, confirming = true), "y").answer => Answer.StopNode
+    pressed(View(panel = Panel.Overview, confirming = true), "n").answer => Answer.Redraw
+    pressed(View(panel = Panel.Overview, confirming = true), "n").view.confirming => false
+    pressed(opened(), "q").view.confirming => true
+    pressed(opened(), "p").view.panel => Panel.Peers
+    pressed(opened(), "x").answer => Answer.Unchanged
+
+fn answered(key: String) -> Pressed
+    ? "The stop question, answered."
+    match key
+        "y" -> Pressed(view = View(panel = Panel.Overview, confirming = false), answer = Answer.StopNode)
+        _ -> Pressed(view = View(panel = Panel.Overview, confirming = false), answer = Answer.Redraw)
+
+verify answered
+    answered("y").answer => Answer.StopNode
+    answered("Escape").answer => Answer.Redraw
+
+fn switched(view: View, key: String) -> Pressed
+    ? "The Panel keys, and q opening the stop question."
+      "An unknown key changes nothing and redraws nothing, so leaning on the"
+      "keyboard costs no flicker."
+    match key
+        "o" -> Pressed(view = View(panel = Panel.Overview, confirming = false), answer = Answer.Redraw)
+        "p" -> Pressed(view = View(panel = Panel.Peers, confirming = false), answer = Answer.Redraw)
+        "b" -> Pressed(view = View(panel = Panel.Blocks, confirming = false), answer = Answer.Redraw)
+        "t" -> Pressed(view = View(panel = Panel.Transactions, confirming = false), answer = Answer.Redraw)
+        "m" -> Pressed(view = View(panel = Panel.Mempool, confirming = false), answer = Answer.Redraw)
+        "q" -> Pressed(view = View(panel = view.panel, confirming = true), answer = Answer.Redraw)
+        _ -> Pressed(view = view, answer = Answer.Unchanged)
+
+verify switched
+    switched(opened(), "b").view.panel => Panel.Blocks
+    switched(opened(), "m").view.panel => Panel.Mempool
+    switched(opened(), "q").view.confirming => true
+    switched(View(panel = Panel.Blocks, confirming = false), "z").view.panel => Panel.Blocks
+
+fn keymapLine() -> String
+    ? "The one line that says what the keys are, always at the top."
+    "o overview  p peers  b blocks  t transactions  m mempool  q quit"
+
+verify keymapLine
+    keymapLine() => "o overview  p peers  b blocks  t transactions  m mempool  q quit"
+
+fn confirmLine() -> String
+    ? "The stop question, shown while it is open."
+    "Stop the node? y/n"
+
+verify confirmLine
+    confirmLine() => "Stop the node? y/n"
+
+fn frameOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<DrawOp>
+    ? "One whole frame: clear, the keymap, the Panel, and the stop question"
+      "when it is open."
+    List.concat([DrawOp.ClearAll, DrawOp.MoveTo(0, 0), DrawOp.Text(keymapLine())], bodyOps(linesOf(view, snapshot, nowMs), confirmingLine(view.confirming), 2, []))
+
+fn confirmingLine(confirming: Bool) -> List<String>
+    ? "The stop question as a trailing line, or nothing."
+    match confirming
+        true -> [confirmLine()]
+        false -> []
+
+verify confirmingLine
+    confirmingLine(true) => ["Stop the node? y/n"]
+    confirmingLine(false) => []
+
+fn bodyOps(lines: List<String>, trailing: List<String>, row: Int, acc: List<DrawOp>) -> List<DrawOp>
+    ? "Each line at its row, top to bottom."
+    match List.concat(lines, trailing)
+        [] -> List.reverse(acc)
+        [head, ..tail] -> bodyOps(tail, [], row + 1, List.prepend(DrawOp.Text(head), List.prepend(DrawOp.MoveTo(0, row), acc)))
+
+verify bodyOps
+    bodyOps([], [], 2, []) => []
+    bodyOps(["a"], [], 2, []) => [DrawOp.MoveTo(0, 2), DrawOp.Text("a")]
+    bodyOps(["a"], ["b"], 2, []) => [DrawOp.MoveTo(0, 2), DrawOp.Text("a"), DrawOp.MoveTo(0, 3), DrawOp.Text("b")]
+
+fn linesOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "The Panel that is up, as its lines."
+    match view.panel
+        Panel.Overview -> overviewLines(snapshot, nowMs)
+        Panel.Peers -> placeholderLines("Peers", "#131")
+        Panel.Blocks -> placeholderLines("Blocks", "#132")
+        Panel.Transactions -> placeholderLines("Transactions", "#133")
+        Panel.Mempool -> placeholderLines("Mempool", "#28")
+
+verify linesOf
+    linesOf(View(panel = Panel.Mempool, confirming = false), Domain.Snapshot.started(0), 0) => ["", "waiting for the Mempool Panel (#28)"]
+    List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 4
+
+fn placeholderLines(name: String, issue: String) -> List<String>
+    ? "A Panel that is not built yet says so, and says where it is coming"
+      "from."
+    ["", "waiting for the {name} Panel ({issue})"]
+
+verify placeholderLines
+    placeholderLines("Mempool", "#28") => ["", "waiting for the Mempool Panel (#28)"]
+
+fn overviewLines(snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "The Overview: the catch-up while it runs, the tip once there is one."
+    match snapshot.phase
+        Phase.Headers -> ibdLines(snapshot)
+        Phase.Bodies -> ibdLines(snapshot)
+        Phase.Listening -> tipLines(snapshot, nowMs)
+
+verify overviewLines
+    overviewLines(Domain.Snapshot.started(0), 0) => ["", "catching up", "headers 0 held, 0/s", "blocks 0/0 (0%) 0/s eta —"]
+    List.len(overviewLines(Domain.Snapshot.tipAt(Domain.Snapshot.started(0), 7, "aa", 0), 5000)) => 8
+
+fn ibdLines(snapshot: Snapshot) -> List<String>
+    ? "The catch-up form: the Header walk, then the body walk."
+    [
+        "",
+        "catching up",
+        "headers {snapshot.headers.done} held, {Domain.Snapshot.rateOf(snapshot.headers)}/s",
+        "blocks {snapshot.bodies.done}/{snapshot.bodies.target} ({Domain.Snapshot.percentOf(snapshot.bodies)}%) {Domain.Snapshot.rateOf(snapshot.bodies)}/s eta {etaClock(Domain.Snapshot.etaSecsOf(snapshot.bodies))}",
+    ]
+
+verify ibdLines
+    ibdLines(Domain.Snapshot.started(0)) => ["", "catching up", "headers 0 held, 0/s", "blocks 0/0 (0%) 0/s eta —"]
+    List.len(ibdLines(Domain.Snapshot.headersAt(Domain.Snapshot.started(0), 5, 9, 100))) => 4
+
+fn tipLines(snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "The at-the-tip form: where the node stands, what just happened, who"
+      "it is talking to, and the Mempool it does not have yet."
+    List.concat([
+        "",
+        "{Domain.Screenlines.tipLine(snapshot.tip)}  (age {ageText(snapshot.tip.atMs, nowMs)})",
+        "",
+        "last Transactions:",
+    ], List.concat(transactionLines(List.take(snapshot.rings.transactions, 4), []), [
+        "",
+        Domain.Screenlines.peersLine(snapshot.company, nowMs),
+        "Mempool: waiting for the Mempool (#28)",
+    ]))
+
+fn transactionLines(views: List<TxView>, acc: List<String>) -> List<String>
+    ? "The newest few Transactions, one line each; none yet is said, not"
+      "left blank."
+    match views
+        [] -> noneYet(List.reverse(acc))
+        [head, ..tail] -> transactionLines(tail, List.prepend("  {Domain.Screenlines.transactionLine(head)}", acc))
+
+fn noneYet(lines: List<String>) -> List<String>
+    ? "An empty list of Transaction lines reads as a sentence instead."
+    match lines
+        [] -> ["  none seen yet"]
+        [head, ..tail] -> lines
+
+verify noneYet
+    noneYet([]) => ["  none seen yet"]
+    noneYet(["  tx aa fee 1 sat"]) => ["  tx aa fee 1 sat"]
+
+verify transactionLines
+    transactionLines([], []) => ["  none seen yet"]
+    transactionLines([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)], []) => ["  tx tt fee 1000 sat"]
+
+fn etaClock(eta: Option<Int>) -> String
+    ? "The remaining time as h:mm, or an em dash while the rate window is"
+      "still filling -- a dash reads as 'not yet known', where a number"
+      "would read as a promise."
+    match eta
+        Option.None -> "—"
+        Option.Some(secs) -> "{Int.div(secs, 3600)}:{padded(Int.div(Int.mod(secs, 3600), 60))}"
+
+verify etaClock
+    etaClock(Option.None) => "—"
+    etaClock(Option.Some(0)) => "0:00"
+    etaClock(Option.Some(59)) => "0:00"
+    etaClock(Option.Some(3600)) => "1:00"
+    etaClock(Option.Some(11225)) => "3:07"
+
+fn padded(minutes: Int) -> String
+    ? "Two digits of minutes."
+    match minutes < 10
+        true -> "0{minutes}"
+        false -> "{minutes}"
+
+verify padded
+    padded(0) => "00"
+    padded(7) => "07"
+    padded(59) => "59"
+
+fn ageText(atMs: Int, nowMs: Int) -> String
+    ? "How long ago that was, never negative even against a skewed clock."
+    Domain.Screenlines.spanText(Int.max(Int.div(nowMs - atMs, 1000), 0))
+
+verify ageText
+    ageText(0, 250000) => "4m10s"
+    ageText(250000, 0) => "0s"
