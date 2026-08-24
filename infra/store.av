@@ -38,7 +38,7 @@ module Store
         "hands back a Store per call where putAll hands back one."
     exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, fixture]
     exposes opaque [Store]
-    depends [Infra.Kv]
+    depends [Bytes, Infra.Kv]
     effects [
         Disk.exists, Disk.makeDir,
         Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
@@ -145,7 +145,7 @@ fn looked(store: Store, key: String) -> Result<Option<String>, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.get(held, key))
-        Store.Database(handle) -> Infra.Kv.get(handle, key)
+        Store.Database(handle) -> asText(Infra.Kv.get(handle, asBytes(key)))
 
 verify looked
     looked(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(Option.Some("b"))
@@ -168,31 +168,31 @@ fn present(store: Store, key: String) -> Result<Bool, String>
     ! [Infra.Kv.get]
     match store
         Store.Memory(held) -> Result.Ok(Map.has(held, key))
-        Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
+        Store.Database(handle) -> wasFound(Infra.Kv.get(handle, asBytes(key)))
 
 verify present
     present(Store.Memory(Map.fromList([("a", "b")])), "a") => Result.Ok(true)
     present(Store.Memory(Map.fromList([])), "a") => Result.Ok(false)
 
-fn wasFound(found: Result<Option<String>, String>) -> Result<Bool, String>
+fn wasFound(found: Result<Option<Bytes>, String>) -> Result<Bool, String>
     ? "Whether a lookup found anything."
       "The database has no cheaper existence check than a read, so has costs a"
       "read and throws the value away rather than pretending otherwise."
     Result.Ok(anything(found?))
 
 verify wasFound
-    wasFound(Result.Ok(Option.Some("b"))) => Result.Ok(true)
+    wasFound(Result.Ok(Option.Some(asBytes("b")))) => Result.Ok(true)
     wasFound(Result.Ok(Option.None)) => Result.Ok(false)
     wasFound(Result.Err("no")) => Result.Err("no")
 
-fn anything(found: Option<String>) -> Bool
+fn anything(found: Option<Bytes>) -> Bool
     ? "Whether a lookup found anything."
     match found
         Option.Some(value) -> true
         Option.None -> false
 
 verify anything
-    anything(Option.Some("b")) => true
+    anything(Option.Some(asBytes("b"))) => true
     anything(Option.None) => false
 
 fn size(store: Store) -> Result<Int, String>
@@ -244,16 +244,74 @@ fn storedPut(handle: Infra.Kv.Handle, entries: List<Entry>) -> Result<Store, Str
     _written = Infra.Kv.putAll(handle, asPairs(entries, []))?
     Result.Ok(Store.Database(handle))
 
-fn asPairs(entries: List<Entry>, acc: List<Tuple<String, String>>) -> List<Tuple<String, String>>
+fn asPairs(entries: List<Entry>, acc: List<Tuple<Bytes, Bytes>>) -> List<Tuple<Bytes, Bytes>>
     ? "The batch as the pairs the contract carries."
     match entries
         [] -> List.reverse(acc)
-        [head, ..tail] -> asPairs(tail, List.prepend((head.key, head.value), acc))
+        [head, ..tail] -> asPairs(tail, List.prepend((asBytes(head.key), asBytes(head.value)), acc))
 
 verify asPairs
     asPairs([], []) => []
-    asPairs([Entry(key = "a", value = "b")], []) => [("a", "b")]
-    asPairs([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")], []) => [("a", "b"), ("c", "d")]
+    asPairs([Entry(key = "a", value = "b")], []) => [(asBytes("a"), asBytes("b"))]
+    asPairs([Entry(key = "a", value = "b"), Entry(key = "c", value = "d")], []) => [(asBytes("a"), asBytes("b")), (asBytes("c"), asBytes("d"))]
+
+fn asBytes(text: String) -> Bytes
+    ? "A key or a value on its way to the database."
+      "The database is bytes and this Store's keys are text, so the encoding"
+      "is named here rather than assumed at the far end. UTF-8, which for the"
+      "keys this program writes -- hexadecimal, digits, colons and one-letter"
+      "prefixes -- is one byte per character, so the stored format is exactly"
+      "what it was when the contract said String."
+    String.toUtf8(text)
+
+verify asBytes
+    Bytes.octets(asBytes("")) => []
+    Bytes.octets(asBytes("b:aa")) => [98, 58, 97, 97]
+    Bytes.octets(asBytes("h:00000001")) => [104, 58, 48, 48, 48, 48, 48, 48, 48, 49]
+
+fn asText(found: Result<Option<Bytes>, String>) -> Result<Option<String>, String>
+    ? "What the database answered, back as the text the Store deals in."
+    match found
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(value) -> textIn(value)
+
+verify asText
+    asText(Result.Ok(Option.None)) => Result.Ok(Option.None)
+    asText(Result.Ok(Option.Some(asBytes("b")))) => Result.Ok(Option.Some("b"))
+    asText(Result.Err("no")) => Result.Err("no")
+
+fn textIn(value: Option<Bytes>) -> Result<Option<String>, String>
+    ? "An absent key stays absent; a present one has to be text."
+    match value
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(bytes) -> someText(String.fromUtf8(bytes))
+
+verify textIn
+    textIn(Option.None) => Result.Ok(Option.None)
+    textIn(Option.Some(asBytes("b"))) => Result.Ok(Option.Some("b"))
+
+fn someText(decoded: Result<String, String>) -> Result<Option<String>, String>
+    ? "A stored value that is not text was written by something else."
+      "The provider used to make this claim in Rust, where no caller could see"
+      "it fail. It is a fact about the world -- somebody else wrote this file"
+      "-- so it is an Err, and now it is one an Aver caller is handed."
+    match decoded
+        Result.Err(why) -> Result.Err("the database holds a value that is not text: {why}")
+        Result.Ok(text) -> Result.Ok(Option.Some(text))
+
+verify someText
+    someText(Result.Ok("b")) => Result.Ok(Option.Some("b"))
+    someText(Result.Err("invalid utf-8")) => Result.Err("the database holds a value that is not text: invalid utf-8")
+
+fn asKeyBytes(keys: List<String>, acc: List<Bytes>) -> List<Bytes>
+    ? "A batch of keys on its way to the database."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> asKeyBytes(tail, List.prepend(asBytes(head), acc))
+
+verify asKeyBytes
+    asKeyBytes([], []) => []
+    asKeyBytes(["a", "b"], []) => [asBytes("a"), asBytes("b")]
 
 fn heldPut(held: Map<String, String>, entries: List<Entry>) -> Result<Store, String>
     ? "Absorb a batch into memory, having first passed it through the same gate."
@@ -289,7 +347,7 @@ fn storedDelete(handle: Infra.Kv.Handle, keys: List<String>) -> Result<Store, St
     ? "Ask the database to forget the keys, in one batch."
     ! [Infra.Kv.deleteAll]
     _checked = acceptableKeys(keys)?
-    _removed = Infra.Kv.deleteAll(handle, keys)?
+    _removed = Infra.Kv.deleteAll(handle, asKeyBytes(keys, []))?
     Result.Ok(Store.Database(handle))
 
 fn heldDelete(held: Map<String, String>, keys: List<String>) -> Result<Store, String>

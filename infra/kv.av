@@ -25,12 +25,15 @@ module Kv
         "Rust target -- and Infra.Store is a sum whose database arm has to hold"
         "the open database. jasisz/aver#997 fixed it, the workaround is gone,"
         "and no caller changed either way."
-        "Nothing else needs an owned carrier. Contract v1 requires every boundary"
-        "type to be declared in the capability module, and Domain.Primitives had"
-        "to declare Octets because the stdlib Bytes is not owned. String, Int,"
-        "Bool, Unit, Option, Result, List and Tuple are all legal as they stand,"
-        "so keys and values cross as themselves and nothing is converted at the"
-        "edge."
+        "Keys and values are Bytes. A database is bytes to bytes and always"
+        "was; the contract used to say String, so providers/kv had a function"
+        "whose whole job was to prove that whatever RocksDB handed back was"
+        "UTF-8 -- a claim about the world made in Rust, where no Aver caller"
+        "could see it fail. jasisz/aver#1022 gave Bytes a compiler-owned"
+        "capability ABI, so the contract can now say what the database means,"
+        "and the one place that does want text -- Infra.Store, whose keys are"
+        "still written as text -- converts explicitly and handles the failure"
+        "as a value."
         "The operations are the ones Infra.Store already has, batched the same"
         "way, because backing that Store is what this is for. There is no put"
         "and no delete for one key: a single change is a batch of one, and"
@@ -48,6 +51,7 @@ module Kv
     kind = capability
     semantics = effectful
     exposes [Handle, open, get, putAll, deleteAll, count, prefixed]
+    depends [Bytes]
 
 resource Handle
 
@@ -58,7 +62,7 @@ operation open(dir: String) -> Result<Handle, String>
     oracle = generativeOutput
     replay = recorded
 
-operation get(handle: Handle, key: String) -> Result<Option<String>, String>
+operation get(handle: Handle, key: Bytes) -> Result<Option<Bytes>, String>
     ? "What is stored under a key, if anything."
       "None means the key is absent. An Err means the read itself failed, which"
       "is the distinction Infra.Store.get was given a Result for before there"
@@ -66,14 +70,14 @@ operation get(handle: Handle, key: String) -> Result<Option<String>, String>
     oracle = generative
     replay = recorded
 
-operation putAll(handle: Handle, entries: List<Tuple<String, String>>) -> Result<Unit, String>
+operation putAll(handle: Handle, entries: List<Tuple<Bytes, Bytes>>) -> Result<Unit, String>
     ? "Write these pairs in one batch, all of them or none of them."
       "Atomic, which the log backend could only approximate by making a batch"
       "one append and discarding a torn tail on the next open."
     oracle = generativeOutput
     replay = recorded
 
-operation deleteAll(handle: Handle, keys: List<String>) -> Result<Unit, String>
+operation deleteAll(handle: Handle, keys: List<Bytes>) -> Result<Unit, String>
     ? "Remove these keys in one batch, all of them or none of them."
       "A key that is not there is not an error. Pruning drops the Location of"
       "every Block in a Segment and does not first ask which of them it wrote."
@@ -87,7 +91,7 @@ operation count(handle: Handle) -> Result<Int, String>
     oracle = generative
     replay = recorded
 
-operation prefixed(handle: Handle, prefix: String) -> Result<List<Tuple<String, String>>, String>
+operation prefixed(handle: Handle, prefix: Bytes) -> Result<List<Tuple<Bytes, Bytes>>, String>
     ? "Every pair whose key starts with this prefix, in key order."
       "The one thing the Map backend cannot do at all and the reason the output"
       "keyspace becomes possible: outputs of one Transaction share a prefix, so"

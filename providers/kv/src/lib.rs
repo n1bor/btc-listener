@@ -28,9 +28,12 @@ use rocksdb::{
 };
 
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
-/// than at the first call.
+/// than at the first call — which is how the move to `Bytes` announced itself:
+/// the contract changed shape, so its hash changed, and every verify block
+/// that reaches a Store declined to run until this line agreed again.
+/// n1bor/btc-listener#43.
 pub const CONTRACT_HASH: &str =
-    "sha256:a3ca919aeb2d1693376f626e4dfe727d5c486cb36c0594ff1a85a069f457bd01";
+    "sha256:b502cc65850614dfd4e4950b3493eb857d456d7cfbad23279512ada5fdfdfc32";
 
 /// The open database. RocksDB takes `&self` for every operation and is
 /// `Sync`, so the resource needs no lock of its own.
@@ -92,8 +95,25 @@ fn string_in(value: &ProviderValue, what: &str) -> Result<String, ProviderFault>
     }
 }
 
-/// The pairs of a `List<Tuple<String, String>>`.
-fn pairs_in(value: &ProviderValue, what: &str) -> Result<Vec<(String, String)>, ProviderFault> {
+/// The bytes of a `Bytes`. Keys and values cross as bytes because that is what
+/// the database stores; the contract used to say `String` and this file had to
+/// prove it, which is a claim about the world made where no caller could see it
+/// fail. n1bor/btc-listener#43.
+fn bytes_in(value: &ProviderValue, what: &str) -> Result<Vec<u8>, ProviderFault> {
+    match value {
+        ProviderValue::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(ProviderFault::new("bad_shape", format!("{what} is not Bytes"))),
+    }
+}
+
+/// A key as a diagnostic, never as data. A key that is not UTF-8 is perfectly
+/// legal now, and a message about it still has to be readable.
+fn shown(key: &[u8]) -> String {
+    String::from_utf8_lossy(key).into_owned()
+}
+
+/// The pairs of a `List<Tuple<Bytes, Bytes>>`.
+fn pairs_in(value: &ProviderValue, what: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ProviderFault> {
     let ProviderValue::List(items) = value else {
         return Err(ProviderFault::new("bad_shape", format!("{what} is not a List")));
     };
@@ -105,16 +125,16 @@ fn pairs_in(value: &ProviderValue, what: &str) -> Result<Vec<(String, String)>, 
         let [key, value] = parts.as_slice() else {
             return Err(ProviderFault::new("bad_shape", format!("{what} holds a Tuple that is not a pair")));
         };
-        out.push((string_in(key, "key")?, string_in(value, "value")?));
+        out.push((bytes_in(key, "key")?, bytes_in(value, "value")?));
     }
     Ok(out)
 }
 
-fn keys_in(value: &ProviderValue, what: &str) -> Result<Vec<String>, ProviderFault> {
+fn keys_in(value: &ProviderValue, what: &str) -> Result<Vec<Vec<u8>>, ProviderFault> {
     let ProviderValue::List(items) = value else {
         return Err(ProviderFault::new("bad_shape", format!("{what} is not a List")));
     };
-    items.iter().map(|item| string_in(item, "key")).collect()
+    items.iter().map(|item| bytes_in(item, "key")).collect()
 }
 
 /// A database error the caller is meant to handle, as distinct from a
@@ -127,16 +147,9 @@ fn ok(value: ProviderValue) -> ProviderValue {
     ProviderValue::ResultOk(Box::new(value))
 }
 
-/// Values are Aver `String`s, so what comes back out of the database has to be
-/// UTF-8. Anything else means the file was written by something other than
-/// this program, which is a fact about the world and so an Err, not a fault.
-fn text(bytes: Vec<u8>, what: &str) -> Result<String, String> {
-    String::from_utf8(bytes).map_err(|_| format!("{what} is not UTF-8"))
-}
-
 impl CapabilityProvider for Kv {
     fn identity(&self) -> &str {
-        "btc-listener.kv/rocksdb@1"
+        "btc-listener.kv/rocksdb@2"
     }
 
     fn fingerprint(&self) -> &str {
@@ -161,17 +174,14 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.get" => {
                 let [handle, key] = args else {
-                    return Err(ProviderFault::new("bad_arity", "get takes a Handle and a String"));
+                    return Err(ProviderFault::new("bad_arity", "get takes a Handle and Bytes"));
                 };
-                let key = string_in(key, "key")?;
+                let key = bytes_in(key, "key")?;
                 let open = open_in(handle, "handle")?;
-                Ok(match open.0.get(key.as_bytes()) {
-                    Err(why) => failed(&format!("cannot read '{key}'"), why),
+                Ok(match open.0.get(&key) {
+                    Err(why) => failed(&format!("cannot read '{}'", shown(&key)), why),
                     Ok(None) => ok(ProviderValue::OptionNone),
-                    Ok(Some(bytes)) => match text(bytes, &format!("the value under '{key}'")) {
-                        Ok(value) => ok(ProviderValue::OptionSome(Box::new(ProviderValue::String(value)))),
-                        Err(why) => ProviderValue::ResultErr(Box::new(ProviderValue::String(why))),
-                    },
+                    Ok(Some(bytes)) => ok(ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes)))),
                 })
             }
             "Infra.Kv.putAll" => {
@@ -182,7 +192,7 @@ impl CapabilityProvider for Kv {
                 let open = open_in(handle, "handle")?;
                 let mut batch = WriteBatch::default();
                 for (key, value) in &entries {
-                    batch.put(key.as_bytes(), value.as_bytes());
+                    batch.put(key, value);
                 }
                 Ok(match open.0.write_opt(batch, &durable()) {
                     Ok(()) => ok(ProviderValue::Unit),
@@ -197,7 +207,7 @@ impl CapabilityProvider for Kv {
                 let open = open_in(handle, "handle")?;
                 let mut batch = WriteBatch::default();
                 for key in &keys {
-                    batch.delete(key.as_bytes());
+                    batch.delete(key);
                 }
                 Ok(match open.0.write_opt(batch, &durable()) {
                     Ok(()) => ok(ProviderValue::Unit),
@@ -220,33 +230,25 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.prefixed" => {
                 let [handle, prefix] = args else {
-                    return Err(ProviderFault::new("bad_arity", "prefixed takes a Handle and a String"));
+                    return Err(ProviderFault::new("bad_arity", "prefixed takes a Handle and Bytes"));
                 };
-                let prefix = string_in(prefix, "prefix")?;
+                let prefix = bytes_in(prefix, "prefix")?;
                 let open = open_in(handle, "handle")?;
                 let mut found = Vec::new();
                 for item in open
                     .0
-                    .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+                    .iterator(IteratorMode::From(&prefix, Direction::Forward))
                 {
                     let (key, value) = match item {
                         Ok(pair) => pair,
                         Err(why) => return Ok(failed("cannot walk the keyspace", why)),
                     };
-                    if !key.starts_with(prefix.as_bytes()) {
+                    if !key.starts_with(&prefix) {
                         break;
                     }
-                    let key = match text(key.to_vec(), "a key") {
-                        Ok(key) => key,
-                        Err(why) => return Ok(ProviderValue::ResultErr(Box::new(ProviderValue::String(why)))),
-                    };
-                    let value = match text(value.to_vec(), &format!("the value under '{key}'")) {
-                        Ok(value) => value,
-                        Err(why) => return Ok(ProviderValue::ResultErr(Box::new(ProviderValue::String(why)))),
-                    };
                     found.push(ProviderValue::Tuple(vec![
-                        ProviderValue::String(key),
-                        ProviderValue::String(value),
+                        ProviderValue::Bytes(key.to_vec()),
+                        ProviderValue::Bytes(value.to_vec()),
                     ]));
                 }
                 Ok(ok(ProviderValue::List(found)))
@@ -319,8 +321,21 @@ mod tests {
         }
     }
 
+    /// A directory, which is still a `String` — only keys and values became
+    /// `Bytes`.
     fn text(value: &str) -> ProviderValue {
         ProviderValue::String(value.to_string())
+    }
+
+    /// A key or a value, as the contract now carries them.
+    fn raw(value: &str) -> ProviderValue {
+        ProviderValue::Bytes(value.as_bytes().to_vec())
+    }
+
+    /// A key or a value that is deliberately not UTF-8, which the database is
+    /// now entitled to hold and this file no longer has an opinion about.
+    fn nonUtf8() -> ProviderValue {
+        ProviderValue::Bytes(vec![0xff, 0xfe, 0x00, 0x80])
     }
 
     fn opened(dir: &Path) -> ProviderValue {
@@ -331,18 +346,20 @@ mod tests {
         let entries = ProviderValue::List(
             pairs
                 .iter()
-                .map(|(key, value)| ProviderValue::Tuple(vec![text(key), text(value)]))
+                .map(|(key, value)| ProviderValue::Tuple(vec![raw(key), raw(value)]))
                 .collect(),
         );
         did(call("putAll", &[handle.clone(), entries]));
     }
 
     fn got(handle: &ProviderValue, key: &str) -> Option<String> {
-        match okayed(call("get", &[handle.clone(), text(key)])) {
+        match okayed(call("get", &[handle.clone(), raw(key)])) {
             ProviderValue::OptionNone => None,
             ProviderValue::OptionSome(inner) => match *inner {
-                ProviderValue::String(value) => Some(value),
-                other => panic!("expected a String, got {other:?}"),
+                ProviderValue::Bytes(value) => {
+                    Some(String::from_utf8(value).expect("this test stores text"))
+                }
+                other => panic!("expected Bytes, got {other:?}"),
             },
             other => panic!("expected an Option, got {other:?}"),
         }
@@ -356,15 +373,16 @@ mod tests {
     }
 
     fn under(handle: &ProviderValue, prefix: &str) -> Vec<(String, String)> {
-        match okayed(call("prefixed", &[handle.clone(), text(prefix)])) {
+        match okayed(call("prefixed", &[handle.clone(), raw(prefix)])) {
             ProviderValue::List(items) => items
                 .into_iter()
                 .map(|item| match item {
                     ProviderValue::Tuple(parts) => match parts.as_slice() {
-                        [ProviderValue::String(key), ProviderValue::String(value)] => {
-                            (key.clone(), value.clone())
-                        }
-                        other => panic!("expected a pair of Strings, got {other:?}"),
+                        [ProviderValue::Bytes(key), ProviderValue::Bytes(value)] => (
+                            String::from_utf8(key.clone()).expect("this test stores text"),
+                            String::from_utf8(value.clone()).expect("this test stores text"),
+                        ),
+                        other => panic!("expected a pair of Bytes, got {other:?}"),
                     },
                     other => panic!("expected a Tuple, got {other:?}"),
                 })
@@ -401,7 +419,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = opened(dir.path());
         put(&handle, &[("b:aa", "1"), ("b:bb", "2")]);
-        let keys = ProviderValue::List(vec![text("b:aa"), text("b:zz")]);
+        let keys = ProviderValue::List(vec![raw("b:aa"), raw("b:zz")]);
         did(call("deleteAll", &[handle.clone(), keys]));
         assert_eq!(got(&handle, "b:aa"), None);
         assert_eq!(got(&handle, "b:bb"), Some("2".to_string()));
@@ -512,7 +530,7 @@ mod tests {
         for round in 0..50 {
             put(&handle, &[("b:aa", &format!("round {round}"))]);
         }
-        let keys = ProviderValue::List(vec![text("b:aa")]);
+        let keys = ProviderValue::List(vec![raw("b:aa")]);
         did(call("deleteAll", &[handle.clone(), keys]));
         put(&handle, &[("b:bb", "kept")]);
         assert_eq!(got(&handle, "b:aa"), None);
@@ -520,22 +538,43 @@ mod tests {
         assert_eq!(counted(&handle), 1);
     }
 
-    /// Values cross the boundary as Aver `String`s. Bytes that are not UTF-8
-    /// cannot have been written by this program, so they are reported as an
-    /// Err the caller can handle rather than as a provider fault.
+    /// Keys and values cross as `Bytes`, so bytes that are not UTF-8 are
+    /// ordinary data and come back unchanged. This file used to refuse them,
+    /// because the contract said `String` and something had to make that true;
+    /// deciding what text means is now Infra.Store's, where a caller can see
+    /// the answer. n1bor/btc-listener#43.
     #[test]
-    fn a_value_that_is_not_utf8_is_an_error_the_caller_can_read() {
+    fn bytes_that_are_not_utf8_come_back_as_they_went_in() {
         let dir = tempfile::tempdir().unwrap();
-        {
-            let db = DB::open(&tuned(), dir.path()).unwrap();
-            db.put(b"b:aa", [0xff, 0xfe]).unwrap();
-            db.flush().unwrap();
-        }
         let handle = opened(dir.path());
-        let why = erred(call("get", &[handle.clone(), text("b:aa")]));
-        assert_eq!(why, "the value under 'b:aa' is not UTF-8");
-        let why = erred(call("prefixed", &[handle, text("b:")]));
-        assert_eq!(why, "the value under 'b:aa' is not UTF-8");
+        let odd = vec![0xffu8, 0xfe, 0x00, 0x80];
+        let entries = ProviderValue::List(vec![ProviderValue::Tuple(vec![
+            nonUtf8(),
+            ProviderValue::Bytes(odd.clone()),
+        ])]);
+        did(call("putAll", &[handle.clone(), entries]));
+
+        match okayed(call("get", &[handle.clone(), nonUtf8()])) {
+            ProviderValue::OptionSome(inner) => match *inner {
+                ProviderValue::Bytes(value) => assert_eq!(value, odd),
+                other => panic!("expected Bytes, got {other:?}"),
+            },
+            other => panic!("expected Some, got {other:?}"),
+        }
+
+        match okayed(call("prefixed", &[handle, ProviderValue::Bytes(vec![0xff])])) {
+            ProviderValue::List(items) => match items.as_slice() {
+                [ProviderValue::Tuple(parts)] => match parts.as_slice() {
+                    [ProviderValue::Bytes(key), ProviderValue::Bytes(value)] => {
+                        assert_eq!(key, &vec![0xffu8, 0xfe, 0x00, 0x80]);
+                        assert_eq!(value, &odd);
+                    }
+                    other => panic!("expected a pair of Bytes, got {other:?}"),
+                },
+                other => panic!("expected one pair, got {other:?}"),
+            },
+            other => panic!("expected a List, got {other:?}"),
+        }
     }
 
     /// Opening what cannot be a database is an Err, not a fault: the
@@ -567,7 +606,7 @@ mod tests {
         let fault = Kv.invoke(&context, &[text("only one argument")]).unwrap_err();
         assert_eq!(fault.code, "bad_arity");
         let fault = Kv
-            .invoke(&context, &[text("not a handle"), text("b:aa")])
+            .invoke(&context, &[text("not a handle"), raw("b:aa")])
             .unwrap_err();
         assert_eq!(fault.code, "bad_shape");
         let unknown = ProviderContext {
