@@ -20,7 +20,7 @@ module Follow
         "are Stages 5 to 7; a Transaction announced here is simply not asked"
         "for, because there is nowhere yet to put one."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -28,6 +28,7 @@ module Follow
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
 
@@ -44,12 +45,13 @@ record Watching
     heard: Map<Int, Int>
     anyHeardMs: Int
     saidPeersMs: Int
+    view: Option<View>
 
 fn freshWatch(nowMs: Int) -> Watching
     ? "What the loop knows about its own watching, before anything happens:"
       "an empty Snapshot, nobody heard yet -- but the clock starts now, so"
       "silence is measured from joining and not from 1970."
-    Watching(snapshot = Domain.Snapshot.started(nowMs), heard = Map.fromList([]), anyHeardMs = nowMs, saidPeersMs = nowMs)
+    Watching(snapshot = Domain.Snapshot.started(nowMs), heard = Map.fromList([]), anyHeardMs = nowMs, saidPeersMs = nowMs, view = Option.None)
 
 verify freshWatch
     freshWatch(5).anyHeardMs => 5
@@ -70,8 +72,12 @@ fn withWatch(state: Following, watch: Watching) -> Following
     ? "The state, with what the loop knows about its watching moved on."
     Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch)
 
-fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore) -> Result<Unit, String>
+fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
+      "With screened true the listen loop runs as the Screen (#130): raw"
+      "mode is entered once the catch-up is done, and however the session"
+      "ends -- q, a polite stop, an error -- the terminal is restored here,"
+      "on the one path every ending shares."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -79,12 +85,22 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Map.keys(pool.sockets))?
-    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs())))
+    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs())), screened)
+    _given = restoredIf(screened)
     closeAfter(asked, outcome)
+
+fn restoredIf(screened: Bool) -> Unit
+    ? "Give the terminal back if the Screen ever had it; restoring a"
+      "terminal that was never taken changes nothing."
+    ! [Terminal.disableRawMode, Terminal.flush, Terminal.showCursor]
+    match screened
+        true -> Infra.Screen.restored()
+        false -> Unit
 
 fn targetPeers() -> Int
     ? "How many Peers the node tries to keep."
@@ -288,8 +304,12 @@ fn closeAfter(pool: Pool, outcome: Result<Unit, String>) -> Result<Unit, String>
     _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn session(state: Following) -> Result<Unit, String>
+fn session(state: Following, screened: Bool) -> Result<Unit, String>
     ? "Catch up on what was missed, then listen."
+      "The catch-up runs in plain lines even for the Screen: its phases"
+      "print through the walks, and the Screen takes over at the moment the"
+      "loop starts ticking. The Screen over the catch-up itself is the rest"
+      "of #130."
       "The catch-up before the first Announcement is not optional. A node that"
       "waited would sit idle for as long as it took the next Block to be"
       "mined, and would then connect it onto a Set that was hours or years"
@@ -301,10 +321,24 @@ fn session(state: Following) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     started = caughtUp(state, firstKey(state.pool))?
-    listen(started)
+    listen(screenedInto(started, screened)?)
+
+fn screenedInto(state: Following, screened: Bool) -> Result<Following, String>
+    ? "Take the terminal and open the Overview, when a Screen was asked for."
+    ! [Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor]
+    match screened
+        false -> Result.Ok(state)
+        true -> takenTerminal(state)
+
+fn takenTerminal(state: Following) -> Result<Following, String>
+    ? "Raw mode on, and the View into the state the loop carries."
+    ! [Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor]
+    _taken = Infra.Screen.entered()?
+    Result.Ok(withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()))))
 
 fn firstKey(pool: Pool) -> Int
     ? "Which Peer to ask first, before any of them has announced anything."
@@ -339,6 +373,7 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match catchingUp(state, key)
@@ -354,6 +389,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _said = Console.error("dropping peer {key}: {why}")
@@ -369,6 +405,7 @@ fn onwardWith(state: Following, why: String) -> Result<Following, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match Map.keys(state.pool.sockets)
@@ -471,7 +508,7 @@ fn watchAfterBuild(watch: Watching, views: List<BlockView>) -> Watching
       "held leaves the Snapshot exactly as it was."
     match views
         [] -> watch
-        [newest, ..older] -> Watching(snapshot = Domain.Snapshot.tipAt(ringed(watch.snapshot, List.reverse(views)), newest.height, newest.blockId, newest.atMs), heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs)
+        [newest, ..older] -> Watching(snapshot = Domain.Snapshot.tipAt(ringed(watch.snapshot, List.reverse(views)), newest.height, newest.blockId, newest.atMs), heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs, view = watch.view)
 
 verify watchAfterBuild
     watchAfterBuild(freshWatch(0), []).snapshot.tip.height => 0
@@ -546,6 +583,7 @@ fn listen(state: Following) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match Process.stopRequested()
@@ -555,10 +593,20 @@ fn listen(state: Following) -> Result<Unit, String>
 fn stopping(state: Following) -> Result<Unit, String>
     ? "Asked to stop: close every Peer and return, so the claim is released"
       "the way it is for every command that finishes."
-    ! [Console.print, Tcp.close]
+      "The terminal comes back first when the Screen has it, so the last"
+      "words land on a terminal that can show them."
+    ! [Console.print, Tcp.close, Terminal.disableRawMode, Terminal.flush, Terminal.showCursor]
+    _screen = restoredFor(state.watch.view)
     _said = Console.print("stop requested; closing the pool and releasing the claim")
     _closed = Infra.Peers.closeAll(state.pool)
     Result.Ok(Unit)
+
+fn restoredFor(view: Option<View>) -> Unit
+    ? "Restore the terminal when there is a Screen to take down."
+    ! [Terminal.disableRawMode, Terminal.flush, Terminal.showCursor]
+    match view
+        Option.None -> Unit
+        Option.Some(one) -> Infra.Screen.restored()
 
 fn turning(state: Following) -> Result<Unit, String>
     ? "One ordinary turn of the loop."
@@ -574,6 +622,7 @@ fn turning(state: Following) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     drained = drainSpare(state)
@@ -590,6 +639,7 @@ fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match arrived
@@ -602,7 +652,7 @@ fn heardFrom(state: Following, key: Int, nowMs: Int) -> Following
 
 fn heardAt(watch: Watching, key: Int, nowMs: Int) -> Watching
     ? "One Peer's voice moves its own timestamp and the pool's."
-    Watching(snapshot = watch.snapshot, heard = Map.set(watch.heard, key, nowMs), anyHeardMs = nowMs, saidPeersMs = watch.saidPeersMs)
+    Watching(snapshot = watch.snapshot, heard = Map.set(watch.heard, key, nowMs), anyHeardMs = nowMs, saidPeersMs = watch.saidPeersMs, view = watch.view)
 
 verify heardAt
     heardAt(freshWatch(0), 3, 900).anyHeardMs => 900
@@ -619,11 +669,57 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _somebody = anyoneLeft(Map.len(state.pool.sockets))?
     _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
-    listen(saidStats(refreshed(state, nowMs), nowMs))
+    fresh = refreshed(state, nowMs)
+    match fresh.watch.view
+        Option.None -> listen(saidStats(fresh, nowMs))
+        Option.Some(view) -> screenTurn(fresh, view, nowMs)
+
+fn screenTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
+    ? "The Screen's share of a quiet tick: keys first, then the frame."
+      "Keys first, because a q pressed a second ago should not have to"
+      "watch one more redraw before it is answered."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    keys = Infra.Screen.drainedKeys()?
+    acted = Domain.Screen.pressedAll(view, keys)
+    match acted.answer
+        Answer.StopNode -> stopping(state)
+        _ -> drawnTurn(withView(state, acted.view), acted.view, nowMs)
+
+fn drawnTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
+    ? "Draw the frame and go round."
+      "Every quiet tick redraws: at the tip that is once a second, and the"
+      "frame is a handful of lines. The catch-up's ten-second cadence"
+      "arrives with the rest of #130."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    _drawn = Infra.Screen.shown(Domain.Screen.frameOf(view, state.watch.snapshot, nowMs))?
+    listen(state)
+
+fn withView(state: Following, view: View) -> Following
+    ? "The state, with the Screen's View moved on."
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(view)))
 
 fn anyoneLeft(held: Int) -> Result<Unit, String>
     ? "A pool with nobody in it ends the run."
@@ -654,7 +750,7 @@ verify stillHeard
 fn refreshed(state: Following, nowMs: Int) -> Following
     ? "The Snapshot's company brought up to date: who is connected, how"
       "long each has been quiet, and how many Candidates are on the shelf."
-    withWatch(state, Watching(snapshot = Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, peerViews(state.pool.standing, state.watch, Map.keys(state.pool.sockets), [])), Domain.AddressBook.sizeOf(state.book)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs))
+    withWatch(state, Watching(snapshot = Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, peerViews(state.pool.standing, state.watch, Map.keys(state.pool.sockets), [])), Domain.AddressBook.sizeOf(state.book)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view))
 
 fn peerViews(standing: Map<Int, Standing>, watch: Watching, keys: List<Int>, acc: List<PeerView>) -> List<PeerView>
     ? "One PeerView per connected Peer, oldest key first."
@@ -694,7 +790,7 @@ fn saidStatsNow(state: Following, nowMs: Int) -> Following
     ? "Say it, and remember when it was said."
     ! [Console.print]
     _said = Console.print(Domain.Screenlines.peersLine(state.watch.snapshot.company, nowMs))
-    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = nowMs))
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = nowMs, view = state.watch.view))
 
 fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this loop acts on; every other one is ignored."
@@ -711,6 +807,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match command
@@ -733,6 +830,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     announced = Domain.Inventory.blockHashesOf(body)
@@ -753,6 +851,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     offered = Domain.Addr.addressesOf(body)
@@ -794,6 +893,7 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _said = Console.print("{Time.now()}  {why}")
@@ -809,6 +909,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     payload = Bytes.fromList(body)?

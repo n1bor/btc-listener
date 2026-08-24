@@ -9,7 +9,7 @@ module Screen
         "The Panels beyond the Overview arrive with their own issues; until"
         "each does, its screen says which issue it is waiting for, because a"
         "blank Panel and a Panel not yet built should not look alike."
-    exposes [DrawOp, Panel, View, Pressed, opened, pressed, frameOf, overviewLines, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
+    exposes [DrawOp, Panel, View, Pressed, Answer, opened, pressed, pressedAll, frameOf, overviewLines, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
     depends [Domain.Screenlines, Domain.Snapshot]
     effects []
 
@@ -90,6 +90,42 @@ verify switched
     switched(opened(), "m").view.panel => Panel.Mempool
     switched(opened(), "q").view.confirming => true
     switched(View(panel = Panel.Blocks, confirming = false), "z").view.panel => Panel.Blocks
+
+fn pressedAll(view: View, keys: List<String>) -> Pressed
+    ? "A drain's worth of keys, in order; a stop wins over everything after"
+      "it, because the question was answered."
+    match keys
+        [] -> Pressed(view = view, answer = Answer.Unchanged)
+        [head, ..tail] -> pressedNext(pressed(view, head), tail)
+
+verify pressedAll
+    pressedAll(opened(), []).answer => Answer.Unchanged
+    pressedAll(opened(), ["p"]).view.panel => Panel.Peers
+    pressedAll(opened(), ["q", "y"]).answer => Answer.StopNode
+    pressedAll(opened(), ["q", "n", "b"]).view.panel => Panel.Blocks
+    pressedAll(opened(), ["q", "n", "b"]).answer => Answer.Redraw
+    pressedAll(opened(), ["x"]).answer => Answer.Unchanged
+
+fn pressedNext(sofar: Pressed, keys: List<String>) -> Pressed
+    ? "Fold the rest, keeping a redraw once one is owed."
+    match sofar.answer
+        Answer.StopNode -> sofar
+        Answer.Unchanged -> pressedAll(sofar.view, keys)
+        Answer.Redraw -> redrawKept(pressedAll(sofar.view, keys))
+
+verify pressedNext
+    pressedNext(Pressed(view = opened(), answer = Answer.StopNode), ["b"]).answer => Answer.StopNode
+    pressedNext(Pressed(view = opened(), answer = Answer.Redraw), []).answer => Answer.Redraw
+
+fn redrawKept(later: Pressed) -> Pressed
+    ? "A redraw already owed is still owed, whatever later keys said."
+    match later.answer
+        Answer.Unchanged -> Pressed(view = later.view, answer = Answer.Redraw)
+        _ -> later
+
+verify redrawKept
+    redrawKept(Pressed(view = opened(), answer = Answer.Unchanged)).answer => Answer.Redraw
+    redrawKept(Pressed(view = opened(), answer = Answer.StopNode)).answer => Answer.StopNode
 
 fn keymapLine() -> String
     ? "The one line that says what the keys are, always at the top."
@@ -197,6 +233,10 @@ fn transactionLines(views: List<TxView>, acc: List<String>) -> List<String>
         [] -> noneYet(List.reverse(acc))
         [head, ..tail] -> transactionLines(tail, List.prepend("  {Domain.Screenlines.transactionLine(head)}", acc))
 
+verify transactionLines
+    transactionLines([], []) => ["  none seen yet"]
+    transactionLines([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)], []) => ["  tx tt fee 1000 sat"]
+
 fn noneYet(lines: List<String>) -> List<String>
     ? "An empty list of Transaction lines reads as a sentence instead."
     match lines
@@ -206,10 +246,6 @@ fn noneYet(lines: List<String>) -> List<String>
 verify noneYet
     noneYet([]) => ["  none seen yet"]
     noneYet(["  tx aa fee 1 sat"]) => ["  tx aa fee 1 sat"]
-
-verify transactionLines
-    transactionLines([], []) => ["  none seen yet"]
-    transactionLines([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)], []) => ["  tx tt fee 1000 sat"]
 
 fn etaClock(eta: Option<Int>) -> String
     ? "The remaining time as h:mm, or an em dash while the rate window is"

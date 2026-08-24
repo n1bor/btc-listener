@@ -15,6 +15,7 @@ module Node
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
 
@@ -27,6 +28,7 @@ fn follow(network: Network, rest: List<String>) -> Unit
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match rest
@@ -42,13 +44,23 @@ fn withDir(network: Network, address: String, more: List<String>) -> Unit
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match more
         [] -> App.Usage.print()
-        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir)
+        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra))
 
-fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String) -> Unit
+fn screenAsked(extra: List<String>) -> Bool
+    ? "Whether the word screen follows the directory (#130)."
+    List.contains(extra, "screen")
+
+verify screenAsked
+    screenAsked([]) => false
+    screenAsked(["screen"]) => true
+    screenAsked(["something"]) => false
+
+fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool) -> Unit
     ? "Follow the tip, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -57,13 +69,14 @@ fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: S
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match addresses
         Result.Err(message) -> Console.error("error: {message}")
-        Result.Ok(peers) -> said(claimed(network, peers, dir))
+        Result.Ok(peers) -> said(claimed(network, peers, dir, screened))
 
-fn claimed(network: Network, addresses: List<PeerAddress>, dir: String) -> Result<String, String>
+fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool) -> Result<String, String>
     ? "Take the directory for the life of the process."
       "A follower holds the claim until it stops, which is the point: the"
       "Index, the Segments and the UTXO Set are all being written as Blocks"
@@ -80,13 +93,14 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String) -> Resul
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _claimed = Infra.Lock.claim(dir, "follow")?
     _armed = Process.stopRequested()
-    Infra.Lock.releasingAfter(dir, following(network, addresses, dir))
+    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened))
 
-fn following(network: Network, addresses: List<PeerAddress>, dir: String) -> Result<String, String>
+fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool) -> Result<String, String>
     ? "Open everything the three phases write to, then hand over to the loop."
       "This returns only when the loop stops, and the loop stops only on a"
       "read that failed, a Peer that went silent, or a Block that would not"
@@ -99,11 +113,12 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String) -> Res
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    _followed = Infra.Follow.follow(network, addresses, store, blocks)?
+    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened)?
     Result.Ok("stopped following")
 
 fn addressesIn(network: Network, texts: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
