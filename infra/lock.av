@@ -13,9 +13,16 @@ module Lock
         "same instant could both pass. Aver has no exclusive create to build on."
         "It stops the case that actually happens -- a second run started while the"
         "first is going -- and does not pretend to be a mutex."
+        "The claim names the process that took it and the host it took it on,"
+        "so a claim whose process has exited can be told from one whose process"
+        "is running -- which is what Bitcoin Core's .lock does, and the only"
+        "answer that removes the ambiguity a signal-stopped follow always left"
+        "behind (#112). Liveness is /proc/<pid>, which is a directory precisely"
+        "as long as the process lives; on a system without /proc the pid reads"
+        "as unknown and a found claim is refused as it always was."
     exposes [claim, release, releasingAfter]
     depends []
-    effects [Disk.delete, Disk.exists, Disk.makeDir, Disk.writeText]
+    effects [Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText]
 
 fn claimPath(dir: String) -> String
     ? "Where the claim lives."
@@ -27,22 +34,162 @@ verify claimPath
 
 fn claim(dir: String, what: String) -> Result<Unit, String>
     ? "Take the directory for writing, or say who has it."
-      "A run that dies leaves the claim behind. The message says how to clear it"
-      "rather than leaving someone to guess, because the alternative is a"
-      "directory nothing will write to again."
+      "A claim already here is read before it is believed: one whose process"
+      "has exited on this host is stale and is taken over, with a word; one"
+      "whose process runs, or whose process cannot be asked about, refuses."
       "The directory is made first. The claim is taken before anything opens the"
       "Store or the Segments, and those are what would otherwise create it, so"
       "on a directory that does not exist yet there would be nowhere to write."
-    ! [Disk.exists, Disk.makeDir, Disk.writeText]
+    ! [Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.writeText]
     _made = Disk.makeDir(dir)?
     match Disk.exists(claimPath(dir))
-        true -> Result.Err("{dir} is being written by another run; if none is, delete {claimPath(dir)}")
+        true -> contested(dir, what, Disk.readText(claimPath(dir))?)
         false -> written(dir, what)
 
+fn contested(dir: String, what: String, held: String) -> Result<Unit, String>
+    ? "Somebody's claim is here; decide whether they still are."
+    ! [Disk.delete, Disk.exists, Disk.readText, Disk.writeText]
+    match heldBy(held)
+        Option.None -> Result.Err("{dir} is being written by another run; if none is, delete {claimPath(dir)}")
+        Option.Some(holder) -> againstHolder(dir, what, holder)
+
+fn againstHolder(dir: String, what: String, holder: Holder) -> Result<Unit, String>
+    ? "A holder on another host cannot be asked about; one on this host can."
+    ! [Disk.delete, Disk.exists, Disk.readText, Disk.writeText]
+    match Bool.and(holder.host == hostName(), holder.host != "unknown")
+        false -> Result.Err("{dir} is claimed by {holder.what} (process {holder.pid} on {holder.host}); if that run is gone, delete {claimPath(dir)}")
+        true -> onThisHost(dir, what, holder)
+
+fn onThisHost(dir: String, what: String, holder: Holder) -> Result<Unit, String>
+    ? "On this host, /proc answers: a directory for the pid means it lives."
+    ! [Disk.delete, Disk.exists, Disk.readText, Disk.writeText]
+    match Disk.exists("/proc/{holder.pid}")
+        true -> Result.Err("{dir} is being written by {holder.what} (process {holder.pid}, running); stop it first")
+        false -> takenOver(dir, what, holder)
+
+fn takenOver(dir: String, what: String, holder: Holder) -> Result<Unit, String>
+    ? "The holder is gone; its claim is stale and this run takes the directory."
+    ! [Disk.delete, Disk.readText, Disk.writeText]
+    _cleared = Disk.delete(claimPath(dir))?
+    written(dir, what)
+
+record Holder
+    what: String
+    pid: Int
+    host: String
+
+fn heldBy(held: String) -> Option<Holder>
+    ? "What a claim file says, if it says enough to decide anything."
+      "Three lines: what took it, its process id, its host. A file with fewer"
+      "-- the format before #112, or something else entirely -- decides"
+      "nothing, and the caller refuses as it always did."
+    heldParts(String.split(held, "\n"))
+
+verify heldBy
+    heldBy("txindex\n123\nbox\n") => Option.Some(Holder(what = "txindex", pid = 123, host = "box"))
+    heldBy("txindex\n") => Option.None
+    heldBy("") => Option.None
+    heldBy("txindex\nx\nbox\n") => Option.None
+
+fn heldParts(lines: List<String>) -> Option<Holder>
+    ? "The three lines, or nothing."
+    match lines
+        [] -> Option.None
+        [what, ..rest] -> heldPid(what, rest)
+
+verify heldParts
+    heldParts(["txindex", "123", "box", ""]) => Option.Some(Holder(what = "txindex", pid = 123, host = "box"))
+    heldParts([]) => Option.None
+    heldParts(["txindex"]) => Option.None
+
+fn heldPid(what: String, rest: List<String>) -> Option<Holder>
+    ? "The second line has to be a whole number."
+    match rest
+        [] -> Option.None
+        [pid, ..more] -> heldHost(what, Int.fromString(pid), more)
+
+verify heldPid
+    heldPid("txindex", ["123", "box"]) => Option.Some(Holder(what = "txindex", pid = 123, host = "box"))
+    heldPid("txindex", []) => Option.None
+
+fn heldHost(what: String, pid: Result<Int, String>, rest: List<String>) -> Option<Holder>
+    ? "The pid parsed, then the host line."
+    match pid
+        Result.Err(why) -> Option.None
+        Result.Ok(number) -> heldNamed(what, number, rest)
+
+verify heldHost
+    heldHost("txindex", Result.Ok(123), ["box"]) => Option.Some(Holder(what = "txindex", pid = 123, host = "box"))
+    heldHost("txindex", Result.Err("no"), ["box"]) => Option.None
+
+fn heldNamed(what: String, pid: Int, rest: List<String>) -> Option<Holder>
+    ? "The third line names the host."
+    match rest
+        [] -> Option.None
+        [host, ..more] -> Option.Some(Holder(what = what, pid = pid, host = host))
+
+verify heldNamed
+    heldNamed("txindex", 123, ["box"]) => Option.Some(Holder(what = "txindex", pid = 123, host = "box"))
+    heldNamed("txindex", 123, []) => Option.None
+
 fn written(dir: String, what: String) -> Result<Unit, String>
-    ? "Record what took it, so the file says something to whoever finds it."
-    ! [Disk.writeText]
-    Disk.writeText(claimPath(dir), "{what}\n")
+    ? "Record what took it, which process, and where, so the next run can decide."
+    ! [Disk.readText, Disk.writeText]
+    Disk.writeText(claimPath(dir), "{what}\n{ownPid()}\n{hostName()}\n")
+
+fn ownPid() -> Int
+    ? "This process's id, read off /proc/self, which needs no capability Aver"
+      "has not got. Zero when /proc is not there; no pid is ever zero, so a"
+      "claim carrying it is never taken for live and never taken over."
+    ! [Disk.readText]
+    pidIn(Disk.readText("/proc/self/stat"))
+
+fn pidIn(stat: Result<String, String>) -> Int
+    ? "The first field of /proc/self/stat is the pid."
+    match stat
+        Result.Err(why) -> 0
+        Result.Ok(text) -> firstNumber(String.split(text, " "))
+
+verify pidIn
+    pidIn(Result.Ok("123 (main) R 1")) => 123
+    pidIn(Result.Err("no /proc")) => 0
+
+fn firstNumber(fields: List<String>) -> Int
+    ? "The pid, or zero from a file that is not what /proc writes."
+    match fields
+        [] -> 0
+        [head, ..tail] -> Result.withDefault(Int.fromString(head), 0)
+
+verify firstNumber
+    firstNumber(["123", "(main)"]) => 123
+    firstNumber(["x"]) => 0
+    firstNumber([]) => 0
+
+fn hostName() -> String
+    ? "This host's name, so a claim found over a shared mount is never judged"
+      "by another machine's /proc."
+    ! [Disk.readText]
+    hostIn(Disk.readText("/proc/sys/kernel/hostname"))
+
+fn hostIn(read: Result<String, String>) -> String
+    ? "The name on its one line, or unknown where /proc is not there."
+    match read
+        Result.Err(why) -> "unknown"
+        Result.Ok(text) -> firstLine(String.split(text, "\n"))
+
+fn firstLine(lines: List<String>) -> String
+    ? "The name is the first line."
+    match lines
+        [] -> "unknown"
+        [head, ..tail] -> head
+
+verify firstLine
+    firstLine(["box", ""]) => "box"
+    firstLine([]) => "unknown"
+
+verify hostIn
+    hostIn(Result.Ok("box\n")) => "box"
+    hostIn(Result.Err("no /proc")) => "unknown"
 
 fn release(dir: String) -> Result<Unit, String>
     ? "Give the directory back."
