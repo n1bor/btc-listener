@@ -36,6 +36,10 @@ and `compile`.
   (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
   not proof a module compiles** — only reachability from `main.av` is, so
   wiring a new module into the CLI is part of writing it, not a step after.
+- A record used as a `Map` value has `Eq` and `Hash` derived for it, and every
+  field must satisfy them — so no opaque record (`PeerAddress`) and no record
+  that lacks the derives (`Frame`) can live inside one. #27 lost a per-Peer
+  Frame queue to this and was better for it.
 - Every module in a `depends` list is glob-imported into the generated Rust.
   Two of them defining the same name is usually harmless — this repo has 157
   such pairs — but it becomes `E0659` the moment a **parameter or binding**
@@ -135,6 +139,18 @@ Chain Work — never the longest. `Domain.Chainwork` is the arithmetic (pinned
 against Core's chainwork for mainnet Block 0), `Domain.HeaderTree` is the tree,
 `Domain.Reorg` tells growth from a Reorganisation, and `Infra.Headers` is the
 only part that touches a Store.
+
+**Several Peers on one loop** (#27, Stage 5): `infra/peers.av` owns every
+socket. Bytes are read as they arrive with `Tcp.readSome`, kept per Peer, and
+Messages cut off the front of the buffer by `domain/inbox.av` — exact-length
+reads are gone, because one of them holds the whole loop until it completes.
+Readiness is one `Tcp.poll` over every connection; the caller owns the `Int`
+keys, so they key the standing too. `awaitFrom(pool, key, wanted)` keeps a
+conversation straight-line while every other Peer is read and pinged. Every
+phase is a pool — `headers`, `bodies` and `listen` are pools of one. Two
+deadlines, not one: 150s of silence from the whole pool, and 60s for a Peer to
+answer the question it was asked, because with several Peers those stopped
+being the same fact.
 
 **Following the tip** (#26, Stage 4): `follow` is the header, body and Set
 phases run again every time a Peer announces a Block. An `inv` naming a Block

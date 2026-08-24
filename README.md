@@ -37,7 +37,7 @@ what those wrote and works offline.
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
 | `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
-| `follow <peer> <dir>` | [stay](#following-the-tip) on the tip of one Peer, and never stop | yes |
+| `follow <peers> <dir>` | [stay](#following-the-tip) on the tip, and never stop | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -686,19 +686,26 @@ Everything above is a chain you were handed. `follow` is the one that stays
 current:
 
 ```bash
-./target/release/main signet follow 192.0.2.1 ~/chain
+./target/release/main signet follow 192.0.2.1,192.0.2.2:38333 ~/chain
 ```
 
-It handshakes with one Peer, catches the directory up — Headers, then bodies,
+One Peer Address or several separated by commas, each with an optional
+`:port`. It handshakes with all of them, catches the directory up — Headers, then bodies,
 then the UTXO Set — and then waits. When the Peer announces a Block it does the
 same three phases again, and the run says where that left it:
 
 ```
-handshake complete: protocol 70016, agent /Satoshi:27.0.0/
+peer 0 is 192.0.2.1:38333
+peer 1 is 192.0.2.2:38333
 following at Height 318980: 4 connected, 0 disconnected, set +9 -6
-2026-08-24 11:42:07  1 Block(s) announced
+2026-08-24 11:42:07  1 Block(s) announced by peer 1
 following at Height 318981: 1 connected, 0 disconnected, set +2 -1
 ```
+
+Whichever Peer announces a Block is the one asked for it. A second Peer
+announcing the same Block a moment later is not a special case and is not
+suppressed: the Header phase places what it already holds, nothing moves, and
+the run says `0 connected`.
 
 An `inv` naming a Block is answered with **getheaders**, not `getdata`. A Block
 whose Header the tree has not placed cannot be connected, and cannot even be
@@ -749,7 +756,31 @@ Blocks, in March 2013, and that was a consensus split rather than mining.
 
 `follow` holds the directory for as long as it runs, so a `prune` or a second
 follower cannot write the same keys from a different idea of where the tip is.
-One Peer and one socket: many Peers are the next stage.
+
+### Why several Peers needed the reading to change
+
+The single-Peer code asked a socket for exactly twenty-four bytes and then for
+exactly the payload they announced. That is the clearest thing to write for one
+Peer and the wrong thing for several: a read of an exact length holds the loop
+until that length arrives, and every other Peer waits behind it — including
+their pings, which go unanswered until they drop us. A body download takes
+hours, so this is not a corner case.
+
+So bytes are taken as they come and kept per Peer, and Messages are cut off the
+front of what has accumulated. Readiness comes from one `Tcp.poll` over every
+connection at once. A caller still writes its half of a conversation as
+straight-line code — ask this Peer for Headers, wait for them — and every other
+Peer is read, buffered and answered while it waits.
+
+A header announcing more than **4,000,000 bytes** — Bitcoin Core's
+`MAX_PROTOCOL_MESSAGE_LENGTH` — ends the connection. Reading exactly what a
+socket is told to read had a ceiling underneath it; a buffer this program fills
+itself does not, so the ceiling had to be named.
+
+Everything goes through the same pool: `headers`, `bodies` and the plain
+listener are pools of one. A Message is read off a wire in one place in this
+program rather than two, so a bulk download and a following node cannot drift
+into different ideas of what a Message is.
 
 ## Reclaiming space
 
@@ -908,6 +939,7 @@ app/                cli.av argument handling, usage.av the help text,
 domain/  the wire
   address.av network.av message.av version.av inventory.av dns.av
   transaction.av    the SegWit-aware decoder
+  inbox.av          what a Peer has said that has not been read yet
   compactsize.av hash.av text.av json.av
 
 domain/  addresses
@@ -939,8 +971,8 @@ domain/  Script
                    rest: Core's own vectors, thousands of them
 
 infra/  the network
-  peer.av           the Peer session: handshake, and the listen loop
-  framing.av        one wanted Message, past whatever else turns up
+  peers.av          several Peers on one loop: sockets, Handshakes, readiness
+  peer.av           the listen command: one Peer, its Transactions printed
   download.av       the Header phase
   bodies.av         the body phase
   follow.av         the node that stays on the tip

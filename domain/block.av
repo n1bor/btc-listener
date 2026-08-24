@@ -6,7 +6,7 @@ module Block
         "only Result here guards that length and the octet range beneath it."
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
-    exposes [BlockHeader, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, networkOf, locatorHeights, getHeadersPayload]
+    exposes [BlockHeader, wireOrder, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, networkOf, locatorHeights, getHeadersPayload]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network, Domain.Transaction]
     effects []
 
@@ -530,3 +530,25 @@ verify zeros
     List.len(zeros(32, [])) => 32
     zeros(2, []) => [0, 0]
     zeros(0, []) => []
+
+fn wireOrder(blockId: String) -> Result<List<Int>, String>
+    ? "A Block Id goes back to front on the wire, being displayed reversed."
+      "Hex that will not decode is an error rather than an empty entry. It used"
+      "to be swallowed, on the grounds that every Block Id here comes from a"
+      "genesisBlockId literal or from Domain.Hash.identifierOf over a digest and"
+      "so cannot be malformed -- true, but it made the one thing that could go"
+      "wrong go wrong invisibly. Neither getHeadersPayload nor getDataPayload"
+      "checks that an entry is thirty-two bytes, so a short one would be sent as"
+      "it stands, the count prefix would disagree with the bytes after it, and"
+      "the Peer would answer a malformed Message with silence. That surfaced as"
+      "'no headers after 200 messages', naming neither the Block Id nor the hex."
+      "Reading it back out of the Store is what makes this reachable: the Index"
+      "is a file, and a file can be truncated, edited or corrupted between runs."
+    bytes = Bytes.fromHex(blockId)?
+    Result.Ok(List.reverse(Bytes.toList(bytes)))
+
+verify wireOrder
+    wireOrder("0102") => Result.Ok([2, 1])
+    wireOrder("") => Result.Ok([])
+    wireOrder("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    wireOrder("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")

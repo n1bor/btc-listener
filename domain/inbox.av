@@ -1,0 +1,329 @@
+module Inbox
+    intent =
+        "What a Peer has sent that has not been read yet, and the Messages"
+        "that can be taken out of it."
+        "The single-Peer code reads a Message by asking the socket for exactly"
+        "twenty-four bytes and then for exactly the payload those announce."
+        "That is the right shape for one Peer and the wrong shape for several:"
+        "a Peer that sends a header and then stops holds the read open, and"
+        "with one loop over many sockets it holds every other Peer with it."
+        "So bytes are taken off the socket as they arrive, kept per Peer, and"
+        "Messages are cut out of what has accumulated. A partial Message is"
+        "not an error and not a stall -- it is simply the tail, waiting for"
+        "the rest of itself."
+        "A header announcing a payload larger than the protocol allows is the"
+        "one thing here that is refused outright. Reading exactly what a"
+        "socket is told to read has a ceiling underneath it; a buffer this"
+        "program fills itself does not, so the ceiling has to be named."
+        "Messages are cut off the front of the buffer one at a time rather"
+        "than all at once into a queue. The queue came first and the compiler"
+        "took it away: a record kept as a Map value has Eq and Hash derived"
+        "for it, and a Frame satisfies neither, so a queue of them could not"
+        "live beside the buffer. What replaced it is smaller -- the buffer is"
+        "the queue -- and it costs a caller nothing, because a caller waiting"
+        "on one Message discards the others exactly as it always did."
+    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, seated, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
+    depends [Bytes, Domain.Message, Domain.Network]
+    effects []
+
+record Frame
+    command: String
+    body: List<Int>
+
+record TakenOne
+    frame: Frame
+    rest: List<Int>
+
+record Standing
+    address: String
+    buffer: List<Int>
+    version: Int
+    agent: String
+
+record Popped
+    standing: Map<Int, Standing>
+    frame: Frame
+
+record PoppedAt
+    standing: Map<Int, Standing>
+    key: Int
+    frame: Frame
+
+fn maxPayload() -> Int
+    ? "The largest payload a Message is allowed to announce."
+      "Four million bytes, which is Bitcoin Core's"
+      "MAX_PROTOCOL_MESSAGE_LENGTH -- the number a Peer is entitled to expect"
+      "us to accept, and the number above which it is not being honest. A"
+      "Block at the consensus weight limit fits underneath it, which is what"
+      "the limit was chosen to allow."
+    4000000
+
+verify maxPayload
+    maxPayload() => 4000000
+
+fn firstOf(buffer: List<Int>) -> Result<Option<TakenOne>, String>
+    ? "The first whole Message the buffer holds, and what follows it."
+      "Nothing is not an error: a Peer that has sent half a Message has sent"
+      "half a Message, and the rest of it is on its way."
+    match List.len(buffer) < Domain.Message.headerLength()
+        true -> Result.Ok(Option.None)
+        false -> sized(buffer, Domain.Message.payloadLengthAt(List.take(buffer, Domain.Message.headerLength())))
+
+verify firstOf
+    firstOf([]) => Result.Ok(Option.None)
+    firstOf([1, 2, 3]) => Result.Ok(Option.None)
+    firstOf(oneMessage()) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "verack", body = []), rest = [])))
+    firstOf(List.concat(oneMessage(), [9, 9])) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "verack", body = []), rest = [9, 9])))
+    firstOf(withPayload()) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "ping", body = [1, 2, 3, 4, 5, 6, 7, 8]), rest = [])))
+    firstOf(List.take(withPayload(), 27)) => Result.Ok(Option.None)
+    firstOf(overLong()) => Result.Err("a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows")
+
+fn sized(buffer: List<Int>, announced: Int) -> Result<Option<TakenOne>, String>
+    ? "A payload larger than the protocol allows ends the conversation."
+      "There is no reading past it and no waiting for it: the length is four"
+      "bytes of a header this program has already accepted, so a stream that"
+      "carries an impossible one is either a Peer misbehaving or a stream we"
+      "have lost our place in, and neither is survivable by reading more."
+    match announced > maxPayload()
+        true -> Result.Err(tooLong(announced))
+        false -> whole(buffer, announced)
+
+verify sized
+    sized(oneMessage(), 0) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "verack", body = []), rest = [])))
+    sized(oneMessage(), 4000001) => Result.Err("a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows")
+    sized(oneMessage(), 4000000) => Result.Ok(Option.None)
+
+fn tooLong(announced: Int) -> String
+    ? "What to say about a header that announces the impossible."
+    "a Message announced {announced} payload bytes, which is more than the {maxPayload()} the protocol allows"
+
+verify tooLong
+    tooLong(4000001) => "a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows"
+
+fn whole(buffer: List<Int>, announced: Int) -> Result<Option<TakenOne>, String>
+    ? "The Message is only there if all of it is there."
+    match List.len(buffer) < Domain.Message.headerLength() + announced
+        true -> Result.Ok(Option.None)
+        false -> cut(buffer, announced)
+
+verify whole
+    whole(oneMessage(), 0) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "verack", body = []), rest = [])))
+    whole(oneMessage(), 1) => Result.Ok(Option.None)
+
+fn cut(buffer: List<Int>, announced: Int) -> Result<Option<TakenOne>, String>
+    ? "Take this Message out and hand back what follows it."
+    header = List.take(buffer, Domain.Message.headerLength())
+    body = List.take(List.drop(buffer, Domain.Message.headerLength()), announced)
+    Result.Ok(Option.Some(TakenOne(frame = Frame(command = Domain.Message.commandAt(header), body = body), rest = List.drop(buffer, Domain.Message.headerLength() + announced))))
+
+verify cut
+    cut(oneMessage(), 0) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "verack", body = []), rest = [])))
+    cut(withPayload(), 8) => Result.Ok(Option.Some(TakenOne(frame = Frame(command = "ping", body = [1, 2, 3, 4, 5, 6, 7, 8]), rest = [])))
+
+fn noStanding() -> Map<Int, Standing>
+    ? "Nothing known about anybody yet."
+    Map.fromList([])
+
+fn seated(standing: Map<Int, Standing>, key: Int, address: String) -> Map<Int, Standing>
+    ? "A Peer just connected to, with nothing said in either direction yet."
+      "The Peer Address is kept as text rather than as a PeerAddress, for the"
+      "same reason the queue went: a Map value has Eq and Hash derived for it"
+      "and an opaque record satisfies neither. Nothing here parses it, so"
+      "text is what it is for."
+    Map.set(standing, key, Standing(address = address, buffer = [], version = 0, agent = ""))
+
+verify seated
+    Map.len(seated(noStanding(), 0, "192.0.2.1:8333")) => 1
+    standingAt(seated(noStanding(), 0, "192.0.2.1:8333"), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = ""))
+
+fn standingAt(standing: Map<Int, Standing>, key: Int) -> Option<Standing>
+    ? "What is known about one Peer, if it is one we hold."
+    Map.get(standing, key)
+
+fn forgotten(standing: Map<Int, Standing>, key: Int) -> Map<Int, Standing>
+    ? "Drop everything known about one Peer."
+    Map.remove(standing, key)
+
+verify forgotten
+    Map.len(forgotten(oneSeated(), 0)) => 0
+    Map.len(forgotten(noStanding(), 0)) => 0
+
+fn absorbedInto(standing: Map<Int, Standing>, key: Int, arrived: List<Int>) -> Map<Int, Standing>
+    ? "Bytes just read from one Peer, onto the end of its buffer."
+    match Map.get(standing, key)
+        Option.None -> standing
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = List.concat(held.buffer, arrived), version = held.version, agent = held.agent))
+
+verify absorbedInto
+    absorbedInto(noStanding(), 0, [1, 2]) => noStanding()
+    standingBuffer(absorbedInto(oneSeated(), 0, [1, 2]), 0) => [1, 2]
+    standingBuffer(absorbedInto(absorbedInto(oneSeated(), 0, [1]), 0, [2]), 0) => [1, 2]
+
+fn popped(standing: Map<Int, Standing>, key: Int) -> Result<Option<Popped>, String>
+    ? "Take the oldest whole Message one Peer has sent and not had read."
+    match Map.get(standing, key)
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(held) -> poppedFrom(standing, key, held, firstOf(held.buffer))
+
+verify popped
+    popped(noStanding(), 0) => Result.Ok(Option.None)
+    popped(oneSeated(), 0) => Result.Ok(Option.None)
+    popped(absorbedInto(oneSeated(), 0, oneMessage()), 0) => Result.Ok(Option.Some(Popped(standing = oneSeated(), frame = Frame(command = "verack", body = []))))
+    popped(absorbedInto(oneSeated(), 0, overLong()), 0) => Result.Err("a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows")
+
+fn poppedFrom(standing: Map<Int, Standing>, key: Int, held: Standing, found: Result<Option<TakenOne>, String>) -> Result<Option<Popped>, String>
+    ? "A buffer with no whole Message in it is a Peer mid-sentence."
+    match found
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(one) -> poppedOne(standing, key, held, one)
+
+verify poppedFrom
+    poppedFrom(oneSeated(), 0, emptyStanding(), Result.Ok(Option.None)) => Result.Ok(Option.None)
+    poppedFrom(oneSeated(), 0, emptyStanding(), Result.Err("no")) => Result.Err("no")
+
+fn poppedOne(standing: Map<Int, Standing>, key: Int, held: Standing, one: Option<TakenOne>) -> Result<Option<Popped>, String>
+    ? "The Message off the front, and the buffer shortened by exactly it."
+    match one
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(taken) -> Result.Ok(Option.Some(Popped(standing = Map.set(standing, key, Standing(address = held.address, buffer = taken.rest, version = held.version, agent = held.agent)), frame = taken.frame)))
+
+verify poppedOne
+    poppedOne(oneSeated(), 0, emptyStanding(), Option.None) => Result.Ok(Option.None)
+    poppedOne(oneSeated(), 0, emptyStanding(), Option.Some(TakenOne(frame = sampleFrame(), rest = []))) => Result.Ok(Option.Some(Popped(standing = oneSeated(), frame = sampleFrame())))
+
+fn poppedAny(standing: Map<Int, Standing>) -> Result<Option<PoppedAt>, String>
+    ? "The next Message any Peer has sent and not had read, and which Peer."
+      "What a node's loop actually wants. With one Peer, waiting for the next"
+      "Message and waiting for the next Message from that Peer were the same"
+      "thing; with several they are not, and it is the difference between a"
+      "node that hears an Announcement and one that hears it eventually."
+      "Identifier order, which is arbitrary but fixed. One Message per turn"
+      "and not a whole buffer, so a Peer that talks a great deal cannot keep"
+      "the loop from reaching the others."
+    firstWith(standing, Map.keys(standing))
+
+verify poppedAny
+    poppedAny(noStanding()) => Result.Ok(Option.None)
+    poppedAny(oneSeated()) => Result.Ok(Option.None)
+    poppedAny(absorbedInto(oneSeated(), 0, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = oneSeated(), key = 0, frame = Frame(command = "verack", body = []))))
+    poppedAny(absorbedInto(seated(oneSeated(), 1, "192.0.2.2:8333"), 1, oneMessage())) => Result.Ok(Option.Some(PoppedAt(standing = seated(oneSeated(), 1, "192.0.2.2:8333"), key = 1, frame = Frame(command = "verack", body = []))))
+
+fn firstWith(standing: Map<Int, Standing>, keys: List<Int>) -> Result<Option<PoppedAt>, String>
+    ? "The first Peer, in identifier order, with a whole Message waiting."
+    match keys
+        [] -> Result.Ok(Option.None)
+        [head, ..tail] -> orNext(standing, head, tail, popped(standing, head))
+
+verify firstWith
+    firstWith(oneSeated(), []) => Result.Ok(Option.None)
+    firstWith(absorbedInto(oneSeated(), 0, oneMessage()), [0]) => Result.Ok(Option.Some(PoppedAt(standing = oneSeated(), key = 0, frame = Frame(command = "verack", body = []))))
+
+fn orNext(standing: Map<Int, Standing>, key: Int, rest: List<Int>, found: Result<Option<Popped>, String>) -> Result<Option<PoppedAt>, String>
+    ? "This Peer had something, or the next one is asked."
+    match found
+        Result.Err(why) -> Result.Err("peer {key}: {why}")
+        Result.Ok(one) -> orNextOk(standing, key, rest, one)
+
+verify orNext
+    orNext(oneSeated(), 0, [], Result.Ok(Option.None)) => Result.Ok(Option.None)
+    orNext(oneSeated(), 0, [], Result.Err("no")) => Result.Err("peer 0: no")
+
+fn orNextOk(standing: Map<Int, Standing>, key: Int, rest: List<Int>, one: Option<Popped>) -> Result<Option<PoppedAt>, String>
+    ? "Name the Peer beside the Message, or carry on down the list."
+    match one
+        Option.Some(found) -> Result.Ok(Option.Some(PoppedAt(standing = found.standing, key = key, frame = found.frame)))
+        Option.None -> firstWith(standing, rest)
+
+verify orNextOk
+    orNextOk(oneSeated(), 0, [], Option.None) => Result.Ok(Option.None)
+    orNextOk(oneSeated(), 0, [], Option.Some(Popped(standing = oneSeated(), frame = sampleFrame()))) => Result.Ok(Option.Some(PoppedAt(standing = oneSeated(), key = 0, frame = sampleFrame())))
+
+fn greeted(standing: Map<Int, Standing>, key: Int, version: Int, agent: String) -> Map<Int, Standing>
+    ? "What a Peer told us about itself once its Handshake completed."
+    match Map.get(standing, key)
+        Option.None -> standing
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = held.buffer, version = version, agent = agent))
+
+verify greeted
+    standingAgent(greeted(oneSeated(), 0, 70016, "/Satoshi:27.0.0/"), 0) => "/Satoshi:27.0.0/"
+    Map.len(greeted(noStanding(), 0, 70016, "x")) => 0
+
+fn framed(command: String, payload: List<Int>) -> Result<List<Int>, String>
+    ? "A Message built by the encoder, as the bytes it would put on the wire."
+      "The cases here go through the encoder rather than spelling headers"
+      "out, so what they prove is that the two halves of this program agree"
+      "with each other -- which is the only thing a round trip can prove, and"
+      "more than a hand-written header would."
+    body = Bytes.fromList(payload)?
+    wrapped = Domain.Message.frame(Network.Signet, command, body)?
+    Result.Ok(Bytes.toList(wrapped))
+
+verify framed
+    List.len(framed("verack", [])?) => 24
+    List.len(framed("ping", [1, 2, 3, 4, 5, 6, 7, 8])?) => 32
+    Domain.Message.commandAt(List.take(framed("verack", [])?, 24)) => "verack"
+
+fn oneMessage() -> List<Int>
+    ? "A framed verack with no payload, for the cases here."
+    Result.withDefault(framed("verack", []), [])
+
+verify oneMessage
+    List.len(oneMessage()) => 24
+
+fn withPayload() -> List<Int>
+    ? "A framed ping carrying its eight-byte nonce, for the cases here."
+    Result.withDefault(framed("ping", [1, 2, 3, 4, 5, 6, 7, 8]), [])
+
+verify withPayload
+    List.len(withPayload()) => 32
+
+fn overLong() -> List<Int>
+    ? "A header announcing one byte more than the protocol allows."
+    List.concat(List.concat(List.take(oneMessage(), 16), Domain.Message.littleEndian(maxPayload() + 1, 4)), List.drop(oneMessage(), 20))
+
+verify overLong
+    List.len(overLong()) => 24
+    Domain.Message.payloadLengthAt(overLong()) => 4000001
+
+fn emptyStanding() -> Standing
+    ? "A Peer just seated, for the cases here."
+    Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = "")
+
+fn oneSeated() -> Map<Int, Standing>
+    ? "One Peer held under identifier zero, for the cases here."
+    seated(noStanding(), 0, "192.0.2.1:8333")
+
+verify oneSeated
+    Map.len(oneSeated()) => 1
+
+fn sampleFrame() -> Frame
+    ? "A Message for the cases here."
+    Frame(command = "verack", body = [])
+
+fn standingBuffer(standing: Map<Int, Standing>, key: Int) -> List<Int>
+    ? "The bytes not yet cut into Messages for one Peer, for the cases here."
+    Result.withDefault(bufferOf(Map.get(standing, key)), [])
+
+fn bufferOf(held: Option<Standing>) -> Result<List<Int>, String>
+    ? "The buffer behind a Peer we may not hold."
+    match held
+        Option.None -> Result.Err("none")
+        Option.Some(one) -> Result.Ok(one.buffer)
+
+verify bufferOf
+    bufferOf(Option.None) => Result.Err("none")
+    bufferOf(Option.Some(emptyStanding())) => Result.Ok([])
+
+fn standingAgent(standing: Map<Int, Standing>, key: Int) -> String
+    ? "What a Peer called itself, for the cases here."
+    Result.withDefault(agentOf(Map.get(standing, key)), "")
+
+fn agentOf(held: Option<Standing>) -> Result<String, String>
+    ? "The agent behind a Peer we may not hold."
+    match held
+        Option.None -> Result.Err("none")
+        Option.Some(one) -> Result.Ok(one.agent)
+
+verify agentOf
+    agentOf(Option.None) => Result.Err("none")
+    agentOf(Option.Some(emptyStanding())) => Result.Ok("")

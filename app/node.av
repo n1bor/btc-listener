@@ -13,7 +13,7 @@ module Node
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
 
@@ -24,7 +24,7 @@ fn follow(network: Network, rest: List<String>) -> Unit
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     match rest
@@ -38,28 +38,28 @@ fn withDir(network: Network, address: String, more: List<String>) -> Unit
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     match more
         [] -> App.Usage.print()
-        [dir, ..extra] -> parsed(network, Domain.Address.fromStringOn(address, Domain.Network.portOf(network)), dir)
+        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir)
 
-fn parsed(network: Network, address: Result<PeerAddress, String>, dir: String) -> Unit
+fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String) -> Unit
     ? "Follow the tip, or say why the address was rejected."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
-    match address
+    match addresses
         Result.Err(message) -> Console.error("error: {message}")
-        Result.Ok(peer) -> said(claimed(network, peer, dir))
+        Result.Ok(peers) -> said(claimed(network, peers, dir))
 
-fn claimed(network: Network, address: PeerAddress, dir: String) -> Result<String, String>
+fn claimed(network: Network, addresses: List<PeerAddress>, dir: String) -> Result<String, String>
     ? "Take the directory for the life of the process."
       "A follower holds the claim until it stops, which is the point: the"
       "Index, the Segments and the UTXO Set are all being written as Blocks"
@@ -70,13 +70,13 @@ fn claimed(network: Network, address: PeerAddress, dir: String) -> Result<String
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     _claimed = Infra.Lock.claim(dir, "follow")?
-    Infra.Lock.releasingAfter(dir, following(network, address, dir))
+    Infra.Lock.releasingAfter(dir, following(network, addresses, dir))
 
-fn following(network: Network, address: PeerAddress, dir: String) -> Result<String, String>
+fn following(network: Network, addresses: List<PeerAddress>, dir: String) -> Result<String, String>
     ? "Open everything the three phases write to, then hand over to the loop."
       "This returns only when the loop stops, and the loop stops only on a"
       "read that failed, a Peer that went silent, or a Block that would not"
@@ -87,13 +87,39 @@ fn following(network: Network, address: PeerAddress, dir: String) -> Result<Stri
         Disk.appendBytes, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    _followed = Infra.Follow.follow(network, address, store, blocks)?
+    _followed = Infra.Follow.follow(network, addresses, store, blocks)?
     Result.Ok("stopped following")
+
+fn addressesIn(network: Network, texts: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
+    ? "Every Peer named on the command line, in the order they were named."
+      "Several Peers rather than one is the whole of Stage 5's first half, and"
+      "until the Address Book exists the only place they can come from is the"
+      "person running it. A comma rather than repeated arguments, so the"
+      "grammar of every other command stays what it was."
+    match texts
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> addressThen(network, head, tail, acc)
+
+verify addressesIn
+    List.len(addressesIn(Network.Signet, ["192.0.2.1"], [])?) => 1
+    List.len(addressesIn(Network.Signet, ["192.0.2.1", "192.0.2.2"], [])?) => 2
+    addressesIn(Network.Signet, [], []) => Result.Ok([])
+    addressesIn(Network.Signet, ["nonsense"], []) => Result.Err("expected four dot-separated octets, got 1")
+
+fn addressThen(network: Network, text: String, rest: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
+    ? "One name parsed, then the rest; the first bad one stops the lot."
+    match Domain.Address.fromPeerText(text, Domain.Network.portOf(network))
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(peer) -> addressesIn(network, rest, List.prepend(peer, acc))
+
+verify addressThen
+    List.len(addressThen(Network.Signet, "192.0.2.1", [], [])?) => 1
+    addressThen(Network.Signet, "nonsense", [], []) => Result.Err("expected four dot-separated octets, got 1")
 
 fn blocksPath(dir: String) -> String
     ? "Where the Segments live."

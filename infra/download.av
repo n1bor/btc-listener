@@ -11,68 +11,82 @@ module Download
         "The phase resumes. It holds nothing it has not already written down,"
         "so stopping is always safe and restarting costs at most the batch"
         "that was in flight."
-    exposes [headers, headersOn]
-    depends [Domain.Address, Domain.Block, Domain.Index, Domain.Network, Domain.Reorg, Infra.Framing, Infra.Headers, Infra.Peer, Infra.Store]
+    exposes [Grown, headers, headersOn]
+    depends [Domain.Address, Domain.Block, Domain.Index, Domain.Network, Domain.Reorg, Infra.Headers, Infra.Peers, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
+
+record Grown
+    pool: Pool
+    store: Store
 
 fn headers(network: Network, address: PeerAddress, store: Store) -> Result<Store, String>
     ? "Fetch every Block Header the Peer has, recording Height against Block Id."
+      "One Peer, which is a pool of one: the same code the node runs with"
+      "several, so a bulk download and a following node cannot drift into two"
+      "ideas of how a Message is read off a socket."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    outcome = headerSession(connection, network, address, store)
-    closeAfter(connection, outcome)
+    pool = Infra.Peers.joined(Infra.Peers.opened(network), soleKey(), address)?
+    closed(pool, headerSession(pool, store))
 
-fn closeAfter(connection: Tcp.Connection, outcome: Result<Store, String>) -> Result<Store, String>
-    ? "Always release the socket, whatever the session did."
+fn soleKey() -> Int
+    ? "The identifier a pool of one Peer keys it under."
+    0
+
+verify soleKey
+    soleKey() => 0
+
+fn closed(pool: Pool, outcome: Result<Grown, String>) -> Result<Store, String>
+    ? "Always release the sockets, whatever the session did."
     ! [Tcp.close]
-    _closed = Tcp.close(connection)
-    outcome
+    _closed = Infra.Peers.closeAll(pool)
+    match outcome
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(grown) -> Result.Ok(grown.store)
 
-fn headerSession(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store) -> Result<Store, String>
-    ? "Handshake, then ask for Headers from wherever the Index already reaches."
+fn headerSession(pool: Pool, store: Store) -> Result<Grown, String>
+    ? "Ask for Headers from wherever the Index already reaches."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Random.int,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    _greeting = Infra.Peer.introduce(connection, network, address)?
-    seeded = withGenesis(network, store)?
+    seeded = withGenesis(pool.network, store)?
     have = heightsHeld(seeded, 0)?
     _said = Console.print("have {have} headers; asking for more")
-    headerBatch(connection, network, seeded, have)
+    headerBatch(pool, soleKey(), seeded, have)
 
-fn headersOn(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
-    ? "The same catch-up on a connection somebody else introduced, and with"
-      "the Height already known."
+fn headersOn(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
+    ? "The same catch-up on a pool somebody else opened, and with the Height"
+      "already known."
       "A node following the tip runs this every time a Peer announces a Block,"
-      "so it can neither open its own socket nor walk h: from genesis to find"
+      "so it can neither open its own sockets nor walk h: from genesis to find"
       "out where it is -- both are cheap once and neither is cheap every ten"
       "minutes for the life of the process."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
     ]
-    seeded = withGenesis(network, store)?
-    headerBatch(connection, network, seeded, have)
+    seeded = withGenesis(pool.network, store)?
+    headerBatch(pool, key, seeded, have)
 
 fn withGenesis(network: Network, store: Store) -> Result<Store, String>
     ? "Put the first Block in the Index, because no Peer will send it."
@@ -129,40 +143,42 @@ verify heightAfter
     heightAfter(Infra.Store.fixture([]), 0, "aa") => Result.Ok(1)
     heightAfter(Infra.Store.fixture([]), 0, "") => Result.Err("index has no Block Id at height 0")
 
-fn headerBatch(connection: Tcp.Connection, network: Network, store: Store, have: Int) -> Result<Store, String>
+fn headerBatch(pool: Pool, key: Int, store: Store, have: Int) -> Result<Grown, String>
     ? "Ask for the Headers after the ones held, store them, and go round again."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
     ]
-    locator = locatorFor(network, store, have)?
+    locator = locatorFor(pool.network, store, have)?
     payload = Domain.Block.getHeadersPayload(locator)?
-    _sent = Infra.Peer.send(connection, network, "getheaders", payload)?
-    frame = Infra.Framing.awaitFrame(connection, network, "headers", Infra.Framing.frameBudget())?
-    decoded = Domain.Block.headersOf(frame.body)?
-    absorb(connection, network, store, have, decoded)
+    sent = Infra.Peers.send(pool, key, "getheaders", payload)?
+    waited = Infra.Peers.awaitFrom(sent, key, "headers")?
+    decoded = Domain.Block.headersOf(waited.frame.body)?
+    absorb(waited.pool, key, store, have, decoded)
 
-fn absorb(connection: Tcp.Connection, network: Network, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Store, String>
+fn absorb(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Grown, String>
     ? "An empty batch means the Peer has nothing after what we hold."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
     ]
     match decoded
-        [] -> done(store, have)
-        [head, ..tail] -> stored(connection, network, store, have, decoded)
+        [] -> done(pool, store, have)
+        [head, ..tail] -> stored(pool, key, store, have, decoded)
 
-fn done(store: Store, have: Int) -> Result<Store, String>
+fn done(pool: Pool, store: Store, have: Int) -> Result<Grown, String>
     ? "Report where the Index now reaches and stop."
     ! [Console.print]
     _said = Console.print("headers complete: {have} known")
-    Result.Ok(store)
+    Result.Ok(Grown(pool = pool, store = store))
 
-fn stored(connection: Tcp.Connection, network: Network, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Store, String>
+fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHeader>) -> Result<Grown, String>
     ? "Write the batch in one append, then ask for the next."
       "One putAll rather than a put per Header: a Store hands back a copy of"
       "itself, so a batch of two thousand costs one copy instead of two thousand."
@@ -170,13 +186,14 @@ fn stored(connection: Tcp.Connection, network: Network, store: Store, have: Int,
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
     ]
     outcome = Infra.Headers.absorbed(store, decoded)?
     _told = announced(outcome)
-    continuing(connection, network, outcome)
+    continuing(pool, key, outcome)
 
-fn continuing(connection: Tcp.Connection, network: Network, outcome: Settled) -> Result<Store, String>
+fn continuing(pool: Pool, key: Int, outcome: Settled) -> Result<Grown, String>
     ? "Ask for more only while the batch is moving the tip."
       "The Height to carry forward used to be the old one plus however many"
       "Headers arrived, which always went up. It is now the tip's Height,"
@@ -190,12 +207,13 @@ fn continuing(connection: Tcp.Connection, network: Network, outcome: Settled) ->
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
     ]
     match outcome.movement
-        Movement.Unchanged -> done(outcome.store, outcome.tipHeight + 1)
-        Movement.Extended(added) -> headerBatch(connection, network, outcome.store, outcome.tipHeight + 1)
-        Movement.Reorganised(forkHeight, displaced) -> headerBatch(connection, network, outcome.store, outcome.tipHeight + 1)
+        Movement.Unchanged -> done(pool, outcome.store, outcome.tipHeight + 1)
+        Movement.Extended(added) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1)
+        Movement.Reorganised(forkHeight, displaced) -> headerBatch(pool, key, outcome.store, outcome.tipHeight + 1)
 
 fn announced(outcome: Settled) -> Unit
     ? "Say where the tip now is, and say so differently when it moved sideways."
@@ -221,13 +239,13 @@ fn locatorFor(network: Network, store: Store, have: Int) -> Result<List<List<Int
     ! [Infra.Kv.get]
     ids = idsHeld(store, have)?
     match ids
-        [] -> Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(network))?])
+        [] -> Result.Ok([Domain.Block.wireOrder(Domain.Block.genesisBlockId(network))?])
         [head, ..tail] -> Result.Ok(ids)
 
 verify locatorFor
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 0) => Result.Ok([Domain.Block.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
     locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "0102")]), 1) => Result.Ok([[2, 1]])
-    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([Infra.Framing.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
+    locatorFor(Network.Mainnet, Infra.Store.fixture([]), 1) => Result.Ok([Domain.Block.wireOrder(Domain.Block.genesisBlockId(Network.Mainnet))?])
     locatorFor(Network.Mainnet, Infra.Store.fixture([("h:00000000", "zz")]), 1) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn idsHeld(store: Store, have: Int) -> Result<List<List<Int>>, String>
@@ -281,7 +299,7 @@ verify prependId
 
 fn prependDecoded(id: String, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The Index named a Block Id, which still has to be one."
-    wire = Infra.Framing.wireOrder(id)?
+    wire = Domain.Block.wireOrder(id)?
     Result.Ok(List.prepend(wire, acc))
 
 verify prependDecoded

@@ -1,208 +1,92 @@
 module Peer
     intent =
-        "The live side of a Peer: the socket, the Handshake, and the listen loop."
-        "This is the only module that touches the network, so everything it does"
-        "is a thin arrangement of pure parts from the domain. Reads are always"
-        "exact-length — a 24-byte header, then exactly the payload it announces —"
-        "so the stream is never guessed at."
-        "Session reads have no deadline of their own since jasisz/aver#782,"
-        "which is right mid-frame and wrong forever: a Peer that goes silent"
-        "would leave the loop blocked and looking like it was working. So every"
-        "frame starts with Tcp.poll at the Message boundary — the one place a"
-        "timeout abandons nothing — and a Peer that says nothing for the"
-        "deadline ends the session with a reason instead of hanging it (#55)."
-        "The loop carries nothing but the connection: an Announcement is"
-        "answered immediately and any Transaction that arrives is decoded, so"
-        "there is nothing to correlate and nothing to remember between reads."
-    exposes [Greeting, Frame, run, introduce, readFrame, send]
-    depends [Bytes, Domain.Message, Domain.Network, Domain.Address, Domain.Version, Domain.Inventory, Domain.Transaction]
+        "The listen command: one Peer, and every Transaction it announces"
+        "decoded and printed."
+        "This is where the project started and it is now the smallest thing"
+        "that uses the pool -- a pool of one. It keeps its own loop rather"
+        "than sharing the node's because it wants a different thing: the node"
+        "follows Blocks and ignores Transactions, and this does the opposite."
+        "Everything about sockets, Handshakes and framing belongs to"
+        "Infra.Peers, so a Message is read off a wire in one place in this"
+        "program and not two."
+    exposes [run]
+    depends [Bytes, Domain.Address, Domain.Inbox, Domain.Inventory, Domain.Network, Domain.Transaction, Infra.Peers]
     effects [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
 
-record Greeting
-    version: Int
-    agent: String
+fn soleKey() -> Int
+    ? "The identifier a pool of one Peer keys it under."
+    0
 
-record Frame
-    command: String
-    body: List<Int>
-
-fn readFrame(connection: Tcp.Connection) -> Result<Frame, String>
-    ? "One framed Message: a fixed header, then exactly the payload it announces."
-      "Every read on this connection goes through here, so the stream is never"
-      "guessed at, no caller has to know the header layout, and every frame"
-      "waits behind the same deadline."
-    ! [Tcp.poll, Tcp.readBytes]
-    _ready = awaited(connection)?
-    header = Bytes.toList(Tcp.readBytes(connection, Domain.Message.headerLength())?)
-    body = Bytes.toList(Tcp.readBytes(connection, Domain.Message.payloadLengthAt(header))?)
-    Result.Ok(Frame(command = Domain.Message.commandAt(header), body = body))
-
-fn awaited(connection: Tcp.Connection) -> Result<Unit, String>
-    ? "Wait at the Message boundary until the Peer has something for us."
-      "Tcp.poll counts bytes the runtime has already buffered as readable, and"
-      "reports a closed connection readable so the read that follows can say"
-      "how it ended — so an empty answer here is real silence, not a frame"
-      "sitting unseen in a buffer."
-    ! [Tcp.poll]
-    ready = Tcp.poll(Map.fromList([(0, connection)]), idleDeadlineMs())?
-    match List.len(ready) > 0
-        true -> Result.Ok(Unit)
-        false -> Result.Err("Peer said nothing for {Int.div(idleDeadlineMs(), 1000)} seconds")
-
-fn idleDeadlineMs() -> Int
-    ? "How long a silent Peer is waited for at a Message boundary."
-      "Bitcoin Core pings an otherwise-quiet connection every two minutes, so a"
-      "Peer that has said nothing for two and a half is not quiet, it is gone —"
-      "or the connection is. The boundary is the only safe place to stop"
-      "waiting: a deadline in the middle of a frame would abandon a stream that"
-      "is merely slow with half a Message consumed. Mid-frame reads therefore"
-      "still block, deliberately; a Peer that stalls between a header and its"
-      "payload waits for the event loop of #26 to be noticed."
-    150000
-
-verify idleDeadlineMs
-    idleDeadlineMs() => 150000
-
-fn send(connection: Tcp.Connection, network: Network, command: String, payload: Bytes) -> Result<Unit, String>
-    ? "Frame a payload for this Network and put it on the wire."
-    ! [Tcp.writeBytes]
-    framed = Domain.Message.frame(network, command, payload)?
-    Tcp.writeBytes(connection, framed)
-
-fn handshakeBudget() -> Int
-    ? "How many Messages to read while waiting for verack before giving up."
-    20
-
-verify handshakeBudget
-    handshakeBudget() => 20
+verify soleKey
+    soleKey() => 0
 
 fn run(network: Network, address: PeerAddress) -> Result<Unit, String>
     ? "Connect, complete the Handshake, then listen until the process is stopped."
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    outcome = session(connection, network, address)
-    closeAfter(connection, outcome)
+    pool = Infra.Peers.joined(Infra.Peers.opened(network), soleKey(), address)?
+    _reported = Console.print("handshake complete")
+    closeAfter(pool, listen(pool))
 
-fn session(connection: Tcp.Connection, network: Network, address: PeerAddress) -> Result<Unit, String>
-    ? "Introduce ourselves, report who answered, then start listening."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    greeting = introduce(connection, network, address)?
-    _reported = Console.print(greetingLine(greeting))
-    listen(connection, network)
-
-fn greetingLine(greeting: Greeting) -> String
-    ? "How a completed Handshake is shown to a reader."
-    "handshake complete: protocol {greeting.version}, agent {greeting.agent}"
-
-fn closeAfter(connection: Tcp.Connection, outcome: Result<Unit, String>) -> Result<Unit, String>
+fn closeAfter(pool: Pool, outcome: Result<Unit, String>) -> Result<Unit, String>
     ? "Always release the socket, whatever the session did."
     ! [Tcp.close]
-    _closed = Tcp.close(connection)
+    _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn introduce(connection: Tcp.Connection, network: Network, address: PeerAddress) -> Result<Greeting, String>
-    ? "Send our version, then read until the Peer sends verack."
-    ! [Random.int, Tcp.poll, Tcp.readBytes, Tcp.writeBytes, Time.unixMs]
-    body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
-    _written = send(connection, network, "version", body)?
-    await(connection, network, handshakeBudget(), Greeting(version = 0, agent = ""))
-
-fn await(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "Read Messages until verack arrives or the budget runs out."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match budget <= 0
-        true -> Result.Err("no verack after {handshakeBudget()} messages")
-        false -> readGreeting(connection, network, budget, seen)
-
-fn readGreeting(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "Read one framed Message during the Handshake."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    frame = readFrame(connection)?
-    dispatchGreeting(connection, network, frame.command, frame.body, budget, seen)
-
-fn dispatchGreeting(connection: Tcp.Connection, network: Network, command: String, body: List<Int>, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "verack ends the Handshake; version tells us who we are talking to."
-      "Anything else is a Peer being chatty before it agrees, and is skipped."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match command
-        "verack" -> Result.Ok(seen)
-        "version" -> acknowledge(connection, network, budget, describePeer(body))
-        _ -> await(connection, network, budget - 1, seen)
-
-fn acknowledge(connection: Tcp.Connection, network: Network, budget: Int, seen: Greeting) -> Result<Greeting, String>
-    ? "Send verack in reply, then keep waiting for theirs."
-    ! [Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    _written = send(connection, network, "verack", Bytes.fromList([]))?
-    await(connection, network, budget - 1, seen)
-
-fn describePeer(body: List<Int>) -> Greeting
-    ? "What the Peer told us about itself in its version payload."
-    Greeting(version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body))
-
-fn listen(connection: Tcp.Connection, network: Network) -> Result<Unit, String>
+fn listen(pool: Pool) -> Result<Unit, String>
     ? "Read Messages for as long as the Peer keeps sending them."
       "This never returns of its own accord: the program runs until it is"
       "stopped, or until a read fails. The call is in tail position, so the"
       "recursion does not grow the stack however long it runs."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    readMessage(connection, network)
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    waited = Infra.Peers.awaitAnyPeer(pool)?
+    handle(waited.pool, waited.key, waited.frame)
 
-fn readMessage(connection: Tcp.Connection, network: Network) -> Result<Unit, String>
-    ? "One framed Message: a fixed header, then exactly what it announces."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    frame = readFrame(connection)?
-    handle(connection, network, frame.command, frame.body)
-
-fn handle(connection: Tcp.Connection, network: Network, command: String, body: List<Int>) -> Result<Unit, String>
+fn handle(pool: Pool, key: Int, frame: Frame) -> Result<Unit, String>
     ? "The three Messages this program acts on; every other one is ignored."
       "A ping must be answered, or the Peer eventually drops the connection."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    match command
-        "inv" -> onAnnouncement(connection, network, body)
-        "tx" -> onTransaction(connection, network, body)
-        "ping" -> onPing(connection, network, body)
-        _ -> listen(connection, network)
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    match frame.command
+        "inv" -> onAnnouncement(pool, key, frame.body)
+        "tx" -> onTransaction(pool, key, frame.body)
+        "ping" -> onPing(pool, key, frame.body)
+        _ -> listen(pool)
 
-fn onAnnouncement(connection: Tcp.Connection, network: Network, body: List<Int>) -> Result<Unit, String>
+fn onAnnouncement(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Ask for every Transaction the Peer just offered."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     hashes = Domain.Inventory.txHashesOf(body)
-    request(connection, network, hashes)
+    request(pool, key, hashes)
 
-fn request(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>) -> Result<Unit, String>
+fn request(pool: Pool, key: Int, hashes: List<List<Int>>) -> Result<Unit, String>
     ? "An Announcement carrying no Transactions needs no reply."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     match hashes
-        [] -> listen(connection, network)
-        [head, ..tail] -> sendGetData(connection, network, hashes)
+        [] -> listen(pool)
+        [head, ..tail] -> sendGetData(pool, key, hashes)
 
-fn sendGetData(connection: Tcp.Connection, network: Network, hashes: List<List<Int>>) -> Result<Unit, String>
+fn sendGetData(pool: Pool, key: Int, hashes: List<List<Int>>) -> Result<Unit, String>
     ? "Send the getdata that turns identifiers into Transactions."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
-    _written = send(connection, network, "getdata", payload)?
-    listen(connection, network)
+    sent = Infra.Peers.send(pool, key, "getdata", payload)?
+    listen(sent)
 
-fn onTransaction(connection: Tcp.Connection, network: Network, body: List<Int>) -> Result<Unit, String>
-    ? "Decode and print the Transaction, then count it against what was wanted."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
-    _shown = show(network, Domain.Transaction.decode(body))
-    listen(connection, network)
+fn onTransaction(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "Decode and print the Transaction, then go back to listening."
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    _shown = show(pool.network, Domain.Transaction.decode(body))
+    listen(pool)
 
 fn show(network: Network, decoded: Result<Transaction, String>) -> Unit
     ? "Print a decoded Transaction, or say why it could not be read."
@@ -214,12 +98,12 @@ fn show(network: Network, decoded: Result<Transaction, String>) -> Unit
         Result.Ok(transaction) -> printLines(Domain.Transaction.summaryLines(Option.Some(network), transaction))
         Result.Err(reason) -> Console.error("could not decode transaction: {reason}")
 
-fn onPing(connection: Tcp.Connection, network: Network, body: List<Int>) -> Result<Unit, String>
+fn onPing(pool: Pool, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Reply with the same nonce the Peer sent."
-    ! [Console.error, Console.print, Tcp.poll, Tcp.readBytes, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
     payload = Bytes.fromList(body)?
-    _written = send(connection, network, "pong", payload)?
-    listen(connection, network)
+    sent = Infra.Peers.send(pool, key, "pong", payload)?
+    listen(sent)
 
 fn printLines(lines: List<String>) -> Unit
     ? "Print each line in turn."

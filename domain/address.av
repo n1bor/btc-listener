@@ -4,7 +4,7 @@ module Address
         "Parsing is the only way in, so an unvalidated address cannot reach the"
         "rest of the program. Octets are kept as numbers rather than as the"
         "original text, so rendering is canonical no matter how it was written."
-    exposes [fromString, fromStringOn, fromParts, fromOctets, fromOctetsOn, toString, hostOf, portOf, octetsOf]
+    exposes [fromString, fromStringOn, fromPeerText, fromParts, fromOctets, fromOctetsOn, toString, hostOf, portOf, octetsOf]
     exposes opaque [PeerAddress]
     effects []
 
@@ -40,6 +40,64 @@ verify fromStringOn
     fromStringOn("1.2.3.4", 38333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 38333))
     portOf(fromStringOn("10.0.0.1", 18444)?) => 18444
     fromStringOn("999.1.1.1", 38333) => Result.Err("octet 999 is out of range (0-255)")
+
+fn fromPeerText(text: String, port: Int) -> Result<PeerAddress, String>
+    ? "A Peer as a person writes one down: an address, and a port if they mean"
+      "one other than the Network's."
+      "Every Peer on a Network uses the same port, which is why the rest of"
+      "this program never had to ask. Several Peers on one machine do not --"
+      "two nodes on a loopback have to differ somewhere, and the port is"
+      "where. The Address gossip carries a port beside every address for the"
+      "same reason, so this is what will read those too."
+    onParts(text, port, String.split(text, ":"))
+
+verify fromPeerText
+    fromPeerText("1.2.3.4", 38333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 38333))
+    fromPeerText("1.2.3.4:18444", 38333) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18444))
+    fromPeerText("1.2.3.4:x", 38333) => Result.Err("port must be a whole number, got 'x'")
+    fromPeerText("1.2.3.4:1:2", 38333) => Result.Err("a Peer is an address or an address and a port, got '1.2.3.4:1:2'")
+    fromPeerText("nonsense", 38333) => Result.Err("expected four dot-separated octets, got 1")
+
+fn onParts(text: String, port: Int, split: List<String>) -> Result<PeerAddress, String>
+    ? "The address comes first."
+    match split
+        [] -> Result.Err("a Peer is an address or an address and a port, got '{text}'")
+        [host, ..rest] -> afterHost(text, port, host, rest)
+
+verify onParts
+    onParts("1.2.3.4", 38333, ["1.2.3.4"]) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 38333))
+    onParts("1.2.3.4:18444", 38333, ["1.2.3.4", "18444"]) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18444))
+    onParts("", 38333, []) => Result.Err("a Peer is an address or an address and a port, got ''")
+
+fn afterHost(text: String, port: Int, host: String, rest: List<String>) -> Result<PeerAddress, String>
+    ? "Nothing after the address means the Network's own port."
+    match rest
+        [] -> fromStringOn(host, port)
+        [given, ..extra] -> afterPort(text, host, given, extra)
+
+verify afterHost
+    afterHost("1.2.3.4", 38333, "1.2.3.4", []) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 38333))
+    afterHost("1.2.3.4:18444", 38333, "1.2.3.4", ["18444"]) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18444))
+
+fn afterPort(text: String, host: String, given: String, extra: List<String>) -> Result<PeerAddress, String>
+    ? "A third field means the text was never a Peer."
+    match extra
+        [] -> onGivenPort(host, given)
+        [head, ..tail] -> Result.Err("a Peer is an address or an address and a port, got '{text}'")
+
+verify afterPort
+    afterPort("1.2.3.4:18444", "1.2.3.4", "18444", []) => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18444))
+    afterPort("1.2.3.4:1:2", "1.2.3.4", "1", ["2"]) => Result.Err("a Peer is an address or an address and a port, got '1.2.3.4:1:2'")
+
+fn onGivenPort(host: String, given: String) -> Result<PeerAddress, String>
+    ? "The port has to be a whole number before it can be a port."
+    match Int.fromString(given)
+        Result.Err(why) -> Result.Err("port must be a whole number, got '{given}'")
+        Result.Ok(port) -> fromStringOn(host, port)
+
+verify onGivenPort
+    onGivenPort("1.2.3.4", "18444") => Result.Ok(PeerAddress(octets = [1, 2, 3, 4], portNumber = 18444))
+    onGivenPort("1.2.3.4", "x") => Result.Err("port must be a whole number, got 'x'")
 
 fn fromParts(text: String, portText: String) -> Result<PeerAddress, String>
     ? "Parse a dotted-quad address and an explicit port, both given as text."

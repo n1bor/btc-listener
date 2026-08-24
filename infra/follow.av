@@ -20,42 +20,96 @@ module Follow
         "are Stages 5 to 7; a Transaction announced here is simply not asked"
         "for, because there is nowhere yet to put one."
     exposes [follow]
-    depends [Bytes, Domain.Address, Domain.HeaderTree, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peer, Infra.Rewind, Infra.Store]
+    depends [Bytes, Domain.Address, Domain.HeaderTree, Domain.Inbox, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
 
 record Following
+    pool: Pool
     store: Store
     blocks: BlockStore
 
-fn follow(network: Network, address: PeerAddress, store: Store, blocks: BlockStore) -> Result<Unit, String>
-    ? "Connect, catch up, then stay caught up until the process is stopped."
+fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore) -> Result<Unit, String>
+    ? "Connect to every Peer given, catch up, then stay caught up."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
-    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    outcome = session(connection, network, address, store, blocks)
-    closeAfter(connection, outcome)
+    pool = joining(Infra.Peers.opened(network), addresses, 0)?
+    outcome = session(Following(pool = pool, store = store, blocks = blocks))
+    closeAfter(pool, outcome)
 
-fn closeAfter(connection: Tcp.Connection, outcome: Result<Unit, String>) -> Result<Unit, String>
-    ? "Always release the socket, whatever the session did."
+fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
+    ? "Every Peer given, each handshaked before the next is dialled."
+      "Sequentially rather than at once, because a Handshake is a"
+      "conversation and ADR 0008 puts conversations on the loop rather than"
+      "in branches. It costs a few seconds at startup and buys the property"
+      "that every Peer in the pool has already been read from once."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match addresses
+        [] -> Result.Ok(pool)
+        [head, ..tail] -> joiningOne(pool, head, tail, key)
+
+fn joiningOne(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int) -> Result<Pool, String>
+    ? "One Peer that will not answer is one Peer, not the end of the node."
+      "With a single Peer a failed Handshake was the run failing, because"
+      "there was nothing else to be connected to. With several it is a fact"
+      "about that Peer, said out loud and stepped past."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Infra.Peers.joined(pool, key, address)
+        Result.Err(why) -> refused(pool, address, rest, key, why)
+        Result.Ok(joined) -> accepted(joined, address, rest, key)
+
+fn refused(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int, why: String) -> Result<Pool, String>
+    ? "Say which Peer would not have us, then try the next."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _said = Console.error("peer {Domain.Address.toString(address)} refused: {why}")
+    joining(pool, rest, key)
+
+fn accepted(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int) -> Result<Pool, String>
+    ? "Say who answered, then go on to the next."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    _said = Console.print("peer {key} is {Domain.Address.toString(address)}")
+    joining(pool, rest, key + 1)
+
+fn closeAfter(pool: Pool, outcome: Result<Unit, String>) -> Result<Unit, String>
+    ? "Always release every socket, whatever the session did."
     ! [Tcp.close]
-    _closed = Tcp.close(connection)
+    _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn session(connection: Tcp.Connection, network: Network, address: PeerAddress, store: Store, blocks: BlockStore) -> Result<Unit, String>
-    ? "Introduce ourselves, catch up on what was missed, then listen."
+fn session(state: Following) -> Result<Unit, String>
+    ? "Catch up on what was missed, then listen."
       "The catch-up before the first Announcement is not optional. A node that"
       "waited would sit idle for as long as it took the next Block to be"
       "mined, and would then connect it onto a Set that was hours or years"
@@ -64,37 +118,52 @@ fn session(connection: Tcp.Connection, network: Network, address: PeerAddress, s
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Random.int,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
-    greeting = Infra.Peer.introduce(connection, network, address)?
-    _reported = Console.print("handshake complete: protocol {greeting.version}, agent {greeting.agent}")
-    started = caughtUp(connection, network, Following(store = store, blocks = blocks))?
-    listen(connection, network, started)
+    started = caughtUp(state, firstKey(state.pool))?
+    listen(started)
 
-fn caughtUp(connection: Tcp.Connection, network: Network, state: Following) -> Result<Following, String>
-    ? "The three phases in the one order they can go in."
+fn firstKey(pool: Pool) -> Int
+    ? "Which Peer to ask first, before any of them has announced anything."
+    Result.withDefault(lowestKey(Map.keys(pool.sockets)), 0)
+
+fn lowestKey(keys: List<Int>) -> Result<Int, String>
+    ? "The lowest identifier held, or nothing when the pool is empty."
+    match keys
+        [] -> Result.Err("no Peers")
+        [head, ..tail] -> Result.Ok(head)
+
+verify lowestKey
+    lowestKey([]) => Result.Err("no Peers")
+    lowestKey([0, 1]) => Result.Ok(0)
+
+fn caughtUp(state: Following, key: Int) -> Result<Following, String>
+    ? "The three phases in the one order they can go in, asking one Peer."
       "Headers first, because nothing below can act on a Block it cannot"
       "place. Then the Set is taken back off any branch the Headers have just"
       "abandoned, because the bodies to fetch are the ones above the fork and"
       "not the ones above where the Set happened to stand. Then the bodies,"
       "then the Set forward over them."
+      "The Peer asked is whichever one told us the chain had moved. Every"
+      "other Peer is read and kept alive throughout, which is the whole"
+      "reason this stage exists -- the single-Peer shape left them unheard"
+      "and unanswered for as long as a catch-up took."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     have = haveOf(state.store)?
-    grown = Infra.Download.headersOn(connection, network, state.store, have)?
-    tipHeight = tipHeightOf(grown)?
-    aligned = Infra.Rewind.realigned(grown, state.blocks)?
-    fetched = Infra.Bodies.bodiesOn(connection, network, aligned.store, state.blocks, aligned.from, tipHeight)?
-    connected(network, Following(store = fetched.store, blocks = fetched.blocks), tipHeight)
+    grown = Infra.Download.headersOn(state.pool, key, state.store, have)?
+    tipHeight = tipHeightOf(grown.store)?
+    aligned = Infra.Rewind.realigned(grown.store, state.blocks)?
+    fetched = Infra.Bodies.bodiesOn(grown.pool, key, aligned.store, state.blocks, aligned.from, tipHeight)?
+    connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks), tipHeight)
 
-fn connected(network: Network, state: Following, tipHeight: Int) -> Result<Following, String>
+fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
     ? "The Set forward to the tip, and one line saying where that leaves it."
     ! [
         Console.print,
@@ -102,9 +171,9 @@ fn connected(network: Network, state: Following, tipHeight: Int) -> Result<Follo
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Time.now, Time.unixMs,
     ]
-    built = Infra.ChainState.build(network, state.store, state.blocks, tipHeight)?
+    built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight)?
     _said = Console.print("following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
-    Result.Ok(Following(store = built.store, blocks = state.blocks))
+    Result.Ok(Following(pool = state.pool, store = built.store, blocks = state.blocks))
 
 fn haveOf(store: Store) -> Result<Int, String>
     ? "How many Heights the Header tree already reaches, for the Locator."
@@ -144,25 +213,27 @@ verify heightOf
     heightOf(Option.None) => 0
     heightOf(Option.Some(Placement(blockId = "aa", parentId = "pp", height = 7, work = 1))) => 7
 
-fn listen(connection: Tcp.Connection, network: Network, state: Following) -> Result<Unit, String>
-    ? "Read Messages for as long as the Peer keeps sending them."
+fn listen(state: Following) -> Result<Unit, String>
+    ? "Read Messages from every Peer for as long as any of them keeps sending."
       "This never returns of its own accord: the process runs until it is"
-      "stopped, until a read fails, or until a Block will not connect. The"
-      "call is in tail position, so the recursion does not grow the stack"
-      "however long it runs."
+      "stopped, until every Peer has gone quiet, or until a Block will not"
+      "connect. The call is in tail position, so the recursion does not grow"
+      "the stack however long it runs."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
-    frame = Infra.Peer.readFrame(connection)?
-    handle(connection, network, state, frame.command, frame.body)
+    waited = Infra.Peers.awaitAnyPeer(state.pool)?
+    handle(Following(pool = waited.pool, store = state.store, blocks = state.blocks), waited.key, waited.frame.command, waited.frame.body)
 
-fn handle(connection: Tcp.Connection, network: Network, state: Following, command: String, body: List<Int>) -> Result<Unit, String>
+fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this loop acts on; every other one is ignored."
-      "A ping has to be answered or the Peer eventually drops the connection."
+      "A ping has to be answered or the Peer eventually drops the connection,"
+      "and it is answered to the Peer that sent it rather than to whichever"
+      "one the node happens to be talking to."
       "An unsolicited headers is treated exactly as an Announcement: a Peer"
       "that was sent no sendheaders should not be sending one, and a Peer that"
       "does is still telling us the chain moved."
@@ -170,16 +241,16 @@ fn handle(connection: Tcp.Connection, network: Network, state: Following, comman
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     match command
-        "inv" -> onAnnouncement(connection, network, state, body)
-        "headers" -> onMoved(connection, network, state, "a Peer sent Headers unasked")
-        "ping" -> onPing(connection, network, state, body)
-        _ -> listen(connection, network, state)
+        "inv" -> onAnnouncement(state, key, body)
+        "headers" -> onMoved(state, key, "peer {key} sent Headers unasked")
+        "ping" -> onPing(state, key, body)
+        _ -> listen(state)
 
-fn onAnnouncement(connection: Tcp.Connection, network: Network, state: Following, body: List<Int>) -> Result<Unit, String>
+fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "An Announcement carrying no Blocks changes nothing here."
       "Transactions are announced down the same Message and are not asked for:"
       "there is no Mempool to put one in until Stage 6, and asking for what"
@@ -189,16 +260,16 @@ fn onAnnouncement(connection: Tcp.Connection, network: Network, state: Following
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     announced = Domain.Inventory.blockHashesOf(body)
     match announced
-        [] -> listen(connection, network, state)
-        [head, ..tail] -> onMoved(connection, network, state, "{List.len(announced)} Block(s) announced")
+        [] -> listen(state)
+        [head, ..tail] -> onMoved(state, key, "{List.len(announced)} Block(s) announced by peer {key}")
 
-fn onMoved(connection: Tcp.Connection, network: Network, state: Following, why: String) -> Result<Unit, String>
-    ? "The chain says it has moved, so go and find out how far."
+fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
+    ? "The chain says it has moved, so ask that Peer how far."
       "What arrived is not trusted to be the new tip, or to be on the branch"
       "with the most work, or to be anything but a Block Id -- the Header"
       "phase settles all three, and a Peer that announced something already"
@@ -207,22 +278,22 @@ fn onMoved(connection: Tcp.Connection, network: Network, state: Following, why: 
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     _said = Console.print("{Time.now()}  {why}")
-    moved = caughtUp(connection, network, state)?
-    listen(connection, network, moved)
+    moved = caughtUp(state, key)?
+    listen(moved)
 
-fn onPing(connection: Tcp.Connection, network: Network, state: Following, body: List<Int>) -> Result<Unit, String>
-    ? "Reply with the same nonce the Peer sent."
+fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "Reply with the same nonce, to the Peer that sent it."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readBytes, Tcp.writeBytes,
+        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     payload = Bytes.fromList(body)?
-    _written = Infra.Peer.send(connection, network, "pong", payload)?
-    listen(connection, network, state)
+    sent = Infra.Peers.send(state.pool, key, "pong", payload)?
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks))
