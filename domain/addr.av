@@ -1,0 +1,236 @@
+module Addr
+    intent =
+        "What a Peer says about other Peers: reading an addr Message, and"
+        "asking for one."
+        "A node that only ever knows the Peers it was told about on the"
+        "command line is a node with one way in and one way to be cut off."
+        "The gossip is how it finds its own: every Peer will name others if"
+        "asked, and names them unasked when it hears of one."
+        "Only IPv4 is read. A PeerAddress is four octets, and an addr entry"
+        "carries sixteen -- IPv4 arrives as an IPv4-mapped IPv6 address, ten"
+        "zero bytes then two 0xFF then the four that matter, and anything"
+        "that is not that shape is a Network this program cannot dial. It is"
+        "skipped rather than refused: a Peer offering an IPv6 address is"
+        "being helpful, not wrong."
+        "Nothing here is trusted. An addr entry is a claim by a Peer under no"
+        "obligation to be honest, which is why what comes out is Candidates"
+        "and not Peers -- the Handshake is what turns one into the other."
+    exposes [entrySize, maxEntries, addressesOf]
+    depends [Domain.Address, Domain.CompactSize, Domain.Message]
+    effects []
+
+fn entrySize() -> Int
+    ? "Each addr entry is thirty bytes."
+      "Four of timestamp, eight of services, sixteen of address, two of port."
+    30
+
+verify entrySize
+    entrySize() => 30
+
+fn maxEntries() -> Int
+    ? "How many addresses one addr Message is allowed to carry."
+      "A thousand, which is Bitcoin Core's MAX_ADDR_TO_SEND. A Peer sending"
+      "more is not being generous, and the count is the Peer's own claim, so"
+      "it is the count that has to be bounded rather than what we do with it."
+    1000
+
+verify maxEntries
+    maxEntries() => 1000
+
+fn addressesOf(body: List<Int>) -> List<PeerAddress>
+    ? "Every IPv4 Peer Address an addr Message offers."
+    collect(entriesOf(body), offered(body), [])
+
+verify addressesOf
+    addressesOf(oneEntry()) => [sampleAddress()?]
+    addressesOf([]) => []
+    addressesOf([0]) => []
+    List.len(addressesOf(twoEntries())) => 2
+    addressesOf(ipv6Entry()) => []
+
+fn offered(body: List<Int>) -> Int
+    ? "How many entries the Message claims, capped at what is allowed."
+      "The cap is not politeness. The count decides how many times the walk"
+      "goes round, and it arrives from a Peer, so an uncapped one is a Peer"
+      "choosing how long this program spends on its Message."
+    lower(countIn(body), maxEntries())
+
+verify offered
+    offered(oneEntry()) => 1
+    offered([]) => 0
+    offered([253, 255, 255]) => 1000
+
+fn lower(a: Int, b: Int) -> Int
+    ? "The smaller of two numbers."
+    match a < b
+        true -> a
+        false -> b
+
+verify lower
+    lower(1, 1000) => 1
+    lower(65535, 1000) => 1000
+
+fn countIn(body: List<Int>) -> Int
+    ? "The entry count that prefixes the entries."
+    match body
+        [] -> 0
+        [head, ..tail] -> countFrom(head, body)
+
+verify countIn
+    countIn([]) => 0
+    countIn([1]) => 1
+    countIn([253, 44, 1]) => 300
+
+fn countFrom(first: Int, body: List<Int>) -> Int
+    ? "A CompactSize is one byte, or a marker and some bytes after it."
+    match Domain.CompactSize.widthOf(first) == 1
+        true -> first
+        false -> Domain.Message.readLittleEndian(List.take(List.drop(body, 1), Domain.CompactSize.widthOf(first) - 1))
+
+verify countFrom
+    countFrom(1, [1]) => 1
+    countFrom(253, [253, 44, 1]) => 300
+
+fn entriesOf(body: List<Int>) -> List<Int>
+    ? "The entry bytes, after the count that precedes them."
+    match body
+        [] -> []
+        [head, ..tail] -> List.drop(body, Domain.CompactSize.widthOf(head))
+
+verify entriesOf
+    entriesOf([]) => []
+    entriesOf([1, 9, 9]) => [9, 9]
+    entriesOf([253, 44, 1, 9]) => [9]
+
+fn collect(entries: List<Int>, remaining: Int, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "One entry at a time, while the Message both claims and holds another."
+    match remaining <= 0
+        true -> List.reverse(acc)
+        false -> collectOne(entries, remaining, acc)
+
+verify collect
+    collect([], 5, []) => []
+    collect(List.drop(oneEntry(), 1), 0, []) => []
+    collect(List.drop(oneEntry(), 1), 1, []) => [sampleAddress()?]
+
+fn collectOne(entries: List<Int>, remaining: Int, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "A Message that claimed more entries than it carried simply stops."
+    match List.len(entries) < entrySize()
+        true -> List.reverse(acc)
+        false -> collectNext(entries, remaining, acc)
+
+verify collectOne
+    collectOne([1, 2], 5, []) => []
+    collectOne(List.drop(oneEntry(), 1), 1, []) => [sampleAddress()?]
+
+fn collectNext(entries: List<Int>, remaining: Int, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "This entry read, then on to the next."
+    collect(List.drop(entries, entrySize()), remaining - 1, keptIfUsable(List.take(entries, entrySize()), acc))
+
+verify collectNext
+    collectNext(List.drop(oneEntry(), 1), 1, []) => [sampleAddress()?]
+    collectNext(List.drop(ipv6Entry(), 1), 1, []) => []
+
+fn keptIfUsable(entry: List<Int>, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "An entry this program can dial is kept; anything else is passed over."
+    match addressIn(entry)
+        Result.Err(why) -> acc
+        Result.Ok(address) -> List.prepend(address, acc)
+
+verify keptIfUsable
+    List.len(keptIfUsable(List.drop(oneEntry(), 1), [])) => 1
+    List.len(keptIfUsable(List.drop(ipv6Entry(), 1), [])) => 0
+
+fn addressIn(entry: List<Int>) -> Result<PeerAddress, String>
+    ? "The Peer Address one entry names, if it names one we can reach."
+    match mappedIpv4(List.take(List.drop(entry, 12), 16))
+        false -> Result.Err("not an IPv4-mapped address")
+        true -> Domain.Address.fromOctetsOn(List.take(List.drop(entry, 24), 4), portIn(entry))
+
+verify addressIn
+    addressIn(List.drop(oneEntry(), 1)) => Result.Ok(sampleAddress()?)
+    addressIn(List.drop(ipv6Entry(), 1)) => Result.Err("not an IPv4-mapped address")
+
+fn portIn(entry: List<Int>) -> Int
+    ? "The port, which is the one field an addr entry writes big-endian."
+      "Network byte order, because it is a port on a socket rather than a"
+      "number in a Message -- the same reason Domain.Version writes one that"
+      "way inside its own address fields."
+    Domain.Message.readLittleEndian(List.reverse(List.take(List.drop(entry, 28), 2)))
+
+verify portIn
+    portIn(List.drop(oneEntry(), 1)) => 8333
+    portIn(List.drop(ipv6Entry(), 1)) => 8333
+
+fn mappedIpv4(sixteen: List<Int>) -> Bool
+    ? "Whether sixteen bytes are an IPv4 address wearing an IPv6 shape."
+      "Ten zero bytes, then two of 0xFF, then the four that mean anything."
+    match List.len(sixteen) < 16
+        false -> Bool.and(allZero(List.take(sixteen, 10)), List.take(List.drop(sixteen, 10), 2) == [255, 255])
+        true -> false
+
+verify mappedIpv4
+    mappedIpv4(mappedPrefix()) => true
+    mappedIpv4([]) => false
+    mappedIpv4(List.concat(List.take(mappedPrefix(), 9), [1, 255, 255, 1, 2, 3, 4])) => false
+
+fn allZero(bytes: List<Int>) -> Bool
+    ? "Whether every byte given is zero."
+    match bytes
+        [] -> true
+        [head, ..tail] -> Bool.and(head == 0, allZero(tail))
+
+verify allZero
+    allZero([]) => true
+    allZero([0, 0]) => true
+    allZero([0, 1]) => false
+
+fn mappedPrefix() -> List<Int>
+    ? "One IPv4-mapped sixteen-byte address, for the cases here."
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 1, 2, 3, 4]
+
+verify mappedPrefix
+    List.len(mappedPrefix()) => 16
+
+fn sampleAddress() -> Result<PeerAddress, String>
+    ? "The Peer that the sample entry names."
+    Domain.Address.fromOctetsOn([1, 2, 3, 4], 8333)
+
+verify sampleAddress
+    Domain.Address.toString(sampleAddress()?) => "1.2.3.4:8333"
+
+fn oneEntry() -> List<Int>
+    ? "An addr Message carrying one IPv4 Peer, for the cases here."
+    List.concat([1], List.concat(List.concat(fourZeros(), eightZeros()), List.concat(mappedPrefix(), [32, 141])))
+
+verify oneEntry
+    List.len(oneEntry()) => 31
+
+fn twoEntries() -> List<Int>
+    ? "An addr Message carrying the same Peer twice, for the cases here."
+    List.concat([2], List.concat(List.drop(oneEntry(), 1), List.drop(oneEntry(), 1)))
+
+verify twoEntries
+    List.len(twoEntries()) => 61
+
+fn ipv6Entry() -> List<Int>
+    ? "An addr Message carrying an address this program cannot dial."
+    List.concat([1], List.concat(List.concat(fourZeros(), eightZeros()), List.concat(sixteenOnes(), [32, 141])))
+
+verify ipv6Entry
+    List.len(ipv6Entry()) => 31
+
+fn fourZeros() -> List<Int>
+    ? "The timestamp field, which nothing here reads."
+    [0, 0, 0, 0]
+
+fn eightZeros() -> List<Int>
+    ? "The services field, which nothing here reads."
+    [0, 0, 0, 0, 0, 0, 0, 0]
+
+fn sixteenOnes() -> List<Int>
+    ? "Sixteen bytes that are not an IPv4-mapped address."
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+verify sixteenOnes
+    List.len(sixteenOnes()) => 16

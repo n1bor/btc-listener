@@ -1,0 +1,166 @@
+module AddressBook
+    intent =
+        "The Candidates this program is holding, and which one to try next."
+        "A Candidate is a Peer Address heard about and not connected to. The"
+        "distinction is the whole point of the word: a Peer has completed a"
+        "Handshake and a Candidate is a claim somebody made, and this module"
+        "is where claims wait to be tested."
+        "Kept in memory only. The full-node plan puts persisted Peer state out"
+        "of scope until a stage forces it in, and nothing here forces it: a"
+        "node that restarts asks its Peers again, which costs one round trip"
+        "and is how it would find out about changes anyway."
+        "Selection is first-untried, and that is a known weakness rather than"
+        "a design. Bitcoin Core buckets addresses by the network they came"
+        "from and picks randomly within a bucket, precisely so that a Peer"
+        "feeding us a thousand addresses it controls cannot decide who we"
+        "connect to. Doing that needs randomness and a shape this does not"
+        "have yet; until then the Address Book is a convenience and not a"
+        "defence, and it says so out loud rather than being quietly relied on."
+    exposes [Candidate, noBook, heard, heardAll, marked, forgotten, nextUntried, untriedIn, sizeOf]
+    depends []
+    effects []
+
+record Candidate
+    address: String
+    heardFrom: Int
+    tried: Bool
+
+fn noBook() -> Map<String, Candidate>
+    ? "An Address Book with nothing in it."
+    Map.fromList([])
+
+fn fromCommandLine() -> Int
+    ? "The identifier standing for an address a person gave us."
+      "Below zero, because every real Peer identifier is not, and where a"
+      "Candidate came from is the first thing that matters when the gossip"
+      "turns out to have been feeding us."
+    0 - 1
+
+verify fromCommandLine
+    fromCommandLine() => 0 - 1
+
+fn sizeOf(book: Map<String, Candidate>) -> Int
+    ? "How many Candidates are held."
+    Map.len(book)
+
+fn heard(book: Map<String, Candidate>, address: String, from: Int) -> Map<String, Candidate>
+    ? "One Candidate, unless it is already known."
+      "Already known wins: the first Peer to name an address is the one"
+      "recorded as having named it, and a later Peer repeating it does not"
+      "get to overwrite that or to reset whether it has been tried."
+    match Map.has(book, address)
+        true -> book
+        false -> Map.set(book, address, Candidate(address = address, heardFrom = from, tried = false))
+
+verify heard
+    sizeOf(heard(noBook(), "1.2.3.4:8333", 0)) => 1
+    Map.get(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333") => Option.Some(Candidate(address = "1.2.3.4:8333", heardFrom = 0, tried = false))
+    Map.get(heard(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), "1.2.3.4:8333", 1), "1.2.3.4:8333") => Option.Some(Candidate(address = "1.2.3.4:8333", heardFrom = 0, tried = true))
+    sizeOf(heard(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", 1)) => 1
+
+fn heardAll(book: Map<String, Candidate>, addresses: List<String>, from: Int) -> Map<String, Candidate>
+    ? "Everything one addr Message offered."
+    match addresses
+        [] -> book
+        [head, ..tail] -> heardAll(heard(book, head, from), tail, from)
+
+verify heardAll
+    sizeOf(heardAll(noBook(), [], 0)) => 0
+    sizeOf(heardAll(noBook(), ["1.2.3.4:8333", "5.6.7.8:8333"], 0)) => 2
+    sizeOf(heardAll(noBook(), ["1.2.3.4:8333", "1.2.3.4:8333"], 0)) => 1
+
+fn marked(book: Map<String, Candidate>, address: String) -> Map<String, Candidate>
+    ? "A Candidate we have now tried, whether or not it answered."
+      "Tried rather than failed, and it is never unset. A Candidate that"
+      "refused us might answer in an hour, but retrying it every time the"
+      "pool is short is a loop that dials the same dead address forever, and"
+      "there is nothing here that could tell the two apart."
+    match Map.get(book, address)
+        Option.None -> book
+        Option.Some(held) -> Map.set(book, address, Candidate(address = held.address, heardFrom = held.heardFrom, tried = true))
+
+verify marked
+    Map.get(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), "1.2.3.4:8333") => Option.Some(Candidate(address = "1.2.3.4:8333", heardFrom = 0, tried = true))
+    sizeOf(marked(noBook(), "1.2.3.4:8333")) => 0
+
+fn forgotten(book: Map<String, Candidate>, address: String) -> Map<String, Candidate>
+    ? "Drop a Candidate entirely."
+    Map.remove(book, address)
+
+verify forgotten
+    sizeOf(forgotten(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333")) => 0
+    sizeOf(forgotten(noBook(), "1.2.3.4:8333")) => 0
+
+fn nextUntried(book: Map<String, Candidate>, connected: List<String>) -> Option<String>
+    ? "A Candidate worth dialling: not tried, and not one we are already on."
+      "The already-connected check is needed because the gossip will hand us"
+      "back the Peers we are talking to -- they are, after all, the addresses"
+      "our Peers know best."
+    firstUntried(book, Map.keys(book), connected)
+
+verify nextUntried
+    nextUntried(noBook(), []) => Option.None
+    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), []) => Option.Some("1.2.3.4:8333")
+    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), ["1.2.3.4:8333"]) => Option.None
+    nextUntried(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), []) => Option.None
+
+fn firstUntried(book: Map<String, Candidate>, keys: List<String>, connected: List<String>) -> Option<String>
+    ? "Walk the Candidates in the order the Book holds them."
+    match keys
+        [] -> Option.None
+        [head, ..tail] -> untriedOrNext(book, head, tail, connected)
+
+verify firstUntried
+    firstUntried(noBook(), [], []) => Option.None
+    firstUntried(heard(noBook(), "1.2.3.4:8333", 0), ["1.2.3.4:8333"], []) => Option.Some("1.2.3.4:8333")
+
+fn untriedOrNext(book: Map<String, Candidate>, address: String, rest: List<String>, connected: List<String>) -> Option<String>
+    ? "This one if it is worth dialling, otherwise the next."
+    match usable(Map.get(book, address), connected)
+        true -> Option.Some(address)
+        false -> firstUntried(book, rest, connected)
+
+verify untriedOrNext
+    untriedOrNext(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", [], []) => Option.Some("1.2.3.4:8333")
+    untriedOrNext(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", [], ["1.2.3.4:8333"]) => Option.None
+
+fn usable(held: Option<Candidate>, connected: List<String>) -> Bool
+    ? "Untried, and not already a Peer."
+    match held
+        Option.None -> false
+        Option.Some(one) -> Bool.and(one.tried == false, List.contains(connected, one.address) == false)
+
+verify usable
+    usable(Option.None, []) => false
+    usable(Option.Some(Candidate(address = "a", heardFrom = 0, tried = false)), []) => true
+    usable(Option.Some(Candidate(address = "a", heardFrom = 0, tried = true)), []) => false
+    usable(Option.Some(Candidate(address = "a", heardFrom = 0, tried = false)), ["a"]) => false
+
+fn untriedIn(book: Map<String, Candidate>, connected: List<String>) -> Int
+    ? "How many Candidates are still worth dialling."
+    countUntried(book, Map.keys(book), connected, 0)
+
+verify untriedIn
+    untriedIn(noBook(), []) => 0
+    untriedIn(heardAll(noBook(), ["1.2.3.4:8333", "5.6.7.8:8333"], 0), []) => 2
+    untriedIn(heardAll(noBook(), ["1.2.3.4:8333", "5.6.7.8:8333"], 0), ["1.2.3.4:8333"]) => 1
+
+fn countUntried(book: Map<String, Candidate>, keys: List<String>, connected: List<String>, acc: Int) -> Int
+    ? "One Candidate at a time."
+    match keys
+        [] -> acc
+        [head, ..tail] -> countUntried(book, tail, connected, acc + oneIfUsable(Map.get(book, head), connected))
+
+verify countUntried
+    countUntried(noBook(), [], [], 0) => 0
+    countUntried(heard(noBook(), "a", 0), ["a"], [], 0) => 1
+
+fn oneIfUsable(held: Option<Candidate>, connected: List<String>) -> Int
+    ? "One for a Candidate worth dialling, nothing for anything else."
+    match usable(held, connected)
+        true -> 1
+        false -> 0
+
+verify oneIfUsable
+    oneIfUsable(Option.None, []) => 0
+    oneIfUsable(Option.Some(Candidate(address = "a", heardFrom = 0, tried = false)), []) => 1

@@ -73,6 +73,7 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #27 |
 | a readiness poll over connections | **delivered and closed** as `Tcp.poll` over a caller-keyed `Map<Int, Tcp.Connection>` | **wired** (n1bor/btc-listener#27): `Infra.Peers` polls every socket at once and reads with `Tcp.readSome` |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
+| a bounded dial | [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118) — `Tcp.connect` has no deadline, so one dead address stalls the loop for minutes (n1bor/btc-listener#119) | Stage 5's gossip, and Stage 6's scoring |
 | `Tcp.listen` / `Tcp.accept` | to be filed; same family as the poll | Stage 8 |
 
 ## The disciplines that carry over

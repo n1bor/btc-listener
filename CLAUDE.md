@@ -152,6 +152,19 @@ deadlines, not one: 150s of silence from the whole pool, and 60s for a Peer to
 answer the question it was asked, because with several Peers those stopped
 being the same fact.
 
+**The Address Book** (#27, Stage 5): `follow` sends `getaddr` on joining and
+folds arriving `addr` Messages into `domain/addressbook.av` as **Candidates** —
+Peer Addresses claimed to exist, which become Peers only on a completed
+Handshake (CONTEXT.md is binding on both words). In memory only; the plan puts
+persisted Peer state out of scope. Target 8 Peers, one dial per turn. The pool
+keeps Messages nobody asked for (bounded at 64, newest wins) because Core
+answers a `getaddr` while the Header phase is waiting for `headers` — draining
+that is where the Book is filled, and it happens between the Header and body
+phases as well as in the listen loop, because a syncing node reaches the listen
+loop hours late. Two known gaps, both filed: selection is first-untried and so
+no defence against eclipse (#118), and a dead Candidate blocks the loop for the
+OS connect timeout (#119).
+
 **Following the tip** (#26, Stage 4): `follow` is the header, body and Set
 phases run again every time a Peer announces a Block. An `inv` naming a Block
 is answered with `getheaders`, not `getdata` — a Block whose Header the tree

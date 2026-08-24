@@ -20,7 +20,7 @@ module Follow
         "are Stages 5 to 7; a Transaction announced here is simply not asked"
         "for, because there is nowhere yet to put one."
     exposes [follow]
-    depends [Bytes, Domain.Address, Domain.HeaderTree, Domain.Inbox, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -34,6 +34,8 @@ record Following
     pool: Pool
     store: Store
     blocks: BlockStore
+    book: Map<String, Candidate>
+    nextKey: Int
 
 fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
@@ -46,8 +48,152 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Time.now, Time.unixMs,
     ]
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
-    outcome = session(Following(pool = pool, store = store, blocks = blocks))
-    closeAfter(pool, outcome)
+    asked = askingAll(pool, Map.keys(pool.sockets))?
+    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses)))
+    closeAfter(asked, outcome)
+
+fn targetPeers() -> Int
+    ? "How many Peers the node tries to keep."
+      "Eight, which is Bitcoin Core's outbound default and is chosen for the"
+      "same reason: enough that losing one is routine and that no single Peer"
+      "decides what chain we see, few enough that a node is not a burden on"
+      "the Network it joined."
+    8
+
+verify targetPeers
+    targetPeers() => 8
+
+fn askingAll(pool: Pool, keys: List<Int>) -> Result<Pool, String>
+    ? "Ask every Peer for the Peers it knows."
+      "Once, on joining. A Peer answers a getaddr at most once per connection"
+      "-- Bitcoin Core ignores the second -- so asking again would be noise,"
+      "and the unsolicited addr Messages that follow are where the rest comes"
+      "from."
+    ! [Tcp.writeBytes]
+    match keys
+        [] -> Result.Ok(pool)
+        [head, ..tail] -> askingAll(Infra.Peers.send(pool, head, "getaddr", Bytes.fromList([]))?, tail)
+
+fn saidBook(before: Int, after: Int) -> Unit
+    ? "Say how the Address Book grew, when it grew."
+      "Silent when it did not, which is most turns of the loop: a Peer"
+      "relaying one address it just learned is routine and a Peer answering"
+      "our getaddr with hundreds is not."
+    ! [Console.print]
+    match after > before
+        false -> Unit
+        true -> Console.print("the Address Book holds {after} Candidate(s), up {after - before}")
+
+fn drainSpare(state: Following) -> Following
+    ? "Messages that arrived while something else was being waited for."
+      "A getaddr is answered while the Header phase is waiting for headers --"
+      "the two questions are asked seconds apart, and the answers do not"
+      "arrive in the order they were asked. The pool keeps what it was not"
+      "asked for; this is where it is looked at, and emptied."
+    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey)
+
+fn bookAfter(book: Map<String, Candidate>, spare: List<Spare>) -> Map<String, Candidate>
+    ? "The Address Book, grown by whatever those Messages said."
+    match spare
+        [] -> book
+        [head, ..tail] -> bookAfter(spareInto(book, head), tail)
+
+verify bookAfter
+    bookAfter(Domain.AddressBook.noBook(), []) => Domain.AddressBook.noBook()
+    Domain.AddressBook.sizeOf(bookAfter(Domain.AddressBook.noBook(), [sampleAddrSpare()])) => 1
+    Domain.AddressBook.sizeOf(bookAfter(Domain.AddressBook.noBook(), [sampleAddrSpare(), sampleAddrSpare()])) => 1
+
+fn spareInto(book: Map<String, Candidate>, one: Spare) -> Map<String, Candidate>
+    ? "The only kept Message this stage acts on is an addr."
+      "Everything else a Peer said while we were waiting is genuinely not"
+      "wanted -- a Transaction with no Mempool to hold it, an inv for a Block"
+      "we will hear about again -- and is let go."
+    match one.frame.command
+        "addr" -> Domain.AddressBook.heardAll(book, renderedAll(Domain.Addr.addressesOf(one.frame.body), []), one.key)
+        _ -> book
+
+verify spareInto
+    Domain.AddressBook.sizeOf(spareInto(Domain.AddressBook.noBook(), sampleAddrSpare())) => 1
+    Domain.AddressBook.sizeOf(spareInto(Domain.AddressBook.noBook(), Spare(key = 0, frame = Frame(command = "tx", body = [])))) => 0
+    Domain.AddressBook.sizeOf(spareInto(Domain.AddressBook.noBook(), Spare(key = 0, frame = Frame(command = "addr", body = [])))) => 0
+
+fn sampleAddrSpare() -> Spare
+    ? "An addr Message naming one Peer, for the cases here."
+    Spare(key = 0, frame = Frame(command = "addr", body = sampleAddrBody()))
+
+fn sampleAddrBody() -> List<Int>
+    ? "One addr entry: a count, a timestamp, services, an IPv4-mapped address"
+      "and a port."
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 1, 2, 3, 4, 32, 141]
+
+verify sampleAddrBody
+    List.len(sampleAddrBody()) => 31
+    Domain.Addr.addressesOf(sampleAddrBody()) => [Domain.Address.fromOctetsOn([1, 2, 3, 4], 8333)?]
+
+fn toppedUp(state: Following) -> Result<Following, String>
+    ? "Dial a Candidate when the node is short of Peers."
+      "One per turn of the loop rather than a rush of them: a Handshake is a"
+      "conversation and this loop is the only thing that can have one, so"
+      "every dial is time the Peers we already have are not being read."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Map.len(state.pool.sockets) >= targetPeers()
+        true -> Result.Ok(state)
+        false -> dialling(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
+
+fn dialling(state: Following, chosen: Option<String>) -> Result<Following, String>
+    ? "Nothing worth dialling is the usual answer, and not a problem."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match chosen
+        Option.None -> Result.Ok(state)
+        Option.Some(address) -> dialled(state, address, Domain.Address.fromPeerText(address, Domain.Network.portOf(state.pool.network)))
+
+fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String>) -> Result<Following, String>
+    ? "A Candidate whose address will not parse is one a Peer made up."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey)
+    match parsed
+        Result.Err(why) -> Result.Ok(tried)
+        Result.Ok(peer) -> reaching(tried, address, peer)
+
+fn reaching(state: Following, address: String, peer: PeerAddress) -> Result<Following, String>
+    ? "One Candidate that would not answer is one Candidate, not the end."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Infra.Peers.joined(state.pool, state.nextKey, peer)
+        Result.Err(why) -> unreachable(state, address, why)
+        Result.Ok(joined) -> reached(state, address, joined)
+
+fn unreachable(state: Following, address: String, why: String) -> Result<Following, String>
+    ? "Say who would not have us, and leave it marked as tried."
+    ! [Console.error]
+    _said = Console.error("candidate {address} did not answer: {why}")
+    Result.Ok(state)
+
+fn reached(state: Following, address: String, joined: Pool) -> Result<Following, String>
+    ? "A Candidate has become a Peer, so ask it who it knows."
+    ! [Console.error, Console.print, Tcp.writeBytes]
+    _said = Console.print("peer {state.nextKey} is {address}, from the Address Book")
+    asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
+    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -118,7 +264,8 @@ fn session(state: Following) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     started = caughtUp(state, firstKey(state.pool))?
@@ -149,19 +296,31 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
       "other Peer is read and kept alive throughout, which is the whole"
       "reason this stage exists -- the single-Peer shape left them unheard"
       "and unanswered for as long as a catch-up took."
+      "The Address Book is drained and the pool topped up between the Header"
+      "phase and the bodies, and again at the end, as well as every turn of"
+      "the listen loop. A node syncing from nothing spends minutes on Headers"
+      "and hours on bodies; draining only at the end would mean doing all of"
+      "that on the one Peer it was started with, which is the arrangement"
+      "this stage exists to end. The answer to a getaddr has arrived by the"
+      "time the Headers have."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     have = haveOf(state.store)?
     grown = Infra.Download.headersOn(state.pool, key, state.store, have)?
-    tipHeight = tipHeightOf(grown.store)?
-    aligned = Infra.Rewind.realigned(grown.store, state.blocks)?
-    fetched = Infra.Bodies.bodiesOn(grown.pool, key, aligned.store, state.blocks, aligned.from, tipHeight)?
-    connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks), tipHeight)
+    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))
+    _heard = saidBook(Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
+    afterHeaders = toppedUp(drained)?
+    tipHeight = tipHeightOf(afterHeaders.store)?
+    aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks)?
+    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey), tipHeight)?
+    toppedUp(drainSpare(upToTip))
 
 fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
     ? "The Set forward to the tip, and one line saying where that leaves it."
@@ -173,7 +332,7 @@ fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
     ]
     built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight)?
     _said = Console.print("following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
-    Result.Ok(Following(pool = state.pool, store = built.store, blocks = state.blocks))
+    Result.Ok(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))
 
 fn haveOf(store: Store) -> Result<Int, String>
     ? "How many Heights the Header tree already reaches, for the Locator."
@@ -223,11 +382,14 @@ fn listen(state: Following) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
-    waited = Infra.Peers.awaitAnyPeer(state.pool)?
-    handle(Following(pool = waited.pool, store = state.store, blocks = state.blocks), waited.key, waited.frame.command, waited.frame.body)
+    drained = drainSpare(state)
+    topped = toppedUp(drained)?
+    waited = Infra.Peers.awaitAnyPeer(topped.pool)?
+    handle(Following(pool = waited.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey), waited.key, waited.frame.command, waited.frame.body)
 
 fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this loop acts on; every other one is ignored."
@@ -241,12 +403,14 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     match command
         "inv" -> onAnnouncement(state, key, body)
         "headers" -> onMoved(state, key, "peer {key} sent Headers unasked")
+        "addr" -> onAddresses(state, key, body)
         "ping" -> onPing(state, key, body)
         _ -> listen(state)
 
@@ -260,13 +424,54 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     announced = Domain.Inventory.blockHashesOf(body)
     match announced
         [] -> listen(state)
         [head, ..tail] -> onMoved(state, key, "{List.len(announced)} Block(s) announced by peer {key}")
+
+fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "Peers this Peer says exist, into the Address Book."
+      "Every one of them is a claim by a Peer under no obligation to be"
+      "honest, which is why they go in as Candidates: nothing is believed"
+      "until a Handshake completes, and who told us is recorded beside each"
+      "one so that a Peer feeding us rubbish can be seen to have done it."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.now, Time.unixMs,
+    ]
+    offered = Domain.Addr.addressesOf(body)
+    grown = Domain.AddressBook.heardAll(state.book, renderedAll(offered, []), key)
+    _said = saidHeard(List.len(offered), key, Domain.AddressBook.sizeOf(grown))
+    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey))
+
+fn saidHeard(offered: Int, key: Int, held: Int) -> Unit
+    ? "Say what was heard, unless nothing was."
+      "A Peer relaying a single address it just learned is the common case"
+      "and is not worth a line; a Peer answering our getaddr with hundreds"
+      "is worth one."
+    ! [Console.print]
+    match offered == 0
+        true -> Unit
+        false -> Console.print("peer {key} named {offered} Peer(s); the Address Book holds {held}")
+
+fn renderedAll(addresses: List<PeerAddress>, acc: List<String>) -> List<String>
+    ? "Each Peer Address as the text the Address Book keys it by."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> renderedAll(tail, List.prepend(Domain.Address.toString(head), acc))
+
+verify renderedAll
+    renderedAll([], []) => []
+    List.len(renderedAll([Domain.Address.fromString("1.2.3.4")?], [])) => 1
+    renderedAll([Domain.Address.fromString("1.2.3.4")?], []) => ["1.2.3.4:8333"]
 
 fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
     ? "The chain says it has moved, so ask that Peer how far."
@@ -278,7 +483,8 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     _said = Console.print("{Time.now()}  {why}")
@@ -291,9 +497,10 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.now, Time.unixMs,
     ]
     payload = Bytes.fromList(body)?
     sent = Infra.Peers.send(state.pool, key, "pong", payload)?
-    listen(Following(pool = sent, store = state.store, blocks = state.blocks))
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey))

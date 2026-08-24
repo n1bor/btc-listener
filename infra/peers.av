@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Waited, WaitedFrom, opened, joined, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs]
+    exposes [Pool, Spare, Waited, WaitedFrom, opened, joined, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare]
     depends [Bytes, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -28,10 +28,15 @@ module Peers
         Time.unixMs,
     ]
 
+record Spare
+    key: Int
+    frame: Frame
+
 record Pool
     network: Network
     sockets: Map<Int, Tcp.Connection>
     standing: Map<Int, Standing>
+    spare: List<Spare>
 
 record Waited
     pool: Pool
@@ -79,14 +84,68 @@ verify answerDeadlineMs
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding())
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [])
 
 fn withStanding(pool: Pool, standing: Map<Int, Standing>) -> Pool
     ? "The pool, with what is known about the Peers moved on."
       "The sockets and the standing are kept in step by only ever changing"
       "one of them here: the pure half is Domain.Inbox's and this is the one"
       "place it is folded back in."
-    Pool(network = pool.network, sockets = pool.sockets, standing = standing)
+    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare)
+
+fn spareLimit() -> Int
+    ? "How many unasked-for Messages to keep for the caller."
+      "A caller waiting on one Message gets others in the meantime, and some"
+      "of them matter -- an addr answering a getaddr arrives exactly while"
+      "the Header phase is waiting for headers, which is when this program"
+      "asks for both. They are kept rather than discarded, and the keeping is"
+      "bounded, because a Peer chooses how many it sends."
+    64
+
+verify spareLimit
+    spareLimit() => 64
+
+fn spareOf(pool: Pool) -> List<Spare>
+    ? "The Messages that arrived while something else was being waited for."
+    pool.spare
+
+fn withoutSpare(pool: Pool) -> Pool
+    ? "The pool, with the kept Messages handed over and forgotten."
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [])
+
+fn sparing(pool: Pool, key: Int, frame: Frame) -> Pool
+    ? "One unasked-for Message kept, oldest dropped once the bound is reached."
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])))
+
+fn bounded(spare: List<Spare>) -> List<Spare>
+    ? "Keep the newest, because an address heard a minute ago is worth more"
+      "than one heard an hour ago."
+    keptFrom(spare, List.len(spare))
+
+fn keptFrom(spare: List<Spare>, held: Int) -> List<Spare>
+    ? "Drop from the front once there are more than the bound allows."
+    match held > spareLimit()
+        true -> List.drop(spare, held - spareLimit())
+        false -> spare
+
+verify keptFrom
+    keptFrom([], 0) => []
+    keptFrom([sampleSpare()], 1) => [sampleSpare()]
+    List.len(keptFrom(manySpare(spareLimit() + 3, []), spareLimit() + 3)) => 64
+
+fn sampleSpare() -> Spare
+    ? "One kept Message, for the cases here."
+    Spare(key = 0, frame = Frame(command = "addr", body = []))
+
+fn manySpare(count: Int, acc: List<Spare>) -> List<Spare>
+    ? "That many kept Messages, for the cases here."
+    match count <= 0
+        true -> acc
+        false -> manySpare(count - 1, List.prepend(sampleSpare(), acc))
+
+verify manySpare
+    List.len(manySpare(3, [])) => 3
+    manySpare(0, []) => []
 
 fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
     ? "Connect to a Peer and complete the Handshake, keeping the rest alive"
@@ -98,7 +157,7 @@ fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
         Time.unixMs,
     ]
     connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, connection), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address)))
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, connection), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address)), spare = pool.spare)
     introduced(seated, key, address)
 
 fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
@@ -130,7 +189,7 @@ fn handshaking(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame:
         "verack" -> Result.Ok(withStanding(pool, Domain.Inbox.greeted(pool.standing, key, seenVersion, seenAgent)))
         "version" -> acknowledged(pool, key, frame.body)
         "ping" -> pongThen(pool, key, seenVersion, seenAgent, frame)
-        _ -> greeting(pool, key, seenVersion, seenAgent)
+        _ -> greeting(sparing(pool, key, frame), key, seenVersion, seenAgent)
 
 fn acknowledged(pool: Pool, key: Int, body: List<Int>) -> Result<Pool, String>
     ? "Send verack in reply, then keep waiting for theirs."
@@ -188,7 +247,7 @@ fn skipped(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Frame) 
     ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match frame.command
         "ping" -> answeredPing(pool, key, wanted, deadlineMs, frame)
-        _ -> awaitingFrom(pool, key, wanted, deadlineMs)
+        _ -> awaitingFrom(sparing(pool, key, frame), key, wanted, deadlineMs)
 
 fn answeredPing(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Frame) -> Result<Waited, String>
     ? "Echo the nonce back, then carry on waiting."
@@ -293,7 +352,7 @@ fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: List<Int>) -> Result
 
 fn forgotten(pool: Pool, key: Int) -> Pool
     ? "Forget a Peer, without closing anything."
-    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key))
+    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare)
 
 fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
     ? "Close one Peer's socket and forget it."

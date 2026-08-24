@@ -22,7 +22,7 @@ module Inbox
         "live beside the buffer. What replaced it is smaller -- the buffer is"
         "the queue -- and it costs a caller nothing, because a caller waiting"
         "on one Message discards the others exactly as it always did."
-    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, seated, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
+    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, seated, addressesHeld, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
     depends [Bytes, Domain.Message, Domain.Network]
     effects []
 
@@ -135,6 +135,38 @@ fn seated(standing: Map<Int, Standing>, key: Int, address: String) -> Map<Int, S
 verify seated
     Map.len(seated(noStanding(), 0, "192.0.2.1:8333")) => 1
     standingAt(seated(noStanding(), 0, "192.0.2.1:8333"), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = [], version = 0, agent = ""))
+
+fn addressesHeld(standing: Map<Int, Standing>) -> List<String>
+    ? "Where every Peer currently held can be reached."
+      "The Address gossip hands back the Peers we are already talking to --"
+      "they are, after all, the addresses our Peers know best -- so something"
+      "has to be able to say which those are."
+    eachAddress(standing, Map.keys(standing), [])
+
+verify addressesHeld
+    addressesHeld(noStanding()) => []
+    addressesHeld(oneSeated()) => ["192.0.2.1:8333"]
+    List.len(addressesHeld(seated(oneSeated(), 1, "192.0.2.2:8333"))) => 2
+
+fn eachAddress(standing: Map<Int, Standing>, keys: List<Int>, acc: List<String>) -> List<String>
+    ? "One Peer at a time, in identifier order."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> eachAddress(standing, tail, withAddress(acc, Map.get(standing, head)))
+
+verify eachAddress
+    eachAddress(noStanding(), [], []) => []
+    eachAddress(oneSeated(), [0], []) => ["192.0.2.1:8333"]
+
+fn withAddress(acc: List<String>, held: Option<Standing>) -> List<String>
+    ? "A Peer we do not hold contributes nothing."
+    match held
+        Option.None -> acc
+        Option.Some(one) -> List.prepend(one.address, acc)
+
+verify withAddress
+    withAddress([], Option.None) => []
+    withAddress([], Option.Some(emptyStanding())) => ["192.0.2.1:8333"]
 
 fn standingAt(standing: Map<Int, Standing>, key: Int) -> Option<Standing>
     ? "What is known about one Peer, if it is one we hold."

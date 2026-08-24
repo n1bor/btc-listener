@@ -23,6 +23,19 @@ The validated network location of a Peer — four octets and a port. Constructed
 only by parsing, so an unvalidated address cannot reach the rest of the program.
 _Avoid_: IP, host, target, addr
 
+**Candidate**:
+A Peer Address this program has heard about but not connected to. It becomes a
+Peer only when a Handshake completes; until then nothing is known about it
+beyond where it claims to be, and the claim came from a Peer with no obligation
+to be honest.
+_Avoid_: peer, node, entry, address
+
+**Address Book**:
+The Candidates this program is holding, and what it knows about each — where it
+was heard from and when it was last reachable. Distinct from the DNS seeds,
+which are the bootstrap and not part of it.
+_Avoid_: addrman, peer table, address manager, cache
+
 **Network**:
 Which Bitcoin network a Peer belongs to. Determines the magic bytes that prefix
 every Message, so a Message is only meaningful with respect to one Network.
