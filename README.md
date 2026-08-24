@@ -76,20 +76,9 @@ because anything that opens the Index is several times faster that way. See
 - A reachable Bitcoin node. Any peer will do; one you run yourself is easier to
   debug against.
 
-A machine that only needs to *run* this needs none of that. Every push to main
-that passes CI publishes the compiled node to the
-[`main-build`](https://github.com/n1bor/btc-listener/releases/tag/main-build)
-release, built on Ubuntu 22.04 so it runs on 22.04 and anything newer:
-
-```bash
-curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/main -o main
-curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/SHA256SUMS -o SHA256SUMS
-sha256sum -c SHA256SUMS && chmod +x main
-```
-
-RocksDB and libsecp256k1 are compiled in, so the only shared libraries are
-stock ones. Standing a download server up that way — and what it costs in disk
-— is [#138](https://github.com/n1bor/btc-listener/issues/138).
+A machine that only needs to *run* this needs none of that — not Aver, not
+Rust, not `clang`. CI publishes a compiled binary for it. See [Running it on a
+server](#running-it-on-a-server).
 
 ## Running
 
@@ -946,6 +935,118 @@ Only Segment 0 goes, because Segment 1 still holds Blocks above the Height.
 8.6 MB becomes 4.6 MB. Afterwards `show` on a discarded Height says so rather
 than reporting it missing, and `audit` over the range counts the Inputs it can
 no longer follow as unresolved rather than as faults.
+
+## Running it on a server
+
+A download measured in days belongs on a machine of its own, and that machine
+does not need a toolchain. It needs one executable and a peer.
+
+### The binary
+
+Every push to `main` that gets past `format`, `check`, `verify`, the provider
+tests and the build publishes what it just proved to the
+[`main-build`](https://github.com/n1bor/btc-listener/releases/tag/main-build)
+release, replacing what was there. The repository is public, so this needs no
+credentials:
+
+```bash
+curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/main -o main
+curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/SHA256SUMS -o SHA256SUMS
+sha256sum -c SHA256SUMS
+chmod +x main && ./main help
+```
+
+**Check the hash rather than skipping it.** Nothing inside the binary says
+which commit produced it; `SHA256SUMS` and the release title are the only
+provenance there is, and three days into a download is exactly when someone
+asks which build wrote the directory.
+
+Picking up a later build is the same two `curl`s. There is no upgrade path for
+a chain directory and deliberately is not one — a format change means
+downloading again, which is what [#48](https://github.com/n1bor/btc-listener/issues/48)
+is.
+
+### What it runs on
+
+18 MB, x86-64, dynamically linked against four libraries that are stock on any
+Ubuntu:
+
+```
+libstdc++.so.6   libgcc_s.so.1   libm.so.6   libc.so.6
+```
+
+RocksDB and libsecp256k1 are C and C++ compiled *into* it rather than linked at
+run time; `libstdc++` appears at all only because RocksDB is C++.
+
+The floor is glibc, and the release job builds on `ubuntu-22.04` rather than on
+`ubuntu-latest` precisely so that floor stays low: a 24.04 runner would raise
+it above 22.04 servers without anything saying so. **Ubuntu 22.04 or newer**,
+therefore — glibc is backward compatible, so newer is always safe, and the CI
+log prints the required version on every publish rather than leaving it to be
+discovered.
+
+Building on the server instead is the [Requirements](#requirements) above, and
+is worth it only if the machine is not x86-64, is older than 22.04, or is going
+to be developed on.
+
+### Prove the machine before trusting it with four days
+
+Nothing is compiled there, so there is no toolchain to check. What is worth
+checking is this binary, on this machine, against a real node — which is
+[`docs/regtest-testing.md`](docs/regtest-testing.md), sections 1 to 4. A few
+minutes, and it needs Bitcoin Core, `python3`, and the repository for
+`tools/regtest/`. It exercises the reorganisation path, which a download will
+never tell you is broken.
+
+### File descriptors
+
+RocksDB keeps many SSTs open and Ubuntu's default is 1024:
+
+```bash
+printf '* soft nofile 65535\n* hard nofile 65535\n' | sudo tee -a /etc/security/limits.conf
+```
+
+Log out and back in for it to apply.
+
+### Choosing a peer
+
+`headers` and `bodies` want an address; only the bare listener asks a DNS seed
+for one. Two things matter:
+
+- **Archival, not pruned.** A pruned peer will not serve old Blocks, and what
+  that looks like is a download that stalls rather than one that says why.
+- **Prove it on a small range first**, before committing days to it:
+
+```bash
+./main headers <peer> ~/chains/mainnet
+./main bodies  <peer> ~/chains/mainnet 1 500
+```
+
+Running Bitcoin Core on the same server is the more debuggable option and the
+more expensive one: a non-pruned mainnet Core is its own full initial sync,
+larger than everything else on the machine put together.
+
+### Long runs
+
+- **Use `tmux`.** These outlive an SSH session, and a disconnect that kills a
+  three-day `bodies` is an avoidable way to lose three days.
+- **One command per directory.** The database takes an exclusive lock, so a
+  second command against the same directory fails rather than waits.
+- **Everything resumes**, and stopping costs at most the batch in flight. A
+  `utxo` run killed at Height 5,934 resumed at 5,935: the Set records where it
+  stands durably, so a kill is not a rollback.
+- **A run that dies leaves `<dir>/.writing`** behind — the claim from
+  `infra/lock.av` — and the next command refuses to start rather than write
+  into a directory something else may still hold. Delete it only once you have
+  confirmed nothing is actually running.
+- **Measure a rate over a window before believing an ETA.** The first minute of
+  a `bodies` run reads far slower than the steady state, because it covers the
+  connect and the handshake: 0.6 Blocks/s against a steady 5.9 on signet, which
+  is the difference between a 28-minute estimate and a false 4.6-hour one.
+
+Sizing the disk for a particular chain, and the two figures that are still
+arithmetic rather than measurements, are in
+[#138](https://github.com/n1bor/btc-listener/issues/138).
 
 ## The Index and its backends
 
