@@ -27,7 +27,11 @@ disagree, check `git log upstream/main` before believing it is a live bug.
 **Moving the pin is a routine** — README "Moving the Aver pin": pull
 `../aver`, reinstall, write the SHA to `.aver-version`, run the gates, then
 grep the repo for `jasisz/aver#` and retire every workaround whose issue has
-closed, in the same PR.
+closed, in the same PR. **But read each citation before retiring**: a line
+recording *where something came from* looks identical to one recording *what
+is worked around*, and only the second retires with its issue —
+`connect_timeout_secs` cites the closed #1118 as provenance and is kept alive
+by the open #1125.
 
 **Test against a real node before you commit.** `aver verify` checks this
 program against fixtures its own authors wrote, and a fixture cannot disagree
@@ -52,6 +56,11 @@ and `compile`.
   field must satisfy them — so no opaque record (`PeerAddress`) and no record
   that lacks the derives (`Frame`) can live inside one. #27 lost a per-Peer
   Frame queue to this and was better for it.
+- The carrier-based Eq/Hash derive resolves by **unqualified type name**, so
+  a record sharing a name with any type the analysis wants `Eq`/`Hash` on
+  gets its twin's derives — and fails E0277 if a field cannot carry them
+  (`Progress` twice, jasisz/aver#1134; the bodies walk state is `Fetched`
+  because of it). Grep the repo for a record's name before adding it.
 - Every module in a `depends` list is glob-imported into the generated Rust.
   Two of them defining the same name is usually harmless — this repo has 157
   such pairs — but it becomes `E0659` the moment a **parameter or binding**
