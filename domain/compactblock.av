@@ -19,7 +19,7 @@ module CompactBlock
         "Nothing here talks to a Peer or reads a Store. It decodes what"
         "arrived, says which positions are still missing, and builds the"
         "request that asks for them; the loop does the asking."
-    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion, assembled, rootOf]
+    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion, assembled, rootOf, witnessIdOf, holdingsFor]
     depends [Bytes, Crypto.Digest32, Domain.Block, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.SipHash, Domain.Transaction]
     effects []
 
@@ -433,3 +433,48 @@ fn identifierIn(decoded: Result<Transaction, String>) -> String
 
 verify identifierIn
     identifierIn(Result.Err("no")) => ""
+
+fn witnessIdOf(raw: List<Int>) -> List<Int>
+    ? "The Witness Transaction Id of these bytes, in wire order."
+      "Version 2 short ids are taken over the wtxid, which is the double"
+      "SHA-256 of the whole serialisation -- Witnesses included -- rather than"
+      "of the stripped form the Transaction Id uses. For a Transaction with no"
+      "Witness the two are the same number, which is why using the wrong one"
+      "works perfectly until the first SegWit spend and then names everything"
+      "wrongly."
+      "Wire order, not reading order. The hash comes out of the digest in the"
+      "order it is hashed in, and that is the order it is fed to SipHash;"
+      "reversing it here would be reversing it twice."
+    Bytes.octets(Crypto.Digest32.bytes(Domain.Hash.doubleSha(Result.withDefault(Bytes.fromList(raw), Bytes.fromList([])))))
+
+verify witnessIdOf
+    List.len(witnessIdOf([])) => 32
+    List.len(witnessIdOf([1, 2, 3])) => 32
+    Domain.Hash.reversedHex(witnessIdOf([])) => Domain.Hash.identifierOf(Bytes.fromList([]))
+
+fn holdingsFor(key: Tuple<Int, Int>, raws: List<List<Int>>) -> Map<Int, List<Int>>
+    ? "Everything we hold, keyed by the short id this Block would name it by."
+      "The Mempool holds Transactions by their own Id; a compact Block names"
+      "them by a hash under a key that only exists once this Block does. So"
+      "reconstruction starts by renaming the whole Mempool, once per compact"
+      "Block, and that is not an inefficiency to design away -- it is what"
+      "makes the naming unguessable in advance."
+      "Two Transactions colliding on one short id would lose one of them"
+      "here. That is the collision BIP152 accepts and answers for with the"
+      "Merkle Root: rebuild, hash, and ask for the whole Block if it does not"
+      "match."
+    holdingsInto(key, raws, Map.fromList([]))
+
+verify holdingsFor
+    Map.len(holdingsFor((0, 0), [])) => 0
+    Map.len(holdingsFor((0, 0), [[1], [2]])) => 2
+
+fn holdingsInto(key: Tuple<Int, Int>, raws: List<List<Int>>, acc: Map<Int, List<Int>>) -> Map<Int, List<Int>>
+    ? "One held Transaction at a time, named and filed."
+    match raws
+        [] -> acc
+        [head, ..tail] -> holdingsInto(key, tail, Map.set(acc, shortIdOf(key, witnessIdOf(head)), head))
+
+verify holdingsInto
+    Map.len(holdingsInto((0, 0), [], Map.fromList([]))) => 0
+    Map.len(holdingsInto((0, 0), [[1]], Map.fromList([]))) => 1
