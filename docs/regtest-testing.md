@@ -365,6 +365,69 @@ this — or any — negative result. See [Prove the binary is the one you
 built](#prove-the-binary-is-the-one-you-built) below; this test was run three
 times against a stale binary before anyone noticed.
 
+### 10. A Block that never crossed the wire
+
+Section 8 proves the compact Block *format* against Core. This proves the
+point of it: a Block arriving as a Header and a list of six-byte names, and
+being rebuilt from Transactions the node already had.
+
+Fill the Mempool first — a compact Block whose Transactions we do not hold
+saves nothing and falls back to fetching them:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444 $D &
+sleep 10
+for i in 1 2 3; do $C sendtoaddress $($C getnewaddress "" bech32) 0.1$i; done
+# wait for three "mempool admitted" lines, then:
+$C generatetoaddress 1 "$($C getnewaddress)"
+```
+
+```
+compact Block 339bd1ed…b162: 4 Transaction(s), 0 fetched, 898 bytes rebuilt from the Mempool
+following at Height 177: 2 connected, 0 disconnected, set +10 -4
+mempool: 3 Transaction(s) left, taken by the chain; holding 0 (0 bytes)
+```
+
+**`0 fetched` is the number to read.** Four Transactions: the coinbase, which
+the sender always sends whole because it cannot be in anybody's Mempool, and
+three we already held. No `getblocktxn` round trip happened at all.
+
+Then confirm the rebuilt Block is the Block — stop `follow` first, since it
+holds the directory:
+
+```bash
+$C getblockhash 177                       # 339bd1ed…b162
+$BIN regtest show $D 177 summary
+```
+
+```
+height 177
+block  339bd1ed0687d50dcbc5d9fab148772627f126775d8bd311b020b31bc05db162
+body   segment 0 offset 56063, 898 bytes
+check  header hashes to the recorded Block Id
+merkle Transactions build the Root in the Header
+parent follows the Block below it in the Index
+work   Block Id is under the target in the Header
+txs    4
+```
+
+All four checks pass on bytes that were never sent to us. `merkle` is the one
+that matters here: it is the same check the reconstruction already made before
+storing, made again by a different path over what actually reached the disk.
+
+**What to try when it does not happen.** The line is absent, not wrong, in
+every failure — the node falls back to fetching the Block whole and says so:
+
+- `fetching it whole instead` names the reason. A short id collision, a Peer
+  that answered oddly, a Mempool that had moved on: all of them end here, and
+  the node is exactly where it would have been without compact Blocks.
+- No compact line at all means Core did not send one. It only serves
+  `MSG_CMPCT_BLOCK` for Blocks near its tip, and only to Peers that sent
+  `sendcmpct` — which this node does on connect, for every Peer, version 2.
+- A Mempool with nothing in it rebuilds nothing. `0 of 4 already held, asking
+  for 3` is the honest version of that, and still correct; it just saves
+  nothing.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

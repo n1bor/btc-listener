@@ -19,7 +19,7 @@ module CompactBlock
         "Nothing here talks to a Peer or reads a Store. It decodes what"
         "arrived, says which positions are still missing, and builds the"
         "request that asks for them; the loop does the asking."
-    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion, assembled, rootOf, witnessIdOf, holdingsFor]
+    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion, assembled, rootOf, witnessIdOf, holdingsFor, rebuilt, blockBytes]
     depends [Bytes, Crypto.Digest32, Domain.Block, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.SipHash, Domain.Transaction]
     effects []
 
@@ -509,3 +509,57 @@ fn holdingsInto(key: Tuple<Int, Int>, raws: List<List<Int>>, acc: Map<Int, List<
 verify holdingsInto
     Map.len(holdingsInto((0, 0), [], Map.fromList([]))) => 0
     Map.len(holdingsInto((0, 0), [[1]], Map.fromList([]))) => 1
+
+fn rebuilt(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>) -> Result<Bytes, String>
+    ? "The whole Block, rebuilt from its parts and checked against its own"
+      "Header before anybody is told it exists."
+      "This is the one function the loop needs. Everything a reconstruction"
+      "can get wrong ends here as a Result.Err with a reason: a position"
+      "nothing filled, a Transaction that will not decode, and above all a"
+      "Merkle Root that does not match. That last one is not paranoia -- a"
+      "six-byte short id can name two Transactions, and the Block that comes"
+      "out of such a collision is wrong in exactly one place and perfectly"
+      "well-formed everywhere else. BIP152 answers it by asking for the whole"
+      "Block instead, which is the caller's move to make."
+    checkedAgainstHeader(compact, assembled(compact, held, supplied)?)
+
+verify rebuilt
+    rebuilt(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
+
+fn checkedAgainstHeader(compact: Compact, transactions: List<List<Int>>) -> Result<Bytes, String>
+    ? "The Transactions we assembled, against the Header that came with them."
+    rootChecked(compact, transactions, rootOf(transactions)?, Domain.Block.decodeHeader(compact.header)?)
+
+fn rootChecked(compact: Compact, transactions: List<List<Int>>, root: String, header: BlockHeader) -> Result<Bytes, String>
+    ? "The Root the rebuilt Transactions commit to has to be the Root the"
+      "Header commits to. Nothing else proves we rebuilt the right Block."
+    match root == header.merkleRoot
+        false -> Result.Err("rebuilt Transactions build {root}, not the {header.merkleRoot} the Header commits to")
+        true -> blockBytes(compact.header, transactions)
+
+verify rootChecked
+    rootChecked(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], "aa", BlockHeader(blockId = "", version = 0, previousBlockId = "", merkleRoot = "bb", timestamp = 0, bits = 0, nonce = 0)) => Result.Err("rebuilt Transactions build aa, not the bb the Header commits to")
+    Bytes.toHex(rootChecked(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], "aa", BlockHeader(blockId = "", version = 0, previousBlockId = "", merkleRoot = "aa", timestamp = 0, bits = 0, nonce = 0))?) => "00"
+
+fn blockBytes(header: List<Int>, transactions: List<List<Int>>) -> Result<Bytes, String>
+    ? "The Block serialised the way it would have arrived whole."
+      "Header, then the count, then the Transactions end to end -- which is"
+      "the shape a Segment holds and the shape everything downstream expects."
+      "The Transactions go in as the bytes they arrived as, never"
+      "re-serialised, or the Block Id would be right and the body would not."
+    Bytes.fromList(List.concat(header, List.concat(Domain.CompactSize.encode(List.len(transactions)), flattened(transactions, []))))
+
+verify blockBytes
+    Bytes.toHex(blockBytes([], [])?) => "00"
+    Bytes.toHex(blockBytes([1], [[2]])?) => "010102"
+    Bytes.toHex(blockBytes([], [[2], [3]])?) => "020203"
+
+fn flattened(transactions: List<List<Int>>, acc: List<Int>) -> List<Int>
+    ? "Every Transaction's bytes, one after another."
+    match transactions
+        [] -> acc
+        [head, ..tail] -> flattened(tail, List.concat(acc, head))
+
+verify flattened
+    flattened([], []) => []
+    flattened([[1], [2]], []) => [1, 2]

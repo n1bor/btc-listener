@@ -15,8 +15,8 @@ module CompactBlockCases
         "sent whole and 2 named by short id."
         "Regenerate with tools/cmpct_oracle_to_aver.py; the capture needs a"
         "regtest node, so this file is committed rather than rebuilt in CI."
-    exposes [key, shortIdFor, decodedNonce, decodedShortIds, decodedPrefilled, rebuiltRoot, wantedNothingHeld]
-    depends [Domain.CompactBlock]
+    exposes [key, shortIdFor, decodedNonce, decodedShortIds, decodedPrefilled, rebuiltRoot, wantedNothingHeld, rebuiltBlock]
+    depends [Bytes, Domain.CompactBlock]
     effects []
 
 fn payload() -> List<Int>
@@ -177,3 +177,35 @@ fn indexesIn(decoded: Result<Compact, String>) -> List<Int>
 verify indexesIn
     indexesIn(Result.Err("no")) => []
     indexesIn(Domain.CompactBlock.decodeCompact(payload())) => [1, 2]
+
+fn rebuiltBlock() -> String
+    ? "The whole Block, rebuilt from the compact one, as hex."
+      "The strongest thing this corpus says. Not that the Merkle Root"
+      "matches, not that the short ids were found -- that the bytes which"
+      "come out are the bytes Core would have sent had it sent the Block"
+      "whole. Every ordering, every length prefix and every Transaction"
+      "serialisation has to be right for this to hold, and any one of them"
+      "being wrong is a Block that looks fine until something hashes it."
+    hexOf(Domain.CompactBlock.decodeCompact(payload()))
+
+verify rebuiltBlock
+    rebuiltBlock() => "00000030c9dc34b024f7ddb6f8ee52d8194db57ed5e7dc5864b29a62c3feb39fb85fa43097c119b99188b27c33449fb705c52f44f552a6ca170594e6bf8d879a8acfdb09a4eb8c6affff7f200100000003020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff0402ab0000ffffffff020e0b039500000000160014b8ef56b08b106fd7756b3f95bb62ef2de41fcd220000000000000000266a24aa21a9ed4a4b7ad911049c26621f865a1e4b672ef82d3bc5d96068713e761d0bad9d334801200000000000000000000000000000000000000000000000000000000000000000000000000200000001a53ef42a5182daa2db806c891450bbbb2302449cfbb482028c1cb975a7f51f85000000006a47304402201d6eb1bd2afc02da567de87e0ded995e5f79d92d15902fc848d5d24a6824853402204779957974ca5d7c9ca64f236d7ec0b308b4863143290aef0c2b993349f962e5012102742750d8a376261cced01d87cd05b1d84d23f813b39471db96852eb53a7a7adffdffffff0273e4f424010000001600148af64f8b377ed2ae4abe052b77a925346b43d3cd0087930300000000160014898e5f55fc47535abef468f293dc686217cd6c7aaa0000000200000001572c3d57d2e0e45c9fd67e8952985cfeb11b25065deac0691ee547786c6e2693010000006a47304402204589c95f9ec54de112b7883e3337085f9c6d77af07a0b951ba21609ab8da0c78022050f338a621ec20bf839f46983dc4f2b0df2de55c3bb0d9ffcda7205ac304135201210310ffb3f7079080a23d37006ac3847d2b5b930eb0e2c607440f6358a197c7cb3efdffffff02801d2c04000000002251207b2bc594b3b75626894ad1ab4deb10c486aef864f2fe9dc7f9ffbe3d23c88056034d5c24010000002251203978902bac8d4cc87cd319b54ec74157d4fa0a1ff39752fabbc3af91b84ec318aa000000"
+
+fn hexOf(decoded: Result<Compact, String>) -> String
+    ? "The rebuilt bytes, or the reason there are none."
+    match decoded
+        Result.Err(why) -> why
+        Result.Ok(compact) -> builtHex(Domain.CompactBlock.rebuilt(compact, held(), []))
+
+verify hexOf
+    hexOf(Result.Err("no")) => "no"
+
+fn builtHex(built: Result<Bytes, String>) -> String
+    ? "Hex, or the reason the rebuild refused."
+    match built
+        Result.Err(why) -> why
+        Result.Ok(bytes) -> Bytes.toHex(bytes)
+
+verify builtHex
+    builtHex(Result.Err("no")) => "no"
+    builtHex(Result.Ok(Bytes.fromList([1]))) => "01"
