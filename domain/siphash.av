@@ -1,0 +1,261 @@
+module SipHash
+    intent =
+        "SipHash-2-4, the keyed hash BIP152 names Transactions by."
+        "A compact Block does not carry Transaction Ids. It carries six-byte"
+        "short ids, each one a slice of a SipHash of the Id under a key both"
+        "sides derive from the Block Header and a nonce the sender chose. The"
+        "key is why: an attacker who could pick two Transactions with the same"
+        "short id could make reconstruction fail, and a key that changes every"
+        "Block means the collision would have to be found after the Header"
+        "exists and before the Block propagates."
+        "Written in Aver rather than asked of a provider, which was a decision"
+        "and not an assumption. RIPEMD-160 and the curve are providers because"
+        "they are consensus-critical and their edge cases are the rules"
+        "themselves; this is neither. It is twelve lines of arithmetic on"
+        "64-bit words, Aver's Bits namespace has every operation it needs, and"
+        "a provider would put a Rust crate between us and a hash whose whole"
+        "specification fits on a page. The reference vectors decide whether"
+        "that judgement was right, and they are all here."
+        "Aver's Int never overflows and never wraps -- that is the point of"
+        "it -- so every place the specification means a 64-bit register,"
+        "Bits.low(x, 64) says so out loud. There are no hidden truncations"
+        "here: an addition that does not say low is an addition that was"
+        "meant to be exact."
+    exposes [State, of, shortIdOf, initial, round, wordsOf, finished]
+    depends []
+    effects []
+
+record State
+    v0: Int
+    v1: Int
+    v2: Int
+    v3: Int
+
+fn mask() -> Int
+    ? "One 64-bit register's worth of ones."
+    18446744073709551615
+
+verify mask
+    mask() => 18446744073709551615
+
+fn of(k0: Int, k1: Int, message: List<Int>) -> Int
+    ? "The 64-bit SipHash-2-4 of these bytes under this key."
+      "The key is two 64-bit halves rather than sixteen bytes, because that"
+      "is how every caller here already holds it: BIP152 takes the first"
+      "sixteen bytes of a SHA-256 and reads them as two little-endian words."
+    finished(absorbed(initial(k0, k1), wordsOf(message)))
+
+verify of
+    of(506097522914230528, 1084818905618843912, []) => 8246050544436514353
+    of(506097522914230528, 1084818905618843912, [0]) => 8428550223375919101
+
+fn initial(k0: Int, k1: Int) -> State
+    ? "The four registers, keyed."
+      "The constants spell somepseudorandomlygeneratedbytes in ASCII, which"
+      "is the specification's own joke and is kept because a reader checking"
+      "this against the paper wants to see the same numbers."
+    State(v0 = Bits.xor(k0, 8317987319222330741), v1 = Bits.xor(k1, 7237128888997146477), v2 = Bits.xor(k0, 7816392313619706465), v3 = Bits.xor(k1, 8387220255154660723))
+
+verify initial
+    initial(0, 0).v0 => 8317987319222330741
+    initial(0, 0).v3 => 8387220255154660723
+    initial(506097522914230528, 1084818905618843912).v0 => 8388350548712186997
+
+fn round(state: State) -> State
+    ? "One SipRound, exactly as the specification draws it."
+      "Four additions, four rotations and four exclusive ors, in this order."
+      "Every addition is taken low, because the specification's registers are"
+      "64 bits wide and Aver's integers are not."
+    afterSecondHalf(afterFirstHalf(state))
+
+verify round
+    round(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+    round(initial(506097522914230528, 1084818905618843912)).v0 => 7522283016919026821
+
+fn afterFirstHalf(state: State) -> State
+    ? "v0 += v1, v1 rotated 13 and mixed in, v0 rotated 32; and the same"
+      "shape on the other pair."
+    State(v0 = rotated32(low(state.v0 + state.v1)), v1 = Bits.xor(rotated13(state.v1), low(state.v0 + state.v1)), v2 = low(state.v2 + state.v3), v3 = Bits.xor(rotated16(state.v3), low(state.v2 + state.v3)))
+
+verify afterFirstHalf
+    afterFirstHalf(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+    afterFirstHalf(State(v0 = 1, v1 = 0, v2 = 0, v3 = 0)).v0 => 4294967296
+
+fn afterSecondHalf(state: State) -> State
+    ? "The halves cross over: v0 takes v3 and v2 takes v1."
+    State(v0 = low(state.v0 + state.v3), v1 = Bits.xor(rotated17(state.v1), low(state.v2 + state.v1)), v2 = rotated32(low(state.v2 + state.v1)), v3 = Bits.xor(rotated21(state.v3), low(state.v0 + state.v3)))
+
+verify afterSecondHalf
+    afterSecondHalf(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+    afterSecondHalf(State(v0 = 1, v1 = 0, v2 = 0, v3 = 1)).v0 => 2
+
+fn low(value: Int) -> Int
+    ? "The low 64 bits, which is what a register would have kept."
+    Bits.low(value, 64)
+
+verify low
+    low(0) => 0
+    low(mask()) => mask()
+    low(mask() + 1) => 0
+    low(mask() + 2) => 1
+
+fn rotated13(value: Int) -> Int
+    ? "Rotate left by 13, in 64 bits."
+    Bits.low(Bits.or(Bits.shiftLeft(value, 13), Bits.shiftRight(value, 51)), 64)
+
+verify rotated13
+    rotated13(1) => 8192
+    rotated13(0) => 0
+    rotated13(mask()) => mask()
+
+fn rotated16(value: Int) -> Int
+    ? "Rotate left by 16, in 64 bits."
+    Bits.low(Bits.or(Bits.shiftLeft(value, 16), Bits.shiftRight(value, 48)), 64)
+
+verify rotated16
+    rotated16(1) => 65536
+    rotated16(mask()) => mask()
+
+fn rotated17(value: Int) -> Int
+    ? "Rotate left by 17, in 64 bits."
+    Bits.low(Bits.or(Bits.shiftLeft(value, 17), Bits.shiftRight(value, 47)), 64)
+
+verify rotated17
+    rotated17(1) => 131072
+    rotated17(mask()) => mask()
+
+fn rotated21(value: Int) -> Int
+    ? "Rotate left by 21, in 64 bits."
+    Bits.low(Bits.or(Bits.shiftLeft(value, 21), Bits.shiftRight(value, 43)), 64)
+
+verify rotated21
+    rotated21(1) => 2097152
+    rotated21(mask()) => mask()
+
+fn rotated32(value: Int) -> Int
+    ? "Rotate left by 32, in 64 bits, which swaps the halves."
+    Bits.low(Bits.or(Bits.shiftLeft(value, 32), Bits.shiftRight(value, 32)), 64)
+
+verify rotated32
+    rotated32(1) => 4294967296
+    rotated32(4294967296) => 1
+    rotated32(mask()) => mask()
+
+fn absorbed(state: State, words: List<Int>) -> State
+    ? "Every message word, two rounds each."
+    match words
+        [] -> state
+        [head, ..tail] -> absorbed(mixed(state, head), tail)
+
+verify absorbed
+    absorbed(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0), []) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+    absorbed(initial(0, 0), [0]).v0 => 14451689025574374036
+
+fn mixed(state: State, word: Int) -> State
+    ? "One word in: xor into v3, two rounds, xor into v0."
+      "This is the whole of the compression function, and the order is what"
+      "makes it a hash rather than an expensive way to add."
+    afterWord(twice(State(v0 = state.v0, v1 = state.v1, v2 = state.v2, v3 = Bits.xor(state.v3, word))), word)
+
+verify mixed
+    mixed(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0), 0) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+    mixed(initial(0, 0), 0).v0 => 14451689025574374036
+
+fn afterWord(state: State, word: Int) -> State
+    ? "The word again, into v0."
+    State(v0 = Bits.xor(state.v0, word), v1 = state.v1, v2 = state.v2, v3 = state.v3)
+
+verify afterWord
+    afterWord(State(v0 = 0, v1 = 1, v2 = 2, v3 = 3), 0) => State(v0 = 0, v1 = 1, v2 = 2, v3 = 3)
+    afterWord(State(v0 = 0, v1 = 1, v2 = 2, v3 = 3), 5).v0 => 5
+
+fn twice(state: State) -> State
+    ? "The two in SipHash-2-4: two rounds per message word."
+    round(round(state))
+
+verify twice
+    twice(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)
+
+fn finished(state: State) -> Int
+    ? "The four in SipHash-2-4: v2 takes a final 0xff, then four rounds, and"
+      "the four registers fold together."
+    folded(round(round(round(round(State(v0 = state.v0, v1 = state.v1, v2 = Bits.xor(state.v2, 255), v3 = state.v3))))))
+
+verify finished
+    finished(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => 4345106524103826080
+    finished(absorbed(initial(506097522914230528, 1084818905618843912), wordsOf([]))) => 8246050544436514353
+
+fn folded(state: State) -> Int
+    ? "The output is the four registers exclusive-ored together."
+    Bits.xor(Bits.xor(state.v0, state.v1), Bits.xor(state.v2, state.v3))
+
+verify folded
+    folded(State(v0 = 0, v1 = 0, v2 = 0, v3 = 0)) => 0
+    folded(State(v0 = 1, v1 = 2, v2 = 4, v3 = 8)) => 15
+
+fn wordsOf(message: List<Int>) -> List<Int>
+    ? "The message as 64-bit little-endian words, with the last one padded."
+      "The padding is the specification's and is not arbitrary: the final"
+      "word carries the message length in its top byte, so that two messages"
+      "differing only in trailing zero bytes cannot hash alike."
+    List.reverse(wordsInto(message, List.len(message), []))
+
+verify wordsOf
+    wordsOf([]) => [0]
+    wordsOf([0]) => [72057594037927936]
+    wordsOf([1]) => [72057594037927937]
+    List.len(wordsOf([1, 2, 3, 4, 5, 6, 7, 8])) => 2
+
+fn wordsInto(rest: List<Int>, length: Int, acc: List<Int>) -> List<Int>
+    ? "Eight bytes at a time until fewer than eight are left."
+    match List.len(rest) >= 8
+        true -> wordsInto(List.drop(rest, 8), length, List.prepend(wordAt(List.take(rest, 8), 0, 0), acc))
+        false -> List.prepend(tailWord(rest, length), acc)
+
+verify wordsInto
+    wordsInto([], 0, []) => [0]
+    List.len(wordsInto([1, 2, 3, 4, 5, 6, 7, 8], 8, [])) => 2
+
+fn tailWord(rest: List<Int>, length: Int) -> Int
+    ? "What is left, with the length byte on top."
+      "Only the low byte of the length is kept, which is the specification's"
+      "rule and the reason a 256-byte message and a 512-byte one do not"
+      "collide by construction elsewhere."
+    Bits.or(wordAt(rest, 0, 0), Bits.shiftLeft(Bits.low(length, 8), 56))
+
+verify tailWord
+    tailWord([], 0) => 0
+    tailWord([], 1) => 72057594037927936
+    tailWord([1], 1) => 72057594037927937
+
+fn wordAt(bytes: List<Int>, shift: Int, acc: Int) -> Int
+    ? "Little-endian: the first byte is the least significant."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> wordAt(tail, shift + 8, Bits.or(acc, shifted(head, shift)))
+
+verify wordAt
+    wordAt([], 0, 0) => 0
+    wordAt([1], 0, 0) => 1
+    wordAt([0, 1], 0, 0) => 256
+    wordAt([255, 255, 255, 255, 255, 255, 255, 255], 0, 0) => mask()
+
+fn shifted(value: Int, by: Int) -> Int
+    ? "A byte moved into place, and a shift that cannot be negative because"
+      "the walk only ever adds eight."
+    Result.withDefault(Bits.shiftLeft(value, by), 0)
+
+verify shifted
+    shifted(1, 0) => 1
+    shifted(1, 8) => 256
+    shifted(1, 0 - 1) => 0
+
+fn shortIdOf(k0: Int, k1: Int, id: List<Int>) -> Int
+    ? "The six-byte short id BIP152 names a Transaction by."
+      "The low 48 bits of the SipHash, and no more: the other sixteen are"
+      "discarded rather than carried, which is what makes a compact Block"
+      "small and what makes a collision possible at all."
+    Bits.low(of(k0, k1, id), 48)
+
+verify shortIdOf
+    shortIdOf(506097522914230528, 1084818905618843912, []) => 241101697846833
