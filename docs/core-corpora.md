@@ -503,9 +503,13 @@ recovered cases agree with Core. The 1,911 byte twelve-input Transaction — the
 largest in Core's corpus, and the one whose twelve signature checks each hash
 the whole Transaction — had never been checked in either direction before.
 
-What is still missing is a re-check: the answer is recorded but nothing runs it
-again. That needs a way to raise the budget for a case known to be expensive,
-which `aver verify` has no flag for. Asked for upstream as jasisz/aver#1071.
+Both are re-checked on every run now. What was missing was a way to raise the
+budget for a case known to be expensive rather than runaway; asked for upstream
+as jasisz/aver#1071, which closed with `[[verify.costly]]` — an `fn`, a file
+glob, a `step-limit` and, required, a `reason`. `aver.toml` carries one entry
+per corpus that needs it, and the reason field is where the case earns its
+budget: the 10,000 byte Script and the 1,911 byte twelve-input Transaction are
+each named there as the case they are.
 
 ## Refreshing, when Core moves
 

@@ -526,11 +526,18 @@ honest answer rather than a disagreement — and the direction that would matter
 refusing what Core accepts, is nought and has always been nought.
 
 Two of those cases — the 10,000 byte Script and the 1,911 byte twelve-input
-Transaction — are answered by the compiled engine rather than by `aver verify`,
-whose VM stops a case at a million steps. They are named in the generated
-module's `intent` with the answer they gave, because a case left out silently
-is a case nobody sees. Raising that budget needs a flag `aver verify` does not
-have; asked for as [jasisz/aver#1071](https://github.com/jasisz/aver/issues/1071).
+Transaction — used to be answered by the compiled engine alone, because
+`aver verify`'s VM stops a case at a million steps and raising that budget
+needed a flag it did not have. It has one now:
+[jasisz/aver#1071](https://github.com/jasisz/aver/issues/1071) closed with
+`[[verify.costly]]`, `aver.toml` carries an entry for `domain/scriptcases*.av`
+and one for `domain/txcases*.av`, and both cases are checked on every run like
+everything else. The counts in the table above are what says so: 1120 for
+`script_tests.json` and 214 for `tx_valid`/`tx_invalid`, each generated
+module's `intent` carrying the count it was generated with. A corpus that
+cannot say how many cases it holds is one that can lose some without saying
+so, which is the habit worth keeping — not the exemption that made it
+necessary.
 
 `script_assets_test.json` was the odd one out: nine megabytes and 3,737 tests,
 once too large and too slow for verify, so it lived behind a `taproottest`
@@ -854,20 +861,23 @@ assumed:
   within a bucket, precisely so a Peer answering `getaddr` with a thousand
   addresses it controls cannot choose who you connect to next. That is
   [#118](https://github.com/n1bor/btc-listener/issues/118).
-- **A Candidate that does not answer stalls the loop for five seconds.**
-  `Tcp.connect` carries a deadline after all — not a parameter but deployment
-  policy, `[effects.Tcp] connect_timeout_secs` in `aver.toml`, defaulting to 5
-  — which this file now sets explicitly so the number is written down where
-  it acts. The "about three minutes" this bullet used to claim was a misread:
-  two log lines with no timestamps, and the gap between them was the loop's
-  own 150-second idle poll plus the 5-second dial. Measured properly, a dead
-  address costs 5.0 s ([#119](https://github.com/n1bor/btc-listener/issues/119),
-  corrected in [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118)).
-  What remains open there is the better shape:
-  [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125), a connect
-  that reports through `Tcp.poll`, so dialling stops being a special case in
-  the schedule. Until it lands the 5-second budget stays, which is why
-  `connect_timeout_secs` is set in `aver.toml` and says so there.
+- ~~**A Candidate that does not answer stalls the loop for five seconds.**~~
+  **Fixed.** A dial is now one more key in the same `Tcp.poll` as the Peers
+  ([jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125),
+  `Tcp.beginConnect`/`Tcp.dialled`, wired in `Infra.Peers.joined`), so the
+  five seconds a dead address costs are five seconds every other Peer spends
+  being read rather than five seconds nobody spends. The deadline itself has
+  not moved and does not need to: `[effects.Tcp] connect_timeout_secs` in
+  `aver.toml` is still 5, still deployment policy rather than a parameter,
+  and is what ends the attempt.
+
+  The history is worth keeping, because the first version of this bullet was
+  wrong. The "about three minutes" it used to claim was a misread of two log
+  lines with no timestamps: the gap between them was the loop's own
+  150-second idle poll plus the 5-second dial. Measured properly, a dead
+  address cost 5.0 s ([#119](https://github.com/n1bor/btc-listener/issues/119),
+  corrected in [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118))
+  — which is the number that is no longer paid by anyone but the Candidate.
 
 ### When a Peer does not play fair
 

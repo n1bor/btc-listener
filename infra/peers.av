@@ -19,12 +19,12 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare]
     depends [Bytes, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Version]
     effects [
         Console.error, Console.print,
         Random.int,
-        Tcp.accept, Tcp.close, Tcp.closeListener, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
 
@@ -401,18 +401,195 @@ verify manySpare
     List.len(manySpare(3, [])) => 3
     manySpare(0, []) => []
 
-fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
-    ? "Connect to a Peer and complete the Handshake, keeping the rest alive"
-      "while it happens."
+fn dialBudgetMs() -> Int
+    ? "How long a dial may stay in flight before this loop gives up on it."
+      "Normally nothing here ends a dead dial: the runtime has a deadline of"
+      "its own (connect_timeout_secs, in aver.toml), Tcp.poll clips its wait"
+      "to that deadline so an expiring attempt cannot sleep behind a longer"
+      "one, and Tcp.dialled then says what went wrong. This is the backstop"
+      "for the case that never arrives -- a dial that keeps waking the poll"
+      "without ever settling -- so it is a multiple of the runtime's budget"
+      "rather than a competitor to it."
+    15000
+
+verify dialBudgetMs
+    dialBudgetMs() => 15000
+
+fn dialTickMs() -> Int
+    ? "How long one turn of the dial's poll waits."
+      "Short enough that the backstop above is looked at while a dial is in"
+      "flight, and nothing to do with how quickly the dial itself is"
+      "noticed: the poll wakes when the dial settles, not when this expires."
+    1000
+
+verify dialTickMs
+    dialTickMs() => 1000
+
+record Joined
+    pool: Pool
+    seated: Bool
+    why: String
+
+fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
+    ? "Dial a Peer and complete the Handshake, keeping the rest alive while"
+      "it happens."
+      "The dial is one more key in the same Tcp.poll (jasisz/aver#1125), so"
+      "a Candidate that never answers costs this pool nothing but the key it"
+      "was going to have. It used to cost every Peer five seconds of"
+      "silence, because Tcp.connect blocked -- and blocking is not something"
+      "one Candidate should be able to do to eight Peers that have pings to"
+      "answer."
+      "The dial is held here rather than parked in the pool. It is a state"
+      "no frame can show -- this call is straight-line, so nothing repaints"
+      "while it is in flight -- and putting it in pool.sockets would leave a"
+      "key with no Standing in front of everything that walks peerKeys."
+      "A Candidate that will not have us is not an error, in the same way"
+      "that a caller we drop is not an error: seated says whether there is a"
+      "Peer now, why says what happened, and the pool comes back either way"
+      "because the others were being read the whole time. An Err here is the"
+      "poll itself failing, which is the loop and not one Candidate."
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
+    match Tcp.beginConnect(Domain.Address.hostOf(address), Domain.Address.portOf(address))
+        Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
+        Result.Ok(dial) -> settling(pool, key, address, dial, Time.unixMs() + dialBudgetMs())
+
+fn joinedOnly(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
+    ? "The same, for the tools that have exactly one Peer to talk to."
+      "With nobody else in the pool there is nothing to keep alive and"
+      "nothing worth handing back, so a Candidate that will not have us is"
+      "the end of the run rather than one Candidate out of eight."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    outcome = joined(pool, key, address)?
+    match outcome.seated
+        true -> Result.Ok(outcome.pool)
+        false -> Result.Err(outcome.why)
+
+fn settling(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int) -> Result<Joined, String>
+    ? "Wait for the dial to settle, reading every other Peer while it does."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Time.unixMs() > deadlineMs
+        true -> abandoned(pool, dial, "dial did not settle within {Int.div(dialBudgetMs(), 1000)} seconds")
+        false -> settlingOn(pool, key, address, dial, deadlineMs)
+
+fn settlingOn(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int) -> Result<Joined, String>
+    ? "One turn of the poll, with the dial among the sockets in it."
+      "What comes back from the other Peers is read before the dial is"
+      "looked at, because those bytes are the reason this is a poll and not"
+      "a wait: they belong in their Inbox whether or not this Candidate ever"
+      "answers."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    ready = Tcp.poll(dialledWith(pool, key, dial), dialTickMs())?
+    settlingAfter(reading(pool, ready)?, key, address, dial, deadlineMs, List.contains(ready, key))
+
+fn dialledWith(pool: Pool, key: Int, dial: Tcp.Dial) -> Map<Int, Tcp.Socket>
+    ? "Every Peer's socket, and the dial as one more key beside them."
+      "The listener is left out for the reason pollable gives: a queued"
+      "caller keeps it ready, and a key that is always ready would spin this"
+      "loop rather than let it wait."
+    Map.set(pollable(pool), key, Tcp.Socket.Dialing(dial))
+
+fn settlingAfter(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int, arrived: Bool) -> Result<Joined, String>
+    ? "The dial woke the poll, or one of the Peers did."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match arrived
+        false -> settling(pool, key, address, dial, deadlineMs)
+        true -> promoting(pool, key, address, dial, deadlineMs)
+
+fn promoting(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int) -> Result<Joined, String>
+    ? "Ask what the dial settled into."
+      "An Err is this Candidate refusing or running out its deadline, which"
+      "is the ordinary answer for an address out of an Address Book and not"
+      "a reason to stop."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match Tcp.dialled(dial)
+        Result.Err(why) -> abandoned(pool, dial, why)
+        Result.Ok(taken) -> promoted(pool, key, address, dial, deadlineMs, taken)
+
+fn promoted(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int, taken: Option<Tcp.Connection>) -> Result<Joined, String>
+    ? "None is readiness that meant nothing, which a poll is allowed to"
+      "report; Some is a Peer."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match taken
+        Option.None -> settling(pool, key, address, dial, deadlineMs)
+        Option.Some(connection) -> seatedOut(pool, key, address, connection)
+
+fn abandoned(pool: Pool, dial: Tcp.Dial, why: String) -> Result<Joined, String>
+    ? "Cancel an attempt that came to nothing, and say what it was."
+      "The cancel matters even when the dial has already failed: the handle"
+      "is the only thing holding a socket the runtime opened, and a node"
+      "that walks an Address Book for days would otherwise leak one per"
+      "Candidate that would not answer."
+    ! [Tcp.closeDial]
+    _cancelled = Tcp.closeDial(dial)
+    Result.Ok(Joined(pool = pool, seated = false, why = why))
+
+fn seatedOut(pool: Pool, key: Int, address: PeerAddress, connection: Tcp.Connection) -> Result<Joined, String>
+    ? "A dial that became a Connection is a Peer we called, so it is seated"
+      "outbound and then introduced."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
     seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height)
-    introduced(seated, key, address)
+    introducedOrDropped(seated, key, address)
+
+fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
+    ? "A Handshake that does not finish leaves a socket open, and an open"
+      "socket nobody is talking on is the leak a long-running node notices."
+      "The same shape as droppedCaller on the inbound side, and for the same"
+      "reason: whoever opened it closes it."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match introduced(pool, key, address)
+        Result.Ok(talking) -> Result.Ok(Joined(pool = talking, seated = true, why = ""))
+        Result.Err(why) -> droppedDial(pool, key, why)
+
+fn droppedDial(pool: Pool, key: Int, why: String) -> Result<Joined, String>
+    ? "Close what the dial opened, and hand the pool back without it."
+    ! [Tcp.close]
+    shed = dropOne(pool, key)?
+    Result.Ok(Joined(pool = shed, seated = false, why = why))
 
 fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
     ? "Send our version, then read until this Peer sends verack."

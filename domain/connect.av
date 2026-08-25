@@ -38,8 +38,8 @@ type Connecting
     Refused(String)
 
 record Building
-    created: Map<String, Unspent>
-    spent: Map<String, Bool>
+    created: Map<Bytes, Unspent>
+    spent: Map<Bytes, Bool>
     removed: List<Unspent>
     fees: Int
     confirmed: List<TxFee>
@@ -106,7 +106,7 @@ verify keptIfSpendable
     keptIfSpendable("aa", 0, Output(value = 0, script = "6a24aa21a9ed"), 7, true, []) => []
     keptIfSpendable("aa", 1, Output(value = 5, script = "51"), 7, false, []) => [Unspent(txid = "aa", index = 1, value = 5, script = "51", height = 7, coinbase = false)]
 
-fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<String, Unspent>) -> Connecting
+fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Connecting
     ? "What this Block does to the Set, or why it may not."
       "The first Transaction is the coinbase and is not asked to find its"
       "Inputs; every other one is. Its claim is checked last, because it can"
@@ -129,7 +129,7 @@ verify connected
     connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
     connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
 
-fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<String, Unspent>) -> Connecting
+fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Connecting
     ? "The rest of the Block first, then what the coinbase is owed."
     settled(network, height, coinbase, walked(rest, height, fromStore, seeded(coinbase, height)))
 
@@ -148,21 +148,21 @@ verify seeded
     Map.len(seeded(minting(50), 1)?.created) => 1
     seeded(minting(50), 1)?.fees => 0
 
-fn intoMap(unspents: List<Unspent>, acc: Map<String, Unspent>) -> Result<Map<String, Unspent>, String>
+fn intoMap(unspents: List<Unspent>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
     ? "A list of Outputs, keyed the way an Input names them."
       "A Result since the key became bytes: an Output whose Transaction Id is"
       "not hexadecimal has no key, and inventing one would put it in the Map"
       "under something no Input could ask for."
     match unspents
         [] -> Result.Ok(acc)
-        [head, ..tail] -> intoMap(tail, Map.set(acc, Domain.UtxoStore.indexOf(Domain.UtxoStore.keyOf(head)?), head))
+        [head, ..tail] -> intoMap(tail, Map.set(acc, Domain.UtxoStore.keyOf(head)?, head))
 
 verify intoMap
     Map.len(intoMap([], Map.fromList([]))?) => 0
     Map.len(intoMap([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)], Map.fromList([]))?) => 1
     intoMap([Unspent(txid = "zz", index = 0, value = 5, script = "", height = 0, coinbase = false)], Map.fromList([])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn walked(transactions: List<Transaction>, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+fn walked(transactions: List<Transaction>, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
     ? "Every Transaction after the coinbase, in the order the Block holds them."
     match transactions
         [] -> building
@@ -173,7 +173,7 @@ verify walked
     walked([], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
     walked([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
 
-fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
     ? "One Transaction's Inputs taken, its Outputs offered, and what it"
       "paid remembered (#133)."
     match building
@@ -182,7 +182,7 @@ fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<String, 
 
 verify oneTransaction
     oneTransaction(minting(50), 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
-    oneTransaction(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), Result.Ok(seeded(minting(50), 1)?))?.fees => 10
+    oneTransaction(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), Result.Ok(seeded(minting(50), 1)?))?.fees => 10
 
 fn confirmedAfter(transaction: Transaction, feesBefore: Int, built: Result<Building, String>) -> Result<Building, String>
     ? "The fee this Transaction alone left behind: what the Block's running"
@@ -195,15 +195,15 @@ verify confirmedAfter
     confirmedAfter(spending("aa", 0, 40), 50, Result.Err("no")) => Result.Err("no")
     confirmedAfter(spending("aa", 0, 40), 0, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 10, confirmed = [])))?.confirmed => [TxFee(txid = "bb", fee = 10, coinbase = false)]
 
-fn taking(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, state: Building) -> Result<Building, String>
+fn taking(transaction: Transaction, height: Int, fromStore: Map<Bytes, Unspent>, state: Building) -> Result<Building, String>
     ? "Resolve every Input, then check the arithmetic."
     afterInputs(transaction, height, spentBy(transaction.inputs, height, fromStore, Result.Ok(state), 0))
 
 verify taking
-    taking(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 10
-    taking(spending("aa", 0, 60), 1, Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+    taking(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 10
+    taking(spending("aa", 0, 60), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?) => Result.Err("Transaction bb pays out 60 against 50 taken in")
 
-fn spentBy(inputs: List<Input>, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>, taken: Int) -> Result<Building, String>
+fn spentBy(inputs: List<Input>, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>, taken: Int) -> Result<Building, String>
     ? "Every Input of one Transaction, and what they add up to."
       "The running total travels in the Building's fees field, which is what"
       "afterInputs then turns into a fee once the Outputs are known."
@@ -216,7 +216,7 @@ verify spentBy
     spentBy([], 0, Map.fromList([]), Result.Ok(seeded(minting(50), 1)?), 0)?.fees => 0
     spentBy([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], 0, Map.fromList([]), Result.Err("no"), 0) => Result.Err("no")
 
-fn oneInput(input: Input, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+fn oneInput(input: Input, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
     ? "One Input, taken out of whatever holds the Output it names."
     match building
         Result.Err(why) -> Result.Err(why)
@@ -238,17 +238,17 @@ verify naming
     naming("aa", 0) => "Output 0 of aa"
     naming("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 12) => "Output 12 of f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
 
-fn resolving(input: Input, height: Int, fromStore: Map<String, Unspent>, state: Building) -> Result<Building, String>
+fn resolving(input: Input, height: Int, fromStore: Map<Bytes, Unspent>, state: Building) -> Result<Building, String>
     ? "Already spent, made in this Block, or resolved from the Store."
       "Spent is checked first, and it is what stops a Block spending the same"
       "Output twice -- once from the Store's answer and once again, because"
       "the Store still says it is there."
     key = outpointKey(input.previousTxid, input.previousIndex)?
-    found(key, naming(input.previousTxid, input.previousIndex), height, state, Map.has(state.spent, Domain.UtxoStore.indexOf(key)), Map.get(state.created, Domain.UtxoStore.indexOf(key)), Map.get(fromStore, Domain.UtxoStore.indexOf(key)))
+    found(key, naming(input.previousTxid, input.previousIndex), height, state, Map.has(state.spent, key), Map.get(state.created, key), Map.get(fromStore, key))
 
 verify resolving
     resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), seeded(minting(50), 1)?) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
-    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 50
+    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 50
 
 fn found(key: Bytes, named: String, height: Int, state: Building, already: Bool, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
     ? "Which of the three answers applies, in the order they have to be asked."
@@ -270,12 +270,12 @@ fn notYetSpent(key: Bytes, named: String, height: Int, state: Building, inBlock:
 
 verify notYetSpent
     notYetSpent(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.None, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
-    List.len(notYetSpent(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Map.get(seeded(minting(50), 1)?.created, Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("cb", 0)?)), Option.None)?.removed) => 0
+    List.len(notYetSpent(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Map.get(seeded(minting(50), 1)?.created, Domain.UtxoStore.unspentKey("cb", 0)?), Option.None)?.removed) => 0
     notYetSpent(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Option.Some(Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = false)), Option.None)?.fees => 50
 
 fn takenFromBlock(key: Bytes, named: String, height: Int, state: Building, unspent: Unspent) -> Result<Building, String>
     ? "Spent where it was made, so it never reaches the Set at all."
-    matureEnough(key, named, height, unspent, Building(created = Map.remove(state.created, Domain.UtxoStore.indexOf(key)), spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = state.removed, fees = state.fees + unspent.value, confirmed = state.confirmed))
+    matureEnough(key, named, height, unspent, Building(created = Map.remove(state.created, key), spent = Map.set(state.spent, key, true), removed = state.removed, fees = state.fees + unspent.value, confirmed = state.confirmed))
 
 verify takenFromBlock
     takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.fees => 50
@@ -285,7 +285,7 @@ fn fromTheStore(key: Bytes, named: String, height: Int, state: Building, inStore
     ? "An Output the Set already held, which does leave Undo Data."
     match inStore
         Option.None -> Result.Err("Input names {named}, which is not an unspent Output")
-        Option.Some(unspent) -> matureEnough(key, named, height, unspent, Building(created = state.created, spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value, confirmed = state.confirmed))
+        Option.Some(unspent) -> matureEnough(key, named, height, unspent, Building(created = state.created, spent = Map.set(state.spent, key, true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value, confirmed = state.confirmed))
 
 verify fromTheStore
     fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
@@ -377,12 +377,12 @@ verify spending
     spending("aa", 0, 40).txid => "bb"
     paidBy(spending("aa", 0, 40)) => 40
 
-fn holding() -> Result<Map<String, Unspent>, String>
+fn holding() -> Result<Map<Bytes, Unspent>, String>
     ? "What the Set already holds, for the cases here."
       "One ordinary Output worth a hundred, and one coinbase Output from"
       "Height 1 worth the same, so a case can ask whether maturity is being"
       "checked without any other difference between them."
-    Result.Ok(Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)), (Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("cc", 0)?), Unspent(txid = "cc", index = 0, value = 100, script = "", height = 1, coinbase = true))]))
+    Result.Ok(Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)), (Domain.UtxoStore.unspentKey("cc", 0)?, Unspent(txid = "cc", index = 0, value = 100, script = "", height = 1, coinbase = true))]))
 
 verify holding
     Map.len(holding()?) => 2

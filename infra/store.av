@@ -45,7 +45,7 @@ module Store
     ]
 
 type Store
-    Memory(Map<String, Bytes>)
+    Memory(Map<Bytes, Bytes>)
     Database(Infra.Kv.Handle)
 
 record Entry
@@ -115,7 +115,7 @@ verify logPath
     logPath("chain") => "chain/index.log"
     logPath("/tmp/chain") => "/tmp/chain/index.log"
 
-fn empty() -> Map<String, Bytes>
+fn empty() -> Map<Bytes, Bytes>
     ? "A Store with nothing in it."
     Map.fromList([])
 
@@ -144,11 +144,11 @@ fn looked(store: Store, key: Bytes) -> Result<Option<Bytes>, String>
     ? "The key is usable, so whichever backend holds the entries answers from them."
     ! [Infra.Kv.get]
     match store
-        Store.Memory(held) -> Result.Ok(Map.get(held, indexed(key)))
+        Store.Memory(held) -> Result.Ok(Map.get(held, key))
         Store.Database(handle) -> Infra.Kv.get(handle, key)
 
 verify looked
-    looked(Store.Memory(Map.fromList([(indexed(keyed("a")), valued("b"))])), keyed("a")) => Result.Ok(Option.Some(valued("b")))
+    looked(Store.Memory(Map.fromList([(keyed("a"), valued("b"))])), keyed("a")) => Result.Ok(Option.Some(valued("b")))
     looked(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(Option.None)
 
 fn has(store: Store, key: Bytes) -> Result<Bool, String>
@@ -167,11 +167,11 @@ fn present(store: Store, key: Bytes) -> Result<Bool, String>
     ? "The key is usable, so ask the entries the backend holds."
     ! [Infra.Kv.get]
     match store
-        Store.Memory(held) -> Result.Ok(Map.has(held, indexed(key)))
+        Store.Memory(held) -> Result.Ok(Map.has(held, key))
         Store.Database(handle) -> wasFound(Infra.Kv.get(handle, key))
 
 verify present
-    present(Store.Memory(Map.fromList([(indexed(keyed("a")), valued("b"))])), keyed("a")) => Result.Ok(true)
+    present(Store.Memory(Map.fromList([(keyed("a"), valued("b"))])), keyed("a")) => Result.Ok(true)
     present(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(false)
 
 fn wasFound(found: Result<Option<Bytes>, String>) -> Result<Bool, String>
@@ -213,12 +213,12 @@ fn fixture(pairs: List<Tuple<Bytes, Bytes>>) -> Store
       "It touches no disk, and says so in the type. A Store made this way refuses"
       "the same keys the database does and can be written to; what it cannot do"
       "is outlive the call."
-    Store.Memory(Map.fromList(asIndexed(pairs, [])))
+    Store.Memory(Map.fromList(pairs))
 
 verify fixture
     fixture([]) => Store.Memory(Map.fromList([]))
-    fixture([(keyed("a"), valued("b"))]) => Store.Memory(Map.set(Map.fromList([]), indexed(keyed("a")), valued("b")))
-    fixture([(keyed("a"), valued("b")), (keyed("c"), valued("d"))]) => Store.Memory(Map.fromList([(indexed(keyed("a")), valued("b")), (indexed(keyed("c")), valued("d"))]))
+    fixture([(keyed("a"), valued("b"))]) => Store.Memory(Map.set(Map.fromList([]), keyed("a"), valued("b")))
+    fixture([(keyed("a"), valued("b")), (keyed("c"), valued("d"))]) => Store.Memory(Map.fromList([(keyed("a"), valued("b")), (keyed("c"), valued("d"))]))
 
 fn put(store: Store, key: Bytes, value: Bytes) -> Result<Store, String>
     ? "Record one key."
@@ -255,37 +255,6 @@ verify asPairs
     asPairs([Entry(key = keyed("a"), value = valued("b"))], []) => [(keyed("a"), valued("b"))]
     asPairs([Entry(key = keyed("a"), value = valued("b")), Entry(key = keyed("c"), value = valued("d"))], []) => [(keyed("a"), valued("b")), (keyed("c"), valued("d"))]
 
-fn asIndexed(pairs: List<Tuple<Bytes, Bytes>>, acc: List<Tuple<String, Bytes>>) -> List<Tuple<String, Bytes>>
-    ? "The fixture's pairs, keyed the way the in-memory backing finds them."
-    match pairs
-        [] -> List.reverse(acc)
-        [head, ..tail] -> asIndexed(tail, List.prepend(indexedPair(head), acc))
-
-verify asIndexed
-    asIndexed([], []) => []
-    asIndexed([(keyed("a"), valued("b"))], []) => [("61", valued("b"))]
-
-fn indexedPair(pair: Tuple<Bytes, Bytes>) -> Tuple<String, Bytes>
-    ? "One fixture pair, keyed the way the in-memory backing finds it."
-    match pair
-        (key, value) -> (indexed(key), value)
-
-verify indexedPair
-    indexedPair((keyed("a"), valued("b"))) => ("61", valued("b"))
-
-fn indexed(key: Bytes) -> String
-    ? "How the in-memory backing indexes a key."
-      "Hexadecimal, because Aver's Map cannot key on Bytes: the generated"
-      "Rust derives neither Eq nor Hash for it (jasisz/aver#1127). The"
-      "Store's keys are bytes and the database sees them as bytes; this is"
-      "only how a fixture's Map finds one, and it is one-to-one, so nothing"
-      "about which keys are distinct changes."
-    Bytes.toHex(key)
-
-verify indexed
-    indexed(keyed("a")) => "61"
-    indexed(keyed("")) => ""
-
 fn valued(text: String) -> Bytes
     ? "A value spelled as text, for the cases in this module."
       "The Store no longer reads a value, so what a case stores is arbitrary"
@@ -306,7 +275,7 @@ fn keyed(text: String) -> Bytes
 verify keyed
     Bytes.octets(keyed("a")) => [97]
 
-fn heldPut(held: Map<String, Bytes>, entries: List<Entry>) -> Result<Store, String>
+fn heldPut(held: Map<Bytes, Bytes>, entries: List<Entry>) -> Result<Store, String>
     ? "Absorb a batch into memory, having first passed it through the same gate."
       "Memory has no database to refuse a key, so it borrows the refusal rather"
       "than repeating the rule, which is what keeps a fixture evidence about the"
@@ -315,8 +284,8 @@ fn heldPut(held: Map<String, Bytes>, entries: List<Entry>) -> Result<Store, Stri
     Result.Ok(Store.Memory(absorbAll(entries, held)))
 
 verify heldPut
-    heldPut(empty(), [Entry(key = keyed("a"), value = valued("b"))]) => Result.Ok(Store.Memory(Map.set(empty(), indexed(keyed("a")), valued("b"))))
-    heldPut(empty(), [Entry(key = keyed("a\tb"), value = valued("c"))]) => Result.Ok(Store.Memory(Map.set(empty(), indexed(keyed("a\tb")), valued("c"))))
+    heldPut(empty(), [Entry(key = keyed("a"), value = valued("b"))]) => Result.Ok(Store.Memory(Map.set(empty(), keyed("a"), valued("b"))))
+    heldPut(empty(), [Entry(key = keyed("a\tb"), value = valued("c"))]) => Result.Ok(Store.Memory(Map.set(empty(), keyed("a\tb"), valued("c"))))
 
 fn delete(store: Store, key: Bytes) -> Result<Store, String>
     ? "Forget one key."
@@ -342,36 +311,36 @@ fn storedDelete(handle: Infra.Kv.Handle, keys: List<Bytes>) -> Result<Store, Str
     _removed = Infra.Kv.deleteAll(handle, keys)?
     Result.Ok(Store.Database(handle))
 
-fn heldDelete(held: Map<String, Bytes>, keys: List<Bytes>) -> Result<Store, String>
+fn heldDelete(held: Map<Bytes, Bytes>, keys: List<Bytes>) -> Result<Store, String>
     ? "Forget the keys in memory, refusing any the Store could never have held."
     _checked = acceptableKeys(keys)?
     Result.Ok(Store.Memory(forgetAll(keys, held)))
 
 verify heldDelete
-    heldDelete(Map.set(empty(), indexed(keyed("a")), valued("b")), [keyed("a")]) => Result.Ok(Store.Memory(empty()))
+    heldDelete(Map.set(empty(), keyed("a"), valued("b")), [keyed("a")]) => Result.Ok(Store.Memory(empty()))
     heldDelete(empty(), [keyed("")]) => Result.Err("Store key must not be empty")
 
-fn forgetAll(keys: List<Bytes>, into: Map<String, Bytes>) -> Map<String, Bytes>
+fn forgetAll(keys: List<Bytes>, into: Map<Bytes, Bytes>) -> Map<Bytes, Bytes>
     ? "Remove the same keys from the in-memory map."
     match keys
         [] -> into
-        [head, ..tail] -> forgetAll(tail, Map.remove(into, indexed(head)))
+        [head, ..tail] -> forgetAll(tail, Map.remove(into, head))
 
 verify forgetAll
     forgetAll([], empty()) => empty()
-    forgetAll([keyed("a")], Map.set(empty(), indexed(keyed("a")), valued("b"))) => empty()
-    Map.len(forgetAll([keyed("a")], Map.set(Map.set(empty(), indexed(keyed("a")), valued("b")), indexed(keyed("c")), valued("d")))) => 1
+    forgetAll([keyed("a")], Map.set(empty(), keyed("a"), valued("b"))) => empty()
+    Map.len(forgetAll([keyed("a")], Map.set(Map.set(empty(), keyed("a"), valued("b")), keyed("c"), valued("d")))) => 1
 
-fn absorbAll(entries: List<Entry>, into: Map<String, Bytes>) -> Map<String, Bytes>
+fn absorbAll(entries: List<Entry>, into: Map<Bytes, Bytes>) -> Map<Bytes, Bytes>
     ? "Apply the same entries to the in-memory map, in the order they were given."
     match entries
         [] -> into
-        [head, ..tail] -> absorbAll(tail, Map.set(into, indexed(head.key), head.value))
+        [head, ..tail] -> absorbAll(tail, Map.set(into, head.key, head.value))
 
 verify absorbAll
     absorbAll([], empty()) => empty()
-    absorbAll([Entry(key = keyed("a"), value = valued("b"))], empty()) => Map.set(empty(), indexed(keyed("a")), valued("b"))
-    Map.get(absorbAll([Entry(key = keyed("a"), value = valued("b")), Entry(key = keyed("a"), value = valued("c"))], empty()), indexed(keyed("a"))) => Option.Some(valued("c"))
+    absorbAll([Entry(key = keyed("a"), value = valued("b"))], empty()) => Map.set(empty(), keyed("a"), valued("b"))
+    Map.get(absorbAll([Entry(key = keyed("a"), value = valued("b")), Entry(key = keyed("a"), value = valued("c"))], empty()), keyed("a")) => Option.Some(valued("c"))
 
 fn keyRefused() -> String
     ? "Why a key cannot be used, in the one wording every entry point gives."
