@@ -158,6 +158,112 @@ $C getblockhash 156
 If 156 still shows the abandoned Block, the `h:` keyspace was not re-pointed
 and everything downstream of it is reading a chain that no longer exists.
 
+### 5. The Mempool, and relay
+
+Everything above is about Blocks. The Mempool is the one thing this node holds
+that no Block contains, and regtest is the only place its whole life can be
+watched: admitted, announced, asked for, and then confirmed away.
+
+Core announces a Transaction only to Peers that were connected when it arrived,
+and it never re-offers what is already in its Mempool. So `follow` has to be up
+first, and the Transaction has to be a new one:
+
+```bash
+$BIN regtest follow 127.0.0.1 $D &
+sleep 20
+$C sendtoaddress $($C getnewaddress "" bech32) 0.5
+```
+
+**Then wait, and wait longer than feels right.** Core spreads Transaction
+Announcements to inbound Peers over a Poisson delay averaging five seconds, so
+the line below has arrived anywhere between two and forty seconds later. An
+eight-second window looks exactly like a broken listener, which is how the
+first run of this test was misread:
+
+```
+mempool admitted 1a63298f…8f9f: 219 bytes, 2190 sat at 10000/kB; holding 1 (219 bytes)
+```
+
+Three things are being proved by that line and each is worth checking
+separately. The **identifier** must equal what Core says:
+
+```bash
+$C getrawmempool          # the same txid, and only it
+```
+
+The **fee** is the one number here that is not in the Transaction: it is what
+the Inputs were worth minus what the Outputs pay, and the Inputs are knowable
+only from the UTXO Set. It is therefore the number that catches an admission
+that resolved the wrong Output, or resolved it from the wrong keyspace:
+
+```bash
+$C getmempoolentry <txid> | grep base       # "base": 0.00002190
+```
+
+`2190 sat` is `0.00002190`. A mismatch means the Set lookup answered about
+something other than what this Transaction spends.
+
+### 6. Relay, with a second node that has no other Peer
+
+An admission that is never passed on is half a Mempool. The only way to prove
+relay is a node that could not have heard it from anywhere else:
+
+```bash
+RT2=$PWD/rt-b; mkdir -p $RT2      # same bitcoin.conf, ports 18463/18464
+bitcoin-27.0/bin/bitcoind -datadir=$RT2 -daemon
+C2="bitcoin-27.0/bin/bitcoin-cli -datadir=$RT2 -rpcuser=av -rpcpassword=av -regtest"
+$C2 addnode "127.0.0.1:18444" onetry     # borrow the chain
+$C2 disconnectnode "127.0.0.1:18444"     # then cut it off
+$C2 getconnectioncount                   # 0 before the listener joins
+```
+
+Point `follow` at both, make a new Transaction on the first node, and the
+second one must end up holding it:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444,127.0.0.1:18464 $D &
+$C sendtoaddress $($C getnewaddress "" bech32) 0.12
+$C2 getrawmempool                        # the same txid, arrived only through us
+```
+
+**Both nodes must be at the same Height first.** A Transaction spending an
+Output from a Block the second node has not got is an orphan there: it accepts
+the Transaction, logs nothing, and never puts it in its Mempool. That looks
+identical to a relay failure and is not one. `getblockcount` on both before
+starting, and re-borrow the chain if they differ.
+
+With `$C2 logging '["net"]'` the second node's `debug.log` shows the whole
+exchange, which is what to read when the Mempool stays empty:
+
+```
+[net] got inv: tx 1a63298f…  new peer=2
+[net] Requesting tx 1a63298f… peer=2
+[net] sending getdata (37 bytes) peer=2
+[net] received: tx (219 bytes) peer=2
+```
+
+That sequence is the proof: we announced, it asked, we served. A node that
+announces and then cannot answer wastes the round trip of every Peer that
+asked, and Peers drop one that does it.
+
+### 7. What a Block takes back
+
+```bash
+$C generatetoaddress 1 "$($C getnewaddress)"
+```
+
+```
+following at Height 169: 1 connected, 0 disconnected, set +11 -10
+mempool: 2 Transaction(s) left, taken by the chain; holding 0 (0 bytes)
+```
+
+The count must reach zero. What this catches is an admission built on the wrong
+keyspace: the `o:` Outputs index holds every Output the chain ever made,
+including ones spent years ago, while the UTXO Set holds only what is unspent.
+A Mempool resolving Inputs through `o:` accepts double spends, relays them, and
+passes every other test in this document — and its held count would not fall to
+zero here, because what it holds was never really spendable.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

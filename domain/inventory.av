@@ -4,7 +4,7 @@ module Inventory
         "A Peer offers Transactions by identifier only; the Transaction itself"
         "arrives after a getdata asks for it. Asking with the witness type is"
         "what makes the reply SegWit-serialised, which the decoder needs."
-    exposes [txHashesOf, blockHashesOf, getDataPayload, entrySize, witnessTxType, witnessBlockType]
+    exposes [txHashesOf, requestedTxHashesOf, blockHashesOf, getDataPayload, entrySize, txType, witnessTxType, witnessBlockType]
     depends [Bytes, Domain.CompactSize, Domain.Message]
     effects []
 
@@ -55,6 +55,20 @@ verify txHashesOf
     List.len(txHashesOf(List.concat([1], List.concat([1, 0, 0, 0], thirtyTwo())))) => 1
     List.len(txHashesOf(List.concat([1], List.concat([2, 0, 0, 0], thirtyTwo())))) => 0
     List.len(txHashesOf([0])) => 0
+
+fn requestedTxHashesOf(body: List<Int>) -> List<List<Int>>
+    ? "Every Transaction a Peer is asking us for, however it asked."
+      "A getdata names the serialisation it wants through the type: plain for"
+      "the stripped form, the witness type for the one with the Witnesses in"
+      "it. Both are collected because both are requests for the same"
+      "Transaction, and a node that answered only one of them would go quiet"
+      "at whichever Peer asked the other way."
+    List.concat(txHashesOf(body), collect(entriesOf(body), witnessTxType(), []))
+
+verify requestedTxHashesOf
+    List.len(requestedTxHashesOf(List.concat([1], List.concat([1, 0, 0, 0], thirtyTwo())))) => 1
+    List.len(requestedTxHashesOf(List.concat([1], List.concat([1, 0, 0, 64], thirtyTwo())))) => 1
+    List.len(requestedTxHashesOf(List.concat([1], List.concat([2, 0, 0, 0], thirtyTwo())))) => 0
 
 fn blockHashesOf(body: List<Int>) -> List<List<Int>>
     ? "Every Block identifier offered in an Announcement."

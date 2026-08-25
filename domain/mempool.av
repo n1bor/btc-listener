@@ -1,0 +1,466 @@
+module Mempool
+    intent =
+        "The Transactions this node holds while no Block contains them."
+        "What is here has been checked twice and by two different standards."
+        "Consensus first -- the Outputs it spends exist, value is not created,"
+        "the Scripts run -- which is the same question an audit asks of a"
+        "mined Transaction, and is asked by whoever calls admit rather than"
+        "here. Then Policy, which is Domain.Standard, and which may refuse a"
+        "perfectly valid Transaction. This module holds the result and answers"
+        "for what happens next: what conflicts with what, what leaves when a"
+        "Block confirms it, what comes back when a Block is disconnected, and"
+        "what is thrown away when there is no more room."
+        "Conflicts are first-seen-wins, which is not a judgement about which"
+        "Transaction is better. Two Transactions that spend the same Output"
+        "cannot both be mined, and a node with no way to tell them apart has"
+        "to pick one and stop: replacing on sight lets a Peer make us relay an"
+        "unbounded chain of Transactions for one Output. BIP125 replacement is"
+        "the rule that makes replacement safe by making it pay, and it is"
+        "deliberately not here -- n1bor/btc-listener#28 defers it, and until it"
+        "arrives the honest behaviour is to keep the first and say so."
+        "The cap is on bytes rather than on count, because bytes are what a"
+        "Peer can make us hold. What goes first is what pays least, so filling"
+        "the Mempool with cheap Transactions costs the sender more than it"
+        "costs us -- and the floor rises as it fills, which is the whole"
+        "defence. A Transaction that would be the cheapest thing in a full"
+        "Mempool is refused rather than admitted and immediately evicted:"
+        "the two are the same outcome, and refusing says so honestly."
+    exposes [Mempool, Held, Admission, empty, entry, outpoint, admit, confirmed, restored, holds, heldFor, count, bytes, capOf, floorRate, lowest, conflictOf, txids]
+    depends [Domain.Standard]
+    effects []
+
+record Held
+    txid: String
+    size: Int
+    fee: Int
+    rate: Int
+    spends: List<String>
+    raw: String
+
+record Mempool
+    held: Map<String, Held>
+    claims: Map<String, String>
+    bytes: Int
+    cap: Int
+
+type Admission
+    Admitted(Mempool)
+    Known
+    Conflicts(String)
+    Refused(String)
+
+fn empty(cap: Int) -> Mempool
+    ? "A Mempool holding nothing, that will hold at most cap bytes."
+      "Core's default is 300 MB. The cap is given rather than chosen here"
+      "because a node on a small machine and a node on a large one want"
+      "different answers, and neither is this module's to pick."
+    Mempool(held = Map.fromList([]), claims = Map.fromList([]), bytes = 0, cap = cap)
+
+verify empty
+    count(empty(1000)) => 0
+    bytes(empty(1000)) => 0
+    capOf(empty(1000)) => 1000
+
+fn outpoint(txid: String, index: Int) -> String
+    ? "The name an Input calls the Output it spends by."
+      "The same spelling the o: keyspace uses, so a claim here and a lookup"
+      "there are talking about the same thing."
+    "{txid}:{index}"
+
+verify outpoint
+    outpoint("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0) => "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:0"
+    outpoint("aa", 7) => "aa:7"
+
+fn entry(txid: String, size: Int, fee: Int, spends: List<String>, raw: String) -> Held
+    ? "One Transaction, as the Mempool holds it."
+      "The fee rate is worked out once, here, rather than every time two"
+      "entries are compared: eviction compares every entry against every"
+      "other one, and a rate recomputed in that loop is the same division"
+      "done thousands of times for an answer that cannot have changed."
+      "The bytes are kept as well, spelled as hex. A node that announces a"
+      "Transaction will be asked for it, and answering that getdata means"
+      "having what arrived rather than something re-serialised from a decoded"
+      "shape -- which for a SegWit Transaction is a different set of bytes"
+      "with a different hash. Hex rather than Bytes because an entry lives in"
+      "a Map and bytes::Bytes has neither Eq nor Hash (jasisz/aver#1127);"
+      "hex is what the rest of this program spells Scripts with anyway."
+    Held(txid = txid, size = size, fee = fee, rate = Domain.Standard.feeRate(fee, size), spends = spends, raw = raw)
+
+verify entry
+    entry("aa", 250, 250, [], "").rate => 1000
+    entry("aa", 250, 250, [], "0200").raw => "0200"
+    entry("aa", 250, 1000, [], "").rate => 4000
+    entry("aa", 250, 250, ["bb:0"], "").spends => ["bb:0"]
+
+fn count(pool: Mempool) -> Int
+    ? "How many Transactions are held."
+    Map.len(pool.held)
+
+verify count
+    count(empty(1000)) => 0
+    count(withOne()) => 1
+
+fn bytes(pool: Mempool) -> Int
+    ? "How many bytes they take, against the cap."
+    pool.bytes
+
+verify bytes
+    bytes(empty(1000)) => 0
+    bytes(withOne()) => 250
+
+fn capOf(pool: Mempool) -> Int
+    ? "The most this Mempool will hold."
+    pool.cap
+
+verify capOf
+    capOf(empty(1000)) => 1000
+
+fn txids(pool: Mempool) -> List<String>
+    ? "What is held, by Transaction Id."
+      "Unordered, because a Map is. A caller that needs an order has to say"
+      "which one it means."
+    Map.keys(pool.held)
+
+verify txids
+    txids(empty(1000)) => []
+    txids(withOne()) => ["aa"]
+
+fn holds(pool: Mempool, txid: String) -> Bool
+    ? "Whether this Transaction is already held."
+    Map.has(pool.held, txid)
+
+verify holds
+    holds(withOne(), "aa") => true
+    holds(withOne(), "bb") => false
+
+fn heldFor(pool: Mempool, txid: String) -> Option<Held>
+    ? "The entry for one Transaction, for a caller answering a getdata."
+    Map.get(pool.held, txid)
+
+verify heldFor
+    heldFor(withOne(), "aa") => Option.Some(entry("aa", 250, 250, ["cc:0"], ""))
+    heldFor(withOne(), "bb") => Option.None
+
+fn floorRate(pool: Mempool) -> Int
+    ? "The least a Transaction must pay to get in right now."
+      "Below the cap that is the relay floor. At the cap it is what the"
+      "cheapest thing held pays, because getting in means displacing it. This"
+      "is the number that rises under flood and the one a reader actually"
+      "wants to see."
+    match pool.bytes < pool.cap
+        true -> Domain.Standard.relayFloor()
+        false -> floorFromLowest(lowest(pool))
+
+verify floorRate
+    floorRate(empty(1000)) => 1000
+    floorRate(full()) => 1000
+
+fn floorFromLowest(cheapest: Option<Held>) -> Int
+    ? "An empty Mempool that is somehow at its cap asks for the relay floor,"
+      "which cannot happen and is answered anyway rather than left partial."
+    match cheapest
+        Option.None -> Domain.Standard.relayFloor()
+        Option.Some(held) -> held.rate
+
+verify floorFromLowest
+    floorFromLowest(Option.None) => 1000
+    floorFromLowest(Option.Some(entry("aa", 250, 1000, [], ""))) => 4000
+
+fn lowest(pool: Mempool) -> Option<Held>
+    ? "The entry that would be evicted next."
+      "Lowest fee rate, and where two pay the same the greater Transaction Id"
+      "goes first -- an arbitrary rule, but a fixed one, so that two nodes"
+      "holding the same Transactions evict the same one."
+    lowestOf(Map.values(pool.held), Option.None)
+
+verify lowest
+    lowest(empty(1000)) => Option.None
+    lowest(withOne()) => Option.Some(entry("aa", 250, 250, ["cc:0"], ""))
+
+fn lowestOf(entries: List<Held>, sofar: Option<Held>) -> Option<Held>
+    ? "The cheapest of what is left, against the cheapest found so far."
+    match entries
+        [] -> sofar
+        [head, ..tail] -> lowestOf(tail, cheaper(head, sofar))
+
+verify lowestOf
+    lowestOf([], Option.None) => Option.None
+    lowestOf([entry("aa", 250, 250, [], "")], Option.None) => Option.Some(entry("aa", 250, 250, [], ""))
+
+fn cheaper(candidate: Held, sofar: Option<Held>) -> Option<Held>
+    ? "Which of two entries leaves first."
+    match sofar
+        Option.None -> Option.Some(candidate)
+        Option.Some(held) -> Option.Some(cheaperOf(candidate, held))
+
+verify cheaper
+    cheaper(entry("aa", 250, 250, [], ""), Option.None) => Option.Some(entry("aa", 250, 250, [], ""))
+    cheaper(entry("aa", 250, 1000, [], ""), Option.Some(entry("bb", 250, 250, [], ""))) => Option.Some(entry("bb", 250, 250, [], ""))
+
+fn cheaperOf(candidate: Held, sofar: Held) -> Held
+    ? "By rate, then by Transaction Id."
+    match candidate.rate < sofar.rate
+        true -> candidate
+        false -> cheaperAtSameRate(candidate, sofar)
+
+verify cheaperOf
+    cheaperOf(entry("aa", 250, 250, [], ""), entry("bb", 250, 1000, [], "")) => entry("aa", 250, 250, [], "")
+    cheaperOf(entry("aa", 250, 1000, [], ""), entry("bb", 250, 250, [], "")) => entry("bb", 250, 250, [], "")
+
+fn cheaperAtSameRate(candidate: Held, sofar: Held) -> Held
+    ? "The tie-break, which exists to be deterministic rather than to be fair."
+    match candidate.rate == sofar.rate
+        false -> sofar
+        true -> laterTxid(candidate, sofar)
+
+verify cheaperAtSameRate
+    cheaperAtSameRate(entry("aa", 250, 250, [], ""), entry("bb", 250, 250, [], "")) => entry("bb", 250, 250, [], "")
+    cheaperAtSameRate(entry("cc", 250, 1000, [], ""), entry("bb", 250, 250, [], "")) => entry("bb", 250, 250, [], "")
+
+fn laterTxid(candidate: Held, sofar: Held) -> Held
+    ? "The greater Transaction Id goes first."
+    match candidate.txid > sofar.txid
+        true -> candidate
+        false -> sofar
+
+verify laterTxid
+    laterTxid(entry("bb", 250, 250, [], ""), entry("aa", 250, 250, [], "")) => entry("bb", 250, 250, [], "")
+    laterTxid(entry("aa", 250, 250, [], ""), entry("bb", 250, 250, [], "")) => entry("bb", 250, 250, [], "")
+
+fn conflictOf(pool: Mempool, held: Held) -> Option<String>
+    ? "The Transaction already holding one of the Outputs this one spends."
+      "The first such, because one is enough to refuse it and the first is"
+      "the one the message will name."
+    claimedBy(pool, held.spends)
+
+verify conflictOf
+    conflictOf(withOne(), entry("bb", 250, 250, ["cc:0"], "")) => Option.Some("aa")
+    conflictOf(withOne(), entry("bb", 250, 250, ["dd:0"], "")) => Option.None
+
+fn claimedBy(pool: Mempool, spends: List<String>) -> Option<String>
+    ? "Walking the Outputs it spends, looking for one already claimed."
+    match spends
+        [] -> Option.None
+        [head, ..tail] -> claimedOr(pool, Map.get(pool.claims, head), tail)
+
+verify claimedBy
+    claimedBy(withOne(), []) => Option.None
+    claimedBy(withOne(), ["cc:0"]) => Option.Some("aa")
+
+fn claimedOr(pool: Mempool, claim: Option<String>, rest: List<String>) -> Option<String>
+    ? "This one, or keep looking."
+    match claim
+        Option.Some(txid) -> Option.Some(txid)
+        Option.None -> claimedBy(pool, rest)
+
+verify claimedOr
+    claimedOr(withOne(), Option.Some("aa"), []) => Option.Some("aa")
+    claimedOr(withOne(), Option.None, []) => Option.None
+    claimedOr(withOne(), Option.None, ["cc:0"]) => Option.Some("aa")
+
+fn admit(pool: Mempool, held: Held) -> Admission
+    ? "Take a Transaction that has already been found valid and standard."
+      "Four answers rather than two: already held, conflicting with something"
+      "held, refused for paying too little, or admitted. A Peer that sends"
+      "the same Transaction twice has not misbehaved, and Known is not an"
+      "error -- it is the reason a node does not relay in a loop."
+    match holds(pool, held.txid)
+        true -> Admission.Known
+        false -> admitUnheld(pool, held)
+
+verify admit
+    admit(withOne(), entry("aa", 250, 250, ["cc:0"], "")) => Admission.Known
+    admit(withOne(), entry("bb", 250, 250, ["cc:0"], "")) => Admission.Conflicts("aa")
+    admit(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
+    admit(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+
+fn admitUnheld(pool: Mempool, held: Held) -> Admission
+    ? "Nothing held under that Id, so the Outputs it spends are the question."
+    match conflictOf(pool, held)
+        Option.Some(txid) -> Admission.Conflicts(txid)
+        Option.None -> admitUnclaimed(pool, held)
+
+verify admitUnheld
+    admitUnheld(withOne(), entry("bb", 250, 250, ["cc:0"], "")) => Admission.Conflicts("aa")
+    admitUnheld(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
+    admitUnheld(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+
+fn admitUnclaimed(pool: Mempool, held: Held) -> Admission
+    ? "Room is made after the entry is lodged rather than before, because"
+      "whether it fits is not the question -- whether it pays more than what"
+      "it would displace is. Placing it and then evicting the cheapest asks"
+      "exactly that, and if the answer is itself, it never belonged."
+    settled(lodged(pool, held), held)
+
+verify admitUnclaimed
+    admitUnclaimed(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
+    admitUnclaimed(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+
+fn settled(pool: Mempool, held: Held) -> Admission
+    ? "Whether the Transaction survived the room being made for it."
+    heldOrRefused(evicted(pool), held)
+
+verify settled
+    settled(lodged(empty(10000), entry("bb", 250, 250, [], "")), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
+    settled(lodged(full(), entry("bb", 250, 250, ["dd:0"], "")), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+
+fn heldOrRefused(pool: Mempool, held: Held) -> Admission
+    ? "A Transaction evicted by its own admission is one that was never"
+      "cheap enough to be here, and saying so is more use to a Peer than"
+      "accepting it and dropping it a moment later."
+    match holds(pool, held.txid)
+        true -> Admission.Admitted(pool)
+        false -> Admission.Refused("pays {held.rate} per 1000 bytes, under the {floorRate(pool)} a full Mempool asks")
+
+verify heldOrRefused
+    heldOrRefused(withOne(), entry("aa", 250, 250, ["cc:0"], "")) => Admission.Admitted(withOne())
+    heldOrRefused(empty(1000), entry("aa", 250, 250, [], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+
+fn lodged(pool: Mempool, held: Held) -> Mempool
+    ? "The entry in, its claims recorded, its bytes counted."
+      "Named lodged rather than placed because Domain.HeaderTree exports a"
+      "placed, Infra.Follow binds that name, and every module in a depends"
+      "list is glob-imported into the generated Rust -- two of them offering"
+      "one name is E0659 the moment a binding takes it. CLAUDE.md lists this"
+      "as one of the failures only cargo build finds, and it found this one."
+    Mempool(held = Map.set(pool.held, held.txid, held), claims = claimed(pool.claims, held.txid, held.spends), bytes = pool.bytes + held.size, cap = pool.cap)
+
+verify lodged
+    count(lodged(empty(10000), entry("bb", 250, 250, [], ""))) => 1
+    bytes(lodged(empty(10000), entry("bb", 250, 250, [], ""))) => 250
+
+fn claimed(claims: Map<String, String>, txid: String, spends: List<String>) -> Map<String, String>
+    ? "Every Output this Transaction spends, recorded against it."
+    match spends
+        [] -> claims
+        [head, ..tail] -> claimed(Map.set(claims, head, txid), txid, tail)
+
+verify claimed
+    Map.get(claimed(Map.fromList([]), "aa", ["cc:0"]), "cc:0") => Option.Some("aa")
+    claimed(Map.fromList([]), "aa", []) => Map.fromList([])
+
+fn released(claims: Map<String, String>, spends: List<String>) -> Map<String, String>
+    ? "The claims of a Transaction that has left."
+    match spends
+        [] -> claims
+        [head, ..tail] -> released(Map.remove(claims, head), tail)
+
+verify released
+    released(claimed(Map.fromList([]), "aa", ["cc:0"]), ["cc:0"]) => Map.fromList([])
+    released(Map.fromList([]), []) => Map.fromList([])
+
+fn evicted(pool: Mempool) -> Mempool
+    ? "Room made, one Transaction at a time, cheapest first."
+      "Over the cap rather than at it: a Mempool exactly at its cap is full"
+      "and legal, and evicting there would throw away a Transaction for no"
+      "gain."
+    match pool.bytes > pool.cap
+        false -> pool
+        true -> evictedOf(pool, lowest(pool))
+
+verify evicted
+    evicted(withOne()) => withOne()
+    bytes(evicted(overfull())) => 250
+
+fn evictedOf(pool: Mempool, cheapest: Option<Held>) -> Mempool
+    ? "An over-full Mempool with nothing in it cannot happen; it is answered"
+      "rather than left partial, because a match that cannot fail is still a"
+      "match that has to say what it does."
+    match cheapest
+        Option.None -> pool
+        Option.Some(held) -> evicted(without(pool, held))
+
+verify evictedOf
+    evictedOf(withOne(), Option.None) => withOne()
+    count(evictedOf(overfull(), Option.Some(entry("aa", 250, 250, ["cc:0"], "")))) => 1
+    count(evictedOf(overfull(), lowest(overfull()))) => 1
+
+fn without(pool: Mempool, held: Held) -> Mempool
+    ? "One entry out, its claims released, its bytes returned."
+    Mempool(held = Map.remove(pool.held, held.txid), claims = released(pool.claims, held.spends), bytes = pool.bytes - held.size, cap = pool.cap)
+
+verify without
+    count(without(withOne(), entry("aa", 250, 250, ["cc:0"], ""))) => 0
+    bytes(without(withOne(), entry("aa", 250, 250, ["cc:0"], ""))) => 0
+
+fn confirmed(pool: Mempool, mined: List<String>) -> Mempool
+    ? "What a Block just confirmed leaves the Mempool."
+      "By Transaction Id, and a Block naming Transactions we never held is"
+      "the ordinary case rather than a surprise -- most of what is mined"
+      "arrived here first, but nothing says it had to."
+    match mined
+        [] -> pool
+        [head, ..tail] -> confirmed(withoutTxid(pool, head), tail)
+
+verify confirmed
+    count(confirmed(withOne(), ["aa"])) => 0
+    count(confirmed(withOne(), ["zz"])) => 1
+    count(confirmed(withOne(), [])) => 1
+
+fn withoutTxid(pool: Mempool, txid: String) -> Mempool
+    ? "One Transaction out, by Id, if it is there at all."
+    withoutHeld(pool, Map.get(pool.held, txid))
+
+verify withoutTxid
+    count(withoutTxid(withOne(), "aa")) => 0
+    count(withoutTxid(withOne(), "zz")) => 1
+
+fn withoutHeld(pool: Mempool, held: Option<Held>) -> Mempool
+    ? "The entry, if there was one."
+    match held
+        Option.None -> pool
+        Option.Some(found) -> without(pool, found)
+
+verify withoutHeld
+    count(withoutHeld(withOne(), Option.None)) => 1
+    count(withoutHeld(withOne(), Option.Some(entry("aa", 250, 250, ["cc:0"], "")))) => 0
+
+fn restored(pool: Mempool, unconfirmed: List<Held>) -> Mempool
+    ? "What a disconnected Block un-confirmed comes back."
+      "These were valid when they were mined, so they are lodged rather than"
+      "re-admitted: asking Policy again would be asking a question whose"
+      "answer we already acted on, and a conflict here means the chain it"
+      "reorganised onto spent the Output first -- in which case the entry is"
+      "dropped and the Output stays with whoever holds it now."
+    match unconfirmed
+        [] -> evicted(pool)
+        [head, ..tail] -> restored(restoredOne(pool, head), tail)
+
+verify restored
+    count(restored(empty(10000), [entry("bb", 250, 250, [], "")])) => 1
+    count(restored(empty(10000), [])) => 0
+
+fn restoredOne(pool: Mempool, held: Held) -> Mempool
+    ? "One of them back, unless something already spends what it spends."
+    match conflictOf(pool, held)
+        Option.Some(_) -> pool
+        Option.None -> lodged(pool, held)
+
+verify restoredOne
+    count(restoredOne(empty(10000), entry("bb", 250, 250, [], ""))) => 1
+    count(restoredOne(withOne(), entry("bb", 250, 250, ["cc:0"], ""))) => 1
+
+fn withOne() -> Mempool
+    ? "A Mempool holding one Transaction, for the cases in this module."
+    lodged(empty(10000), entry("aa", 250, 250, ["cc:0"], ""))
+
+verify withOne
+    count(withOne()) => 1
+
+fn full() -> Mempool
+    ? "A Mempool exactly at its cap, which is full and legal."
+    lodged(empty(250), entry("aa", 250, 250, ["cc:0"], ""))
+
+verify full
+    bytes(full()) => 250
+    capOf(full()) => 250
+
+fn overfull() -> Mempool
+    ? "A Mempool over its cap by one Transaction, for the eviction cases."
+      "The cheaper of the two pays half what the other does, so which one"
+      "leaves is a question about rates rather than about order."
+    lodged(lodged(empty(250), entry("aa", 250, 250, ["cc:0"], "")), entry("bb", 250, 500, ["dd:0"], ""))
+
+verify overfull
+    bytes(overfull()) => 500
+    count(overfull()) => 2

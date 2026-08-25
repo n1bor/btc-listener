@@ -15,12 +15,14 @@ module Follow
         "loses the ordering. Headers first is also what Bitcoin Core does with"
         "an inv it did not expect, and for the same reason. The getdata still"
         "happens -- it is what the body phase is -- one Header later."
-        "Exactly one Peer and one blocking socket, so nothing here waits on"
-        "the concurrency answer. The Mempool, many Peers and compact Blocks"
-        "are Stages 5 to 7; a Transaction announced here is simply not asked"
-        "for, because there is nowhere yet to put one."
+        "Many Peers now, and a Mempool: a Transaction announced here is asked"
+        "for, checked against the UTXO Set and Policy, held if it passes and"
+        "announced onward to every other Peer. What is still missing from"
+        "this loop is compact Blocks, which is Stage 7, and inbound Peers,"
+        "which is Stage 8 and waits on a runtime that can accept a connection"
+        "at all (jasisz/aver#1131)."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -39,6 +41,7 @@ record Following
     book: Map<String, Candidate>
     nextKey: Int
     watch: Watching
+    mempool: Mempool
 
 record Watching
     snapshot: Snapshot
@@ -68,9 +71,21 @@ fn tickMs() -> Int
 verify tickMs
     tickMs() => 1000
 
+fn mempoolCap() -> Int
+    ? "How many bytes of unconfirmed Transactions this node will hold."
+      "Core's default, 300 MB, and the same reasoning: it is large enough that"
+      "a node sees what a miner would be choosing from, and small enough that"
+      "a Peer cannot make us hold the whole flood. What goes first when it is"
+      "reached is what pays least, so the cost of filling it falls on whoever"
+      "is filling it. Domain.Mempool does that part."
+    300000000
+
+verify mempoolCap
+    mempoolCap() => 300000000
+
 fn withWatch(state: Following, watch: Watching) -> Following
     ? "The state, with what the loop knows about its watching moved on."
-    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch)
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch, mempool = state.mempool)
 
 fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
@@ -90,7 +105,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     ]
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Map.keys(pool.sockets))?
-    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs())), screened)
+    outcome = session(Following(pool = asked, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap())), screened)
     _given = restoredIf(screened)
     closeAfter(asked, outcome)
 
@@ -140,7 +155,7 @@ fn drainSpare(state: Following) -> Following
       "the two questions are asked seconds apart, and the answers do not"
       "arrive in the order they were asked. The pool keeps what it was not"
       "asked for; this is where it is looked at, and emptied."
-    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey, watch = state.watch)
+    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool)
 
 fn bookAfter(book: Map<String, Candidate>, spare: List<Spare>) -> Map<String, Candidate>
     ? "The Address Book, grown by whatever those Messages said."
@@ -215,7 +230,7 @@ fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch)
+    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool)
     match parsed
         Result.Err(why) -> Result.Ok(tried)
         Result.Ok(peer) -> reaching(tried, address, peer)
@@ -243,7 +258,7 @@ fn reached(state: Following, address: String, joined: Pool) -> Result<Following,
     ! [Console.error, Console.print, Tcp.writeBytes]
     _said = Console.print("peer {state.nextKey} is {address}, from the Address Book")
     asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
-    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch))
+    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch, mempool = state.mempool))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -419,7 +434,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
     ]
     _said = Console.error("dropping peer {key}: {why}")
     shrunk = Infra.Peers.dropOne(state.pool, key)?
-    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch), why)
+    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool), why)
 
 fn onwardWith(state: Following, why: String) -> Result<Following, String>
     ? "Another Peer to ask, or nobody left and the reason the last one gave."
@@ -462,17 +477,18 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     have = haveOf(state.store)?
     grown = Infra.Download.headersOn(state.pool, key, state.store, have)?
-    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch))
+    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool))
     _heard = saidBook(Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
     afterHeaders = toppedUp(drained)?
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight)?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = afterHeaders.watch), tipHeight)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = afterHeaders.watch, mempool = afterHeaders.mempool), tipHeight)?
     toppedUp(drainSpare(upToTip))
 
 fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
@@ -490,7 +506,98 @@ fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
     built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight)?
     _each = saidBlocks(blockLinesOf(built.blocks, built.views))
     _said = Console.print("following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch), watchAfterBuild(state.watch, built.views)))
+    swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = swept), watchAfterBuild(state.watch, built.views)))
+
+fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
+    ? "The Mempool, after the chain moved under it."
+      "Nothing moved means nothing to do, and that is the common case: this"
+      "runs on every turn of the loop that reaches the Set, and most of them"
+      "connect no Blocks at all."
+    ! [Console.print, Infra.Kv.get]
+    match connectedCount + disconnectedCount == 0
+        true -> Result.Ok(pool)
+        false -> saidSwept(pool, sweeping(store, pool, Domain.Mempool.txids(pool), [])?)
+
+fn saidSwept(before: Mempool, after: Mempool) -> Result<Mempool, String>
+    ? "Say what the chain took, unless it took nothing."
+      "A Block that confirms nothing we held is the ordinary case on a quiet"
+      "chain and is not worth a line."
+    ! [Console.print]
+    match Domain.Mempool.count(before) == Domain.Mempool.count(after)
+        true -> Result.Ok(after)
+        false -> toldSwept(before, after)
+
+fn toldSwept(before: Mempool, after: Mempool) -> Result<Mempool, String>
+    ? "What left, and what is still held."
+    ! [Console.print]
+    _said = Console.print("mempool: {Domain.Mempool.count(before) - Domain.Mempool.count(after)} Transaction(s) left, taken by the chain; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
+    Result.Ok(after)
+
+fn sweeping(store: Store, pool: Mempool, held: List<String>, gone: List<String>) -> Result<Mempool, String>
+    ? "Every held Transaction, against the Set the new Blocks left behind."
+      "A held Transaction whose Inputs the Set no longer holds has either been"
+      "confirmed or been beaten to its Outputs by one that was, and the two"
+      "want the same thing done: it leaves. Asking the Set is what makes both"
+      "answers one question -- there is no need to know which Block confirmed"
+      "what, only whether the Outputs it means to spend are still there."
+      "A reorganisation is the same walk. Disconnecting puts Outputs back, so"
+      "a Transaction that was dropped for being confirmed is simply not here"
+      "any more; Core would restore it and this does not, which costs us a"
+      "Transaction we would have relayed and never costs correctness. The"
+      "restoring half of n1bor/btc-listener#28 needs the disconnected Block's"
+      "Transactions carried out of the walk, and Domain.Mempool.restored is"
+      "written and waiting for them."
+    ! [Infra.Kv.get]
+    match held
+        [] -> Result.Ok(Domain.Mempool.confirmed(pool, gone))
+        [head, ..tail] -> sweptOne(store, pool, head, tail, gone)
+
+fn sweptOne(store: Store, pool: Mempool, txid: String, rest: List<String>, gone: List<String>) -> Result<Mempool, String>
+    ? "One held Transaction, by what it spends."
+    ! [Infra.Kv.get]
+    match Domain.Mempool.heldFor(pool, txid)
+        Option.None -> sweeping(store, pool, rest, gone)
+        Option.Some(entry) -> sweptSpends(store, pool, txid, rest, gone, entry.spends)
+
+fn sweptSpends(store: Store, pool: Mempool, txid: String, rest: List<String>, gone: List<String>, spends: List<String>) -> Result<Mempool, String>
+    ? "Its Outputs, one at a time, stopping at the first one that has gone."
+    ! [Infra.Kv.get]
+    match spends
+        [] -> sweeping(store, pool, rest, gone)
+        [head, ..tail] -> sweptSpend(store, pool, txid, rest, gone, head, tail)
+
+fn sweptSpend(store: Store, pool: Mempool, txid: String, rest: List<String>, gone: List<String>, spend: String, others: List<String>) -> Result<Mempool, String>
+    ? "Whether the Set still holds this one."
+    ! [Infra.Kv.get]
+    stored = Infra.Store.get(store, keyForOutpoint(spend)?)?
+    match stored
+        Option.None -> sweeping(store, pool, rest, List.prepend(txid, gone))
+        Option.Some(found) -> sweptSpends(store, pool, txid, rest, gone, others)
+
+fn keyForOutpoint(spend: String) -> Result<Bytes, String>
+    ? "The Set key for an Output named the way the Mempool names it."
+    keyForParts(String.split(spend, ":"))
+
+fn keyForParts(parts: List<String>) -> Result<Bytes, String>
+    ? "The two halves of the name, back into a key."
+    match parts
+        [] -> Result.Err("an Output name is a Transaction Id and a position, got nothing")
+        [head, ..tail] -> keyForRest(head, tail)
+
+verify keyForParts
+    keyForParts([]) => Result.Err("an Output name is a Transaction Id and a position, got nothing")
+    keyForParts(["f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", "0"]) => Domain.UtxoStore.unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)
+
+fn keyForRest(txid: String, rest: List<String>) -> Result<Bytes, String>
+    ? "The position, which a name without one has not got."
+    match rest
+        [] -> Result.Err("an Output name is a Transaction Id and a position, got only {txid}")
+        [head, ..tail] -> Domain.UtxoStore.unspentKey(txid, Result.withDefault(Int.fromString(head), 0))
+
+verify keyForRest
+    keyForRest("aa", []) => Result.Err("an Output name is a Transaction Id and a position, got only aa")
+    keyForRest("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", ["0"]) => Domain.UtxoStore.unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)
 
 fn blockLinesOf(connectedCount: Int, views: List<BlockView>) -> List<String>
     ? "A line per Block, but only when every connected Block is in the ring"
@@ -653,7 +760,7 @@ fn turning(state: Following) -> Result<Unit, String>
     drained = drainSpare(state)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
-    onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch), topped.watch), ticked.arrived)
+    onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool), topped.watch), ticked.arrived)
 
 fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
     ? "A Message to handle, or a moment to look at the clock."
@@ -838,17 +945,19 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
     ]
     match command
         "inv" -> onAnnouncement(state, key, body)
+        "tx" -> onTransaction(state, key, body)
+        "getdata" -> onAsked(state, key, body)
         "headers" -> onMoved(state, key, "peer {key} sent Headers unasked")
         "addr" -> onAddresses(state, key, body)
         "ping" -> onPing(state, key, body)
         _ -> listen(state)
 
 fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
-    ? "An Announcement carrying no Blocks changes nothing here."
-      "Transactions are announced down the same Message and are not asked for:"
-      "there is no Mempool to put one in until Stage 6, and asking for what"
-      "cannot be kept would be noise on the wire and a lie about what this"
-      "program does."
+    ? "Blocks first, then Transactions."
+      "Both are announced down the same Message. A Block moving the chain"
+      "outranks anything unconfirmed -- what a Block confirms leaves the"
+      "Mempool anyway -- so an Announcement carrying both is followed for the"
+      "Block, and the Transactions in it will be offered again by somebody."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -861,7 +970,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
     ]
     announced = Domain.Inventory.blockHashesOf(body)
     match announced
-        [] -> listen(state)
+        [] -> onOffered(state, key, Domain.Inventory.txHashesOf(body))
         [head, ..tail] -> onMoved(state, key, "{List.len(announced)} Block(s) announced by peer {key}")
 
 fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
@@ -883,7 +992,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
     offered = Domain.Addr.addressesOf(body)
     grown = Domain.AddressBook.heardAll(state.book, renderedAll(offered, []), key)
     _said = saidHeard(List.len(offered), key, Domain.AddressBook.sizeOf(grown))
-    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch))
+    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool))
 
 fn saidHeard(offered: Int, key: Int, held: Int) -> Unit
     ? "Say what was heard, unless nothing was."
@@ -940,4 +1049,213 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ]
     payload = Bytes.fromList(body)?
     sent = Infra.Peers.send(state.pool, key, "pong", payload)?
-    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch))
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool))
+
+fn onOffered(state: Following, key: Int, offered: List<List<Int>>) -> Result<Unit, String>
+    ? "Transactions a Peer says it holds."
+      "Only the ones we have not got are asked for. That is most of the flood"
+      "control at this end but not all of it: nothing here records what has"
+      "been asked for and not yet arrived, so a Transaction announced by eight"
+      "Peers at once is asked of all eight, and seven copies arrive to be"
+      "recognised and dropped. Each of those costs a decode and nothing more"
+      "-- admission answers Known before it looks anything up -- and the fix"
+      "is a record of what is in flight, which is the same bookkeeping the"
+      "orphan pool needs. Both are deferred by n1bor/btc-listener#28."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match unheld(state.mempool, offered, [])
+        [] -> listen(state)
+        [head, ..tail] -> asking(state, key, List.prepend(head, tail))
+
+fn unheld(pool: Mempool, offered: List<List<Int>>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "The offered identifiers we do not already hold."
+    match offered
+        [] -> List.reverse(acc)
+        [head, ..tail] -> unheld(pool, tail, keptIfNew(pool, head, acc))
+
+verify unheld
+    unheld(Domain.Mempool.empty(1000), [], []) => []
+    List.len(unheld(Domain.Mempool.empty(1000), [[1, 2]], [])) => 1
+
+fn keptIfNew(pool: Mempool, hash: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
+    ? "An identifier we hold is dropped rather than asked for."
+    match Domain.Mempool.holds(pool, Domain.Hash.reversedHex(hash))
+        true -> acc
+        false -> List.prepend(hash, acc)
+
+verify keptIfNew
+    List.len(keptIfNew(Domain.Mempool.empty(1000), [1, 2], [])) => 1
+    keptIfNew(Domain.Mempool.empty(1000), [1, 2], []) => [[1, 2]]
+
+fn asking(state: Following, key: Int, hashes: List<List<Int>>) -> Result<Unit, String>
+    ? "Ask the Peer that offered them, with the witness type."
+      "The witness type is what makes the reply SegWit-serialised, which is"
+      "the serialisation the Transaction Id was not taken over and the one the"
+      "Scripts need."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
+    sent = Infra.Peers.send(state.pool, key, "getdata", payload)?
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool))
+
+fn onTransaction(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "A Transaction we asked for, or one a Peer sent unasked."
+      "Both go through the same admission. A Peer that sends what nobody asked"
+      "for has not misbehaved -- Core does it, for a Transaction it thinks we"
+      "want -- and admission is the thing that decides, not who sent it."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    tipHeight = tipHeightOf(state.store)?
+    landing = Infra.Mempool.admitting(state.pool.network, state.store, state.mempool, body, tipHeight)?
+    landed(state, key, landing)
+
+fn landed(state: Following, key: Int, landing: Landing) -> Result<Unit, String>
+    ? "What admission decided, and what to do about it."
+      "Only an admission is relayed. A refusal is ours and not the network's:"
+      "a Transaction we will not hold may be perfectly valid, and telling"
+      "other Peers we have it when we do not is how a node ends up unable to"
+      "answer its own Announcements."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match landing
+        Landing.Admitted(after, held) -> announcing(state, key, after, held)
+        Landing.Duplicate -> listen(state)
+        Landing.Conflicted(txid) -> notHeld(state, "conflicts with {txid}, which got here first")
+        Landing.Rejected(why) -> notHeld(state, why)
+
+fn notHeld(state: Following, why: String) -> Result<Unit, String>
+    ? "Say why, and carry on."
+      "One line per refusal is a lot on mainnet and the right amount on a"
+      "chain being watched. n1bor/btc-listener#134 is where this becomes a"
+      "counter on a Panel instead."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    _said = Console.print("mempool refused a Transaction: it {why}")
+    listen(state)
+
+fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.Held) -> Result<Unit, String>
+    ? "Held, and told to every other Peer."
+      "Not back to the Peer that sent it: it plainly has it. Announced by"
+      "identifier rather than sent whole, which is what inv is for -- a Peer"
+      "that wants it asks, and most will already have it."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    _said = Console.print("mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
+    told = toldOthers(state.pool, Map.keys(state.pool.sockets), key, payload)?
+    listen(Following(pool = told, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = after))
+
+fn toldOthers(pool: Pool, keys: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
+    ? "The Announcement, to every Peer but the one that told us."
+    ! [Tcp.writeBytes]
+    match keys
+        [] -> Result.Ok(pool)
+        [head, ..tail] -> toldOne(pool, head, tail, sender, payload)
+
+fn toldOne(pool: Pool, key: Int, rest: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
+    ? "One Peer, unless it is the one that sent it."
+    ! [Tcp.writeBytes]
+    match key == sender
+        true -> toldOthers(pool, rest, sender, payload)
+        false -> toldOthers(Infra.Peers.send(pool, key, "inv", payload)?, rest, sender, payload)
+
+fn hashOf(txid: String) -> List<Int>
+    ? "A Transaction Id back into the bytes an Announcement carries."
+      "Announcements carry the hash the way it came off the digest, which is"
+      "the reverse of the way it is read; Domain.Hash.reversedHex turns one"
+      "into the other and this turns it back."
+    List.reverse(Bytes.octets(Result.withDefault(Bytes.fromHex(txid), Bytes.fromList([]))))
+
+verify hashOf
+    hashOf("0201") => [1, 2]
+    hashOf("") => []
+    Domain.Hash.reversedHex(hashOf("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")) => "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
+
+fn onAsked(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "A Peer asking for Transactions we announced."
+      "Answering is not a courtesy: a node that announces and then goes quiet"
+      "wastes the round trip of every Peer that asked, and Peers drop one that"
+      "does it. What we cannot answer is passed over in silence, which is what"
+      "Core does with a getdata for something it no longer holds."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    answered = serving(state.pool, state.mempool, key, Domain.Inventory.requestedTxHashesOf(body))?
+    listen(Following(pool = answered, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool))
+
+fn serving(pool: Pool, mempool: Mempool, key: Int, asked: List<List<Int>>) -> Result<Pool, String>
+    ? "Each identifier asked for, answered from what we hold."
+    ! [Tcp.writeBytes]
+    match asked
+        [] -> Result.Ok(pool)
+        [head, ..tail] -> servingOne(pool, mempool, key, head, tail)
+
+fn servingOne(pool: Pool, mempool: Mempool, key: Int, hash: List<Int>, rest: List<List<Int>>) -> Result<Pool, String>
+    ? "One of them, if it is still held."
+    ! [Tcp.writeBytes]
+    match Domain.Mempool.heldFor(mempool, Domain.Hash.reversedHex(hash))
+        Option.None -> serving(pool, mempool, key, rest)
+        Option.Some(held) -> served(pool, mempool, key, held, rest)
+
+fn served(pool: Pool, mempool: Mempool, key: Int, held: Domain.Mempool.Held, rest: List<List<Int>>) -> Result<Pool, String>
+    ? "The bytes that arrived, back out unchanged."
+      "Unchanged matters: a SegWit Transaction re-serialised from its decoded"
+      "shape is a different string of bytes, and a Peer checking what it asked"
+      "for against what it got would find a Transaction it did not ask for."
+    ! [Tcp.writeBytes]
+    serving(Infra.Peers.send(pool, key, "tx", Bytes.fromHex(held.raw)?)?, mempool, key, rest)

@@ -1,0 +1,343 @@
+module Standard
+    intent =
+        "Which Transactions this node is willing to hold and pass on, over and"
+        "above what the chain would accept."
+        "This is Policy in the sense CONTEXT.md means it, and the boundary is"
+        "load-bearing: a Transaction refused here may be perfectly valid, and"
+        "the chain is full of ones that are. Nothing in this module may ever"
+        "be asked about a Block. Domain.Rules answers for consensus at a"
+        "Height; this answers only for what we choose to relay, and the two"
+        "must not be confused -- an auditor that applied these rules would"
+        "reject Transactions that are already mined, which n1bor/btc-listener#52"
+        "names as the one outcome that must not happen."
+        "The rules are Core's, at the values Core uses, because Policy is only"
+        "worth anything if the Peers around us apply roughly the same one: a"
+        "node that relays what nobody else will is talking to itself, and one"
+        "that refuses what everyone else relays is a hole in the network."
+        "Where a value is chosen rather than copied it says so."
+        "Size is measured as serialised bytes rather than as weight units."
+        "Core's limit is 400,000 weight, which is 100,000 virtual bytes, and a"
+        "Transaction's weight is not something this program can yet work out --"
+        "it needs the witness and non-witness halves measured apart. Serialised"
+        "size is never smaller than the virtual size, so this refuses a little"
+        "more than Core does and never less. n1bor/btc-listener#28."
+    exposes [Standardness, standardOf, isStandardKind, maxSize, maxScriptSigSize, minVersion, maxVersion, dust, relayFloor, feeRate, paysEnough]
+    depends [Domain.Script, Domain.Transaction]
+    effects []
+
+type Standardness
+    Standard
+    Nonstandard(String)
+
+fn maxSize() -> Int
+    ? "The largest Transaction we will hold, in serialised bytes."
+      "Core's MAX_STANDARD_TX_WEIGHT is 400,000 weight units, which is 100,000"
+      "virtual bytes. Read against serialised size this is the same number"
+      "applied more strictly; see the intent."
+    100000
+
+verify maxSize
+    maxSize() => 100000
+
+fn maxScriptSigSize() -> Int
+    ? "The largest input Script we will hold, in bytes."
+      "Core's MAX_STANDARD_SCRIPTSIG_SIZE. It is large enough for a 15-of-15"
+      "P2SH redemption and nothing much beyond it."
+    1650
+
+verify maxScriptSigSize
+    maxScriptSigSize() => 1650
+
+fn minVersion() -> Int
+    ? "The lowest Transaction version we will relay."
+    1
+
+verify minVersion
+    minVersion() => 1
+
+fn maxVersion() -> Int
+    ? "The highest Transaction version we will relay."
+      "Core's MAX_STANDARD_VERSION. Version 3 exists in later Core as TRUC,"
+      "with a Policy of its own that this node does not implement; relaying a"
+      "version we do not understand the rules for would be claiming to enforce"
+      "something we do not."
+    2
+
+verify maxVersion
+    maxVersion() => 2
+
+fn dust() -> Int
+    ? "The smallest Output value we will relay, in satoshis."
+      "Core works this out per Output, from what it would cost to spend it at"
+      "the dust relay fee; for the common Output shapes that lands on 546 for"
+      "a P2PKH-sized Output and 294 for a P2WPKH one. This uses the higher of"
+      "the two for every shape, which is the conservative direction: it"
+      "refuses a few Outputs Core would relay rather than relaying ones it"
+      "would not. A per-shape calculation is a later issue if it earns one."
+    546
+
+verify dust
+    dust() => 546
+
+fn relayFloor() -> Int
+    ? "The least a Transaction may pay, in satoshis per 1000 bytes."
+      "Core's DEFAULT_MIN_RELAY_TX_FEE, which is one satoshi per byte. It is"
+      "a floor and not a target: a full Mempool asks for more than this, and"
+      "Domain.Mempool answers for that rather than this module."
+    1000
+
+verify relayFloor
+    relayFloor() => 1000
+
+fn feeRate(fee: Int, size: Int) -> Int
+    ? "What a Transaction pays, in satoshis per 1000 bytes."
+      "Integer arithmetic throughout, because a fee rate that rounds is a fee"
+      "rate two nodes can disagree about. A Transaction of no size has no rate"
+      "rather than an infinite one; it cannot occur, and answering 0 keeps"
+      "every caller total."
+    match size <= 0
+        true -> 0
+        false -> Result.withDefault(Int.div(fee * 1000, size), 0)
+
+verify feeRate
+    feeRate(1000, 1000) => 1000
+    feeRate(226, 226) => 1000
+    feeRate(1000, 250) => 4000
+    feeRate(0, 250) => 0
+    feeRate(100, 0) => 0
+    feeRate(1, 1000) => 1
+
+fn paysEnough(fee: Int, size: Int) -> Bool
+    ? "Whether what it pays clears the floor."
+    feeRate(fee, size) >= relayFloor()
+
+verify paysEnough
+    paysEnough(250, 250) => true
+    paysEnough(249, 250) => false
+    paysEnough(0, 250) => false
+    paysEnough(1000000, 250) => true
+
+fn isStandardKind(kind: String) -> Bool
+    ? "Whether an Output paying this kind of Script is one we will relay."
+      "Domain.Script.kindOf's vocabulary, and the list is Core's standard"
+      "types. Bare P2MS is on it, which surprises people: it is standard to"
+      "relay and has been since the beginning, up to three keys, which"
+      "Domain.Script.kindOf already refuses beyond. Anything unrecognised is"
+      "nonstandard by construction -- that is what the name means -- and a"
+      "future Script type appears here as a line, not as a silent yes."
+    List.contains(["P2PKH", "P2SH", "P2WPKH", "P2WSH", "P2TR", "P2PK", "P2MS", "P2A", "OP_RETURN"], kind)
+
+verify isStandardKind
+    isStandardKind("P2PKH") => true
+    isStandardKind("P2WPKH") => true
+    isStandardKind("P2TR") => true
+    isStandardKind("OP_RETURN") => true
+    isStandardKind("P2A") => true
+    isStandardKind("nonstandard") => false
+    isStandardKind("") => false
+
+fn standardOf(transaction: Transaction) -> Standardness
+    ? "Whether we will hold and relay this Transaction at all."
+      "Shape only. Whether it is valid -- whether the Outputs it spends exist"
+      "and whether its Scripts run -- is consensus, and is asked before this"
+      "by whoever is admitting it. This is the cheaper question and is asked"
+      "first for that reason."
+    match transaction.size > maxSize()
+        true -> Standardness.Nonstandard("is {transaction.size} bytes, over the {maxSize()} we relay")
+        false -> versioned(transaction)
+
+verify standardOf
+    standardOf(oneOutput("0014751e76e8199196d454941c45d1b3a323f1433bd6", 100000)) => Standardness.Standard
+    standardOf(sized(200000)) => Standardness.Nonstandard("is 200000 bytes, over the 100000 we relay")
+
+fn versioned(transaction: Transaction) -> Standardness
+    ? "A version whose rules we do not know is one we cannot claim to enforce."
+    match transaction.version < minVersion()
+        true -> Standardness.Nonstandard("is version {transaction.version}, and we relay {minVersion()} to {maxVersion()}")
+        false -> versionUnderCap(transaction)
+
+verify versioned
+    versioned(versioned0()) => Standardness.Nonstandard("is version 0, and we relay 1 to 2")
+
+fn versionUnderCap(transaction: Transaction) -> Standardness
+    ? "The other end of the same question."
+    match transaction.version > maxVersion()
+        true -> Standardness.Nonstandard("is version {transaction.version}, and we relay {minVersion()} to {maxVersion()}")
+        false -> inputsStandard(transaction, transaction.inputs)
+
+verify versionUnderCap
+    versionUnderCap(versioned3()) => Standardness.Nonstandard("is version 3, and we relay 1 to 2")
+
+fn inputsStandard(transaction: Transaction, inputs: List<Input>) -> Standardness
+    ? "Every input Script bounded, and pushing only."
+      "Core requires a scriptSig that does nothing but push, because a"
+      "scriptSig that computes is a scriptSig whose cost cannot be read off"
+      "its length. Consensus allows it below P2SH's activation and the chain"
+      "holds such Transactions, which is exactly why this is Policy."
+    match inputs
+        [] -> outputsStandard(transaction, transaction.outputs, 0)
+        [head, ..tail] -> withInputOfSize(transaction, head, tail, Int.div(String.len(head.script), 2))
+
+verify inputsStandard
+    inputsStandard(oneOutput("0014751e76e8199196d454941c45d1b3a323f1433bd6", 100000), []) => Standardness.Standard
+    inputsStandard(bare(), [pushingInput()]) => Standardness.Standard
+    inputsStandard(bare(), [computingInput()]) => Standardness.Nonstandard("has an input Script that does more than push")
+
+fn withInputOfSize(transaction: Transaction, input: Input, rest: List<Input>, bytes: Int) -> Standardness
+    ? "The same input, with its size already counted."
+    match bytes > maxScriptSigSize()
+        true -> Standardness.Nonstandard("has an input Script of {bytes} bytes, over the {maxScriptSigSize()} we relay")
+        false -> withPushOnlyInput(transaction, input, rest)
+
+verify withInputOfSize
+    withInputOfSize(bare(), pushingInput(), [], 1651) => Standardness.Nonstandard("has an input Script of 1651 bytes, over the 1650 we relay")
+    withInputOfSize(bare(), pushingInput(), [], 100) => Standardness.Standard
+
+fn withPushOnlyInput(transaction: Transaction, input: Input, rest: List<Input>) -> Standardness
+    ? "A scriptSig that only pushes, unless it is a coinbase -- which cannot"
+      "reach a Mempool in the first place, and is not special-cased here"
+      "because the admission path refuses it before shape is asked."
+    match Domain.Script.isPushOnly(input.script)
+        false -> Standardness.Nonstandard("has an input Script that does more than push")
+        true -> inputsStandard(transaction, rest)
+
+verify withPushOnlyInput
+    withPushOnlyInput(bare(), computingInput(), []) => Standardness.Nonstandard("has an input Script that does more than push")
+    withPushOnlyInput(bare(), pushingInput(), []) => Standardness.Standard
+
+fn outputsStandard(transaction: Transaction, outputs: List<Output>, dataSeen: Int) -> Standardness
+    ? "Every Output a shape we relay, above dust, and at most one carrying data."
+    match outputs
+        [] -> Standardness.Standard
+        [head, ..tail] -> withOutput(transaction, head, tail, dataSeen)
+
+verify outputsStandard
+    outputsStandard(bare(), [], 0) => Standardness.Standard
+    outputsStandard(bare(), [Output(value = 100000, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6")], 0) => Standardness.Standard
+    outputsStandard(bare(), [Output(value = 100000, script = "ffff")], 0) => Standardness.Nonstandard("pays a Script we do not relay: nonstandard")
+
+fn withOutput(transaction: Transaction, output: Output, rest: List<Output>, dataSeen: Int) -> Standardness
+    ? "One Output, by the kind of Script it pays."
+    match isStandardKind(Domain.Script.kindOf(output.script))
+        false -> Standardness.Nonstandard("pays a Script we do not relay: {Domain.Script.kindOf(output.script)}")
+        true -> withKnownOutput(transaction, output, rest, dataSeen)
+
+verify withOutput
+    withOutput(bare(), Output(value = 100000, script = "ffff"), [], 0) => Standardness.Nonstandard("pays a Script we do not relay: nonstandard")
+    withOutput(bare(), Output(value = 100000, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6"), [], 0) => Standardness.Standard
+
+fn withKnownOutput(transaction: Transaction, output: Output, rest: List<Output>, dataSeen: Int) -> Standardness
+    ? "Data-carrying Outputs are counted rather than measured."
+      "One OP_RETURN is standard and two are not, which is Core's rule and is"
+      "about relaying data cheaply rather than about the data itself. An"
+      "OP_RETURN carries no value and is not dust, so it leaves here rather"
+      "than going on to the dust question."
+    match Domain.Script.kindOf(output.script) == "OP_RETURN"
+        true -> withDataOutput(transaction, output, rest, dataSeen)
+        false -> aboveDust(transaction, output, rest, dataSeen)
+
+verify withKnownOutput
+    withKnownOutput(bare(), Output(value = 0, script = "6a0b68656c6c6f20776f726c64"), [], 1) => Standardness.Nonstandard("carries data in more than one Output")
+    withKnownOutput(bare(), Output(value = 100000, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6"), [], 0) => Standardness.Standard
+
+fn withDataOutput(transaction: Transaction, output: Output, rest: List<Output>, dataSeen: Int) -> Standardness
+    ? "The second one is the one that is refused."
+    match dataSeen > 0
+        true -> Standardness.Nonstandard("carries data in more than one Output")
+        false -> outputsStandard(transaction, rest, dataSeen + 1)
+
+verify withDataOutput
+    withDataOutput(bare(), Output(value = 0, script = "6a0b68656c6c6f20776f726c64"), [], 0) => Standardness.Standard
+    withDataOutput(bare(), Output(value = 0, script = "6a0b68656c6c6f20776f726c64"), [], 2) => Standardness.Nonstandard("carries data in more than one Output")
+
+fn aboveDust(transaction: Transaction, output: Output, rest: List<Output>, dataSeen: Int) -> Standardness
+    ? "An Output too small to be worth spending is one nobody will ever spend,"
+      "and relaying it asks every node to hold it forever."
+    match output.value < dust()
+        true -> Standardness.Nonstandard("pays {output.value} satoshis, under the {dust()} we relay")
+        false -> outputsStandard(transaction, rest, dataSeen)
+
+verify aboveDust
+    aboveDust(bare(), Output(value = 545, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6"), [], 0) => Standardness.Nonstandard("pays 545 satoshis, under the 546 we relay")
+    aboveDust(bare(), Output(value = 546, script = "0014751e76e8199196d454941c45d1b3a323f1433bd6"), [], 0) => Standardness.Standard
+
+fn bare() -> Transaction
+    ? "A Transaction with nothing in it, for the cases in this module."
+      "The shape questions each take one field, so a case that is about"
+      "Outputs says nothing about inputs and vice versa."
+    Transaction(version = 2, inputs = [], outputs = [], lockTime = 0, txid = "", size = 200, isSegWit = false)
+
+verify bare
+    bare().version => 2
+
+fn sized(size: Int) -> Transaction
+    ? "The same, at a stated size."
+    Transaction(version = 2, inputs = [], outputs = [], lockTime = 0, txid = "", size = size, isSegWit = false)
+
+verify sized
+    sized(200000).size => 200000
+
+fn versioned0() -> Transaction
+    ? "A Transaction claiming version 0, which no rule we know describes."
+    Transaction(version = 0, inputs = [], outputs = [], lockTime = 0, txid = "", size = 200, isSegWit = false)
+
+verify versioned0
+    versioned0().version => 0
+
+fn versioned3() -> Transaction
+    ? "A Transaction claiming version 3, whose Policy this node does not carry."
+    Transaction(version = 3, inputs = [], outputs = [], lockTime = 0, txid = "", size = 200, isSegWit = false)
+
+verify versioned3
+    versioned3().version => 3
+
+fn oneOutput(script: String, value: Int) -> Transaction
+    ? "A Transaction paying one Output, for the cases in this module."
+    Transaction(version = 2, inputs = [], outputs = [Output(value = value, script = script)], lockTime = 0, txid = "", size = 200, isSegWit = false)
+
+verify oneOutput
+    List.len(oneOutput("0014751e76e8199196d454941c45d1b3a323f1433bd6", 100000).outputs) => 1
+
+fn longScriptInput() -> Input
+    ? "An input Script one byte over what we relay."
+      "Built rather than spelled, so that the number in the case is the number"
+      "being tested: 1651 bytes of hex is 3302 characters, and a wall of"
+      "zeroes in the source would be a number nobody could check by eye."
+    Input(previousTxid = "", previousIndex = 0, script = zeroBytes(1651), sequence = 0, witness = [])
+
+verify longScriptInput
+    String.len(longScriptInput().script) => 3302
+
+fn zeroBytes(count: Int) -> String
+    ? "A Script of that many zero bytes, spelled as hex."
+    zeroBytesOnto("", count)
+
+verify zeroBytes
+    zeroBytes(0) => ""
+    zeroBytes(1) => "00"
+    zeroBytes(3) => "000000"
+
+fn zeroBytesOnto(sofar: String, left: Int) -> String
+    ? "One byte at a time, because Aver has no repeat and a fixture that"
+      "cannot be built is a fixture that gets left out."
+    match left <= 0
+        true -> sofar
+        false -> zeroBytesOnto("{sofar}00", left - 1)
+
+verify zeroBytesOnto
+    zeroBytesOnto("", 0) => ""
+    zeroBytesOnto("ff", 1) => "ff00"
+
+fn pushingInput() -> Input
+    ? "An input Script that only pushes, which is what Policy asks for."
+    Input(previousTxid = "", previousIndex = 0, script = "0101", sequence = 0, witness = [])
+
+verify pushingInput
+    pushingInput().script => "0101"
+
+fn computingInput() -> Input
+    ? "An input Script that does more than push: OP_DUP."
+    Input(previousTxid = "", previousIndex = 0, script = "76", sequence = 0, witness = [])
+
+verify computingInput
+    computingInput().script => "76"

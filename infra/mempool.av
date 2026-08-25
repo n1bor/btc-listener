@@ -1,0 +1,249 @@
+module Mempool
+    intent =
+        "Deciding whether an unconfirmed Transaction may be held, which is the"
+        "only place in this program that asks consensus of something no Block"
+        "contains."
+        "The order of the questions is the design. Shape first, because"
+        "Domain.Standard costs nothing and refuses most of what should be"
+        "refused. Then the Outputs it spends, looked up in the UTXO Set rather"
+        "than in the o: keyspace -- and that difference is the whole point. The"
+        "o: keyspace holds every Output the chain ever made and would happily"
+        "resolve one that was spent three years ago; the Set holds only what is"
+        "unspent now. An admission built on o: would accept double spends"
+        "cheerfully and relay them, which is worse than not relaying at all."
+        "Then value, then the fee floor, then the Scripts. Scripts last because"
+        "they are the expensive question, and because everything before them"
+        "narrows what reaches them: a Peer that wants to make us run Scripts"
+        "has to pay the fee floor to do it."
+        "What this cannot yet do is see the Transactions the Mempool already"
+        "holds as spendable. A chain of unconfirmed Transactions -- B spending"
+        "an Output of A while A is still unconfirmed -- resolves against the"
+        "Set, finds nothing, and is refused. Core holds those; the orphan pool"
+        "and package relay are deferred by n1bor/btc-listener#28, and this is"
+        "the honest half of that deferral rather than a bug: the Transaction is"
+        "refused rather than admitted on a guess."
+    exposes [Landing, admitting, paidOut]
+    depends [Bytes, Domain.Mempool, Domain.Network, Domain.Rules, Domain.ScriptWork, Domain.Spend, Domain.SpendScript, Domain.Standard, Domain.Transaction, Domain.UtxoStore, Infra.Spends, Infra.Store]
+    effects [Infra.Kv.get]
+
+type Landing
+    Admitted(Mempool, Held)
+    Duplicate
+    Conflicted(String)
+    Rejected(String)
+
+record Gathering
+    tally: Tally
+    pending: List<Pending>
+    spends: List<String>
+    raw: String
+
+fn admitting(network: Network, store: Store, pool: Mempool, raw: List<Int>, tipHeight: Int) -> Result<Landing, String>
+    ? "Whether this Transaction may be held, and the Mempool that holds it."
+      "A Result.Err here is the Store failing, not the Transaction failing."
+      "A Transaction we will not have is a Landing.Rejected and an ordinary"
+      "outcome: most of what a Peer offers is refused by somebody."
+    ! [Infra.Kv.get]
+    hex = Bytes.toHex(Bytes.fromList(raw)?)
+    match Domain.Transaction.decode(raw)
+        Result.Err(why) -> Result.Ok(Landing.Rejected("would not decode: {why}"))
+        Result.Ok(transaction) -> known(network, store, pool, transaction, tipHeight, hex)
+
+fn known(network: Network, store: Store, pool: Mempool, transaction: Transaction, tipHeight: Int, hex: String) -> Result<Landing, String>
+    ? "Something already held is answered before any work is done on it."
+      "A Peer sending what we hold is the ordinary shape of relay rather than"
+      "a fault, and this is the cheap way to say so."
+    ! [Infra.Kv.get]
+    match Domain.Mempool.holds(pool, Domain.Transaction.txidOf(transaction))
+        true -> Result.Ok(Landing.Duplicate)
+        false -> shaped(network, store, pool, transaction, tipHeight, hex)
+
+fn shaped(network: Network, store: Store, pool: Mempool, transaction: Transaction, tipHeight: Int, hex: String) -> Result<Landing, String>
+    ? "Policy before consensus, because Policy is the cheaper question."
+    ! [Infra.Kv.get]
+    match Domain.Standard.standardOf(transaction)
+        Standardness.Nonstandard(why) -> Result.Ok(Landing.Rejected("is not standard: it {why}"))
+        Standardness.Standard -> againstSet(network, store, pool, transaction, tipHeight, hex)
+
+fn againstSet(network: Network, store: Store, pool: Mempool, transaction: Transaction, tipHeight: Int, hex: String) -> Result<Landing, String>
+    ? "Every Input followed into the UTXO Set."
+    ! [Infra.Kv.get]
+    gathered = gathering(store, transaction, 0, Domain.Transaction.inputsOf(transaction), Gathering(tally = Domain.Spend.started(), pending = [], spends = [], raw = hex), tipHeight)?
+    conserving(network, pool, transaction, gathered, tipHeight)
+
+fn gathering(store: Store, transaction: Transaction, index: Int, inputs: List<Input>, held: Gathering, tipHeight: Int) -> Result<Gathering, String>
+    ? "One Input at a time, holding what the Scripts will need."
+    ! [Infra.Kv.get]
+    match inputs
+        [] -> Result.Ok(Gathering(tally = held.tally, pending = List.reverse(held.pending), spends = List.reverse(held.spends), raw = held.raw))
+        [head, ..tail] -> gatheringOne(store, transaction, index, head, tail, held, tipHeight)
+
+fn gatheringOne(store: Store, transaction: Transaction, index: Int, input: Input, rest: List<Input>, held: Gathering, tipHeight: Int) -> Result<Gathering, String>
+    ? "This Input's parent, out of the Set."
+    ! [Infra.Kv.get]
+    key = Domain.UtxoStore.unspentKey(Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
+    stored = Infra.Store.get(store, key)?
+    coined(store, transaction, index, input, rest, held, tipHeight, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input), stored)
+
+fn coined(store: Store, transaction: Transaction, index: Int, input: Input, rest: List<Input>, held: Gathering, tipHeight: Int, previousTxid: String, position: Int, stored: Option<Bytes>) -> Result<Gathering, String>
+    ? "An Output the Set does not hold is spent or was never there, and the"
+      "two are the same answer to a node that only holds what is unspent."
+    ! [Infra.Kv.get]
+    match stored
+        Option.None -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Unknown("the Set does not hold {previousTxid}:{position}")), tipHeight)
+        Option.Some(value) -> decoded(store, transaction, index, input, rest, held, tipHeight, Domain.UtxoStore.decodeCoin(previousTxid, position, value)?)
+
+fn decoded(store: Store, transaction: Transaction, index: Int, input: Input, rest: List<Input>, held: Gathering, tipHeight: Int, unspent: Unspent) -> Result<Gathering, String>
+    ? "A coinbase Output has to have aged before anyone may spend it, and a"
+      "Transaction spending one too early is invalid rather than merely"
+      "unwelcome -- a Block containing it would be rejected by every node."
+      "The spend would happen in the next Block, so it is judged there."
+    ! [Infra.Kv.get]
+    match Domain.UtxoStore.matured(unspent, tipHeight + 1)
+        false -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Invalid("spends a coinbase from Height {unspent.height} that is not spendable until {unspent.height + Domain.UtxoStore.maturity()}")), tipHeight)
+        true -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Resolved(unspent.value, unspent.script)), tipHeight)
+
+fn absorbed(held: Gathering, input: Input, index: Int, spend: Spend) -> Gathering
+    ? "One answer folded in: the value, the Script work, and the claim."
+    Gathering(tally = Domain.Spend.absorb(held.tally, spend), pending = List.prepend(Pending(index = index, input = input, spend = spend), held.pending), spends = List.prepend(Domain.Mempool.outpoint(Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input)), held.spends), raw = held.raw)
+
+verify absorbed
+    List.len(absorbed(Gathering(tally = Domain.Spend.started(), pending = [], spends = [], raw = ""), sampleInput(), 0, Spend.Resolved(5, "51")).pending) => 1
+    absorbed(Gathering(tally = Domain.Spend.started(), pending = [], spends = [], raw = ""), sampleInput(), 0, Spend.Resolved(5, "51")).spends => ["aa:0"]
+    absorbed(Gathering(tally = Domain.Spend.started(), pending = [], spends = [], raw = ""), sampleInput(), 0, Spend.Resolved(5, "51")).tally.spent => 5
+
+fn conserving(network: Network, pool: Mempool, transaction: Transaction, gathered: Gathering, tipHeight: Int) -> Result<Landing, String>
+    ? "What it spends against what it pays."
+      "Every Verdict but Conserved is a refusal here, and each says something"
+      "different: Incomplete is an Output we do not hold, Broken is one that"
+      "cannot be spent, Created is value out of nothing, and Coinbase is a"
+      "Transaction that mints -- which only a Block may do, so a loose one is"
+      "refused rather than mined."
+    match Domain.Spend.verdictOf(gathered.tally, paidOut(Domain.Transaction.outputsOf(transaction), 0))
+        Verdict.Conserved -> priced(network, pool, transaction, gathered, tipHeight)
+        Verdict.Created(extra) -> Result.Ok(Landing.Rejected("pays out {extra} satoshis more than it spends"))
+        Verdict.Incomplete(why) -> Result.Ok(Landing.Rejected("spends an Output we cannot account for: {why}"))
+        Verdict.Broken(why) -> Result.Ok(Landing.Rejected("is invalid: {why}"))
+        Verdict.Coinbase -> Result.Ok(Landing.Rejected("is a coinbase, which only a Block may carry"))
+
+verify conserving
+    conserving(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("pays 0 per 1000 bytes, under the 1000 we relay"))
+    conserving(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 100, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("pays out 400 satoshis more than it spends"))
+    conserving(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 0, unknown = Option.Some("the Set does not hold aa:0"), invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("spends an Output we cannot account for: the Set does not hold aa:0"))
+    conserving(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 0, unknown = Option.None, invalid = Option.Some("spends a coinbase too early"), coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("is invalid: spends a coinbase too early"))
+    conserving(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Domain.Spend.markCoinbase(Domain.Spend.started()), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("is a coinbase, which only a Block may carry"))
+
+fn paidOut(outputs: List<Output>, sofar: Int) -> Int
+    ? "What a Transaction pays out, in satoshis."
+    match outputs
+        [] -> sofar
+        [head, ..tail] -> paidOut(tail, sofar + Domain.Transaction.valueOf(head))
+
+verify paidOut
+    paidOut([], 0) => 0
+    paidOut([Output(value = 500, script = "51")], 0) => 500
+    paidOut([Output(value = 500, script = "51"), Output(value = 200, script = "51")], 0) => 700
+
+fn priced(network: Network, pool: Mempool, transaction: Transaction, gathered: Gathering, tipHeight: Int) -> Result<Landing, String>
+    ? "The fee floor, before any Script is run."
+      "This is the throttle that makes the Script work bounded: a Peer that"
+      "wants us to run Scripts has to pay for the privilege at the going rate,"
+      "and a full Mempool raises that rate on its own."
+    match Domain.Standard.paysEnough(Domain.Spend.feeOf(gathered.tally, paidOut(Domain.Transaction.outputsOf(transaction), 0)), Domain.Transaction.sizeOf(transaction))
+        false -> Result.Ok(Landing.Rejected("pays {Domain.Standard.feeRate(Domain.Spend.feeOf(gathered.tally, paidOut(Domain.Transaction.outputsOf(transaction), 0)), Domain.Transaction.sizeOf(transaction))} per 1000 bytes, under the {Domain.Standard.relayFloor()} we relay"))
+        true -> scripted(network, pool, transaction, gathered, tipHeight)
+
+verify priced
+    priced(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Rejected("pays 0 per 1000 bytes, under the 1000 we relay"))
+    priced(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Admitted(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 500, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000), Domain.Mempool.entry("aa", 250, 500, [], "")))
+
+fn scripted(network: Network, pool: Mempool, transaction: Transaction, gathered: Gathering, tipHeight: Int) -> Result<Landing, String>
+    ? "Every Script pair run, under the Rules the next Block will be judged by."
+      "Height plus one, because a Transaction in the Mempool is a Transaction"
+      "asking to be in the Block after the one we stand on, and it is that"
+      "Block's Rules it has to satisfy. On a chain at a fork Height the"
+      "difference is real."
+    counted(pool, transaction, gathered, Infra.Spends.scriptsAcross([Work(transaction = transaction, tally = gathered.tally, spent = gathered.pending)], Domain.Rules.at(network, tipHeight + 1), tipHeight + 1, "")?)
+
+verify scripted
+    scripted(Network.Signet, Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), 100) => Result.Ok(Landing.Admitted(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 500, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000), Domain.Mempool.entry("aa", 250, 500, [], "")))
+
+fn counted(pool: Mempool, transaction: Transaction, gathered: Gathering, outcome: Tuple<Outcomes, List<String>>) -> Result<Landing, String>
+    ? "A Script that failed is a refusal; a Script that could not be decided"
+      "is also a refusal, and for a stricter reason. An auditor reports"
+      "undecided because the chain already accepted the Block and our opinion"
+      "changes nothing. Here the Transaction is asking to be held and passed"
+      "on, and passing on what we could not check is how a node becomes a"
+      "vector for what it does not understand."
+    match outcome
+        (counts, lines) -> landed(pool, transaction, gathered, refusalIn(counts))
+
+verify counted
+    counted(Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), (Domain.SpendScript.noOutcomes(), [])) => Result.Ok(Landing.Admitted(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 500, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000), Domain.Mempool.entry("aa", 250, 500, [], "")))
+    counted(Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), (Outcomes(passed = 0, failed = 1, undecided = 0, note = Option.None), [])) => Result.Ok(Landing.Rejected("has 1 Script(s) that failed"))
+
+fn refusalIn(counts: Outcomes) -> Option<String>
+    ? "What the Script pass has to say against this Transaction, if anything."
+    match counts.failed > 0
+        true -> Option.Some("has {counts.failed} Script(s) that failed")
+        false -> undecidedIn(counts)
+
+verify refusalIn
+    refusalIn(Domain.SpendScript.noOutcomes()) => Option.None
+    refusalIn(Outcomes(passed = 0, failed = 2, undecided = 0, note = Option.None)) => Option.Some("has 2 Script(s) that failed")
+    refusalIn(Outcomes(passed = 0, failed = 0, undecided = 1, note = Option.None)) => Option.Some("has 1 Script(s) this engine cannot decide")
+
+fn undecidedIn(counts: Outcomes) -> Option<String>
+    ? "The other reason a Script pass refuses."
+    match counts.undecided > 0
+        true -> Option.Some("has {counts.undecided} Script(s) this engine cannot decide")
+        false -> Option.None
+
+verify undecidedIn
+    undecidedIn(Domain.SpendScript.noOutcomes()) => Option.None
+
+fn landed(pool: Mempool, transaction: Transaction, gathered: Gathering, refusal: Option<String>) -> Result<Landing, String>
+    ? "Valid, standard, and paid for. What is left is whether there is room"
+      "and whether something else already spends what it spends."
+    match refusal
+        Option.Some(why) -> Result.Ok(Landing.Rejected(why))
+        Option.None -> enrolled(pool, entryFor(transaction, gathered))
+
+verify landed
+    landed(Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), Option.None) => Result.Ok(Landing.Admitted(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 500, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000), Domain.Mempool.entry("aa", 250, 500, [], "")))
+    landed(Domain.Mempool.empty(10000), sampleTransaction(), Gathering(tally = Tally(spent = 1000, unknown = Option.None, invalid = Option.None, coinbase = false), pending = [], spends = [], raw = ""), Option.Some("has 1 Script(s) that failed")) => Result.Ok(Landing.Rejected("has 1 Script(s) that failed"))
+
+fn entryFor(transaction: Transaction, gathered: Gathering) -> Held
+    ? "The Transaction as the Mempool will hold it."
+    Domain.Mempool.entry(Domain.Transaction.txidOf(transaction), Domain.Transaction.sizeOf(transaction), Domain.Spend.feeOf(gathered.tally, paidOut(Domain.Transaction.outputsOf(transaction), 0)), gathered.spends, gathered.raw)
+
+fn enrolled(pool: Mempool, held: Held) -> Result<Landing, String>
+    ? "The pure Mempool has the last word, and its four answers become ours."
+      "Named enrolled for the same reason Domain.Mempool.lodged is not called"
+      "placed: the name is taken by Domain.HeaderTree and glob-imported"
+      "wherever both are depended on."
+    match Domain.Mempool.admit(pool, held)
+        Admission.Admitted(after) -> Result.Ok(Landing.Admitted(after, held))
+        Admission.Known -> Result.Ok(Landing.Duplicate)
+        Admission.Conflicts(txid) -> Result.Ok(Landing.Conflicted(txid))
+        Admission.Refused(why) -> Result.Ok(Landing.Rejected(why))
+
+verify enrolled
+    enrolled(Domain.Mempool.empty(10000), Domain.Mempool.entry("aa", 250, 500, [], "")) => Result.Ok(Landing.Admitted(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 500, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000), Domain.Mempool.entry("aa", 250, 500, [], "")))
+    enrolled(Mempool(held = Map.fromList([("aa", Domain.Mempool.entry("aa", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 250), Domain.Mempool.entry("zz", 250, 250, [], "")) => Result.Ok(Landing.Rejected("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks"))
+
+fn sampleTransaction() -> Transaction
+    ? "A Transaction paying 500 satoshis, for the cases in this module."
+      "Its Id is spelled rather than hashed, because these cases are about"
+      "what happens to a Transaction and not about how it is named."
+    Transaction(version = 2, inputs = [sampleInput()], outputs = [Output(value = 500, script = "51")], lockTime = 0, txid = "aa", size = 250, isSegWit = false)
+
+verify sampleTransaction
+    sampleTransaction().txid => "aa"
+
+fn sampleInput() -> Input
+    ? "An Input naming one Output, for the cases in this module."
+    Input(previousTxid = "aa", previousIndex = 0, script = "51", sequence = 0, witness = [])
+
+verify sampleInput
+    sampleInput().previousTxid => "aa"
