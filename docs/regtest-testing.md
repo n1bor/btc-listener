@@ -428,6 +428,82 @@ every failure — the node falls back to fetching the Block whole and says so:
   for 3` is the honest version of that, and still correct; it just saves
   nothing.
 
+### 11. A Peer that dialled us
+
+Everything above this node did by dialling out. This is the other direction:
+`serve` binds a port and answers callers (#30).
+
+Bitcoin Core already holds the regtest port, so give the listener another —
+which is what `serve:PORT` is for, and what any second node on one machine
+needs:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444 $D serve:18455 &
+```
+
+```
+listening on port 18455 for up to 8 inbound Peer(s)
+```
+
+Then have the *second* node dial it. It must be a node with no other route to
+us, or you have proved nothing about the inbound path:
+
+```bash
+$C2 addnode "127.0.0.1:18455" onetry
+```
+
+```
+peer 1 dialled us from 127.0.0.1:48492
+```
+
+**Check the handshake from the caller's side**, because that is the half this
+node has never done before — it has always been the one to open with
+`version`, and an inbound Peer expects ours in reply before its `verack`:
+
+```bash
+$C2 getpeerinfo
+```
+
+```
+id 17  127.0.0.1:18455  '/aver-btc-listener:0.1/'  outbound  v70016
+```
+
+Core knowing our user agent and protocol version is the proof: it only learns
+those from a `version` it received and acknowledged.
+
+**Then prove the Peer is first-class, not merely connected.** An inbound Peer
+that cannot be relayed to is a socket, not a Peer. Make a Transaction on the
+first node and read the *second* node's log:
+
+```bash
+$C2 logging '["net"]'
+$C sendtoaddress $($C getnewaddress "" bech32) 0.31
+```
+
+```
+[net] received: inv (37 bytes) peer=17
+[net] got inv: tx a5352641…  new peer=17
+[net] Requesting tx a5352641… peer=17
+[net] received: tx (222 bytes) peer=17
+```
+
+Announced to it, asked for by it, served to it — over a connection it opened.
+Nothing in the relay path knows which side dialled, which is the point: an
+inbound Peer is seated in the same pool, under the same standing, with the
+same key space.
+
+**It will not enter the second node's Mempool unless both nodes are at the
+same Height** — same trap as section 6, and it looks identical to a relay
+failure. Check `getblockcount` on both before concluding anything.
+
+#### What this does not yet do
+
+Serving the chain. A Peer that dials us can talk to us, but `getheaders` and
+`getdata` for Blocks are not answered yet, so nobody can sync from this node —
+which is the rest of #30, along with the DoS work the issue asks for. What is
+here is the accept loop, the handshake from the answering side, an inbound
+cap, and a caller that misbehaves costing itself its slot and nothing else.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

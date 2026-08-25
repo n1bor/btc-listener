@@ -29,7 +29,7 @@ module Follow
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -81,6 +81,20 @@ fn tickMs() -> Int
 verify tickMs
     tickMs() => 1000
 
+fn listeningIf(pool: Pool, network: Network, answering: Option<Int>) -> Result<Pool, String>
+    ? "Bind a port, if this node was asked to answer callers."
+    ! [Console.print, Tcp.listen]
+    match answering
+        Option.None -> Result.Ok(pool)
+        Option.Some(port) -> listeningOn(pool, port)
+
+fn listeningOn(pool: Pool, port: Int) -> Result<Pool, String>
+    ? "The port bound, and said out loud -- an open port is worth announcing."
+    ! [Console.print, Tcp.listen]
+    bound = Infra.Peers.listening(pool, port)?
+    _said = Console.print("listening on port {port} for up to {Infra.Peers.inboundLimit()} inbound Peer(s)")
+    Result.Ok(bound)
+
 fn mempoolCap() -> Int
     ? "How many bytes of unconfirmed Transactions this node will hold."
       "Core's default, 300 MB, and the same reasoning: it is large enough that"
@@ -97,28 +111,35 @@ fn withWatch(state: Following, watch: Watching) -> Following
     ? "The state, with what the loop knows about its watching moved on."
     Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch, mempool = state.mempool, rebuilding = state.rebuilding)
 
-fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool) -> Result<Unit, String>
+fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool, answering: Option<Int>) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
       "With screened true the listen loop runs as the Screen (#130): raw"
       "mode is entered once the catch-up is done, and however the session"
       "ends -- q, a polite stop, an error -- the terminal is restored here,"
       "on the one path every ending shares."
+      "With answering carrying a port the node also binds it and answers"
+      "callers (#30). It is a word rather than a default because an inbound"
+      "port is an attack surface, and a node should not open one because"
+      "somebody upgraded it. Listening starts after the outbound Peers have"
+      "been greeted and asked their questions, so a bound port never delays"
+      "catching up."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
-    asked = askingAll(pool, Map.keys(pool.sockets))?
-    told = tellingCompact(asked, Map.keys(asked.sockets))?
-    outcome = session(Following(pool = told, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), screened)
+    asked = askingAll(pool, Infra.Peers.peerKeys(pool))?
+    told = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
+    bound = listeningIf(told, network, answering)?
+    outcome = session(Following(pool = bound, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), screened)
     _given = restoredIf(screened)
-    closeAfter(told, outcome)
+    closeAfter(bound, outcome)
 
 fn restoredIf(screened: Bool) -> Unit
     ? "Give the terminal back if the Screen ever had it; restoring a"
@@ -226,10 +247,10 @@ fn toppedUp(state: Following) -> Result<Following, String>
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    match Map.len(state.pool.sockets) >= targetPeers()
+    match List.len(Infra.Peers.peerKeys(state.pool)) >= targetPeers()
         true -> Result.Ok(state)
         false -> dialling(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
 
@@ -238,7 +259,7 @@ fn dialling(state: Following, chosen: Option<String>) -> Result<Following, Strin
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match chosen
@@ -250,7 +271,7 @@ fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
@@ -263,7 +284,7 @@ fn reaching(state: Following, address: String, peer: PeerAddress) -> Result<Foll
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match Infra.Peers.joined(state.pool, state.nextKey, peer)
@@ -292,7 +313,7 @@ fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, S
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match addresses
@@ -307,7 +328,7 @@ fn joiningOne(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: In
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match Infra.Peers.joined(pool, key, address)
@@ -319,7 +340,7 @@ fn refused(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int, 
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     _said = Console.error("peer {Domain.Address.toString(address)} refused: {why}")
@@ -330,7 +351,7 @@ fn accepted(pool: Pool, address: PeerAddress, rest: List<PeerAddress>, key: Int)
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     _said = Console.print("peer {key} is {Domain.Address.toString(address)}")
@@ -358,7 +379,7 @@ fn session(state: Following, screened: Bool) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -408,7 +429,7 @@ verify atTip
 
 fn firstKey(pool: Pool) -> Int
     ? "Which Peer to ask first, before any of them has announced anything."
-    Result.withDefault(lowestKey(Map.keys(pool.sockets)), 0)
+    Result.withDefault(lowestKey(Infra.Peers.peerKeys(pool)), 0)
 
 fn lowestKey(keys: List<Int>) -> Result<Int, String>
     ? "The lowest identifier held, or nothing when the pool is empty."
@@ -438,7 +459,7 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -454,7 +475,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -470,11 +491,11 @@ fn onwardWith(state: Following, why: String) -> Result<Following, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    match Map.keys(state.pool.sockets)
+    match Infra.Peers.peerKeys(state.pool)
         [] -> Result.Err("no Peer could bring the chain up to date; the last said: {why}")
         [head, ..tail] -> caughtUp(state, head)
 
@@ -502,7 +523,7 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -852,7 +873,7 @@ fn listen(state: Following) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -891,7 +912,7 @@ fn turning(state: Following) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -908,7 +929,7 @@ fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -938,16 +959,35 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _somebody = anyoneLeft(Map.len(state.pool.sockets))?
+    _somebody = anyoneLeft(List.len(Infra.Peers.peerKeys(state.pool)))?
     _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
     fresh = refreshed(state, nowMs)
-    match staleRebuild(fresh.rebuilding, nowMs)
-        Option.Some(pending) -> fellBack(fresh, pending.key, "peer {pending.key} did not send the compact Block for {pending.blockId} within {Int.div(rebuildDeadlineMs(), 1000)} seconds")
-        Option.None -> quietOnward(fresh, nowMs)
+    taken = Infra.Peers.accepting(fresh.pool, fresh.nextKey)?
+    admitted = afterAccepting(fresh, taken)
+    match staleRebuild(admitted.rebuilding, nowMs)
+        Option.Some(pending) -> fellBack(admitted, pending.key, "peer {pending.key} did not send the compact Block for {pending.blockId} within {Int.div(rebuildDeadlineMs(), 1000)} seconds")
+        Option.None -> quietOnward(admitted, nowMs)
+
+fn afterAccepting(state: Following, taken: Accepted) -> Following
+    ? "A caller admitted takes the next key, so the one after it is free."
+      "Asked on every quiet turn rather than waited on: accept answers None"
+      "for an empty backlog without blocking, so this costs a syscall a"
+      "second and needs no wait of its own."
+    Following(pool = taken.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = nextAfter(state.nextKey, taken.seated), watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
+
+fn nextAfter(nextKey: Int, seated: Option<Int>) -> Int
+    ? "One further on if a caller took a key, unchanged if none did."
+    match seated
+        Option.None -> nextKey
+        Option.Some(key) -> key + 1
+
+verify nextAfter
+    nextAfter(4, Option.None) => 4
+    nextAfter(4, Option.Some(4)) => 5
 
 fn quietOnward(state: Following, nowMs: Int) -> Result<Unit, String>
     ? "The rest of the quiet turn, once no rebuild is overdue."
@@ -957,7 +997,7 @@ fn quietOnward(state: Following, nowMs: Int) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -999,7 +1039,7 @@ fn screenTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1020,7 +1060,7 @@ fn drawnTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1060,7 +1100,7 @@ verify stillHeard
 fn refreshed(state: Following, nowMs: Int) -> Following
     ? "The Snapshot's company brought up to date: who is connected, how"
       "long each has been quiet, and how many Candidates are on the shelf."
-    withWatch(state, Watching(snapshot = Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, peerViews(state.pool.standing, state.watch, Map.keys(state.pool.sockets), [])), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, peerViews(state.pool.standing, state.watch, Infra.Peers.peerKeys(state.pool), [])), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn mempoolView(pool: Mempool) -> MempoolView
     ? "The Mempool's four numbers, read through the accessors #28 built for"
@@ -1075,7 +1115,7 @@ fn peerViews(standing: Map<Int, Standing>, watch: Watching, keys: List<Int>, acc
 
 verify peerViews
     peerViews(Domain.Inbox.noStanding(), freshWatch(0), [], []) => []
-    peerViews(Map.fromList([(0, Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0))]), freshWatch(5), [0], []) => [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 5, sent = 0, received = 0)]
+    peerViews(Map.fromList([(0, Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false))]), freshWatch(5), [0], []) => [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 5, sent = 0, received = 0)]
 
 fn peerView(standing: Map<Int, Standing>, watch: Watching, key: Int) -> PeerView
     ? "What the Snapshot shows of one Peer."
@@ -1092,8 +1132,8 @@ fn viewOf(key: Int, standing: Option<Standing>, heardMs: Int) -> PeerView
 
 verify viewOf
     viewOf(2, Option.None, 7) => PeerView(key = 2, address = "unknown", version = 0, agent = "", lastHeardMs = 7, sent = 0, received = 0)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 120, received = 4096)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 120, received = 4096, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096)
 
 fn saidStats(state: Following, nowMs: Int) -> Following
     ? "The Peer stats line, when it has come due and not before."
@@ -1122,7 +1162,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1149,7 +1189,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1170,7 +1210,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1219,7 +1259,7 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1235,7 +1275,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1259,7 +1299,7 @@ fn onOffered(state: Following, key: Int, offered: List<List<Int>>) -> Result<Uni
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1298,7 +1338,7 @@ fn asking(state: Following, key: Int, hashes: List<List<Int>>) -> Result<Unit, S
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1317,7 +1357,7 @@ fn onTransaction(state: Following, key: Int, body: List<Int>) -> Result<Unit, St
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1337,7 +1377,7 @@ fn landed(state: Following, key: Int, landing: Landing) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1358,7 +1398,7 @@ fn notHeld(state: Following, why: String) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1376,13 +1416,13 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _said = Console.print("mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
-    told = toldOthers(state.pool, Map.keys(state.pool.sockets), key, payload)?
+    told = toldOthers(state.pool, Infra.Peers.peerKeys(state.pool), key, payload)?
     listen(Following(pool = told, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = after, rebuilding = state.rebuilding))
 
 fn toldOthers(pool: Pool, keys: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
@@ -1423,7 +1463,7 @@ fn onAsked(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1466,7 +1506,7 @@ fn onAnnouncedBlocks(state: Following, key: Int, announced: List<List<Int>>, fir
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1485,7 +1525,7 @@ fn askingCompact(state: Following, key: Int, announced: List<List<Int>>, first: 
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1534,7 +1574,7 @@ fn onCompact(state: Following, key: Int, body: List<Int>) -> Result<Unit, String
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1550,7 +1590,7 @@ fn filling(state: Following, key: Int, compact: Compact) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1586,7 +1626,7 @@ fn askingFor(state: Following, key: Int, compact: Compact, indexes: List<Int>) -
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1633,7 +1673,7 @@ fn onBlockTxn(state: Following, key: Int, body: List<Int>) -> Result<Unit, Strin
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1649,7 +1689,7 @@ fn withAnswer(state: Following, key: Int, answer: Tuple<List<Int>, List<Int>>) -
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1664,7 +1704,7 @@ fn finishing(state: Following, key: Int, carried: Result<List<Carried>, String>)
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1689,7 +1729,7 @@ fn assembling(state: Following, key: Int, supplied: List<List<Int>>) -> Result<U
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1705,7 +1745,7 @@ fn withPending(state: Following, key: Int, pending: Rebuilding, supplied: List<L
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1724,7 +1764,7 @@ fn completed(state: Following, key: Int, compact: Compact, built: Result<Bytes, 
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1745,7 +1785,7 @@ fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplie
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -1772,7 +1812,7 @@ fn fellBack(state: Following, key: Int, why: String) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]

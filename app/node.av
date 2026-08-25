@@ -14,7 +14,7 @@ module Node
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -27,7 +27,7 @@ fn follow(network: Network, rest: List<String>) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -43,13 +43,93 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
-        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra))
+        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network))
+
+fn servePort(extra: List<String>, network: Network) -> Option<Int>
+    ? "Which port to answer callers on, if the word serve was given (#30)."
+      "A word rather than a default, because binding a port is the one thing"
+      "this program does that invites strangers in, and nobody should acquire"
+      "an open port by upgrading."
+      "serve alone takes the Network's own port, which is what a real node"
+      "wants. serve:PORT names another, which is what a second node on one"
+      "machine needs -- including the regtest pair the end-to-end test uses,"
+      "where Bitcoin Core already holds 18444."
+    servePortIn(extra, Domain.Network.portOf(network))
+
+verify servePort
+    servePort([], Network.Regtest) => Option.None
+    servePort(["serve"], Network.Regtest) => Option.Some(18444)
+    servePort(["serve:18455"], Network.Regtest) => Option.Some(18455)
+    servePort(["screen", "serve"], Network.Signet) => Option.Some(38333)
+    servePort(["something"], Network.Regtest) => Option.None
+
+fn servePortIn(extra: List<String>, fallback: Int) -> Option<Int>
+    ? "The first word that asks to serve, and what it asks for."
+    match extra
+        [] -> Option.None
+        [head, ..tail] -> serveWordOr(head, tail, fallback)
+
+verify servePortIn
+    servePortIn([], 18444) => Option.None
+    servePortIn(["serve"], 18444) => Option.Some(18444)
+
+fn serveWordOr(word: String, rest: List<String>, fallback: Int) -> Option<Int>
+    ? "This word, or keep looking through the rest."
+    match word == "serve"
+        true -> Option.Some(fallback)
+        false -> servePortAfter(word, rest, fallback)
+
+verify serveWordOr
+    serveWordOr("serve", [], 18444) => Option.Some(18444)
+    serveWordOr("screen", [], 18444) => Option.None
+
+fn servePortAfter(word: String, rest: List<String>, fallback: Int) -> Option<Int>
+    ? "serve:PORT names its own port; anything else is not ours."
+    match String.startsWith(word, "serve:")
+        false -> servePortIn(rest, fallback)
+        true -> portAfterColon(String.split(word, ":"), rest, fallback)
+
+verify servePortAfter
+    servePortAfter("serve:18455", [], 18444) => Option.Some(18455)
+    servePortAfter("screen", [], 18444) => Option.None
+
+fn portAfterColon(parts: List<String>, rest: List<String>, fallback: Int) -> Option<Int>
+    ? "The half after the colon, which the word being serve: guarantees."
+    match parts
+        [] -> servePortIn(rest, fallback)
+        [head, ..tail] -> portInTail(tail, rest, fallback)
+
+verify portAfterColon
+    portAfterColon(["serve", "18455"], [], 18444) => Option.Some(18455)
+    portAfterColon([], [], 18444) => Option.None
+
+fn portInTail(tail: List<String>, rest: List<String>, fallback: Int) -> Option<Int>
+    ? "What follows the colon, if anything does."
+    match tail
+        [] -> servePortIn(rest, fallback)
+        [head, ..more] -> portIn(head, rest, fallback)
+
+verify portInTail
+    portInTail(["18455"], [], 18444) => Option.Some(18455)
+    portInTail([], [], 18444) => Option.None
+
+fn portIn(text: String, rest: List<String>, fallback: Int) -> Option<Int>
+    ? "A port that will not parse is not a port, and the word is passed over"
+      "rather than silently becoming the default -- a typed port that binds"
+      "somewhere else is worse than one that does not bind."
+    match Int.fromString(text)
+        Result.Err(why) -> servePortIn(rest, fallback)
+        Result.Ok(port) -> Option.Some(port)
+
+verify portIn
+    portIn("18455", [], 18444) => Option.Some(18455)
+    portIn("nonsense", [], 18444) => Option.None
 
 fn screenAsked(extra: List<String>) -> Bool
     ? "Whether the word screen follows the directory (#130)."
@@ -60,7 +140,7 @@ verify screenAsked
     screenAsked(["screen"]) => true
     screenAsked(["something"]) => false
 
-fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool) -> Result<Unit, String>
+fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool, answering: Option<Int>) -> Result<Unit, String>
     ? "Follow the tip, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -68,15 +148,15 @@ fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: S
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match addresses
         Result.Err(message) -> Result.Err("error: {message}")
-        Result.Ok(peers) -> said(claimed(network, peers, dir, screened))
+        Result.Ok(peers) -> said(claimed(network, peers, dir, screened, answering))
 
-fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool) -> Result<String, String>
+fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>) -> Result<String, String>
     ? "Take the directory for the life of the process."
       "A follower holds the claim until it stops, which is the point: the"
       "Index, the Segments and the UTXO Set are all being written as Blocks"
@@ -92,15 +172,15 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     _claimed = Infra.Lock.claim(dir, "follow")?
     _armed = Process.stopRequested()
-    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened))
+    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened, answering))
 
-fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool) -> Result<String, String>
+fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>) -> Result<String, String>
     ? "Open everything the three phases write to, then hand over to the loop."
       "This returns only when the loop stops, and the loop stops only on a"
       "read that failed, a Peer that went silent, or a Block that would not"
@@ -112,13 +192,13 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String, screen
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened)?
+    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened, answering)?
     Result.Ok("stopped following")
 
 fn addressesIn(network: Network, texts: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
