@@ -173,13 +173,36 @@ fn linesOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<String>
         Panel.Overview -> overviewLines(snapshot, nowMs)
         Panel.Peers -> peersPanelLines(snapshot.company, nowMs)
         Panel.Blocks -> blocksPanelLines(snapshot, nowMs)
-        Panel.Transactions -> placeholderLines("Transactions", "#133")
+        Panel.Transactions -> transactionsPanelLines(snapshot, nowMs)
         Panel.Mempool -> placeholderLines("Mempool", "#28")
 
 verify linesOf
     linesOf(View(panel = Panel.Mempool, confirming = false), Domain.Snapshot.started(0), 0) => ["", "waiting for the Mempool Panel (#28)"]
     List.len(linesOf(View(panel = Panel.Peers, confirming = false), Domain.Snapshot.started(0), 0)) => 5
     List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 5
+
+fn transactionsPanelLines(snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "The Transactions Panel (#133): the newest confirmed Transactions,"
+      "each with the fee connect computed, and how long ago its Block came."
+      "Mempool arrivals join this Panel when #28's relay feeds them through."
+    List.concat([
+        "",
+        "last confirmed Transactions:",
+    ], transactionRows(snapshot.rings.transactions, nowMs, []))
+
+verify transactionsPanelLines
+    transactionsPanelLines(Domain.Snapshot.started(0), 0) => ["", "last confirmed Transactions:", "  none confirmed yet"]
+    List.len(transactionsPanelLines(Domain.Snapshot.notedTransaction(Domain.Snapshot.started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)), 5000)) => 3
+
+fn transactionRows(views: List<TxView>, nowMs: Int, acc: List<String>) -> List<String>
+    ? "One row per Transaction, newest first."
+    match views
+        [] -> anyRows(List.reverse(acc), "  none confirmed yet")
+        [head, ..tail] -> transactionRows(tail, nowMs, List.prepend("  {Domain.Screenlines.transactionLine(head)}  ({ageText(head.atMs, nowMs)} ago)", acc))
+
+verify transactionRows
+    transactionRows([], 0, []) => ["  none confirmed yet"]
+    transactionRows([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 3000)], 5000, []) => ["  tx tt fee 1000 sat  (2s ago)"]
 
 fn blocksPanelLines(snapshot: Snapshot, nowMs: Int) -> List<String>
     ? "The Blocks Panel (#132): the newest Blocks, then anything the chain"

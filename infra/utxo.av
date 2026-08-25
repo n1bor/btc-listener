@@ -24,6 +24,7 @@ record Applied
     added: Int
     removed: Int
     fees: Int
+    confirmed: List<TxFee>
 
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
@@ -46,7 +47,7 @@ fn applying(store: Store, blockId: String, change: Change) -> Result<Applied, St
     ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
     grown = Infra.Store.putAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed)?)])?)?
     shrunk = Infra.Store.deleteAll(grown, keysOf(change.removed, [])?)?
-    Result.Ok(Applied(store = shrunk, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees))
+    Result.Ok(Applied(store = shrunk, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees, confirmed = change.confirmed))
 
 fn entriesFor(added: List<Unspent>, acc: List<Entry>) -> Result<List<Entry>, String>
     ? "One Set entry per Output the Block leaves unspent."
@@ -230,7 +231,7 @@ fn reversed(store: Store, blockId: String, reversal: Reversal) -> Result<Applied
     ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
     restored = Infra.Store.putAll(store, entriesFor(reversal.restored, [])?)?
     cleared = Infra.Store.deleteAll(restored, List.prepend(Domain.UtxoStore.undoKey(blockId)?, reversal.deleted))?
-    Result.Ok(Applied(store = cleared, added = List.len(reversal.restored), removed = List.len(reversal.deleted), fees = 0))
+    Result.Ok(Applied(store = cleared, added = List.len(reversal.restored), removed = List.len(reversal.deleted), fees = 0, confirmed = []))
 
 fn prunedUndo(store: Store, tipHeight: Int) -> Result<Store, String>
     ? "Forget the Undo Data of Blocks the window has moved past."

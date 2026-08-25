@@ -21,7 +21,7 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Bytes, Domain.AssumeValid, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Domain.Connect, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.readBytesAt,
@@ -175,10 +175,23 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Time.now, Time.unixMs,
     ]
     marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
-    looked = Infra.Screen.glanced(Infra.Screen.eyeing(state.eye, Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs)), view.atMs)?
+    looked = Infra.Screen.glanced(Infra.Screen.eyeing(state.eye, confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs), applied.confirmed, view.atMs)), view.atMs)?
     counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
     walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked), height + 1, to)
+
+fn confirmedInto(snapshot: Snapshot, confirmed: List<TxFee>, nowMs: Int) -> Snapshot
+    ? "Every Transaction this Block confirmed, into the ring with the fee"
+      "connect computed for it (#133). Block order in, so the newest ends"
+      "up at the front of the ring."
+    match confirmed
+        [] -> snapshot
+        [head, ..tail] -> confirmedInto(Domain.Snapshot.notedTransaction(snapshot, TxView(txId = head.txid, fee = head.fee, coinbase = head.coinbase, atMs = nowMs)), tail, nowMs)
+
+verify confirmedInto
+    confirmedInto(Domain.Snapshot.started(0), [], 9).rings.transactions => []
+    List.len(confirmedInto(Domain.Snapshot.started(0), [TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "bb", fee = 10, coinbase = false)], 9).rings.transactions) => 2
+    confirmedInto(Domain.Snapshot.started(0), [TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "bb", fee = 10, coinbase = false)], 9).rings.transactions => [TxView(txId = "bb", fee = 10, coinbase = false, atMs = 9), TxView(txId = "cb", fee = 0, coinbase = true, atMs = 9)]
 
 fn maybeReportIfPlain(eye: Eye, height: Int, counted: Built, pace: Pace) -> Result<Pace, String>
     ? "The minute line for the plain log; the Screen draws the walk instead."

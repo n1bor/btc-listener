@@ -18,14 +18,20 @@ module Connect
         "answer. It must not be left in the Set, and it must not be in the"
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
-    exposes [Change, Connecting, connected, paidBy, createdBy, outpointKey]
+    exposes [Change, Connecting, TxFee, connected, paidBy, createdBy, outpointKey]
     depends [Bytes, Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
+
+record TxFee
+    txid: String
+    fee: Int
+    coinbase: Bool
 
 record Change
     added: List<Unspent>
     removed: List<Unspent>
     fees: Int
+    confirmed: List<TxFee>
 
 type Connecting
     Applied(Change)
@@ -36,6 +42,7 @@ record Building
     spent: Map<String, Bool>
     removed: List<Unspent>
     fees: Int
+    confirmed: List<TxFee>
 
 fn outpointKey(txid: String, index: Int) -> Result<Bytes, String>
     ? "How an Input names the Output it spends."
@@ -118,16 +125,16 @@ verify connected
     connected(Network.Mainnet, 1, [minting(50), paying("a1", "a2", 0, 90), paying("a2", "aa", 0, 80)], holding()?) => Connecting.Refused("Input names Output 0 of a2, which is not an unspent Output")
     connected(Network.Mainnet, 50, [minting(50), paying("a1", "cc", 0, 90)], holding()?) => Connecting.Refused("Input names Output 0 of cc, a coinbase Output from Height 1 that is not spendable until 101")
     feesOf(connected(Network.Mainnet, 101, [minting(50), paying("a1", "cc", 0, 90)], holding()?)) => 10
-    connected(Network.Mainnet, 1, [minting(5000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    connected(Network.Mainnet, 1, [minting(5000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
     connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
-    connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 4000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
 
 fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<String, Unspent>) -> Connecting
     ? "The rest of the Block first, then what the coinbase is owed."
     settled(network, height, coinbase, walked(rest, height, fromStore, seeded(coinbase, height)))
 
 verify withCoinbase
-    withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
     withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connecting.Refused("coinbase claims 6000000000 with 5000000000 allowed")
 
 fn seeded(coinbase: Transaction, height: Int) -> Result<Building, String>
@@ -135,7 +142,7 @@ fn seeded(coinbase: Transaction, height: Int) -> Result<Building, String>
       "The coinbase's Outputs go in first because a later Transaction in the"
       "same Block may not spend them -- a coinbase waits a hundred Blocks --"
       "but they still have to be in the Set at the end."
-    Result.Ok(Building(created = intoMap(createdBy(coinbase, height, true), Map.fromList([]))?, spent = Map.fromList([]), removed = [], fees = 0))
+    Result.Ok(Building(created = intoMap(createdBy(coinbase, height, true), Map.fromList([]))?, spent = Map.fromList([]), removed = [], fees = 0, confirmed = []))
 
 verify seeded
     Map.len(seeded(minting(50), 1)?.created) => 1
@@ -167,14 +174,26 @@ verify walked
     walked([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
 
 fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, building: Result<Building, String>) -> Result<Building, String>
-    ? "One Transaction's Inputs taken, and its Outputs offered."
+    ? "One Transaction's Inputs taken, its Outputs offered, and what it"
+      "paid remembered (#133)."
     match building
         Result.Err(why) -> Result.Err(why)
-        Result.Ok(state) -> taking(transaction, height, fromStore, state)
+        Result.Ok(state) -> confirmedAfter(transaction, state.fees, taking(transaction, height, fromStore, state))
 
 verify oneTransaction
     oneTransaction(minting(50), 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
     oneTransaction(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.indexOf(Domain.UtxoStore.unspentKey("aa", 0)?), Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), Result.Ok(seeded(minting(50), 1)?))?.fees => 10
+
+fn confirmedAfter(transaction: Transaction, feesBefore: Int, built: Result<Building, String>) -> Result<Building, String>
+    ? "The fee this Transaction alone left behind: what the Block's running"
+      "total grew by across its step."
+    match built
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(after) -> Result.Ok(Building(created = after.created, spent = after.spent, removed = after.removed, fees = after.fees, confirmed = List.prepend(TxFee(txid = transaction.txid, fee = after.fees - feesBefore, coinbase = false), after.confirmed)))
+
+verify confirmedAfter
+    confirmedAfter(spending("aa", 0, 40), 50, Result.Err("no")) => Result.Err("no")
+    confirmedAfter(spending("aa", 0, 40), 0, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 10, confirmed = [])))?.confirmed => [TxFee(txid = "bb", fee = 10, coinbase = false)]
 
 fn taking(transaction: Transaction, height: Int, fromStore: Map<String, Unspent>, state: Building) -> Result<Building, String>
     ? "Resolve every Input, then check the arithmetic."
@@ -256,7 +275,7 @@ verify notYetSpent
 
 fn takenFromBlock(key: Bytes, named: String, height: Int, state: Building, unspent: Unspent) -> Result<Building, String>
     ? "Spent where it was made, so it never reaches the Set at all."
-    matureEnough(key, named, height, unspent, Building(created = Map.remove(state.created, Domain.UtxoStore.indexOf(key)), spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = state.removed, fees = state.fees + unspent.value))
+    matureEnough(key, named, height, unspent, Building(created = Map.remove(state.created, Domain.UtxoStore.indexOf(key)), spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = state.removed, fees = state.fees + unspent.value, confirmed = state.confirmed))
 
 verify takenFromBlock
     takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.fees => 50
@@ -266,7 +285,7 @@ fn fromTheStore(key: Bytes, named: String, height: Int, state: Building, inStore
     ? "An Output the Set already held, which does leave Undo Data."
     match inStore
         Option.None -> Result.Err("Input names {named}, which is not an unspent Output")
-        Option.Some(unspent) -> matureEnough(key, named, height, unspent, Building(created = state.created, spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value))
+        Option.Some(unspent) -> matureEnough(key, named, height, unspent, Building(created = state.created, spent = Map.set(state.spent, Domain.UtxoStore.indexOf(key), true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value, confirmed = state.confirmed))
 
 verify fromTheStore
     fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
@@ -290,7 +309,7 @@ fn afterInputs(transaction: Transaction, height: Int, building: Result<Building,
 
 verify afterInputs
     afterInputs(minting(50), 0, Result.Err("no")) => Result.Err("no")
-    afterInputs(spending("aa", 0, 40), 1, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50)))?.fees => 10
+    afterInputs(spending("aa", 0, 40), 1, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = [])))?.fees => 10
 
 fn conserving(transaction: Transaction, height: Int, state: Building) -> Result<Building, String>
     ? "A Transaction may not pay out more than it took in."
@@ -299,18 +318,18 @@ fn conserving(transaction: Transaction, height: Int, state: Building) -> Result<
     weighed(transaction, height, state, paid, state.fees - paid)
 
 verify conserving
-    conserving(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50))?.fees => 10
-    conserving(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50)) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+    conserving(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []))?.fees => 10
+    conserving(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = [])) => Result.Err("Transaction bb pays out 60 against 50 taken in")
 
 fn weighed(transaction: Transaction, height: Int, state: Building, paid: Int, left: Int) -> Result<Building, String>
     ? "Refuse value that was not taken in; otherwise keep the Outputs."
     match left < 0
         true -> Result.Err("Transaction {transaction.txid} pays out {paid} against {state.fees} taken in")
-        false -> Result.Ok(Building(created = intoMap(createdBy(transaction, height, false), state.created)?, spent = state.spent, removed = state.removed, fees = left))
+        false -> Result.Ok(Building(created = intoMap(createdBy(transaction, height, false), state.created)?, spent = state.spent, removed = state.removed, fees = left, confirmed = state.confirmed))
 
 verify weighed
-    weighed(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 40, 10)?.fees => 10
-    weighed(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50), 60, 0 - 10) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+    weighed(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []), 40, 10)?.fees => 10
+    weighed(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []), 60, 0 - 10) => Result.Err("Transaction bb pays out 60 against 50 taken in")
 
 fn settled(network: Network, height: Int, coinbase: Transaction, building: Result<Building, String>) -> Connecting
     ? "The coinbase's claim, judged against the subsidy and the fees."
@@ -320,25 +339,27 @@ fn settled(network: Network, height: Int, coinbase: Transaction, building: Resul
 
 verify settled
     settled(Network.Mainnet, 1, minting(50), Result.Err("no")) => Connecting.Refused("no")
-    settled(Network.Mainnet, 1, minting(50), Result.Ok(seeded(minting(50), 1)?)) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    settled(Network.Mainnet, 1, minting(50), Result.Ok(seeded(minting(50), 1)?)) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
 
 fn claimed(network: Network, height: Int, coinbase: Transaction, state: Building) -> Connecting
     ? "No more than the subsidy plus what the Block's fees left behind."
-    allowed(paidBy(coinbase), Domain.Subsidy.atHeight(network, height), state)
+    allowed(coinbase.txid, paidBy(coinbase), Domain.Subsidy.atHeight(network, height), state)
 
 verify claimed
-    claimed(Network.Mainnet, 1, minting(5000000000), seeded(minting(5000000000), 1)?) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
+    claimed(Network.Mainnet, 1, minting(5000000000), seeded(minting(5000000000), 1)?) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
     claimed(Network.Mainnet, 1, minting(5000000001), seeded(minting(5000000001), 1)?) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
 
-fn allowed(paid: Int, subsidy: Int, state: Building) -> Connecting
+fn allowed(coinbaseTxid: String, paid: Int, subsidy: Int, state: Building) -> Connecting
     ? "Within the claim, the Block's changes; over it, the reason."
+      "The confirmed list comes out in Block order, the coinbase first, so a"
+      "reader sees the Block as the Block was."
     match Domain.Subsidy.withinClaim(paid, subsidy, state.fees)
         false -> Connecting.Refused("coinbase claims {paid} with {Domain.Subsidy.claimAllowed(subsidy, state.fees)} allowed")
-        true -> Connecting.Applied(Change(added = Map.values(state.created), removed = List.reverse(state.removed), fees = state.fees))
+        true -> Connecting.Applied(Change(added = Map.values(state.created), removed = List.reverse(state.removed), fees = state.fees, confirmed = List.prepend(TxFee(txid = coinbaseTxid, fee = 0, coinbase = true), List.reverse(state.confirmed))))
 
 verify allowed
-    allowed(50, 50, seeded(minting(50), 1)?) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0))
-    allowed(51, 50, seeded(minting(50), 1)?) => Connecting.Refused("coinbase claims 51 with 50 allowed")
+    allowed("cb", 50, 50, seeded(minting(50), 1)?) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
+    allowed("cb", 51, 50, seeded(minting(50), 1)?) => Connecting.Refused("coinbase claims 51 with 50 allowed")
 
 fn minting(value: Int) -> Transaction
     ? "A coinbase paying one Output, for the cases here."
@@ -382,7 +403,7 @@ fn added(connection: Connecting) -> List<Unspent>
 
 verify added
     added(Connecting.Refused("no")) => []
-    List.len(added(Connecting.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+    List.len(added(Connecting.Applied(Change(added = [], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)])))) => 0
 
 fn removedBy(connection: Connecting) -> List<Unspent>
     ? "What it takes out, which is the Undo Data."
@@ -392,7 +413,7 @@ fn removedBy(connection: Connecting) -> List<Unspent>
 
 verify removedBy
     removedBy(Connecting.Refused("no")) => []
-    List.len(removedBy(Connecting.Applied(Change(added = [], removed = [], fees = 0)))) => 0
+    List.len(removedBy(Connecting.Applied(Change(added = [], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)])))) => 0
 
 fn feesOf(connection: Connecting) -> Int
     ? "What the Block left for its miner, or below zero when it was refused."
@@ -402,4 +423,4 @@ fn feesOf(connection: Connecting) -> Int
 
 verify feesOf
     feesOf(Connecting.Refused("no")) => 0 - 1
-    feesOf(Connecting.Applied(Change(added = [], removed = [], fees = 7))) => 7
+    feesOf(Connecting.Applied(Change(added = [], removed = [], fees = 7, confirmed = []))) => 7
