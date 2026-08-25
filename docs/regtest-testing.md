@@ -560,14 +560,13 @@ This is the finish line the full-node plan named first, and the only test that
 proves it: an empty Bitcoin Core, whose **only** Peer is this node, building
 the whole chain from what we serve.
 
-**Use a genuinely empty node.** Not one left over from an earlier session —
-`getblockcount` must say 0. A node holding a chain that forked from ours asks
-a question this one cannot yet answer and gets non-connecting Headers back
-forever ([#171](https://github.com/n1bor/btc-listener/issues/171)); you will
-see thousands of `served 8 Header(s) to peer 1` and two processes at 100%.
-An empty node's Locator is just genesis, which is on every chain, so this
-test passes straight through that bug — which is exactly why it is not the
-only test §12 should have.
+**Use a genuinely empty node** for this half of the test — `getblockcount`
+must say 0. An empty node's Locator is just genesis, which is on every chain,
+so it agrees with us about the one Block that cannot be in dispute. A node
+holding a chain that forked from ours asks a harder question, and §12b is
+where that question is asked; running only the empty case passed straight
+through [#171](https://github.com/n1bor/btc-listener/issues/171) for as long
+as that bug existed.
 
 ```bash
 RT3=$PWD/rt-c; mkdir -p $RT3      # same bitcoin.conf, ports 18473/18474
@@ -621,6 +620,89 @@ A getdata for a Block also arrives as the **witness** Block type, not the
 plain one — answering only the plain type serves nothing to any modern Peer,
 which looks exactly like a node that has the Blocks and will not part with
 them. `inflight` on the asking node fills up and never empties.
+
+### 12b. A node on a branch we abandoned
+
+The empty node in §12 agrees with us about genesis and nothing else is at
+stake. This is the case that has something at stake: a Core left on a branch
+this node walked away from, which must be told where the two chains actually
+part company. It was [#171](https://github.com/n1bor/btc-listener/issues/171),
+and it went unnoticed because §12 alone cannot see it.
+
+Take a second Core all the way up our chain, then cut it loose so it keeps
+holding that branch while the first node builds a longer one:
+
+```bash
+RT2=$PWD/rt-b; mkdir -p $RT2      # same bitcoin.conf, ports 18454/18453
+bitcoin-27.0/bin/bitcoind -datadir=$RT2 -daemon
+C2="bitcoin-27.0/bin/bitcoin-cli -datadir=$RT2 -rpcuser=av -rpcpassword=av -regtest"
+$C2 addnode "127.0.0.1:18444" onetry
+# wait until $C2 getblockcount equals $C getblockcount, then strand it
+$C2 disconnectnode "127.0.0.1:18444"
+$C2 setnetworkactive false
+$C2 getbestblockhash               # remember this: the abandoned tip
+```
+
+Follow the first node up to that same tip, then make the first node abandon
+the branch and build a longer one:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444 $D     # up to 160, then Ctrl-C
+$C invalidateblock $($C getblockhash 156)
+$C generatetoaddress 32 "$($C getnewaddress)"      # note: a FRESH address
+$BIN regtest follow 127.0.0.1:18444 $D     # onto the new branch, 187
+```
+
+**Mine to a fresh address.** `generatetoaddress` to the same address you
+invalidated from rebuilds the *identical* Block — same parent, same coinbase
+output, and an empty Mempool leaves nothing else to vary — so Core recognises
+the hash it has just marked invalid and refuses it:
+
+```
+error code: -32603
+error message:
+ProcessNewBlock, block not accepted
+```
+
+Nothing in that message points at the address, and the node sits at 155
+refusing every attempt. A new address changes the coinbase, and with it the
+Merkle root and the Block Id.
+
+Now serve, and let the stranded node ask:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444 $D serve:18455 &
+$C2 setnetworkactive true
+$C2 addnode "127.0.0.1:18455" onetry
+```
+
+```
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 187, for up to 8 inbound Peer(s)
+peer 1 dialled us from 127.0.0.1:55206
+served 32 Header(s) to peer 1
+served a Block of 250 bytes to peer 1
+...
+```
+
+**Count the Headers.** Thirty-two is 156..187 — everything above the Height
+the two chains genuinely share. Twenty-eight would be 160..187, counted from
+the caller's own abandoned tip, and that is the bug: Headers whose parent the
+caller has never seen. It rejects them, asks the same question again, and
+neither side ever moves.
+
+```bash
+$C2 getblockcount          # 187
+$C2 getbestblockhash       # must equal the first node's getblockhash 187
+$C2 getpeerinfo | grep synced
+```
+
+```
+"synced_headers": 187,
+"synced_blocks": 187,
+```
+
+`synced_headers: -1` is the tell that this is failing: it means the caller has
+accepted no Header at all from us, however many we think we served.
 
 ### 13. A Candidate that will not answer
 
