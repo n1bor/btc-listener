@@ -107,11 +107,15 @@ verify tipLine
 
 fn peersLine(company: Company, nowMs: Int) -> String
     ? "The pool and the Address Book, in one line."
-    "{List.len(company.peers)} Peers, {company.candidates} Candidates, quietest heard {Domain.Snapshot.quietestSecsOf(company.peers, nowMs)}s ago"
+      "Both directions are counted (#164): a node that serves the chain is"
+      "keeping company it did not choose, and how much of it is the first"
+      "thing worth knowing about the pool."
+    "{List.len(company.peers)} Peers ({Domain.Snapshot.outboundOf(company.peers)} out, {Domain.Snapshot.inboundOf(company.peers)} in), {company.candidates} Candidates, quietest heard {Domain.Snapshot.quietestSecsOf(company.peers, nowMs)}s ago"
 
 verify peersLine
-    peersLine(Company(peers = [], candidates = 0), 0) => "0 Peers, 0 Candidates, quietest heard 0s ago"
-    peersLine(Company(peers = [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 4000, sent = 0, received = 0)], candidates = 41), 10000) => "1 Peers, 41 Candidates, quietest heard 6s ago"
+    peersLine(Company(peers = [], candidates = 0), 0) => "0 Peers (0 out, 0 in), 0 Candidates, quietest heard 0s ago"
+    peersLine(Company(peers = [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 4000, sent = 0, received = 0, inbound = false)], candidates = 41), 10000) => "1 Peers (1 out, 0 in), 41 Candidates, quietest heard 6s ago"
+    peersLine(Company(peers = [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 4000, sent = 0, received = 0, inbound = true)], candidates = 41), 10000) => "1 Peers (0 out, 1 in), 41 Candidates, quietest heard 6s ago"
 
 fn reorgLine(view: ReorgView) -> String
     ? "A Reorganisation: the last agreed Height, what it displaced, and"
@@ -129,11 +133,35 @@ verify orphanLine
     orphanLine(3, 0, 250000) => "Orphan Headers seen: 3, last 4m10s ago"
 
 fn transactionLine(view: TxView) -> String
-    ? "One connected Transaction and what it paid."
+    ? "One Transaction, what it paid, and whether a Block has taken it yet."
+      "A Transaction is on this ring from the moment the Mempool admits it"
+      "(#164), so the line has to say which of the two it is; a row with no"
+      "mark is one a Block holds."
+    "{paidLine(view)}{heldMark(view.confirmed)}"
+
+verify transactionLine
+    transactionLine(TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5, confirmed = true)) => "tx tt fee 1000 sat"
+    transactionLine(TxView(txId = "cc", fee = 0, coinbase = true, atMs = 5, confirmed = true)) => "tx cc coinbase"
+    transactionLine(TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5, confirmed = false)) => "tx tt fee 1000 sat  in Mempool"
+
+fn paidLine(view: TxView) -> String
+    ? "What the Transaction paid, or that it is a coinbase and pays nothing."
     match view.coinbase
         true -> "tx {view.txId} coinbase"
         false -> "tx {view.txId} fee {view.fee} sat"
 
-verify transactionLine
-    transactionLine(TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)) => "tx tt fee 1000 sat"
-    transactionLine(TxView(txId = "cc", fee = 0, coinbase = true, atMs = 5)) => "tx cc coinbase"
+verify paidLine
+    paidLine(TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5, confirmed = true)) => "tx tt fee 1000 sat"
+    paidLine(TxView(txId = "cc", fee = 0, coinbase = true, atMs = 5, confirmed = true)) => "tx cc coinbase"
+
+fn heldMark(confirmed: Bool) -> String
+    ? "The mark on a Transaction no Block has taken yet. Confirmed is the"
+      "quiet case on purpose: most rows are confirmed, and a Panel that"
+      "marks every one of them says nothing."
+    match confirmed
+        true -> ""
+        false -> "  in Mempool"
+
+verify heldMark
+    heldMark(true) => ""
+    heldMark(false) => "  in Mempool"
