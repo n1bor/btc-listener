@@ -356,8 +356,11 @@ cargo test --manifest-path providers/kv/Cargo.toml
 `cargo build` is not a formality: three failure classes survive `check`,
 `verify` **and** `compile`, and are listed in CLAUDE.md.
 
-**Then run this document.** Sections 1–4 take a few minutes on regtest and are
-the only evidence in the project that comes from outside the project. A change
+**Then run this document.** Sections 1 to 4 take a few minutes on regtest and
+are the only evidence in the project that comes from outside the project.
+Sections 5 to 8 cost a few minutes more and cover the Mempool, relay to a
+second node, and a compact Block captured from Core; run the ones your change
+can reach. A change
 that passes every gate and breaks the reorganisation path is a change that
 passes every gate.
 

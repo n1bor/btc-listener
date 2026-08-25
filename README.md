@@ -993,7 +993,8 @@ to be developed on.
 
 Nothing is compiled there, so there is no toolchain to check. What is worth
 checking is this binary, on this machine, against a real node — which is
-[`docs/regtest-testing.md`](docs/regtest-testing.md), sections 1 to 4. A few
+[`docs/regtest-testing.md`](docs/regtest-testing.md), sections 1 to 4 — and 5
+to 8 if the change reaches the Mempool, relay or compact Blocks. A few
 minutes, and it needs Bitcoin Core, `python3`, and the repository for
 `tools/regtest/`. It exercises the reorganisation path, which a download will
 never tell you is broken.
