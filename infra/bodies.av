@@ -8,10 +8,14 @@ module Bodies
         "that held both outgrew what a reader can hold at once."
         "Not to be confused with Infra.Blocks. This is the phase that asks a"
         "Peer for a body; that is the Segment store the body is appended to."
+        "The walk state is named Fetched rather than Progress: Domain.Snapshot"
+        "also exposes a Progress, and the 8afdcbe2 backend derives Eq and Hash"
+        "by unqualified name, so the twin got derives it cannot carry"
+        "(jasisz/aver#1134). Retire the name-dodge when that closes."
         "A Height whose Block is already held is skipped, which is what makes"
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
-    exposes [Progress, bodies, bodiesOn]
+    exposes [Fetched, bodies, bodiesOn]
     depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
     effects [
         Console.error, Console.print,
@@ -24,7 +28,7 @@ module Bodies
         Time.unixMs,
     ]
 
-record Progress
+record Fetched
     pool: Pool
     store: Store
     blocks: BlockStore
@@ -46,7 +50,7 @@ fn locationBatch() -> Int
 verify locationBatch
     locationBatch() => 2000
 
-fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
+fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Fetched, String>
     ? "Fetch the Blocks for a range of Heights and write them to Segments."
     ! [
         Console.error, Console.print,
@@ -68,13 +72,13 @@ fn soleKey() -> Int
 verify soleKey
     soleKey() => 0
 
-fn closed(pool: Pool, outcome: Result<Progress, String>) -> Result<Progress, String>
+fn closed(pool: Pool, outcome: Result<Fetched, String>) -> Result<Fetched, String>
     ? "Always release the sockets, whatever the session did."
     ! [Tcp.close]
     _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int, eye: Eye) -> Result<Progress, String>
+fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int, eye: Eye) -> Result<Fetched, String>
     ? "The same range walk on a pool somebody else opened."
       "What a node following the tip needs: the Headers say a Block exists and"
       "where it sits, and this is what turns that into a body on disk the"
@@ -89,16 +93,16 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    walked = walk(Progress(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), key, from, to)?
+    walked = walk(Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), key, from, to)?
     settled(walked)
 
-fn settled(progress: Progress) -> Result<Progress, String>
+fn settled(progress: Fetched) -> Result<Fetched, String>
     ? "Write whatever Locations are still held back."
     ! [Infra.Kv.putAll]
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Progress(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace, eye = progress.eye))
+    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace, eye = progress.eye))
 
-fn walk(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, String>
+fn walk(progress: Fetched, key: Int, height: Int, to: Int) -> Result<Fetched, String>
     ? "Each Height in turn, until the range is exhausted."
       "Each turn asks the stop flag first, so a Ctrl-C during a long fetch"
       "ends the walk at a Block boundary with what is already stored, and the"
@@ -116,7 +120,7 @@ fn walk(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, 
         true -> Result.Ok(progress)
         false -> atHeight(progress, key, height, to)
 
-fn atHeight(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, String>
+fn atHeight(progress: Fetched, key: Int, height: Int, to: Int) -> Result<Fetched, String>
     ? "A Height the Index does not name cannot be fetched, and ends the walk."
     ! [
         Console.error, Console.print,
@@ -132,7 +136,7 @@ fn atHeight(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progre
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
         Option.Some(blockId) -> maybeFetch(progress, key, height, to, blockId)
 
-fn maybeFetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) -> Result<Progress, String>
+fn maybeFetch(progress: Fetched, key: Int, height: Int, to: Int, blockId: String) -> Result<Fetched, String>
     ? "A Block already held is skipped, which is what makes the phase resumable."
     ! [
         Console.error, Console.print,
@@ -148,7 +152,7 @@ fn maybeFetch(progress: Progress, key: Int, height: Int, to: Int, blockId: Strin
         true -> walk(progress, key, height + 1, to)
         false -> fetch(progress, key, height, to, blockId)
 
-fn fetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) -> Result<Progress, String>
+fn fetch(progress: Fetched, key: Int, height: Int, to: Int, blockId: String) -> Result<Fetched, String>
     ? "Ask for one Block and wait for it."
     ! [
         Console.error, Console.print,
@@ -165,11 +169,11 @@ fn fetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) ->
     waited = Infra.Peers.awaitFrom(sent, key, "block")?
     keep(asked(progress, waited.pool), key, height, to, blockId, waited.frame)
 
-fn asked(progress: Progress, pool: Pool) -> Progress
+fn asked(progress: Fetched, pool: Pool) -> Fetched
     ? "The walk, carrying the pool the last question left."
-    Progress(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = progress.eye)
+    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = progress.eye)
 
-fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Progress, String>
+fn keep(progress: Fetched, key: Int, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Fetched, String>
     ? "Write the Block to a Segment, then record where it went."
       "The bytes are on disk before the Index names them, so a crash between the"
       "two costs a Block that is fetched again rather than an entry pointing at"
@@ -186,7 +190,7 @@ fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, fra
     payload = Bytes.fromList(frame.body)?
     _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
     appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace, eye = progress.eye)
+    held = Fetched(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace, eye = progress.eye)
     written = maybeWrite(held)?
     announce(written, key, height, to, List.len(frame.body))
 
@@ -214,14 +218,14 @@ verify matchesRequest
     matchesRequest(0, "aa", "aa") => Result.Ok(Unit)
     matchesRequest(3, "aa", "bb") => Result.Err("peer 3 was asked for Block aa and sent bb")
 
-fn maybeWrite(progress: Progress) -> Result<Progress, String>
+fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
     ? "Write the batch once it is big enough, and start a new one."
     ! [Infra.Kv.putAll]
     match progress.waiting >= locationBatch()
         false -> Result.Ok(progress)
         true -> settled(progress)
 
-fn announce(progress: Progress, key: Int, height: Int, to: Int, size: Int) -> Result<Progress, String>
+fn announce(progress: Fetched, key: Int, height: Int, to: Int, size: Int) -> Result<Fetched, String>
     ? "A progress line each minute, rather than a line for every Block."
       "The walk fetches thousands of Blocks a minute at the start of the"
       "chain, and a reader watching it wants where it is, how fast it is"
@@ -238,7 +242,7 @@ fn announce(progress: Progress, key: Int, height: Int, to: Int, size: Int) -> Re
     ]
     saying(progress, key, height, to, Time.unixMs())
 
-fn saying(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Progress, String>
+fn saying(progress: Fetched, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
     ? "Say where the walk is when a line is due, and stay quiet otherwise."
     ! [
         Console.error, Console.print,
@@ -255,9 +259,9 @@ fn saying(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Res
         false -> walk(seen, key, height + 1, to)
         true -> said(seen, key, height, to, nowMs)
 
-fn withEye(progress: Progress, eye: Eye) -> Progress
+fn withEye(progress: Fetched, eye: Eye) -> Fetched
     ? "The walk's state, with its Eye moved on."
-    Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = eye)
+    Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = eye)
 
 fn plainly(eye: Eye) -> Bool
     ? "Whether this walk speaks in printed lines; the Screen draws instead."
@@ -269,7 +273,7 @@ verify plainly
     plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0))) => true
     plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0))) => false
 
-fn said(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Progress, String>
+fn said(progress: Fetched, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
     ? "The line, and the Pace the next one measures from."
     ! [
         Console.error, Console.print,
@@ -281,7 +285,7 @@ fn said(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Resul
         Time.unixMs,
     ]
     _said = Console.print("{lineAt(height, to, progress.count, progress.pace, nowMs)}")
-    walk(Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye), key, height + 1, to)
+    walk(Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye), key, height + 1, to)
 
 fn lineAt(height: Int, to: Int, count: Int, pace: Pace, nowMs: Int) -> String
     ? "The walk's first line has no window to read a rate off, and says so"
