@@ -2016,7 +2016,8 @@ fn saidServed(howMany: Int, key: Int) -> Unit
         false -> Console.print("served {howMany} Header(s) to peer {key}")
 
 fn agreedHeight(store: Store, locator: List<List<Int>>) -> Result<Int, String>
-    ? "The Height of the newest Block Id in the Locator that we also hold."
+    ? "The Height of the newest Block Id in the Locator that is on our active"
+      "chain."
       "Zero when we recognise none of them, which means starting from genesis"
       "-- the honest answer to a Peer on a chain we have never seen."
     ! [Infra.Kv.get]
@@ -2031,12 +2032,56 @@ fn heightOfKnown(store: Store, hash: List<Int>, rest: List<List<Int>>) -> Result
     heightOfHeld(store, hash, held, rest)
 
 fn heightOfHeld(store: Store, hash: List<Int>, held: Option<Bytes>, rest: List<List<Int>>) -> Result<Int, String>
-    ? "A Header we hold gives its Height; one we do not sends us further back"
-      "down the Locator, which is exactly what a Locator is for."
+    ? "A Header we hold sends us on to ask whether we still stand on it; one"
+      "we do not sends us further back down the Locator, which is exactly"
+      "what a Locator is for."
     ! [Infra.Kv.get]
     match held
         Option.None -> agreedHeight(store, rest)
-        Option.Some(stored) -> Result.Ok(Domain.TreeStore.decodeHeld(Domain.Hash.reversedHex(hash), stored)?.placement.height)
+        Option.Some(stored) -> heightIfActive(store, Domain.Hash.reversedHex(hash), stored, rest)
+
+fn heightIfActive(store: Store, blockId: String, stored: Bytes, rest: List<List<Int>>) -> Result<Int, String>
+    ? "Holding a Header is not agreeing about it (#171)."
+      "After a reorganisation the abandoned branch's Headers are still held,"
+      "so a Peer left on that branch matches one of them -- and every Header"
+      "we would serve from above it belongs to the branch we moved to, whose"
+      "parent is not the Block the Peer asked from. It rejects them, asks"
+      "again, and neither side ever moves. Bitcoin Core draws the same line"
+      "in FindForkInGlobalIndex, which takes the first Locator entry that is"
+      "in the active chain rather than the first one in the block index."
+    ! [Infra.Kv.get]
+    height = Domain.TreeStore.decodeHeld(blockId, stored)?.placement.height
+    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
+    activeAt(store, blockId, height, rest, Domain.Index.blockIdIn(named))
+
+fn activeAt(store: Store, blockId: String, height: Int, rest: List<List<Int>>, named: Option<String>) -> Result<Int, String>
+    ? "The round trip the h: keyspace already affords: a Height re-points when"
+      "the chain moves, so an Id is on the active chain exactly when its own"
+      "Height names it back. A Height the Index does not name is above the"
+      "end of our chain, which is not agreement either."
+    ! [Infra.Kv.get]
+    match named
+        Option.None -> agreedHeight(store, rest)
+        Option.Some(active) -> agreedIfNamed(store, blockId, height, rest, active)
+
+verify activeAt
+    activeAt(Infra.Store.fixture([]), "aa", 7, [], Option.None) => Result.Ok(0)
+    activeAt(Infra.Store.fixture([]), "aa", 7, [], Option.Some("aa")) => Result.Ok(7)
+    activeAt(Infra.Store.fixture([]), "aa", 7, [], Option.Some("bb")) => Result.Ok(0)
+
+fn agreedIfNamed(store: Store, blockId: String, height: Int, rest: List<List<Int>>, active: String) -> Result<Int, String>
+    ? "An Id its own Height names back is one we genuinely agree about. An"
+      "abandoned one sends us further down the Locator, which is where the"
+      "newest Height the Peer and this chain still share is waiting -- and"
+      "Headers from there connect to what it holds."
+    ! [Infra.Kv.get]
+    match active == blockId
+        true -> Result.Ok(height)
+        false -> agreedHeight(store, rest)
+
+verify agreedIfNamed
+    agreedIfNamed(Infra.Store.fixture([]), "aa", 7, [], "aa") => Result.Ok(7)
+    agreedIfNamed(Infra.Store.fixture([]), "aa", 7, [], "bb") => Result.Ok(0)
 
 fn headersFrom(store: Store, height: Int, left: Int, acc: List<String>) -> Result<List<String>, String>
     ? "The Headers at these Heights, in order, stopping at the tip or the cap."
