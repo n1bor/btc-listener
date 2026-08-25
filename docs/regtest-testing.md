@@ -141,6 +141,23 @@ following at Height 167: 12 connected, 0 disconnected, set +12 -0
 expected outcome, and the polite stop should print `stop requested; closing the
 pool and releasing the claim` on the way out.
 
+**If you reused a datadir, generate past the old tip and not past the fork.**
+The twelve above assume Core is at 160, so invalidating 156 and building
+twelve puts the new branch at 167 — ahead of the 160 it left. A datadir left
+over from a previous session may be at 179, and then twelve Blocks build a
+*shorter* branch than the one abandoned. This node will refuse it, correctly,
+and print nothing that looks like a reorganisation:
+
+```
+have 180 headers; asking for more
+headers complete: 180 known
+```
+
+That is the right answer to less work, not a broken Header walk — and the way
+to tell the difference is Core's own net log, which will say it sent them
+(`sending headers (2188 bytes)`) while our count does not move. Count from
+`$C getblockcount` before you invalidate, and build past *that*.
+
 ### 4. Agree with Core, hash for hash
 
 A listener can be internally consistent and still wrong. The only external
@@ -468,6 +485,39 @@ $C2 getpeerinfo
 id 17  127.0.0.1:18455  '/aver-btc-listener:0.1/'  outbound  v70016
 ```
 
+#### The first connection is dropped, and that is Core, not us
+
+Expect this in our log, every time, before the one that works:
+
+```
+peer 1 dialled us from 127.0.0.1:52080
+dropping inbound peer 1 from 127.0.0.1:52080: peer 1: a Message announced
+  2918162963 payload bytes, which is more than the 4000000 the protocol allows
+peer 1 dialled us from 127.0.0.1:52092
+```
+
+Two connections from one `onetry`, and a first frame that announces nearly
+three gigabytes. Nothing is wrong. Core's own net log says what it is:
+
+```
+[net] trying v2 connection 127.0.0.1:18455 lastseen=0.0hrs
+[net] disconnecting peer=2
+[net] trying v1 connection 127.0.0.1:18455 lastseen=0.0hrs
+New manual v1 peer connected: version: 70016, blocks=183, peer=3
+```
+
+The first attempt is **BIP324 v2 encrypted transport**, which opens with a
+64-byte ellswift public key and random padding rather than a Message header.
+Read as v1 that is a length field of noise, and refusing it is the right
+answer — a node that trusted it would try to allocate what it announced.
+Core notices the disconnect, downgrades, and the v1 connection syncs.
+
+So the alarming line is a *pass*, not a fail. What would be a fail is the
+second connection never arriving, or `transport_protocol_type` reading
+anything but `v1` in `getpeerinfo`. Speaking v2 is not implemented and is not
+pretended: it is a separate piece of work, and until it exists every Core Peer
+costs one refused connection on the way in.
+
 Core knowing our user agent and protocol version is the proof: it only learns
 those from a `version` it received and acknowledged.
 
@@ -509,6 +559,15 @@ cap, and a caller that misbehaves costing itself its slot and nothing else.
 This is the finish line the full-node plan named first, and the only test that
 proves it: an empty Bitcoin Core, whose **only** Peer is this node, building
 the whole chain from what we serve.
+
+**Use a genuinely empty node.** Not one left over from an earlier session —
+`getblockcount` must say 0. A node holding a chain that forked from ours asks
+a question this one cannot yet answer and gets non-connecting Headers back
+forever ([#171](https://github.com/n1bor/btc-listener/issues/171)); you will
+see thousands of `served 8 Header(s) to peer 1` and two processes at 100%.
+An empty node's Locator is just genesis, which is on every chain, so this
+test passes straight through that bug — which is exactly why it is not the
+only test §12 should have.
 
 ```bash
 RT3=$PWD/rt-c; mkdir -p $RT3      # same bitcoin.conf, ports 18473/18474
@@ -562,6 +621,53 @@ A getdata for a Block also arrives as the **witness** Block type, not the
 plain one — answering only the plain type serves nothing to any modern Peer,
 which looks exactly like a node that has the Blocks and will not part with
 them. `inflight` on the asking node fills up and never empties.
+
+### 13. A Candidate that will not answer
+
+The dial stopped being a special case in the schedule when
+[jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125) landed:
+`Infra.Peers.joined` calls `Tcp.beginConnect`, keeps the `Tcp.Dial` as a
+local, and polls it as one more key beside every Peer. What that buys is not
+speed — a dead address still costs its five seconds — but *whose* five seconds
+they are. They used to be the whole pool's.
+
+Prove the deadline still fires, and that one Candidate refusing is not the end
+of the node. `198.51.100.1` is TEST-NET-2 and routes nowhere, so it never
+answers rather than refusing quickly, which is the case that matters:
+
+```bash
+timeout 60 $BIN regtest follow 198.51.100.1,127.0.0.1:18444 $D
+```
+
+```
+peer 198.51.100.1:18444 refused: Tcp.beginConnect: socket establishment timed
+  out (deadline: 5000 ms)
+peer 0 is 127.0.0.1:18444
+headers complete: 184 known
+following at Height 183: 0 connected, 0 disconnected, set +0 -0
+```
+
+Three things to read, not one:
+
+- **`deadline: 5000 ms`** is `connect_timeout_secs` from `aver.toml` reaching
+  the log. A dial with no deadline hangs the startup walk instead.
+- **The live Peer takes key 0**, not key 1. A Candidate that never seats does
+  not consume a key, which is what makes an Address Book full of dead
+  addresses cost keys rather than Peers.
+- **The node reaches the tip anyway.** A refused Candidate prints and is
+  stepped past; it is a fact about that address, not about the run.
+
+Note the **comma**. `follow` takes one argument for all its Peers, so
+`follow a b $D` reads `b` as the directory and `$D` as an extra — which fails
+several steps later, saying `no Peer is held under identifier 0`, and looks
+nothing like the argument mistake it is.
+
+The half this cannot show is the part worth having: that while the dial is in
+flight the other Peers are still being read. It needs a Peer talking during
+the five seconds and a way to see that its bytes arrived, which regtest gives
+no comfortable handle on. `Infra.Peers.settlingOn` is where it happens —
+`reading(pool, ready)` before the dial is looked at — and the shape of the
+code is the argument until someone finds a way to test it.
 
 ## A Peer that lies
 

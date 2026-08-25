@@ -56,15 +56,17 @@ last on purpose.
 
 Independent of the stages, proceeding as upstream and appetite allow:
 
-- **Binary Segments** — [#31](https://github.com/n1bor/btc-listener/issues/31),
-  blocked on [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009)
+- ~~**Binary Segments**~~ — [#31](https://github.com/n1bor/btc-listener/issues/31),
+  **shipped**: [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009)
+  delivered `Disk.readBytesAt` and a Segment is now length-framed binary read
+  one Block at a time ([ADR 0004](adr/0004-hex-text-as-the-interim-block-format.md))
 - **Outputs over the whole chain** — [#21](https://github.com/n1bor/btc-listener/issues/21),
-  the audit side's mainnet-scale work
-- **BIP66 into Rules** — [#22](https://github.com/n1bor/btc-listener/issues/22),
-  once the held chain reaches its activation
-- **Parallel Script checking in audit** — [#32](https://github.com/n1bor/btc-listener/issues/32),
-  the first independent product; measured to be where audit's time goes once
-  spends resolve
+  the audit side's mainnet-scale work, and the only one of these still open
+- ~~**BIP66 into Rules**~~ — [#22](https://github.com/n1bor/btc-listener/issues/22),
+  **shipped** once the held chain reached its activation
+- ~~**Parallel Script checking in audit**~~ — [#32](https://github.com/n1bor/btc-listener/issues/32),
+  **shipped**: the first independent product, and it went where the
+  measurement said audit's time was once spends resolve
 
 ## What the plan asks of Aver
 
@@ -77,9 +79,9 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #27 |
 | a readiness poll over connections | **delivered and closed** as `Tcp.poll` over a caller-keyed `Map<Int, Tcp.Connection>` | **wired** (n1bor/btc-listener#27): `Infra.Peers` polls every socket at once and reads with `Tcp.readSome` |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
-| ~~a bounded dial~~ | **delivered**: `connect_timeout_secs` is deployment policy (aver.toml), and [jasisz/aver#1122](https://github.com/jasisz/aver/pull/1122) made the deadline observable — [#1118](https://github.com/jasisz/aver/issues/1118) closed | **wired**: the 5 s dial budget stands until [#1125](https://github.com/jasisz/aver/issues/1125) makes dialling one more key in the poll |
-| a connect that reports through the poll | [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125) — `beginConnect`/`dialled`, the dial as one more key in `Tcp.poll`; until then a dead Candidate costs a budgeted 5 s (`connect_timeout_secs`, pinned in aver.toml) | Peer scoring, then Stages 6–8 |
-| `Tcp.listen` / `Tcp.accept` | [jasisz/aver#1131](https://github.com/jasisz/aver/issues/1131) — filed 24 August 2026: `Tcp` can dial but cannot answer, so Stage 8 cannot start. The ask is a non-blocking accept the existing poll can see, an accepted socket that is an ordinary `Tcp.Connection`, and the remote address | Stage 8, and nothing else |
+| ~~a bounded dial~~ | **delivered**: `connect_timeout_secs` is deployment policy (aver.toml), and [jasisz/aver#1122](https://github.com/jasisz/aver/pull/1122) made the deadline observable — [#1118](https://github.com/jasisz/aver/issues/1118) closed | **wired**: the 5 s deadline still ends a dead dial, but since [#1125](https://github.com/jasisz/aver/issues/1125) it ends only that dial |
+| ~~a connect that reports through the poll~~ | **delivered and closed** as [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125): `Tcp.beginConnect`, `Tcp.dialled`, `Tcp.closeDial`, and `Tcp.Socket.Dialing` as one more key in `Tcp.poll` | **wired**: `Infra.Peers.joined` holds the dial as a local and polls it beside every Peer, so a dead Candidate is read time for the others rather than a stall |
+| ~~`Tcp.listen` / `Tcp.accept`~~ | **delivered and closed**: filed 24 August 2026 as [jasisz/aver#1131](https://github.com/jasisz/aver/issues/1131), answered the next day by [#1138](https://github.com/jasisz/aver/pull/1138) with exactly what was asked — a non-blocking `accept` the existing poll can see, an accepted socket that is an ordinary `Tcp.Connection`, and `Tcp.peerAddress` | **wired**: Stage 8 shipped on it |
 
 ## The disciplines that carry over
 

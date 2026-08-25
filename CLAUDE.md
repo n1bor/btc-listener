@@ -30,8 +30,9 @@ grep the repo for `jasisz/aver#` and retire every workaround whose issue has
 closed, in the same PR. **But read each citation before retiring**: a line
 recording *where something came from* looks identical to one recording *what
 is worked around*, and only the second retires with its issue —
-`connect_timeout_secs` cites the closed #1118 as provenance and is kept alive
-by the open #1125.
+`connect_timeout_secs` in `aver.toml` cites #1118 and #1125, both now closed,
+and stays: it is a dial's deadline, which the dial still needs now that the
+dial is a key in `Tcp.poll` rather than a five-second stall.
 
 **Test against a real node before you commit.** `aver verify` checks this
 program against fixtures its own authors wrote, and a fixture cannot disagree
