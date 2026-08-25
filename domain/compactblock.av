@@ -19,8 +19,8 @@ module CompactBlock
         "Nothing here talks to a Peer or reads a Store. It decodes what"
         "arrived, says which positions are still missing, and builds the"
         "request that asks for them; the loop does the asking."
-    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion]
-    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Message, Domain.SipHash, Domain.Transaction]
+    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion, assembled, rootOf]
+    depends [Bytes, Crypto.Digest32, Domain.Block, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.SipHash, Domain.Transaction]
     effects []
 
 record Prefilled
@@ -302,3 +302,134 @@ fn decodeBlockTxn(body: List<Int>) -> Result<Tuple<List<Int>, List<Int>>, String
 
 verify decodeBlockTxn
     decodeBlockTxn([]) => Result.Err("a blocktxn is at least 33 bytes, got 0")
+
+fn assembled(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "The Block's Transactions, in order, as bytes."
+      "Three sources meet here and the order they meet in is the whole of the"
+      "reconstruction. A position is either one the sender filled in -- the"
+      "coinbase, always, and anything else it guessed we lacked -- or one it"
+      "named with a short id, which we either hold or have just been sent in"
+      "answer to a getblocktxn. The prefilled sit at stated indexes and the"
+      "short ids fill what is left, in their own order, which is why this"
+      "walks positions rather than lists."
+      "The bytes are carried rather than the decoded Transactions, because"
+      "what happens next is hashing them: a Transaction re-serialised from a"
+      "decoded shape is a different byte string for anything SegWit, and the"
+      "Merkle Root would not match a Block that is perfectly good."
+    filling(compact, held, supplied, totalOf(compact), 0, compact.shortIds, [])
+
+verify assembled
+    assembled(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), []) => Result.Ok([])
+    assembled(Compact(header = [], nonce = 0, shortIds = [], prefilled = [Prefilled(index = 0, raw = [1])]), Map.fromList([]), []) => Result.Ok([[1]])
+    assembled(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([(7, [9])]), []) => Result.Ok([[9]])
+    assembled(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [[4]]) => Result.Ok([[4]])
+    assembled(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
+
+fn filling(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "One position at a time, from the front."
+    match at >= total
+        true -> Result.Ok(List.reverse(acc))
+        false -> atPosition(compact, held, supplied, total, at, shortIds, acc, prefilledAt(compact.prefilled, at))
+
+verify filling
+    filling(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 0, 0, [], []) => Result.Ok([])
+
+fn atPosition(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>, sent: Option<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "A position the sender filled in takes no short id with it."
+    match sent
+        Option.Some(raw) -> filling(compact, held, supplied, total, at + 1, shortIds, List.prepend(raw, acc))
+        Option.None -> byShortId(compact, held, supplied, total, at, shortIds, acc)
+
+verify atPosition
+    atPosition(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 1, 0, [], [], Option.Some([2])) => Result.Ok([[2]])
+
+fn byShortId(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "The next short id names this position."
+      "Running out of short ids here means the counts disagreed with the"
+      "positions, which is a Message that cannot be rebuilt rather than one"
+      "that rebuilds wrongly."
+    match shortIds
+        [] -> Result.Err("position {at} has no short id and no prefilled Transaction")
+        [head, ..tail] -> fromHoldings(compact, held, supplied, total, at, head, tail, acc)
+
+verify byShortId
+    byShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 1, 0, [], []) => Result.Err("position 0 has no short id and no prefilled Transaction")
+
+fn fromHoldings(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Ours if we hold it, otherwise the next Transaction we were sent."
+    match Map.get(held, shortId)
+        Option.Some(raw) -> filling(compact, held, supplied, total, at + 1, rest, List.prepend(raw, acc))
+        Option.None -> fromSupplied(compact, held, supplied, total, at, shortId, rest, acc)
+
+verify fromHoldings
+    fromHoldings(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([(7, [9])]), [], 1, 0, 7, [], []) => Result.Ok([[9]])
+
+fn fromSupplied(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "What the getblocktxn answer sent, in the order it was asked for."
+      "Nothing left to take is a Peer that answered with fewer Transactions"
+      "than it was asked for, and the Block cannot be rebuilt. Saying which"
+      "position ran dry is what makes that debuggable at three in the"
+      "morning."
+    match supplied
+        [] -> Result.Err("position {at} is named by short id {shortId}, which we do not hold and were not sent")
+        [head, ..tail] -> filling(compact, held, tail, total, at + 1, rest, List.prepend(head, acc))
+
+verify fromSupplied
+    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [], 1, 0, 7, [], []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
+    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [[4]], 1, 0, 7, [], []) => Result.Ok([[4]])
+
+fn prefilledAt(prefilled: List<Prefilled>, at: Int) -> Option<List<Int>>
+    ? "The Transaction the sender put at this position, if it put one."
+    match prefilled
+        [] -> Option.None
+        [head, ..tail] -> prefilledOr(head, tail, at)
+
+verify prefilledAt
+    prefilledAt([], 0) => Option.None
+    prefilledAt([Prefilled(index = 0, raw = [1])], 0) => Option.Some([1])
+    prefilledAt([Prefilled(index = 1, raw = [1])], 0) => Option.None
+
+fn prefilledOr(head: Prefilled, tail: List<Prefilled>, at: Int) -> Option<List<Int>>
+    ? "This one, or keep looking."
+    match head.index == at
+        true -> Option.Some(head.raw)
+        false -> prefilledAt(tail, at)
+
+verify prefilledOr
+    prefilledOr(Prefilled(index = 0, raw = [1]), [], 0) => Option.Some([1])
+    prefilledOr(Prefilled(index = 1, raw = [1]), [], 0) => Option.None
+
+fn rootOf(transactions: List<List<Int>>) -> Result<String, String>
+    ? "The Merkle Root the rebuilt Transactions commit to."
+      "The last check on a reconstruction, and the only one that matters:"
+      "short ids are six bytes and two Transactions can share one, so a Block"
+      "assembled from the wrong Transaction in one position is a real"
+      "possibility rather than a theoretical one. The Root catches it, and"
+      "BIP152 says to fall back to asking for the whole Block when it does."
+    Domain.Block.merkleRootOf(identifiersOf(transactions, []))
+
+verify rootOf
+    rootOf([]) => Domain.Block.merkleRootOf([])
+
+fn identifiersOf(transactions: List<List<Int>>, acc: List<String>) -> List<String>
+    ? "Each Transaction named by its Id, in order."
+      "The Id is over the legacy serialisation, so a SegWit Transaction is"
+      "named by bytes that are not the ones on the wire -- which is why this"
+      "decodes rather than hashing what it was given."
+    match transactions
+        [] -> List.reverse(acc)
+        [head, ..tail] -> identifiersOf(tail, List.prepend(identifierIn(Domain.Transaction.decode(head)), acc))
+
+verify identifiersOf
+    identifiersOf([], []) => []
+
+fn identifierIn(decoded: Result<Transaction, String>) -> String
+    ? "The Transaction Id the decoder worked out, or empty for bytes that"
+      "would not decode -- which the Merkle Root then reports as a mismatch"
+      "rather than this reporting it twice."
+    match decoded
+        Result.Err(why) -> ""
+        Result.Ok(transaction) -> Domain.Transaction.txidOf(transaction)
+
+verify identifierIn
+    identifierIn(Result.Err("no")) => ""

@@ -15,7 +15,7 @@ module CompactBlockCases
         "sent whole and 2 named by short id."
         "Regenerate with tools/cmpct_oracle_to_aver.py; the capture needs a"
         "regtest node, so this file is committed rather than rebuilt in CI."
-    exposes [key, shortIdFor, decodedNonce, decodedShortIds, decodedPrefilled]
+    exposes [key, shortIdFor, decodedNonce, decodedShortIds, decodedPrefilled, rebuiltRoot]
     depends [Domain.CompactBlock]
     effects []
 
@@ -102,3 +102,42 @@ fn prefilledIn(decoded: Result<Compact, String>) -> Int
 verify prefilledIn
     prefilledIn(Result.Err("no")) => 0
     prefilledIn(Domain.CompactBlock.decodeCompact(payload())) => 1
+
+fn held() -> Map<Int, List<Int>>
+    ? "The Transactions a node would have held unconfirmed, under the short"
+      "ids this Block names them by. Standing in for a Mempool: these are"
+      "the very Transactions Core expected us to have, which is why it sent"
+      "their names rather than their bytes."
+    Map.fromList([(197202912545015, [2, 0, 0, 0, 1, 165, 62, 244, 42, 81, 130, 218, 162, 219, 128, 108, 137, 20, 80, 187, 187, 35, 2, 68, 156, 251, 180, 130, 2, 140, 28, 185, 117, 167, 245, 31, 133, 0, 0, 0, 0, 106, 71, 48, 68, 2, 32, 29, 110, 177, 189, 42, 252, 2, 218, 86, 125, 232, 126, 13, 237, 153, 94, 95, 121, 217, 45, 21, 144, 47, 200, 72, 213, 210, 74, 104, 36, 133, 52, 2, 32, 71, 121, 149, 121, 116, 202, 93, 124, 156, 166, 79, 35, 109, 126, 192, 179, 8, 180, 134, 49, 67, 41, 10, 239, 12, 43, 153, 51, 73, 249, 98, 229, 1, 33, 2, 116, 39, 80, 216, 163, 118, 38, 28, 206, 208, 29, 135, 205, 5, 177, 216, 77, 35, 248, 19, 179, 148, 113, 219, 150, 133, 46, 181, 58, 122, 122, 223, 253, 255, 255, 255, 2, 115, 228, 244, 36, 1, 0, 0, 0, 22, 0, 20, 138, 246, 79, 139, 55, 126, 210, 174, 74, 190, 5, 43, 119, 169, 37, 52, 107, 67, 211, 205, 0, 135, 147, 3, 0, 0, 0, 0, 22, 0, 20, 137, 142, 95, 85, 252, 71, 83, 90, 190, 244, 104, 242, 147, 220, 104, 98, 23, 205, 108, 122, 170, 0, 0, 0]), (223209330454722, [2, 0, 0, 0, 1, 87, 44, 61, 87, 210, 224, 228, 92, 159, 214, 126, 137, 82, 152, 92, 254, 177, 27, 37, 6, 93, 234, 192, 105, 30, 229, 71, 120, 108, 110, 38, 147, 1, 0, 0, 0, 106, 71, 48, 68, 2, 32, 69, 137, 201, 95, 158, 197, 77, 225, 18, 183, 136, 62, 51, 55, 8, 95, 156, 109, 119, 175, 7, 160, 185, 81, 186, 33, 96, 154, 184, 218, 12, 120, 2, 32, 80, 243, 56, 166, 33, 236, 32, 191, 131, 159, 70, 152, 61, 196, 242, 176, 223, 45, 229, 92, 59, 176, 217, 255, 205, 167, 32, 90, 195, 4, 19, 82, 1, 33, 3, 16, 255, 179, 247, 7, 144, 128, 162, 61, 55, 0, 106, 195, 132, 125, 43, 91, 147, 14, 176, 226, 198, 7, 68, 15, 99, 88, 161, 151, 199, 203, 62, 253, 255, 255, 255, 2, 128, 29, 44, 4, 0, 0, 0, 0, 34, 81, 32, 123, 43, 197, 148, 179, 183, 86, 38, 137, 74, 209, 171, 77, 235, 16, 196, 134, 174, 248, 100, 242, 254, 157, 199, 249, 255, 190, 61, 35, 200, 128, 86, 3, 77, 92, 36, 1, 0, 0, 0, 34, 81, 32, 57, 120, 144, 43, 172, 141, 76, 200, 124, 211, 25, 181, 78, 199, 65, 87, 212, 250, 10, 31, 243, 151, 82, 250, 187, 195, 175, 145, 184, 78, 195, 24, 170, 0, 0, 0])])
+
+verify held
+    Map.len(held()) => 2
+
+fn rebuiltRoot() -> String
+    ? "The Merkle Root of the Block rebuilt from this compact one."
+      "The whole of reconstruction in one line: decode what arrived, fill"
+      "every position from the prefilled Transactions and the ones we hold,"
+      "and hash the result. It has to equal the Root in the Header Core"
+      "sent, or the Block we rebuilt is not the Block it meant."
+    rootIn(Domain.CompactBlock.decodeCompact(payload()))
+
+verify rebuiltRoot
+    rebuiltRoot() => "09dbcf8a9a878dbfe6940517caa652f5442fc505b79f44337cb28891b919c197"
+
+fn rootIn(decoded: Result<Compact, String>) -> String
+    ? "The Root, or the reason there is not one."
+    match decoded
+        Result.Err(why) -> why
+        Result.Ok(compact) -> rootFrom(Domain.CompactBlock.assembled(compact, held(), []))
+
+verify rootIn
+    rootIn(Result.Err("no")) => "no"
+
+fn rootFrom(assembled: Result<List<List<Int>>, String>) -> String
+    ? "Every position filled, then hashed."
+    match assembled
+        Result.Err(why) -> why
+        Result.Ok(transactions) -> Result.withDefault(Domain.CompactBlock.rootOf(transactions), "no Root")
+
+verify rootFrom
+    rootFrom(Result.Err("no")) => "no"

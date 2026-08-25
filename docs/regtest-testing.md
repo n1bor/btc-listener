@@ -296,9 +296,17 @@ python3 tools/cmpct_oracle_to_aver.py cap.json
 aver verify domain/compactblockcases.av --module-root .
 ```
 
-The cases pin three things against Core: the key derived from the Header and
-nonce, the short id of each Witness Transaction Id under that key, and the
-decoding of the Message itself. **Do not skip the key case.** Four plausible
+The cases pin four things against Core: the key derived from the Header and
+nonce, the short id of each Witness Transaction Id under that key, the
+decoding of the Message itself, and — the one that ties it together — **the
+Merkle Root of the Block rebuilt from it**. That last case fills every
+position from the prefilled Transactions and the ones a node would have held,
+hashes the result, and compares it with the Root in the Header Core sent. If
+reconstruction puts one Transaction in the wrong place, the Root says so.
+
+Check that case can fail before believing it: take one Transaction out of
+`held()` and re-run, and `rebuiltRoot` must fail. A reconstruction test that
+cannot fail is worse than none, because it reads like proof. **Do not skip the key case.** Four plausible
 mistakes all produce a decoder that looks like it works — the double SHA-256
 instead of the single, the Transaction Id instead of the Witness Transaction
 Id, the digest read big-endian, the id in reading order rather than wire
