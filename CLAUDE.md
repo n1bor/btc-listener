@@ -52,6 +52,11 @@ and `compile`.
   field must satisfy them — so no opaque record (`PeerAddress`) and no record
   that lacks the derives (`Frame`) can live inside one. #27 lost a per-Peer
   Frame queue to this and was better for it.
+- A match binding used **by reference and by value in the same arm** emits
+  Rust that moves a borrowed value (E0505): `[newest, ..older] ->
+  f(newest, g(older, newest))` compiles under check/verify/compile and fails
+  under rustc (jasisz/aver#1130). Hoist the arm body into a named function --
+  a parameter can be used twice where the binding cannot.
 - Every module in a `depends` list is glob-imported into the generated Rust.
   Two of them defining the same name is usually harmless — this repo has 157
   such pairs — but it becomes `E0659` the moment a **parameter or binding**
