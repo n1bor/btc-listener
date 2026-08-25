@@ -530,8 +530,8 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
     _each = saidLinesIfPlain(seen, blockLinesOf(built.blocks, built.views))
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
-    _waiting = restorable(backOut)
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = swept), watchAfterBuild(seen, built.views)))
+    restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored), watchAfterBuild(seen, built.views)))
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."
@@ -623,14 +623,83 @@ verify keyForRest
     keyForRest("aa", []) => Result.Err("an Output name is a Transaction Id and a position, got only aa")
     keyForRest("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", ["0"]) => Domain.UtxoStore.unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)
 
-fn restorable(unconfirmed: List<Carried>) -> Int
-    ? "The Transactions a Reorganisation put back in flight, counted where"
-      "Domain.Mempool.restored will take them (#28's open half): the sweep"
-      "above leaves, this hands back, and the two belong side by side."
-    List.len(unconfirmed)
+fn restoring(network: Network, store: Store, pool: Mempool, unconfirmed: List<Carried>, tipHeight: Int, back: Int, offered: Int) -> Result<Mempool, String>
+    ? "What a Reorganisation put back in flight, offered to the Mempool again."
+      "Offered, not placed. A Transaction from an abandoned Block was valid on"
+      "the branch that carried it, and that is no longer the question: what"
+      "matters is whether it is valid on the branch we have just moved to. A"
+      "reorganisation whose new Blocks spend the same Outputs is the ordinary"
+      "shape of one rather than an edge case, and putting such a Transaction"
+      "back unasked would mean holding a double spend and announcing it to"
+      "every Peer. So each goes through the same admission as anything else:"
+      "the Set is asked, the ones whose Outputs have gone are refused, and"
+      "first-seen-wins settles anything the new branch already claimed."
+      "The bytes are what is offered, not the decoded Transaction, because"
+      "the Mempool has to be able to hand them back verbatim to a Peer that"
+      "asks -- which is why the rewind carries them (#147)."
+      "They arrive lowest Block first, so a parent is offered before any child"
+      "that spends it. Offered the other way round, the child would find its"
+      "parent's Output missing from the Set and be refused for good."
+    ! [Console.print, Infra.Kv.get]
+    match unconfirmed
+        [] -> saidRestored(pool, back, offered)
+        [head, ..tail] -> restoringOne(network, store, pool, head, tail, tipHeight, back, offered)
 
-verify restorable
-    restorable([]) => 0
+fn restoringOne(network: Network, store: Store, pool: Mempool, one: Carried, rest: List<Carried>, tipHeight: Int, back: Int, offered: Int) -> Result<Mempool, String>
+    ? "One of them, through the ordinary door."
+    ! [Console.print, Infra.Kv.get]
+    landing = Infra.Mempool.admitting(network, store, pool, one.bytes, tipHeight)?
+    restoring(network, store, poolAfter(pool, landing), rest, tipHeight, back + oneIfAdmitted(landing), offered)
+
+fn poolAfter(pool: Mempool, landing: Landing) -> Mempool
+    ? "The Mempool that admission left behind."
+      "A refusal leaves it exactly as it was, which is the answer for a"
+      "Transaction the new branch has already spent out from under."
+    match landing
+        Landing.Admitted(after, held) -> after
+        _ -> pool
+
+verify poolAfter
+    count(poolAfter(Domain.Mempool.empty(1000), Landing.Duplicate)) => 0
+    count(poolAfter(Domain.Mempool.empty(1000), Landing.Rejected("no"))) => 0
+    count(poolAfter(Domain.Mempool.empty(1000), Landing.Conflicted("aa"))) => 0
+
+fn count(pool: Mempool) -> Int
+    ? "How many the Mempool holds, for the cases just above."
+    Domain.Mempool.count(pool)
+
+verify count
+    count(Domain.Mempool.empty(1000)) => 0
+
+fn oneIfAdmitted(landing: Landing) -> Int
+    ? "One for a Transaction that came back, nothing for one that did not."
+    match landing
+        Landing.Admitted(after, held) -> 1
+        _ -> 0
+
+verify oneIfAdmitted
+    oneIfAdmitted(Landing.Duplicate) => 0
+    oneIfAdmitted(Landing.Rejected("no")) => 0
+    oneIfAdmitted(Landing.Conflicted("aa")) => 0
+
+fn saidRestored(pool: Mempool, back: Int, offered: Int) -> Result<Mempool, String>
+    ? "Say what the disconnect put back, unless it put nothing."
+      "Reported by what was offered rather than by what was admitted, and the"
+      "difference between the two numbers is the point: a Reorganisation whose"
+      "new Blocks spend the same Outputs offers Transactions that are refused,"
+      "and a line saying 3 offered, 0 admitted is the correct outcome rather"
+      "than a silence that could equally mean nothing was carried at all."
+    ! [Console.print]
+    match offered == 0
+        true -> Result.Ok(pool)
+        false -> toldRestored(pool, back, offered)
+
+fn toldRestored(pool: Mempool, back: Int, offered: Int) -> Result<Mempool, String>
+    ? "A Reorganisation putting Transactions back in flight is worth a line:"
+      "it is the moment a spend that looked settled stops being settled."
+    ! [Console.print]
+    _said = Console.print("mempool: {offered} Transaction(s) offered back from disconnected Block(s), {back} admitted; holding {Domain.Mempool.count(pool)} ({Domain.Mempool.bytes(pool)} bytes)")
+    Result.Ok(pool)
 
 fn saidLineIfPlain(watch: Watching, line: String) -> Unit
     ? "One line for the plain log; the Screen draws the same fact."

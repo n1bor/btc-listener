@@ -10,6 +10,11 @@ module Mempool
         "for what happens next: what conflicts with what, what leaves when a"
         "Block confirms it, what comes back when a Block is disconnected, and"
         "what is thrown away when there is no more room."
+        "What a disconnected Block un-confirms does not come back through this"
+        "module. It goes back through admission, in Infra.Mempool, because a"
+        "Transaction that was valid on an abandoned branch may be a double"
+        "spend on the branch that replaced it -- and putting it back without"
+        "asking would mean relaying one. n1bor/btc-listener#28."
         "Conflicts are first-seen-wins, which is not a judgement about which"
         "Transaction is better. Two Transactions that spend the same Output"
         "cannot both be mined, and a node with no way to tell them apart has"
@@ -25,7 +30,7 @@ module Mempool
         "defence. A Transaction that would be the cheapest thing in a full"
         "Mempool is refused rather than admitted and immediately evicted:"
         "the two are the same outcome, and refusing says so honestly."
-    exposes [Mempool, Held, Admission, empty, entry, outpoint, admit, confirmed, restored, holds, heldFor, count, bytes, capOf, floorRate, lowest, conflictOf, txids]
+    exposes [Mempool, Held, Admission, empty, entry, outpoint, admit, confirmed, holds, heldFor, count, bytes, capOf, floorRate, lowest, conflictOf, txids]
     depends [Domain.Standard]
     effects []
 
@@ -414,31 +419,6 @@ fn withoutHeld(pool: Mempool, held: Option<Held>) -> Mempool
 verify withoutHeld
     count(withoutHeld(withOne(), Option.None)) => 1
     count(withoutHeld(withOne(), Option.Some(entry("aa", 250, 250, ["cc:0"], "")))) => 0
-
-fn restored(pool: Mempool, unconfirmed: List<Held>) -> Mempool
-    ? "What a disconnected Block un-confirmed comes back."
-      "These were valid when they were mined, so they are lodged rather than"
-      "re-admitted: asking Policy again would be asking a question whose"
-      "answer we already acted on, and a conflict here means the chain it"
-      "reorganised onto spent the Output first -- in which case the entry is"
-      "dropped and the Output stays with whoever holds it now."
-    match unconfirmed
-        [] -> evicted(pool)
-        [head, ..tail] -> restored(restoredOne(pool, head), tail)
-
-verify restored
-    count(restored(empty(10000), [entry("bb", 250, 250, [], "")])) => 1
-    count(restored(empty(10000), [])) => 0
-
-fn restoredOne(pool: Mempool, held: Held) -> Mempool
-    ? "One of them back, unless something already spends what it spends."
-    match conflictOf(pool, held)
-        Option.Some(_) -> pool
-        Option.None -> lodged(pool, held)
-
-verify restoredOne
-    count(restoredOne(empty(10000), entry("bb", 250, 250, [], ""))) => 1
-    count(restoredOne(withOne(), entry("bb", 250, 250, ["cc:0"], ""))) => 1
 
 fn withOne() -> Mempool
     ? "A Mempool holding one Transaction, for the cases in this module."

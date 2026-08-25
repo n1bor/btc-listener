@@ -315,6 +315,56 @@ order — and each of them silently names every Transaction wrongly.
 **This capture needs a node, so the generated file is committed** rather than
 rebuilt in CI, the same way the Core corpora are.
 
+### 9. A Transaction that only the abandoned branch ever had
+
+The sweep in section 7 removes what a Block confirms. This is the other half:
+what a Block **un**-confirms has to come back, and the only way to see it is a
+Transaction the winning branch has never heard of.
+
+Core will not give you one by itself. Invalidate a Block and Core puts its
+Transactions back in its own Mempool and mines them straight into the
+replacement, so the Transaction is confirmed again and nothing was restored.
+The trick is a second node that never saw it:
+
+```bash
+# both nodes on the same chain, then cut node 2 off
+$C2 addnode "127.0.0.1:18444" onetry; sleep 10
+$C2 disconnectnode "127.0.0.1:18444"
+
+$BIN regtest follow 127.0.0.1:18444,127.0.0.1:18464 $D &
+
+TX=$($C sendtoaddress $($C getnewaddress "" bech32) 0.55)   # node 1 only
+$C generatetoaddress 1 "$($C getnewaddress)"                # into node 1's branch
+$C2 generatetoaddress 2 "$($C2 getnewaddress)"              # a longer branch without it
+```
+
+Node 2's branch is longer, so the node follows it, and the Block holding the
+Transaction is disconnected. Expect, in order:
+
+```
+mempool admitted 60876dcb…ba64: 245 bytes, 1641 sat at 6697/kB; holding 1 (245 bytes)
+following at Height 176: 1 connected, 0 disconnected, set +3 -1
+mempool: 1 Transaction(s) left, taken by the chain; holding 0 (0 bytes)
+headers to 177  REORGANISED: 1 Height(s) re-pointed above 175
+REORGANISED: the Set stands on a branch the chain has left; taking it back to
+  Height 175, disconnecting 1 Block(s)
+  height 176 disconnected: set +1 -3
+following at Height 177: 2 connected, 0 disconnected, set +2 -0
+mempool: 1 Transaction(s) offered back from disconnected Block(s), 1 admitted; holding 1 (245 bytes)
+```
+
+**Read both numbers on the last line.** Offered and admitted are reported
+separately because they differ for a good reason: a reorganisation whose new
+Blocks spend the same Outputs offers Transactions that are then correctly
+refused, and `3 offered, 0 admitted` is a right answer. A silence would be
+ambiguous between that and nothing having been carried at all — which is
+exactly the ambiguity that cost an hour here.
+
+**Confirm the binary you are running contains the change** before believing
+this — or any — negative result. See [Prove the binary is the one you
+built](#prove-the-binary-is-the-one-you-built) below; this test was run three
+times against a stale binary before anyone noticed.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
@@ -353,8 +403,36 @@ cargo test --manifest-path providers/primitives/Cargo.toml
 cargo test --manifest-path providers/kv/Cargo.toml
 ```
 
-`cargo build` is not a formality: three failure classes survive `check`,
-`verify` **and** `compile`, and are listed in CLAUDE.md.
+`cargo build` is not a formality: the failure classes that survive `check`,
+`verify` **and** `compile` are listed in CLAUDE.md.
+
+### Prove the binary is the one you built
+
+**A negative result is worth nothing until the thing under test is known to be
+running.** In one night this caught two false conclusions, in two different
+sessions, both from the same shell mistake:
+
+```bash
+aver compile main.av --module-root . -o ../btc-listener-build | grep -c "^error" && cargo build ...
+```
+
+`grep -c` exits **1** when it matches nothing, so the `&&` skips the build
+**precisely when the compile is clean**. The run prints `0`, looks healthy,
+and leaves the previous binary in place. One session then spent an hour
+concluding a feature "did not fire" against a binary that did not contain it;
+the other blamed two vanished builds on memory pressure.
+
+Use `;` rather than `&&` between gate steps, and check the artefact rather
+than the exit status:
+
+```bash
+strings ../btc-listener-build/target/release/main | grep -c "a string you just added"
+ls -la ../btc-listener-build/target/release/main      # newer than your edit?
+```
+
+A running `follow` also holds `<dir>/.writing`, so a second run refuses to
+start — which looks like a broken test rather than a busy directory. Confirm
+no process is going before deleting the claim.
 
 **Then run this document.** Sections 1 to 4 take a few minutes on regtest and
 are the only evidence in the project that comes from outside the project.
