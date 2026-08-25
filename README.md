@@ -863,8 +863,11 @@ assumed:
   own 150-second idle poll plus the 5-second dial. Measured properly, a dead
   address costs 5.0 s ([#119](https://github.com/n1bor/btc-listener/issues/119),
   corrected in [jasisz/aver#1118](https://github.com/jasisz/aver/issues/1118)).
-  What remains open there is the better shape: a connect that reports through
-  `Tcp.poll`, so dialling stops being a special case in the schedule.
+  What remains open there is the better shape:
+  [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125), a connect
+  that reports through `Tcp.poll`, so dialling stops being a special case in
+  the schedule. Until it lands the 5-second budget stays, which is why
+  `connect_timeout_secs` is set in `aver.toml` and says so there.
 
 ### When a Peer does not play fair
 
