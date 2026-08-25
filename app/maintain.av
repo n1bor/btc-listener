@@ -20,7 +20,7 @@ record Span
     from: Int
     to: Int
 
-fn prune(rest: List<String>) -> Unit
+fn prune(rest: List<String>) -> Result<Unit, String>
     ? "Pruning is local: a directory and the Height to prune below, no Peer."
     ! [
         Console.error, Console.print,
@@ -28,10 +28,10 @@ fn prune(rest: List<String>) -> Unit
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [dir, ..more] -> pruneHeight(dir, more)
 
-fn pruneHeight(dir: String, more: List<String>) -> Unit
+fn pruneHeight(dir: String, more: List<String>) -> Result<Unit, String>
     ? "Take the Height that follows the directory."
     ! [
         Console.error, Console.print,
@@ -39,10 +39,10 @@ fn pruneHeight(dir: String, more: List<String>) -> Unit
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match more
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [height, ..extra] -> startPrune(dir, Int.fromString(height))
 
-fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
+fn startPrune(dir: String, parsed: Result<Int, String>) -> Result<Unit, String>
     ? "Prune, or show the usage if the Height was not a whole number."
     ! [
         Console.error, Console.print,
@@ -50,7 +50,7 @@ fn startPrune(dir: String, parsed: Result<Int, String>) -> Unit
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match parsed
-        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Err(message) -> Result.Err("usage: <dir> <height>")
         Result.Ok(below) -> said(pruneRun(dir, below))
 
 fn pruneRun(dir: String, below: Int) -> Result<String, String>
@@ -73,7 +73,7 @@ fn pruneDone(dir: String, below: Int) -> Result<String, String>
     pruned = Infra.Prune.run(store, blocks, below)?
     Result.Ok("{pruned.segments} Segments deleted, {pruned.locations} Locations dropped, Prune Watermark now {pruned.watermark}")
 
-fn reindex(rest: List<String>) -> Unit
+fn reindex(rest: List<String>) -> Result<Unit, String>
     ? "Reindexing is local: a directory, and nothing else to choose."
     ! [
         Console.error, Console.print,
@@ -81,7 +81,7 @@ fn reindex(rest: List<String>) -> Unit
         Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
-        [] -> Console.error("usage: <dir>")
+        [] -> Result.Err("usage: <dir>")
         [dir, ..extra] -> said(reindexRun(dir))
 
 fn reindexRun(dir: String) -> Result<String, String>
@@ -104,7 +104,7 @@ fn reindexDone(dir: String) -> Result<String, String>
     rebuilt = Infra.Reindex.run(store, "{dir}/blocks")?
     Result.Ok("{rebuilt.blocks} Blocks located across {rebuilt.segments} Segments")
 
-fn txIndex(rest: List<String>) -> Unit
+fn txIndex(rest: List<String>) -> Result<Unit, String>
     ? "Indexing is local: a directory and a range of Heights."
     ! [
         Console.error, Console.print,
@@ -112,10 +112,10 @@ fn txIndex(rest: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <a> <b>")
+        [] -> Result.Err("usage: <dir> <a> <b>")
         [dir, ..more] -> txIndexRange(dir, more)
 
-fn txIndexRange(dir: String, more: List<String>) -> Unit
+fn txIndexRange(dir: String, more: List<String>) -> Result<Unit, String>
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
@@ -123,7 +123,7 @@ fn txIndexRange(dir: String, more: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match heights(more)
-        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.None -> Result.Err("usage: <dir> <a> <b>")
         Option.Some(span) -> said(txIndexRun(dir, span))
 
 fn txIndexRun(dir: String, span: Span) -> Result<String, String>
@@ -146,7 +146,7 @@ fn txIndexDone(dir: String, span: Span) -> Result<String, String>
     built = Infra.TxIndex.build(store, blocks, span.from, span.to)?
     Result.Ok("{built.transactions} Transactions recorded from {built.blocks} Blocks")
 
-fn outputs(rest: List<String>) -> Unit
+fn outputs(rest: List<String>) -> Result<Unit, String>
     ? "Indexing Outputs is local: a directory and a range of Heights."
     ! [
         Console.error, Console.print,
@@ -155,10 +155,10 @@ fn outputs(rest: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <a> <b>")
+        [] -> Result.Err("usage: <dir> <a> <b>")
         [dir, ..more] -> outputsRange(dir, more)
 
-fn outputsRange(dir: String, more: List<String>) -> Unit
+fn outputsRange(dir: String, more: List<String>) -> Result<Unit, String>
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
@@ -167,7 +167,7 @@ fn outputsRange(dir: String, more: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match heights(more)
-        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.None -> Result.Err("usage: <dir> <a> <b>")
         Option.Some(span) -> said(outputsRun(dir, span))
 
 fn outputsRun(dir: String, span: Span) -> Result<String, String>
@@ -194,7 +194,7 @@ fn outputsDone(dir: String, span: Span) -> Result<String, String>
     built = Infra.Outputs.build(store, blocks, span.from, span.to)?
     Result.Ok("{built.outputs} Outputs recorded from {built.blocks} Blocks")
 
-fn audit(network: Network, rest: List<String>) -> Unit
+fn audit(network: Network, rest: List<String>) -> Result<Unit, String>
     ? "Checking a range needs no claim: it only reads."
       "The Network comes from the caller because the rules a Block was mined"
       "under depend on which chain it is on, not only how high up it is."
@@ -205,10 +205,10 @@ fn audit(network: Network, rest: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <a> <b>")
+        [] -> Result.Err("usage: <dir> <a> <b>")
         [dir, ..more] -> auditRange(network, dir, more)
 
-fn auditRange(network: Network, dir: String, more: List<String>) -> Unit
+fn auditRange(network: Network, dir: String, more: List<String>) -> Result<Unit, String>
     ? "Both Heights must be given."
     ! [
         Console.error, Console.print,
@@ -217,7 +217,7 @@ fn auditRange(network: Network, dir: String, more: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match heights(more)
-        Option.None -> Console.error("usage: <dir> <a> <b>")
+        Option.None -> Result.Err("usage: <dir> <a> <b>")
         Option.Some(span) -> said(auditRun(network, dir, span))
 
 fn auditRun(network: Network, dir: String, span: Span) -> Result<String, String>
@@ -287,14 +287,14 @@ verify withFrom
     withFrom(1, Result.Ok(5)) => Option.Some(Span(from = 1, to = 5))
     withFrom(1, Result.Err("no")) => Option.None
 
-fn said(outcome: Result<String, String>) -> Unit
+fn said(outcome: Result<String, String>) -> Result<Unit, String>
     ? "Report what the command finished with."
     ! [Console.error, Console.print]
     match outcome
-        Result.Ok(line) -> Console.print(line)
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Ok(line) -> Result.Ok(Console.print(line))
+        Result.Err(message) -> Result.Err("error: {message}")
 
-fn utxo(network: Network, rest: List<String>) -> Unit
+fn utxo(network: Network, rest: List<String>) -> Result<Unit, String>
     ? "Building the UTXO Set is local: a directory and a Height to reach."
       "A Height rather than a range. The Set is the state after connecting"
       "every Block up to one Height, so there is nothing a start Height could"
@@ -307,10 +307,10 @@ fn utxo(network: Network, rest: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [dir, ..more] -> utxoHeight(network, dir, more)
 
-fn utxoHeight(network: Network, dir: String, more: List<String>) -> Unit
+fn utxoHeight(network: Network, dir: String, more: List<String>) -> Result<Unit, String>
     ? "Take the Height that follows the directory."
     ! [
         Console.error, Console.print,
@@ -320,10 +320,10 @@ fn utxoHeight(network: Network, dir: String, more: List<String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match more
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [height, ..extra] -> startUtxo(network, dir, Int.fromString(height))
 
-fn startUtxo(network: Network, dir: String, parsed: Result<Int, String>) -> Unit
+fn startUtxo(network: Network, dir: String, parsed: Result<Int, String>) -> Result<Unit, String>
     ? "Build, or show the usage if the Height was not a whole number."
     ! [
         Console.error, Console.print,
@@ -333,7 +333,7 @@ fn startUtxo(network: Network, dir: String, parsed: Result<Int, String>) -> Unit
         Time.now, Time.unixMs,
     ]
     match parsed
-        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Err(message) -> Result.Err("usage: <dir> <height>")
         Result.Ok(to) -> said(utxoRun(network, dir, to))
 
 fn utxoRun(network: Network, dir: String, to: Int) -> Result<String, String>
@@ -362,7 +362,7 @@ fn utxoDone(network: Network, dir: String, to: Int) -> Result<String, String>
     built = Infra.ChainState.build(network, store, blocks, to, Infra.Screen.unwatched(Domain.Snapshot.started(Time.unixMs())))?
     Result.Ok("{built.blocks} Blocks connected to Height {built.reached}; Set +{built.added} -{built.removed} Outputs, {built.fees} satoshis in fees")
 
-fn assumeValid(rest: List<String>) -> Unit
+fn assumeValid(rest: List<String>) -> Result<Unit, String>
     ? "Setting the Assume-valid Height is local: a directory and a Height."
     ! [
         Console.error, Console.print,
@@ -370,10 +370,10 @@ fn assumeValid(rest: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match rest
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [dir, ..more] -> assumeValidHeight(dir, more)
 
-fn assumeValidHeight(dir: String, more: List<String>) -> Unit
+fn assumeValidHeight(dir: String, more: List<String>) -> Result<Unit, String>
     ? "Take the Height that follows the directory."
     ! [
         Console.error, Console.print,
@@ -381,10 +381,10 @@ fn assumeValidHeight(dir: String, more: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match more
-        [] -> Console.error("usage: <dir> <height>")
+        [] -> Result.Err("usage: <dir> <height>")
         [height, ..extra] -> startAssumeValid(dir, Int.fromString(height))
 
-fn startAssumeValid(dir: String, parsed: Result<Int, String>) -> Unit
+fn startAssumeValid(dir: String, parsed: Result<Int, String>) -> Result<Unit, String>
     ? "Set it, or show the usage if the Height was not a whole number."
     ! [
         Console.error, Console.print,
@@ -392,7 +392,7 @@ fn startAssumeValid(dir: String, parsed: Result<Int, String>) -> Unit
         Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
     ]
     match parsed
-        Result.Err(message) -> Console.error("usage: <dir> <height>")
+        Result.Err(message) -> Result.Err("usage: <dir> <height>")
         Result.Ok(height) -> said(assumeValidRun(dir, height))
 
 fn assumeValidRun(dir: String, height: Int) -> Result<String, String>

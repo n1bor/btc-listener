@@ -29,7 +29,7 @@ verify describe
     describe(Domain.Address.fromString("192.168.1.10")?) => "listening to peer 192.168.1.10:8333"
     describe(Domain.Address.fromParts("10.0.0.1", "18333")?) => "listening to peer 10.0.0.1:18333"
 
-fn runCli() -> Unit
+fn runCli() -> Result<Unit, String>
     ? "Starts the argv CLI."
     ! [
         Args.get,
@@ -44,7 +44,7 @@ fn runCli() -> Unit
     ]
     run(Args.get())
 
-fn run(args: List<String>) -> Unit
+fn run(args: List<String>) -> Result<Unit, String>
     ? "Dispatch on the arguments given after `--`."
     ! [
         Console.error, Console.print,
@@ -60,7 +60,7 @@ fn run(args: List<String>) -> Unit
         [] -> discover(Network.Mainnet)
         [head, ..rest] -> maybeNetwork(head, rest)
 
-fn maybeNetwork(head: String, rest: List<String>) -> Unit
+fn maybeNetwork(head: String, rest: List<String>) -> Result<Unit, String>
     ? "A leading Network name chooses the Network; anything else is mainnet as before."
       "regtest is here for the same reason the other three are -- it is a"
       "Network this program can speak, and every part below already knew its"
@@ -82,7 +82,7 @@ fn maybeNetwork(head: String, rest: List<String>) -> Unit
         "regtest" -> onNetwork(Network.Regtest, rest)
         _ -> dispatch(Network.Mainnet, head, rest)
 
-fn onNetwork(network: Network, args: List<String>) -> Unit
+fn onNetwork(network: Network, args: List<String>) -> Result<Unit, String>
     ? "The arguments after the Network was chosen: same grammar, different wire."
     ! [
         Console.error, Console.print,
@@ -98,7 +98,7 @@ fn onNetwork(network: Network, args: List<String>) -> Unit
         [] -> discover(network)
         [head, ..rest] -> dispatch(network, head, rest)
 
-fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
+fn dispatch(network: Network, command: String, rest: List<String>) -> Result<Unit, String>
     ? "A leading subcommand, or an address for the listener as before."
     ! [
         Console.error, Console.print,
@@ -124,10 +124,10 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Unit
         "tx" -> App.Lookup.byTxid(network, rest, false)
         "spend" -> App.Lookup.byTxid(network, rest, true)
         "show" -> needShow(rest)
-        "help" -> App.Usage.print()
+        "help" -> Result.Ok(App.Usage.print())
         _ -> runWithAddress(network, command, rest)
 
-fn needTwo(network: Network, rest: List<String>) -> Unit
+fn needTwo(network: Network, rest: List<String>) -> Result<Unit, String>
     ? "The header phase wants an address and a directory."
     ! [
         Console.error, Console.print,
@@ -140,10 +140,10 @@ fn needTwo(network: Network, rest: List<String>) -> Unit
         Time.unixMs,
     ]
     match rest
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [address, ..more] -> withDir(network, address, more)
 
-fn withDir(network: Network, address: String, more: List<String>) -> Unit
+fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit, String>
     ? "Take the directory that follows the address."
     ! [
         Console.error, Console.print,
@@ -156,10 +156,10 @@ fn withDir(network: Network, address: String, more: List<String>) -> Unit
         Time.unixMs,
     ]
     match more
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [dir, ..extra] -> startHeaders(network, Domain.Address.fromPeerText(address, Domain.Network.portOf(network)), dir)
 
-fn startHeaders(network: Network, parsed: Result<PeerAddress, String>, dir: String) -> Unit
+fn startHeaders(network: Network, parsed: Result<PeerAddress, String>, dir: String) -> Result<Unit, String>
     ? "Fetch every Header, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -172,7 +172,7 @@ fn startHeaders(network: Network, parsed: Result<PeerAddress, String>, dir: Stri
         Time.unixMs,
     ]
     match parsed
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Err(message) -> Result.Err("error: {message}")
         Result.Ok(address) -> said(headerRun(network, address, dir))
 
 fn headerRun(network: Network, address: PeerAddress, dir: String) -> Result<String, String>
@@ -210,7 +210,7 @@ fn headersDone(network: Network, address: PeerAddress, dir: String) -> Result<St
     held = Infra.Store.size(grown)?
     Result.Ok("index holds {held} entries")
 
-fn needFour(network: Network, rest: List<String>) -> Unit
+fn needFour(network: Network, rest: List<String>) -> Result<Unit, String>
     ? "The body phase wants an address, a directory and two Heights."
     ! [
         Console.error, Console.print,
@@ -223,10 +223,10 @@ fn needFour(network: Network, rest: List<String>) -> Unit
         Time.unixMs,
     ]
     match rest
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [address, ..more] -> bodyDir(network, address, more)
 
-fn bodyDir(network: Network, address: String, more: List<String>) -> Unit
+fn bodyDir(network: Network, address: String, more: List<String>) -> Result<Unit, String>
     ? "Take the directory, then the range."
     ! [
         Console.error, Console.print,
@@ -239,10 +239,10 @@ fn bodyDir(network: Network, address: String, more: List<String>) -> Unit
         Time.unixMs,
     ]
     match more
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [dir, ..range] -> bodyRange(network, address, dir, range)
 
-fn bodyRange(network: Network, address: String, dir: String, range: List<String>) -> Unit
+fn bodyRange(network: Network, address: String, dir: String, range: List<String>) -> Result<Unit, String>
     ? "Both Heights must be given; there is no sensible default for either."
     ! [
         Console.error, Console.print,
@@ -255,7 +255,7 @@ fn bodyRange(network: Network, address: String, dir: String, range: List<String>
         Time.unixMs,
     ]
     match heights(range)
-        Option.None -> App.Usage.print()
+        Option.None -> Result.Ok(App.Usage.print())
         Option.Some(span) -> startBodies(network, Domain.Address.fromPeerText(address, Domain.Network.portOf(network)), dir, span)
 
 fn heights(range: List<String>) -> Option<Span>
@@ -300,7 +300,7 @@ verify withFrom
     withFrom(1, Result.Ok(5)) => Option.Some(Span(from = 1, to = 5))
     withFrom(1, Result.Err("no")) => Option.None
 
-fn startBodies(network: Network, parsed: Result<PeerAddress, String>, dir: String, span: Span) -> Unit
+fn startBodies(network: Network, parsed: Result<PeerAddress, String>, dir: String, span: Span) -> Result<Unit, String>
     ? "Fetch the Blocks, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -313,7 +313,7 @@ fn startBodies(network: Network, parsed: Result<PeerAddress, String>, dir: Strin
         Time.unixMs,
     ]
     match parsed
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Err(message) -> Result.Err("error: {message}")
         Result.Ok(address) -> said(bodyRun(network, address, dir, span))
 
 fn bodyRun(network: Network, address: PeerAddress, dir: String, span: Span) -> Result<String, String>
@@ -365,7 +365,7 @@ verify bodiesReport
     bodiesReport(0, 3, 0) => Result.Ok("0 Blocks stored, last Segment 3")
     bodiesReport(7, 3, 3) => Result.Err("7 Blocks stored but 3 Heights in the range still hold no body; run this phase again over them")
 
-fn needShow(rest: List<String>) -> Unit
+fn needShow(rest: List<String>) -> Result<Unit, String>
     ? "Showing a Block is local: a directory and a Height, no Peer."
     ! [
         Console.error, Console.print,
@@ -373,10 +373,10 @@ fn needShow(rest: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open,
     ]
     match rest
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [dir, ..more] -> showHeight(dir, more)
 
-fn showHeight(dir: String, more: List<String>) -> Unit
+fn showHeight(dir: String, more: List<String>) -> Result<Unit, String>
     ? "Take the Height that follows the directory."
     ! [
         Console.error, Console.print,
@@ -384,10 +384,10 @@ fn showHeight(dir: String, more: List<String>) -> Unit
         Infra.Kv.get, Infra.Kv.open,
     ]
     match more
-        [] -> App.Usage.print()
+        [] -> Result.Ok(App.Usage.print())
         [height, ..extra] -> showMode(dir, Int.fromString(height), extra)
 
-fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Unit
+fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Result<Unit, String>
     ? "An optional third word chooses how much of the Block to print."
     ! [
         Console.error, Console.print,
@@ -398,7 +398,7 @@ fn showMode(dir: String, parsed: Result<Int, String>, extra: List<String>) -> Un
         [] -> startShow(dir, parsed, true)
         [mode, ..rest] -> namedMode(dir, parsed, mode)
 
-fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
+fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Result<Unit, String>
     ? "Only two words mean anything here; anything else is a typo worth showing."
     ! [
         Console.error, Console.print,
@@ -408,9 +408,9 @@ fn namedMode(dir: String, parsed: Result<Int, String>, mode: String) -> Unit
     match mode
         "full" -> startShow(dir, parsed, true)
         "summary" -> startShow(dir, parsed, false)
-        _ -> App.Usage.print()
+        _ -> Result.Ok(App.Usage.print())
 
-fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -> Unit
+fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -> Result<Unit, String>
     ? "Show, or the usage if the Height was not a whole number."
     ! [
         Console.error, Console.print,
@@ -418,7 +418,7 @@ fn startShow(dir: String, parsed: Result<Int, String>, withTransactions: Bool) -
         Infra.Kv.get, Infra.Kv.open,
     ]
     match parsed
-        Result.Err(message) -> App.Usage.print()
+        Result.Err(message) -> Result.Ok(App.Usage.print())
         Result.Ok(height) -> shown(showRun(dir, height, withTransactions))
 
 fn showRun(dir: String, height: Int, withTransactions: Bool) -> Result<List<String>, String>
@@ -434,12 +434,12 @@ fn showRun(dir: String, height: Int, withTransactions: Bool) -> Result<List<Stri
     network = Infra.Chain.networkOf(store)?
     Result.Ok(App.Show.describeFound(network, found, below, withTransactions))
 
-fn shown(outcome: Result<List<String>, String>) -> Unit
+fn shown(outcome: Result<List<String>, String>) -> Result<Unit, String>
     ? "Print the lines, or the reason there are none."
     ! [Console.error, Console.print]
     match outcome
-        Result.Ok(lines) -> App.Usage.printLines(lines)
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Ok(lines) -> Result.Ok(App.Usage.printLines(lines))
+        Result.Err(message) -> Result.Err("error: {message}")
 
 fn blocksPath(dir: String) -> String
     ? "Where the Segments live."
@@ -448,14 +448,14 @@ fn blocksPath(dir: String) -> String
 verify blocksPath
     blocksPath("chain") => "chain/blocks"
 
-fn said(outcome: Result<String, String>) -> Unit
+fn said(outcome: Result<String, String>) -> Result<Unit, String>
     ? "Report what a phase finished with."
     ! [Console.error, Console.print]
     match outcome
-        Result.Ok(line) -> Console.print(line)
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Ok(line) -> Result.Ok(Console.print(line))
+        Result.Err(message) -> Result.Err("error: {message}")
 
-fn discover(network: Network) -> Unit
+fn discover(network: Network) -> Result<Unit, String>
     ? "With no address given, ask a DNS seed of the chosen Network for one."
     ! [
         Console.error, Console.print,
@@ -466,7 +466,7 @@ fn discover(network: Network) -> Unit
     _searching = Console.print("no peer given; asking a {Domain.Network.nameOf(network)} DNS seed")
     report(network, Infra.Resolver.discover(network))
 
-fn runWithAddress(network: Network, address: String, rest: List<String>) -> Unit
+fn runWithAddress(network: Network, address: String, rest: List<String>) -> Result<Unit, String>
     ? "One argument is an address on the default port; more may carry a port."
     ! [
         Console.error, Console.print,
@@ -478,7 +478,7 @@ fn runWithAddress(network: Network, address: String, rest: List<String>) -> Unit
         [] -> report(network, Domain.Address.fromPeerText(address, Domain.Network.portOf(network)))
         [port, ..extra] -> runWithPort(network, address, port, extra)
 
-fn runWithPort(network: Network, address: String, port: String, extra: List<String>) -> Unit
+fn runWithPort(network: Network, address: String, port: String, extra: List<String>) -> Result<Unit, String>
     ? "An address and a port, and nothing after them."
     ! [
         Console.error, Console.print,
@@ -488,9 +488,9 @@ fn runWithPort(network: Network, address: String, port: String, extra: List<Stri
     ]
     match extra
         [] -> report(network, Domain.Address.fromParts(address, port))
-        [_, ..surplus] -> App.Usage.print()
+        [_, ..surplus] -> Result.Ok(App.Usage.print())
 
-fn report(network: Network, parsed: Result<PeerAddress, String>) -> Unit
+fn report(network: Network, parsed: Result<PeerAddress, String>) -> Result<Unit, String>
     ? "Connect to the accepted Peer, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -500,9 +500,9 @@ fn report(network: Network, parsed: Result<PeerAddress, String>) -> Unit
     ]
     match parsed
         Result.Ok(address) -> connectTo(network, address)
-        Result.Err(message) -> Console.error("error: {message}")
+        Result.Err(message) -> Result.Err("error: {message}")
 
-fn connectTo(network: Network, address: PeerAddress) -> Unit
+fn connectTo(network: Network, address: PeerAddress) -> Result<Unit, String>
     ? "Announce the Peer, then listen to it."
     ! [
         Console.error, Console.print,
@@ -513,9 +513,9 @@ fn connectTo(network: Network, address: PeerAddress) -> Unit
     _announced = Console.print(describe(address))
     announce(Infra.Peer.run(network, address))
 
-fn announce(outcome: Result<Unit, String>) -> Unit
+fn announce(outcome: Result<Unit, String>) -> Result<Unit, String>
     ? "Say why the session ended, if it ended badly."
     ! [Console.error, Console.print]
     match outcome
-        Result.Ok(done) -> Console.print("peer closed the connection")
-        Result.Err(message) -> Console.error("peer session failed: {message}")
+        Result.Ok(done) -> Result.Ok(Console.print("peer closed the connection"))
+        Result.Err(message) -> Result.Err("peer session failed: {message}")
