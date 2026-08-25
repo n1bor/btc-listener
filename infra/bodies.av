@@ -12,7 +12,7 @@ module Bodies
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
     exposes [Progress, bodies, bodiesOn]
-    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screenlines, Infra.Pace]
+    depends [Bytes, Domain.Address, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
     effects [
         Console.error, Console.print,
         Disk.appendBytes,
@@ -20,6 +20,7 @@ module Bodies
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
 
@@ -31,6 +32,7 @@ record Progress
     waiting: Int
     count: Int
     pace: Pace
+    eye: Eye
 
 fn locationBatch() -> Int
     ? "How many Locations to hold before writing them."
@@ -53,10 +55,11 @@ fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockSto
         Process.stopRequested,
         Random.int,
         Tcp.close, Tcp.connect, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     pool = Infra.Peers.joined(Infra.Peers.opened(network), soleKey(), address)?
-    closed(pool, bodiesOn(pool, soleKey(), store, blocks, from, to))
+    closed(pool, bodiesOn(pool, soleKey(), store, blocks, from, to, Infra.Screen.unwatched(Domain.Snapshot.started(Time.unixMs()))))
 
 fn soleKey() -> Int
     ? "The identifier a pool of one Peer keys it under."
@@ -71,7 +74,7 @@ fn closed(pool: Pool, outcome: Result<Progress, String>) -> Result<Progress, Str
     _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Progress, String>
+fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int, eye: Eye) -> Result<Progress, String>
     ? "The same range walk on a pool somebody else opened."
       "What a node following the tip needs: the Headers say a Block exists and"
       "where it sits, and this is what turns that into a body on disk the"
@@ -83,16 +86,17 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    walked = walk(Progress(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs())), key, from, to)?
+    walked = walk(Progress(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), key, from, to)?
     settled(walked)
 
 fn settled(progress: Progress) -> Result<Progress, String>
     ? "Write whatever Locations are still held back."
     ! [Infra.Kv.putAll]
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Progress(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace))
+    Result.Ok(Progress(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace, eye = progress.eye))
 
 fn walk(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, String>
     ? "Each Height in turn, until the range is exhausted."
@@ -105,9 +109,10 @@ fn walk(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progress, 
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    match Bool.or(height > to, Process.stopRequested())
+    match Bool.or(height > to, Bool.or(Process.stopRequested(), progress.eye.stopped))
         true -> Result.Ok(progress)
         false -> atHeight(progress, key, height, to)
 
@@ -119,6 +124,7 @@ fn atHeight(progress: Progress, key: Int, height: Int, to: Int) -> Result<Progre
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     named = Domain.Index.blockIdIn(Infra.Store.get(progress.store, Domain.IndexKeys.heightKey(height)?)?)
@@ -134,6 +140,7 @@ fn maybeFetch(progress: Progress, key: Int, height: Int, to: Int, blockId: Strin
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     held = Infra.Store.has(progress.store, Domain.IndexKeys.blockKey(blockId)?)?
@@ -149,6 +156,7 @@ fn fetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) ->
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     wanted = Domain.Block.wireOrder(blockId)?
@@ -159,7 +167,7 @@ fn fetch(progress: Progress, key: Int, height: Int, to: Int, blockId: String) ->
 
 fn asked(progress: Progress, pool: Pool) -> Progress
     ? "The walk, carrying the pool the last question left."
-    Progress(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace)
+    Progress(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = progress.eye)
 
 fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Progress, String>
     ? "Write the Block to a Segment, then record where it went."
@@ -172,12 +180,13 @@ fn keep(progress: Progress, key: Int, height: Int, to: Int, blockId: String, fra
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     payload = Bytes.fromList(frame.body)?
     _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
     appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace)
+    held = Progress(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace, eye = progress.eye)
     written = maybeWrite(held)?
     announce(written, key, height, to, List.len(frame.body))
 
@@ -224,6 +233,7 @@ fn announce(progress: Progress, key: Int, height: Int, to: Int, size: Int) -> Re
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     saying(progress, key, height, to, Time.unixMs())
@@ -236,11 +246,28 @@ fn saying(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Res
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    match Infra.Pace.due(progress.pace, nowMs, progress.count - 1)
-        false -> walk(progress, key, height + 1, to)
-        true -> said(progress, key, height, to, nowMs)
+    looked = Infra.Screen.glanced(Infra.Screen.eyeing(progress.eye, Domain.Snapshot.bodiesAt(progress.eye.snapshot, height, to, nowMs)), nowMs)?
+    seen = withEye(progress, looked)
+    match Bool.and(Infra.Pace.due(seen.pace, nowMs, seen.count - 1), plainly(seen.eye))
+        false -> walk(seen, key, height + 1, to)
+        true -> said(seen, key, height, to, nowMs)
+
+fn withEye(progress: Progress, eye: Eye) -> Progress
+    ? "The walk's state, with its Eye moved on."
+    Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = eye)
+
+fn plainly(eye: Eye) -> Bool
+    ? "Whether this walk speaks in printed lines; the Screen draws instead."
+    match eye.view
+        Option.None -> true
+        Option.Some(view) -> false
+
+verify plainly
+    plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0))) => true
+    plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0))) => false
 
 fn said(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Progress, String>
     ? "The line, and the Pace the next one measures from."
@@ -250,10 +277,11 @@ fn said(progress: Progress, key: Int, height: Int, to: Int, nowMs: Int) -> Resul
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     _said = Console.print("{lineAt(height, to, progress.count, progress.pace, nowMs)}")
-    walk(Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0)), key, height + 1, to)
+    walk(Progress(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye), key, height + 1, to)
 
 fn lineAt(height: Int, to: Int, count: Int, pace: Pace, nowMs: Int) -> String
     ? "The walk's first line has no window to read a rate off, and says so"

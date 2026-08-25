@@ -21,11 +21,12 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Bytes, Domain.AssumeValid, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
 
@@ -38,13 +39,15 @@ record Built
     reached: Int
     dropped: Int
     views: List<BlockView>
+    eye: Eye
 
 record Walk
     blocks: BlockStore
     counted: Built
     pace: Pace
+    eye: Eye
 
-fn build(network: Network, store: Store, blocks: BlockStore, to: Int) -> Result<Built, String>
+fn build(network: Network, store: Store, blocks: BlockStore, to: Int, eye: Eye) -> Result<Built, String>
     ? "Connect every Block from where the Set stands up to this Height."
       "Where it stands is asked before anything is connected, because it is a"
       "Block and not merely a Height: a reorganisation since the last walk"
@@ -54,14 +57,32 @@ fn build(network: Network, store: Store, blocks: BlockStore, to: Int) -> Result<
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     aligned = Infra.Rewind.realigned(store, blocks)?
-    _said = saidRange(aligned.from, to)
-    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = []), pace = Infra.Pace.pacedFrom(Time.unixMs())), aligned.from, to)?
+    _said = saidRangeIfPlain(eye, aligned.from, to)
+    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = [], eye = eye), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), aligned.from, to)?
     swept = Infra.Utxo.prunedUndo(walked.counted.store, walked.counted.reached)?
     _told = claimTold(swept, walked.counted.reached)?
     Result.Ok(counting(walked.counted, swept))
+
+fn saidRangeIfPlain(eye: Eye, from: Int, to: Int) -> Unit
+    ? "The range line for the plain log; the Screen draws the walk instead."
+    ! [Console.print]
+    match plainly(eye)
+        true -> saidRange(from, to)
+        false -> Unit
+
+fn plainly(eye: Eye) -> Bool
+    ? "Whether this walk speaks in printed lines; the Screen draws instead."
+    match eye.view
+        Option.None -> true
+        Option.Some(view) -> false
+
+verify plainly
+    plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0))) => true
+    plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0))) => false
 
 fn saidRange(from: Int, to: Int) -> Unit
     ? "Say what is about to be connected, when anything is."
@@ -79,7 +100,7 @@ fn counting(counted: Built, store: Store) -> Built
       "Handed back rather than dropped because a caller that goes round again"
       "-- a node following a tip does, every Block -- has to carry the Store"
       "the last round left, exactly as every other phase in this program does."
-    Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped, views = counted.views)
+    Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped, views = counted.views, eye = counted.eye)
 
 fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn, stopping at the first one the chain cannot supply."
@@ -87,9 +108,10 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    match height > to
+    match Bool.or(height > to, state.eye.stopped)
         true -> Result.Ok(state)
         false -> atHeight(network, state, height, to)
 
@@ -99,6 +121,7 @@ fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk,
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     named = Domain.Index.blockIdIn(Infra.Store.get(state.counted.store, Domain.IndexKeys.heightKey(height)?)?)
@@ -114,6 +137,7 @@ fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String)
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     located = Infra.Store.get(state.counted.store, Domain.IndexKeys.blockKey(blockId)?)?
@@ -127,6 +151,7 @@ fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: Stri
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     location = Domain.Index.decodeLocation(stored)?
@@ -146,12 +171,21 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Console.print,
         Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
-    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()))
-    stepped = maybeReport(height, counted, state.pace)?
-    walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped), height + 1, to)
+    looked = Infra.Screen.glanced(Infra.Screen.eyeing(state.eye, Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs)), view.atMs)?
+    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked)
+    stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
+    walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked), height + 1, to)
+
+fn maybeReportIfPlain(eye: Eye, height: Int, counted: Built, pace: Pace) -> Result<Pace, String>
+    ? "The minute line for the plain log; the Screen draws the walk instead."
+    ! [Console.print, Time.now, Time.unixMs]
+    match plainly(eye)
+        true -> maybeReport(height, counted, pace)
+        false -> Result.Ok(pace)
 
 fn maybeReport(height: Int, counted: Built, pace: Pace) -> Result<Pace, String>
     ? "Say where the walk has got to, about once a minute."

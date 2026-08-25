@@ -7,11 +7,70 @@ module Screen
         "purpose: restore is the last thing done on every way out, and a"
         "restore that fails has nowhere better to send its complaint than"
         "the terminal it failed to restore (#130)."
-    exposes [entered, restored, shown, drainedKeys]
-    depends [Domain.Screen]
+    exposes [Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing]
+    depends [Domain.Screen, Domain.Snapshot]
     effects [
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
     ]
+
+record Eye
+    view: Option<View>
+    snapshot: Snapshot
+    shownMs: Int
+    stopped: Bool
+
+fn unwatched(snapshot: Snapshot) -> Eye
+    ? "An Eye for a caller with no Screen: every glance is free and blind."
+    Eye(view = Option.None, snapshot = snapshot, shownMs = 0, stopped = false)
+
+fn watchedBy(view: Option<View>, snapshot: Snapshot) -> Eye
+    ? "The Eye a screened follow threads through its walks (#130)."
+    Eye(view = view, snapshot = snapshot, shownMs = 0, stopped = false)
+
+fn eyeing(eye: Eye, snapshot: Snapshot) -> Eye
+    ? "The Eye, with the Snapshot it will draw from moved on."
+    Eye(view = eye.view, snapshot = snapshot, shownMs = eye.shownMs, stopped = eye.stopped)
+
+fn redrawEveryMs() -> Int
+    ? "How often a catch-up frame is redrawn: every ten seconds, the cadence"
+      "the front screen was specified with (#128)."
+    10000
+
+verify redrawEveryMs
+    redrawEveryMs() => 10000
+
+fn glanced(eye: Eye, nowMs: Int) -> Result<Eye, String>
+    ? "One look at the terminal from inside a long walk: keys handled, the"
+      "frame redrawn when its ten seconds are up, and a stop remembered."
+      "With no Screen this is one match and nothing else, so the walks can"
+      "call it unconditionally."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey]
+    match eye.view
+        Option.None -> Result.Ok(eye)
+        Option.Some(view) -> glancedAt(eye, view, nowMs)
+
+fn glancedAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
+    ? "Keys folded, then the redraw decision."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey]
+    keys = drainedKeys()?
+    acted = Domain.Screen.pressedAll(view, keys)
+    match acted.answer
+        Answer.StopNode -> Result.Ok(Eye(view = Option.Some(acted.view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = true))
+        Answer.Redraw -> drawnAt(eye, acted.view, nowMs)
+        Answer.Unchanged -> maybeDrawn(eye, acted.view, nowMs)
+
+fn maybeDrawn(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
+    ? "Redraw only when the last frame has gone stale."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    match nowMs - eye.shownMs >= redrawEveryMs()
+        true -> drawnAt(eye, view, nowMs)
+        false -> Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped))
+
+fn drawnAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
+    ? "The frame onto the terminal, and the clock that gates the next one."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
+    _drawn = shown(Domain.Screen.frameOf(view, eye.snapshot, nowMs))?
+    Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = nowMs, stopped = eye.stopped))
 
 fn entered() -> Result<Unit, String>
     ? "Take the terminal: raw mode, no cursor, a clean slate."

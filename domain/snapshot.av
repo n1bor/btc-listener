@@ -8,7 +8,7 @@ module Snapshot
         "The rings are bounded on purpose: a Snapshot is what the node would"
         "want to say about now, not a log, so the newest few of everything is"
         "the whole point and forgetting the rest is correct."
-    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, advanced, freshProgress, withPeers, withCandidates, rateOf, etaSecsOf, percentOf, quietestSecsOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
+    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, advanced, freshProgress, setsAt, withPeers, withCandidates, rateOf, etaSecsOf, percentOf, quietestSecsOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
     depends []
     effects []
 
@@ -74,6 +74,7 @@ record Snapshot
     tip: TipView
     headers: Progress
     bodies: Progress
+    sets: Progress
     company: Company
     rings: Rings
 
@@ -123,7 +124,7 @@ verify freshProgress
 
 fn started(nowMs: Int) -> Snapshot
     ? "The Snapshot a node begins with: no tip, nothing done, nobody met."
-    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), company = Company(peers = [], candidates = 0), rings = Rings(blocks = [], reorgs = [], orphans = [], transactions = []))
+    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), sets = freshProgress(), company = Company(peers = [], candidates = 0), rings = Rings(blocks = [], reorgs = [], orphans = [], transactions = []))
 
 verify started
     started(5).tip.height => 0
@@ -132,7 +133,7 @@ verify started
 
 fn headersAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
     ? "The Header count moved; remember when, so a rate can be read off."
-    Snapshot(phase = Phase.Headers, tip = snapshot.tip, headers = advanced(snapshot.headers, done, target, nowMs), bodies = snapshot.bodies, company = snapshot.company, rings = snapshot.rings)
+    Snapshot(phase = Phase.Headers, tip = snapshot.tip, headers = advanced(snapshot.headers, done, target, nowMs), bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, rings = snapshot.rings)
 
 verify headersAt
     headersAt(started(0), 100, 200, 1000).headers.done => 100
@@ -141,15 +142,24 @@ verify headersAt
 
 fn bodiesAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
     ? "The body count moved, which also means the Header phase is behind us."
-    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = advanced(snapshot.bodies, done, target, nowMs), company = snapshot.company, rings = snapshot.rings)
+    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = advanced(snapshot.bodies, done, target, nowMs), sets = snapshot.sets, company = snapshot.company, rings = snapshot.rings)
 
 verify bodiesAt
     bodiesAt(started(0), 7, 9, 1000).bodies.done => 7
     bodiesAt(started(0), 7, 9, 1000).phase => Phase.Bodies
 
+fn setsAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
+    ? "The Set walked forward; the phase stays a catch-up phase, because a"
+      "Set still connecting is a node not yet at the tip."
+    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = advanced(snapshot.sets, done, target, nowMs), company = snapshot.company, rings = snapshot.rings)
+
+verify setsAt
+    setsAt(started(0), 7, 9, 1000).sets.done => 7
+    setsAt(started(0), 7, 9, 1000).phase => Phase.Bodies
+
 fn tipAt(snapshot: Snapshot, height: Int, blockId: String, nowMs: Int) -> Snapshot
     ? "Caught up: the node stands on this Block, listening."
-    Snapshot(phase = Phase.Listening, tip = TipView(height = height, blockId = blockId, atMs = nowMs), headers = snapshot.headers, bodies = snapshot.bodies, company = snapshot.company, rings = snapshot.rings)
+    Snapshot(phase = Phase.Listening, tip = TipView(height = height, blockId = blockId, atMs = nowMs), headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, rings = snapshot.rings)
 
 verify tipAt
     tipAt(started(0), 318980, "aa", 1000).tip.height => 318980
@@ -296,18 +306,18 @@ verify notedTransaction
 
 fn withRings(snapshot: Snapshot, rings: Rings) -> Snapshot
     ? "The Snapshot, with its rings moved on."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = snapshot.company, rings = rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, rings = rings)
 
 fn withPeers(snapshot: Snapshot, peers: List<PeerView>) -> Snapshot
     ? "Who the node is talking to, refreshed whole each tick."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = Company(peers = peers, candidates = snapshot.company.candidates), rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = peers, candidates = snapshot.company.candidates), rings = snapshot.rings)
 
 verify withPeers
     List.len(withPeers(started(0), [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 9, sent = 0, received = 0)]).company.peers) => 1
 
 fn withCandidates(snapshot: Snapshot, count: Int) -> Snapshot
     ? "How many Candidates the Address Book holds."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, company = Company(peers = snapshot.company.peers, candidates = count), rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = snapshot.company.peers, candidates = count), rings = snapshot.rings)
 
 verify withCandidates
     withCandidates(started(0), 41).company.candidates => 41

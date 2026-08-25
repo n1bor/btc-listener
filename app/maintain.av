@@ -7,11 +7,12 @@ module Maintain
         "reindex is the recovery command: it rewrites every Block's Location"
         "from the Segments, for a directory whose Index was lost (#92, #93)."
     exposes [prune, txIndex, outputs, audit, reindex, utxo, assumeValid]
-    depends [Domain.AssumeValid, Infra.ChainState, Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex, Domain.IndexKeys]
+    depends [Domain.AssumeValid, Infra.ChainState, Domain.Network, Domain.Index, Domain.SpendScript, Infra.Audit, Infra.Blocks, Infra.Lock, Infra.Outputs, Infra.Prune, Infra.Reindex, Infra.Store, Infra.TxIndex, Domain.IndexKeys, Infra.Screen, Domain.Snapshot]
     effects [
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
 
@@ -302,6 +303,7 @@ fn utxo(network: Network, rest: List<String>) -> Unit
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     match rest
@@ -314,6 +316,7 @@ fn utxoHeight(network: Network, dir: String, more: List<String>) -> Unit
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     match more
@@ -326,6 +329,7 @@ fn startUtxo(network: Network, dir: String, parsed: Result<Int, String>) -> Unit
         Console.error, Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     match parsed
@@ -338,6 +342,7 @@ fn utxoRun(network: Network, dir: String, to: Int) -> Result<String, String>
         Console.print,
         Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     _claimed = Infra.Lock.claim(dir, "utxo")?
@@ -349,11 +354,12 @@ fn utxoDone(network: Network, dir: String, to: Int) -> Result<String, String>
         Console.print,
         Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open("{dir}/blocks")?
-    built = Infra.ChainState.build(network, store, blocks, to)?
+    built = Infra.ChainState.build(network, store, blocks, to, Infra.Screen.unwatched(Domain.Snapshot.started(Time.unixMs())))?
     Result.Ok("{built.blocks} Blocks connected to Height {built.reached}; Set +{built.added} -{built.removed} Outputs, {built.fees} satoshis in fees")
 
 fn assumeValid(rest: List<String>) -> Unit
