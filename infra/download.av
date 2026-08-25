@@ -276,7 +276,38 @@ fn stored(pool: Pool, key: Int, store: Store, have: Int, decoded: List<BlockHead
     ]
     outcome = Infra.Headers.absorbed(store, decoded)?
     _told = announcedIfPlain(eye, outcome)
-    continuing(pool, key, outcome, pace, eye)
+    continuing(pool, key, outcome, pace, Infra.Screen.eyeing(eye, ringsAfter(eye.snapshot, outcome, Time.unixMs())))
+
+fn ringsAfter(snapshot: Snapshot, outcome: Settled, nowMs: Int) -> Snapshot
+    ? "What a batch did to the tree, into the Snapshot's rings (#132): a"
+      "Reorganisation is remembered, and Headers that could not be placed"
+      "are counted."
+    orphansAfter(reorgAfter(snapshot, outcome, nowMs), outcome.orphans, nowMs)
+
+verify ringsAfter
+    List.len(ringsAfter(Domain.Snapshot.started(0), Settled(store = Infra.Store.fixture([]), placed = 1, orphans = 0, movement = Movement.Unchanged, tipHeight = 5), 9).rings.reorgs) => 0
+    List.len(ringsAfter(Domain.Snapshot.started(0), Settled(store = Infra.Store.fixture([]), placed = 1, orphans = 0, movement = Movement.Reorganised(7, 5), tipHeight = 12), 9).rings.reorgs) => 1
+    ringsAfter(Domain.Snapshot.started(0), Settled(store = Infra.Store.fixture([]), placed = 0, orphans = 2, movement = Movement.Unchanged, tipHeight = 5), 9).rings.orphans => 2
+
+fn reorgAfter(snapshot: Snapshot, outcome: Settled, nowMs: Int) -> Snapshot
+    ? "A Reorganisation into the ring; growth and stillness change nothing."
+    match outcome.movement
+        Movement.Unchanged -> snapshot
+        Movement.Extended(added) -> snapshot
+        Movement.Reorganised(forkHeight, displaced) -> Domain.Snapshot.notedReorg(snapshot, ReorgView(forkHeight = forkHeight, displaced = displaced, tipHeight = outcome.tipHeight, atMs = nowMs))
+
+verify reorgAfter
+    reorgAfter(Domain.Snapshot.started(0), Settled(store = Infra.Store.fixture([]), placed = 1, orphans = 0, movement = Movement.Extended(3), tipHeight = 5), 9).rings.reorgs => []
+
+fn orphansAfter(snapshot: Snapshot, count: Int, nowMs: Int) -> Snapshot
+    ? "Orphans counted only when a batch had any."
+    match count > 0
+        true -> Domain.Snapshot.notedOrphan(snapshot, count, nowMs)
+        false -> snapshot
+
+verify orphansAfter
+    orphansAfter(Domain.Snapshot.started(0), 0, 9).rings.orphans => 0
+    orphansAfter(Domain.Snapshot.started(0), 2, 9).rings.orphans => 2
 
 fn continuing(pool: Pool, key: Int, outcome: Settled, pace: Pace, eye: Eye) -> Result<Grown, String>
     ? "Ask for more only while the batch is moving the tip."

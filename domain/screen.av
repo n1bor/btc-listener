@@ -172,7 +172,7 @@ fn linesOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<String>
     match view.panel
         Panel.Overview -> overviewLines(snapshot, nowMs)
         Panel.Peers -> peersPanelLines(snapshot.company, nowMs)
-        Panel.Blocks -> placeholderLines("Blocks", "#132")
+        Panel.Blocks -> blocksPanelLines(snapshot, nowMs)
         Panel.Transactions -> placeholderLines("Transactions", "#133")
         Panel.Mempool -> placeholderLines("Mempool", "#28")
 
@@ -180,6 +180,58 @@ verify linesOf
     linesOf(View(panel = Panel.Mempool, confirming = false), Domain.Snapshot.started(0), 0) => ["", "waiting for the Mempool Panel (#28)"]
     List.len(linesOf(View(panel = Panel.Peers, confirming = false), Domain.Snapshot.started(0), 0)) => 5
     List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 5
+
+fn blocksPanelLines(snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "The Blocks Panel (#132): the newest Blocks, then anything the chain"
+      "did that was not simply growing."
+    List.concat(List.concat([
+        "",
+        "last Blocks:",
+    ], blockRows(snapshot.rings.blocks, [])), List.concat(List.prepend("", reorgRows(snapshot.rings.reorgs, [])), orphanRow(snapshot.rings.orphans, snapshot.rings.orphanMs, nowMs)))
+
+verify blocksPanelLines
+    blocksPanelLines(Domain.Snapshot.started(0), 0) => ["", "last Blocks:", "  none connected yet", "", "  no Reorganisation seen"]
+    List.len(blocksPanelLines(Domain.Snapshot.notedOrphan(Domain.Snapshot.started(0), 2, 0), 5000)) => 6
+
+fn blockRows(views: List<BlockView>, acc: List<String>) -> List<String>
+    ? "One row per held Block, newest first."
+    match views
+        [] -> anyRows(List.reverse(acc), "  none connected yet")
+        [head, ..tail] -> blockRows(tail, List.prepend("  {Domain.Screenlines.blockLine(head)}", acc))
+
+verify blockRows
+    blockRows([], []) => ["  none connected yet"]
+    blockRows([BlockView(height = 5, blockId = "aa", transactions = 2, bytes = 300, atMs = 0)], []) => ["  block 5 aa 2 tx 300 bytes"]
+
+fn reorgRows(views: List<ReorgView>, acc: List<String>) -> List<String>
+    ? "One row per remembered Reorganisation, newest first."
+    match views
+        [] -> anyRows(List.reverse(acc), "  no Reorganisation seen")
+        [head, ..tail] -> reorgRows(tail, List.prepend("  {Domain.Screenlines.reorgLine(head)}", acc))
+
+verify reorgRows
+    reorgRows([], []) => ["  no Reorganisation seen"]
+    reorgRows([ReorgView(forkHeight = 7, displaced = 5, tipHeight = 12, atMs = 5)], []) => ["  reorganisation at Height 7: 5 Height(s) re-pointed, tip now 12"]
+
+fn anyRows(rows: List<String>, whenNone: String) -> List<String>
+    ? "Nothing is said, not left blank."
+    match rows
+        [] -> [whenNone]
+        [head, ..tail] -> rows
+
+verify anyRows
+    anyRows([], "none") => ["none"]
+    anyRows(["x"], "none") => ["x"]
+
+fn orphanRow(count: Int, lastMs: Int, nowMs: Int) -> List<String>
+    ? "The orphan line, only once there is something to count."
+    match count > 0
+        true -> ["  {Domain.Screenlines.orphanLine(count, lastMs, nowMs)}"]
+        false -> []
+
+verify orphanRow
+    orphanRow(0, 0, 0) => []
+    orphanRow(3, 0, 250000) => ["  Orphan Headers seen: 3, last 4m10s ago"]
 
 fn peersPanelLines(company: Company, nowMs: Int) -> List<String>
     ? "The Peers Panel (#131): the pool one line per Peer, then the Book."

@@ -49,8 +49,8 @@ record BlockView
 
 record ReorgView
     forkHeight: Int
-    fromId: String
-    toId: String
+    displaced: Int
+    tipHeight: Int
     atMs: Int
 
 record TxView
@@ -66,7 +66,8 @@ record Company
 record Rings
     blocks: List<BlockView>
     reorgs: List<ReorgView>
-    orphans: List<String>
+    orphans: Int
+    orphanMs: Int
     transactions: List<TxView>
 
 record Snapshot
@@ -124,7 +125,7 @@ verify freshProgress
 
 fn started(nowMs: Int) -> Snapshot
     ? "The Snapshot a node begins with: no tip, nothing done, nobody met."
-    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), sets = freshProgress(), company = Company(peers = [], candidates = 0), rings = Rings(blocks = [], reorgs = [], orphans = [], transactions = []))
+    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), sets = freshProgress(), company = Company(peers = [], candidates = 0), rings = Rings(blocks = [], reorgs = [], orphans = 0, orphanMs = 0, transactions = []))
 
 verify started
     started(5).tip.height => 0
@@ -278,28 +279,33 @@ verify percentOf
 
 fn notedBlock(snapshot: Snapshot, view: BlockView) -> Snapshot
     ? "A Block connected: newest first, oldest forgotten."
-    withRings(snapshot, Rings(blocks = List.take(List.prepend(view, snapshot.rings.blocks), blockLimit()), reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, transactions = snapshot.rings.transactions))
+    withRings(snapshot, Rings(blocks = List.take(List.prepend(view, snapshot.rings.blocks), blockLimit()), reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = snapshot.rings.transactions))
 
 verify notedBlock
     notedBlock(started(0), BlockView(height = 1, blockId = "aa", transactions = 2, bytes = 300, atMs = 5)).rings.blocks => [BlockView(height = 1, blockId = "aa", transactions = 2, bytes = 300, atMs = 5)]
 
 fn notedReorg(snapshot: Snapshot, view: ReorgView) -> Snapshot
     ? "A Reorganisation happened; the Screen's Blocks Panel wants the last few."
-    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = List.take(List.prepend(view, snapshot.rings.reorgs), reorgLimit()), orphans = snapshot.rings.orphans, transactions = snapshot.rings.transactions))
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = List.take(List.prepend(view, snapshot.rings.reorgs), reorgLimit()), orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = snapshot.rings.transactions))
 
 verify notedReorg
-    notedReorg(started(0), ReorgView(forkHeight = 7, fromId = "aa", toId = "bb", atMs = 5)).rings.reorgs => [ReorgView(forkHeight = 7, fromId = "aa", toId = "bb", atMs = 5)]
+    notedReorg(started(0), ReorgView(forkHeight = 7, displaced = 5, tipHeight = 12, atMs = 5)).rings.reorgs => [ReorgView(forkHeight = 7, displaced = 5, tipHeight = 12, atMs = 5)]
 
-fn notedOrphan(snapshot: Snapshot, blockId: String) -> Snapshot
-    ? "A Header arrived whose parent we do not hold."
-    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = List.take(List.prepend(blockId, snapshot.rings.orphans), orphanLimit()), transactions = snapshot.rings.transactions))
+fn notedOrphan(snapshot: Snapshot, count: Int, nowMs: Int) -> Snapshot
+    ? "Headers arrived whose parents we do not hold."
+      "A count rather than names: the tree reports how many of a batch it"
+      "could not place, and when the last of them was seen is what a watcher"
+      "wants to know."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans + count, orphanMs = nowMs, transactions = snapshot.rings.transactions))
 
 verify notedOrphan
-    notedOrphan(started(0), "aa").rings.orphans => ["aa"]
+    notedOrphan(started(0), 2, 9).rings.orphans => 2
+    notedOrphan(notedOrphan(started(0), 2, 9), 1, 12).rings.orphans => 3
+    notedOrphan(started(0), 2, 9).rings.orphanMs => 9
 
 fn notedTransaction(snapshot: Snapshot, view: TxView) -> Snapshot
     ? "A Transaction connected, its fee already computed by connect."
-    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
 
 verify notedTransaction
     notedTransaction(started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)).rings.transactions => [TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)]
