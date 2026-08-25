@@ -504,6 +504,65 @@ which is the rest of #30, along with the DoS work the issue asks for. What is
 here is the accept loop, the handshake from the answering side, an inbound
 cap, and a caller that misbehaves costing itself its slot and nothing else.
 
+### 12. A node that syncs from us
+
+This is the finish line the full-node plan named first, and the only test that
+proves it: an empty Bitcoin Core, whose **only** Peer is this node, building
+the whole chain from what we serve.
+
+```bash
+RT3=$PWD/rt-c; mkdir -p $RT3      # same bitcoin.conf, ports 18473/18474
+bitcoin-27.0/bin/bitcoind -datadir=$RT3 -daemon
+C3="bitcoin-27.0/bin/bitcoin-cli -datadir=$RT3 -rpcuser=av -rpcpassword=av -regtest"
+$C3 getblockcount                  # 0
+
+$BIN regtest follow 127.0.0.1:18444 $D serve:18455 &
+$C3 addnode "127.0.0.1:18455" onetry
+```
+
+```
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 179, for up to 8 inbound Peer(s)
+peer 1 dialled us from 127.0.0.1:40228
+served 179 Header(s) to peer 1
+served a Block of 898 bytes to peer 1
+...
+```
+
+```bash
+$C3 getblockchaininfo
+```
+
+```
+blocks 179  headers 179  verificationprogress 1  initialblockdownload False
+```
+
+**Check the tip hash matches, not just the height** — a node can be at the
+right height on the wrong chain:
+
+```bash
+$C3 getbestblockhash        # must equal the first node's getblockhash 179
+```
+
+#### Two service bits, and what happens without them
+
+Both of these were found here, and both look identical to a node nobody wants
+to talk to:
+
+- **Without `start_height`**, Core reads our `version` as a Peer with no
+  chain and never sends a `getheaders`. Watch for `startingheight` in the
+  other node's `getpeerinfo`: if it says 0 while we hold a chain, we are
+  advertising ourselves as useless.
+- **Without `NODE_WITNESS`**, Core takes our Headers and then **never asks for
+  a Block**. With SegWit active it will not request Blocks from a Peer that
+  cannot serve Witnesses, so the sync stops silently at `synced_headers 179,
+  synced_blocks 0`. `getpeerinfo`'s `servicesnames` must show `WITNESS`
+  beside `NETWORK`.
+
+A getdata for a Block also arrives as the **witness** Block type, not the
+plain one — answering only the plain type serves nothing to any modern Peer,
+which looks exactly like a node that has the Blocks and will not part with
+them. `inflight` on the asking node fills up and never empties.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

@@ -5,7 +5,7 @@ module Version
         "Building it is pure — the caller supplies the clock reading and the nonce"
         "rather than this module reaching for them — so the exact bytes are"
         "checkable against a known-good vector instead of against a live Peer."
-    exposes [payload, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf]
+    exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf]
     depends [Bytes, Domain.Message, Domain.Address]
     effects []
 
@@ -23,17 +23,73 @@ fn userAgent() -> String
 verify userAgent
     userAgent() => "/aver-btc-listener:0.1/"
 
+fn nodeNetwork() -> Int
+    ? "The service bit that says this node serves the whole chain."
+      "NODE_NETWORK. A node that answers getheaders and getdata for Blocks"
+      "has to advertise it or nobody will ask: Core picks who to sync from"
+      "by service bits, so serving without saying so is serving nobody."
+      "n1bor/btc-listener#30 also wants NODE_NETWORK_LIMITED while pruned,"
+      "which is a different bit and a different promise -- the Prune"
+      "Watermark knows the difference and nothing here reads it yet."
+    1
+
+verify nodeNetwork
+    nodeNetwork() => 1
+
+fn nodeWitness() -> Int
+    ? "The service bit for a node that can serve Witness-serialised Blocks."
+      "NODE_WITNESS. Not optional for a node that wants to be synced from:"
+      "with SegWit active, Bitcoin Core will not ask a Peer for a Block"
+      "unless that Peer claims this, because a Block without its Witnesses"
+      "cannot be validated. A node advertising NODE_NETWORK alone gets its"
+      "Headers taken and its Blocks never requested -- which looks exactly"
+      "like a node nobody wants to sync from."
+      "This node can claim it honestly: a Block is stored as the bytes that"
+      "arrived, Witnesses and all, and served back the same way."
+    8
+
+verify nodeWitness
+    nodeWitness() => 8
+
+fn nodeNetworkLimited() -> Int
+    ? "The service bit for a node that serves only the recent chain."
+      "NODE_NETWORK_LIMITED, bit 10. A pruned node still has the last few"
+      "hundred Blocks and can usefully serve them; claiming NODE_NETWORK"
+      "while holding none of the old ones wastes the time of every Peer that"
+      "believes it. This is the honest smaller promise."
+    1024
+
+verify nodeNetworkLimited
+    nodeNetworkLimited() => 1024
+
 fn payload(peer: PeerAddress, timestamp: Int, nonce: Int) -> Result<Bytes, String>
-    ? "Build a version payload addressed to this Peer."
-    preamble = List.concat(Domain.Message.littleEndian(protocolVersion(), 4), List.concat(Domain.Message.littleEndian(0, 8), Domain.Message.littleEndian(timestamp, 8)))
-    addresses = List.concat(networkAddress(Domain.Address.octetsOf(peer), Domain.Address.portOf(peer)), networkAddress([0, 0, 0, 0], 0))
-    trailer = List.concat(List.concat(Domain.Message.littleEndian(nonce, 8), varString(userAgent())), List.concat(Domain.Message.littleEndian(0, 4), [1]))
-    Bytes.fromList(List.concat(List.concat(preamble, addresses), trailer))
+    ? "Build a version payload addressed to this Peer, claiming no services."
+      "What a Peer that only listens says about itself."
+    payloadOffering(peer, timestamp, nonce, 0, 0)
 
 verify payload
     payload(Domain.Address.fromString("10.0.0.1")?, 0, 0) => Result.Ok(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff0000000000000000000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001")?)
     Bytes.toHex(payload(Domain.Address.fromString("192.168.1.10")?, 1700000000, 7)?) => "80110100000000000000000000f1536500000000000000000000000000000000000000000000ffffc0a8010a208d000000000000000000000000000000000000ffff0000000000000700000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001"
     List.len(Bytes.octets(payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)?)) => 109
+
+fn payloadOffering(peer: PeerAddress, timestamp: Int, nonce: Int, services: Int, startHeight: Int) -> Result<Bytes, String>
+    ? "The same, with the service bits and the Height this node holds."
+      "start_height is not decoration. Bitcoin Core picks who to sync from by"
+      "it: a Peer claiming no more Blocks than the asker has is a Peer with"
+      "nothing to offer, and Core will not send it a getheaders. Sending zero"
+      "-- which is what this said for its whole life as a listener -- makes a"
+      "node that serves the entire chain invisible to anyone who might want"
+      "it."
+    preamble = List.concat(Domain.Message.littleEndian(protocolVersion(), 4), List.concat(Domain.Message.littleEndian(services, 8), Domain.Message.littleEndian(timestamp, 8)))
+    addresses = List.concat(networkAddress(Domain.Address.octetsOf(peer), Domain.Address.portOf(peer)), networkAddress([0, 0, 0, 0], 0))
+    trailer = List.concat(List.concat(Domain.Message.littleEndian(nonce, 8), varString(userAgent())), List.concat(Domain.Message.littleEndian(startHeight, 4), [1]))
+    Bytes.fromList(List.concat(List.concat(preamble, addresses), trailer))
+
+verify payloadOffering
+    payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 0, 0) => payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)
+    List.take(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 1, 0)?), 5) => [128, 17, 1, 0, 1]
+    List.take(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 0, 0)?), 5) => [128, 17, 1, 0, 0]
+    List.drop(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 1, 179)?), 104) => [179, 0, 0, 0, 1]
 
 fn networkAddress(octets: List<Int>, port: Int) -> List<Int>
     ? "A 26-byte address field: services, IPv4-mapped IPv6, then the port."

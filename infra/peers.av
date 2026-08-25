@@ -37,6 +37,8 @@ record Pool
     sockets: Map<Int, Tcp.Socket>
     standing: Map<Int, Standing>
     spare: List<Spare>
+    serves: Int
+    height: Int
 
 record Waited
     pool: Pool
@@ -231,7 +233,7 @@ fn seating(pool: Pool, key: Int, connection: Tcp.Connection, address: String) ->
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height)
     _said = Console.print("peer {key} dialled us from {address}")
     greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", true))
 
@@ -324,7 +326,7 @@ fn inboundLimit() -> Int
 verify inboundLimit
     inboundLimit() => 8
 
-fn listening(pool: Pool, port: Int) -> Result<Pool, String>
+fn listening(pool: Pool, port: Int, services: Int, height: Int) -> Result<Pool, String>
     ? "Bind the port and put the listener in the pool beside the Peers."
       "A backlog of sixteen: twice the inbound limit, so a burst of callers"
       "queues rather than being refused by the kernel before this node has"
@@ -332,18 +334,18 @@ fn listening(pool: Pool, port: Int) -> Result<Pool, String>
       "is not its own memory to fill."
     ! [Tcp.listen]
     listener = Tcp.listen(port, 16)?
-    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare))
+    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height))
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [])
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0)
 
 fn withStanding(pool: Pool, standing: Map<Int, Standing>) -> Pool
     ? "The pool, with what is known about the Peers moved on."
       "The sockets and the standing are kept in step by only ever changing"
       "one of them here: the pure half is Domain.Inbox's and this is the one"
       "place it is folded back in."
-    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare)
+    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height)
 
 fn spareLimit() -> Int
     ? "How many unasked-for Messages to keep for the caller."
@@ -363,11 +365,11 @@ fn spareOf(pool: Pool) -> List<Spare>
 
 fn withoutSpare(pool: Pool) -> Pool
     ? "The pool, with the kept Messages handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [])
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height)
 
 fn sparing(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept, oldest dropped once the bound is reached."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])))
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height)
 
 fn bounded(spare: List<Spare>) -> List<Spare>
     ? "Keep the newest, because an address heard a minute ago is worth more"
@@ -409,7 +411,7 @@ fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
         Time.unixMs,
     ]
     connection = Tcp.connect(Domain.Address.hostOf(address), Domain.Address.portOf(address))?
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height)
     introduced(seated, key, address)
 
 fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
@@ -420,7 +422,7 @@ fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String
         Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
+    body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
     sent = send(pool, key, "version", body)?
     greeting(sent, key, 0, "", false)
 
@@ -493,8 +495,20 @@ fn ourVersionTo(pool: Pool, key: Int) -> Result<Pool, String>
       "represent, and it says so rather than failing further away."
     ! [Random.int, Tcp.writeBytes, Time.unixMs]
     address = Domain.Address.fromPeerText(addressTextOf(Domain.Inbox.standingAt(pool.standing, key)), Domain.Network.portOf(pool.network))?
-    body = Domain.Version.payload(address, Time.unixMs(), Random.int(1, 2147483647))?
+    body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
     send(pool, key, "version", body)
+
+fn servicesOf(pool: Pool) -> Int
+    ? "What this node promises."
+      "Held as the bits themselves rather than as a Bool, because there are"
+      "three answers and not two: nothing, the whole chain, and -- for a"
+      "pruned directory -- only the recent part of it. A Peer picks who to"
+      "sync from by these bits, so claiming more than we hold wastes its time"
+      "and ours."
+    pool.serves
+
+verify servicesOf
+    servicesOf(opened(Network.Regtest)) => 0
 
 fn addressTextOf(standing: Option<Standing>) -> String
     ? "The text a standing holds, or one that will not parse -- which is the"
@@ -758,7 +772,7 @@ fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: List<Int>) -> Result
 
 fn forgotten(pool: Pool, key: Int) -> Pool
     ? "Forget a Peer, without closing anything."
-    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare)
+    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height)
 
 fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
     ? "Close one Peer's socket and forget it."

@@ -22,7 +22,7 @@ module Follow
         "which is Stage 8 and waits on a runtime that can accept a connection"
         "at all (jasisz/aver#1131)."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -81,19 +81,56 @@ fn tickMs() -> Int
 verify tickMs
     tickMs() => 1000
 
-fn listeningIf(pool: Pool, network: Network, answering: Option<Int>) -> Result<Pool, String>
+fn listeningIf(pool: Pool, store: Store, answering: Option<Int>) -> Result<Pool, String>
     ? "Bind a port, if this node was asked to answer callers."
-    ! [Console.print, Tcp.listen]
+    ! [Console.print, Infra.Kv.get, Tcp.listen]
     match answering
         Option.None -> Result.Ok(pool)
-        Option.Some(port) -> listeningOn(pool, port)
+        Option.Some(port) -> listeningOn(pool, store, port)
 
-fn listeningOn(pool: Pool, port: Int) -> Result<Pool, String>
+fn listeningOn(pool: Pool, store: Store, port: Int) -> Result<Pool, String>
     ? "The port bound, and said out loud -- an open port is worth announcing."
-    ! [Console.print, Tcp.listen]
-    bound = Infra.Peers.listening(pool, port)?
-    _said = Console.print("listening on port {port} for up to {Infra.Peers.inboundLimit()} inbound Peer(s)")
+      "What this node promises is decided here, once, from the directory it"
+      "actually holds: the whole chain if nothing has been pruned, and only"
+      "the recent part if it has. Promising more than we hold would send"
+      "syncing Peers to a node that cannot answer them."
+      "The line reports what the pool ends up holding rather than what was"
+      "asked for. Those were once the same sentence and briefly were not: a"
+      "rebuild dropped both arguments on the floor, so the node announced"
+      "NODE_NETWORK at Height 179 while telling every Peer it had nothing."
+    ! [Console.print, Infra.Kv.get, Tcp.listen]
+    services = servicesFrom(store)?
+    height = tipHeightOf(store)?
+    bound = Infra.Peers.listening(pool, port, services, height)?
+    _said = Console.print("listening on port {port} as {promiseNamed(bound.serves)} at Height {bound.height}, for up to {Infra.Peers.inboundLimit()} inbound Peer(s)")
     Result.Ok(bound)
+
+fn servicesFrom(store: Store) -> Result<Int, String>
+    ? "The service bits this directory can honestly claim."
+    ! [Infra.Kv.get]
+    watermark = Infra.Store.get(store, Domain.IndexKeys.prunedBelowKey()?)?
+    Result.Ok(promiseFor(watermark))
+
+fn promiseFor(watermark: Option<Bytes>) -> Int
+    ? "A directory that has never pruned serves everything; one that has"
+      "serves what is left, and says which."
+    match watermark
+        Option.None -> Domain.Version.nodeNetwork() + Domain.Version.nodeWitness()
+        Option.Some(stored) -> Domain.Version.nodeNetworkLimited() + Domain.Version.nodeWitness()
+
+verify promiseFor
+    promiseFor(Option.None) => 9
+    promiseFor(Option.Some(Domain.Index.emptyBytes())) => 1032
+
+fn promiseNamed(services: Int) -> String
+    ? "The bits, for a reader."
+    match services == Domain.Version.nodeNetwork() + Domain.Version.nodeWitness()
+        true -> "NODE_NETWORK|NODE_WITNESS"
+        false -> "NODE_NETWORK_LIMITED|NODE_WITNESS"
+
+verify promiseNamed
+    promiseNamed(9) => "NODE_NETWORK|NODE_WITNESS"
+    promiseNamed(1032) => "NODE_NETWORK_LIMITED|NODE_WITNESS"
 
 fn mempoolCap() -> Int
     ? "How many bytes of unconfirmed Transactions this node will hold."
@@ -136,7 +173,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Infra.Peers.peerKeys(pool))?
     told = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
-    bound = listeningIf(told, network, answering)?
+    bound = listeningIf(told, store, answering)?
     outcome = session(Following(pool = bound, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), screened)
     _given = restoredIf(screened)
     closeAfter(bound, outcome)
@@ -1172,6 +1209,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         "blocktxn" -> onBlockTxn(state, key, body)
         "tx" -> onTransaction(state, key, body)
         "getdata" -> onAsked(state, key, body)
+        "getheaders" -> onAskedHeaders(state, key, body)
         "headers" -> onMoved(state, key, "peer {key} sent Headers unasked")
         "addr" -> onAddresses(state, key, body)
         "ping" -> onPing(state, key, body)
@@ -1468,7 +1506,91 @@ fn onAsked(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Time.now, Time.unixMs,
     ]
     answered = serving(state.pool, state.mempool, key, Domain.Inventory.requestedTxHashesOf(body))?
-    listen(Following(pool = answered, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding))
+    blocksOut = servingBlocks(withPool(state, answered), key, List.take(Domain.Inventory.requestedBlockHashesOf(body), servedBlockCap()))?
+    listen(blocksOut)
+
+fn servedBlockCap() -> Int
+    ? "The most Blocks one getdata will be answered with."
+      "A getdata may name fifty thousand Blocks, and answering all of them"
+      "means reading fifty thousand Blocks off disk and putting gigabytes on"
+      "a wire nobody promised to read. Core caps a getdata at a thousand"
+      "entries and so does this: a Peer that wants more asks again, which"
+      "gives this node a turn in between to notice what else is happening."
+      "The cap is on what we serve rather than on what may be asked, because"
+      "refusing the Message outright would break a Peer that asked politely"
+      "for more than we will give at once."
+    1000
+
+verify servedBlockCap
+    servedBlockCap() => 1000
+
+fn servingBlocks(state: Following, key: Int, asked: List<List<Int>>) -> Result<Following, String>
+    ? "Blocks a Peer asked for, out of our own Segments."
+      "This is the half that makes a node worth syncing from: Headers say"
+      "what the chain is, Blocks are the chain. A Block we do not hold is"
+      "passed over in silence, which is what Core does with a getdata for"
+      "something it has pruned or never had."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match asked
+        [] -> Result.Ok(state)
+        [head, ..tail] -> servingBlock(state, key, head, tail)
+
+fn servingBlock(state: Following, key: Int, hash: List<Int>, rest: List<List<Int>>) -> Result<Following, String>
+    ? "One Block, by the Id the getdata named it with."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    located = Infra.Store.get(state.store, Domain.IndexKeys.blockKey(Domain.Hash.reversedHex(hash))?)?
+    servingLocated(state, key, hash, rest, located)
+
+fn servingLocated(state: Following, key: Int, hash: List<Int>, rest: List<List<Int>>, located: Option<Bytes>) -> Result<Following, String>
+    ? "A Block we never fetched, or one whose bytes we can read back."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match located
+        Option.None -> servingBlocks(state, key, rest)
+        Option.Some(stored) -> sendingBlock(state, key, rest, Domain.Index.decodeLocation(stored)?)
+
+fn sendingBlock(state: Following, key: Int, rest: List<List<Int>>, location: Location) -> Result<Following, String>
+    ? "The Block off the Segment and onto the wire, exactly as it was stored."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    payload = Infra.Blocks.read(state.blocks, location)?
+    sent = Infra.Peers.send(state.pool, key, "block", payload)?
+    _said = Console.print("served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
+    servingBlocks(withPool(state, sent), key, rest)
 
 fn serving(pool: Pool, mempool: Mempool, key: Int, asked: List<List<Int>>) -> Result<Pool, String>
     ? "Each identifier asked for, answered from what we hold."
@@ -1818,3 +1940,103 @@ fn fellBack(state: Following, key: Int, why: String) -> Result<Unit, String>
     ]
     _said = Console.print("{why}; fetching it whole instead")
     onMoved(givenUp(state), key, "falling back to a whole Block from peer {key}")
+
+fn onAskedHeaders(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
+    ? "A Peer asking what follows the newest Block it knows."
+      "This is how a node syncs from us, and the whole of what makes this a"
+      "Peer worth connecting to rather than a Peer that only takes. The"
+      "Locator names Block Ids newest first; the first one we hold is the"
+      "newest thing we agree about, and everything above it is what they are"
+      "missing."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    from = agreedHeight(state.store, Domain.Block.locatorIn(body))?
+    headers = headersFrom(state.store, from + 1, Domain.Block.headersCap(), [])?
+    answered = sendingHeaders(state, key, headers)?
+    listen(answered)
+
+fn sendingHeaders(state: Following, key: Int, headers: List<String>) -> Result<Following, String>
+    ? "The Headers we hold above what they know, up to the cap."
+      "An empty answer is still an answer: it tells a Peer it is level with"
+      "us, which is what it asked."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.connect, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    payload = Domain.Block.headersPayload(headers)?
+    sent = Infra.Peers.send(state.pool, key, "headers", payload)?
+    _said = saidServed(List.len(headers), key)
+    Result.Ok(withPool(state, sent))
+
+fn saidServed(howMany: Int, key: Int) -> Unit
+    ? "Say what was served, unless it was nothing."
+    ! [Console.print]
+    match howMany == 0
+        true -> Unit
+        false -> Console.print("served {howMany} Header(s) to peer {key}")
+
+fn agreedHeight(store: Store, locator: List<List<Int>>) -> Result<Int, String>
+    ? "The Height of the newest Block Id in the Locator that we also hold."
+      "Zero when we recognise none of them, which means starting from genesis"
+      "-- the honest answer to a Peer on a chain we have never seen."
+    ! [Infra.Kv.get]
+    match locator
+        [] -> Result.Ok(0)
+        [head, ..tail] -> heightOfKnown(store, head, tail)
+
+fn heightOfKnown(store: Store, hash: List<Int>, rest: List<List<Int>>) -> Result<Int, String>
+    ? "This one, if we hold it, otherwise the next."
+    ! [Infra.Kv.get]
+    held = Infra.Store.get(store, Domain.TreeStore.headerKey(Domain.Hash.reversedHex(hash))?)?
+    heightOfHeld(store, hash, held, rest)
+
+fn heightOfHeld(store: Store, hash: List<Int>, held: Option<Bytes>, rest: List<List<Int>>) -> Result<Int, String>
+    ? "A Header we hold gives its Height; one we do not sends us further back"
+      "down the Locator, which is exactly what a Locator is for."
+    ! [Infra.Kv.get]
+    match held
+        Option.None -> agreedHeight(store, rest)
+        Option.Some(stored) -> Result.Ok(Domain.TreeStore.decodeHeld(Domain.Hash.reversedHex(hash), stored)?.placement.height)
+
+fn headersFrom(store: Store, height: Int, left: Int, acc: List<String>) -> Result<List<String>, String>
+    ? "The Headers at these Heights, in order, stopping at the tip or the cap."
+    ! [Infra.Kv.get]
+    match left <= 0
+        true -> Result.Ok(List.reverse(acc))
+        false -> headerAt(store, height, left, acc)
+
+fn headerAt(store: Store, height: Int, left: Int, acc: List<String>) -> Result<List<String>, String>
+    ? "The Block Id at this Height, if the chain reaches it."
+    ! [Infra.Kv.get]
+    named = Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?
+    headerNamed(store, height, left, acc, Domain.Index.blockIdIn(named))
+
+fn headerNamed(store: Store, height: Int, left: Int, acc: List<String>, blockId: Option<String>) -> Result<List<String>, String>
+    ? "Past the tip there is nothing to serve, and that is not a fault."
+    ! [Infra.Kv.get]
+    match blockId
+        Option.None -> Result.Ok(List.reverse(acc))
+        Option.Some(named) -> headerHeld(store, height, left, acc, named, Infra.Store.get(store, Domain.TreeStore.headerKey(named)?)?)
+
+fn headerHeld(store: Store, height: Int, left: Int, acc: List<String>, blockId: String, held: Option<Bytes>) -> Result<List<String>, String>
+    ? "A Height the Index names but the tree has no Header for is a directory"
+      "half-built rather than a chain with a hole; it stops the answer where"
+      "it is instead of claiming the Headers above it do not exist."
+    ! [Infra.Kv.get]
+    match held
+        Option.None -> Result.Ok(List.reverse(acc))
+        Option.Some(stored) -> headersFrom(store, height + 1, left - 1, List.prepend(Domain.TreeStore.decodeHeld(blockId, stored)?.headerHex, acc))

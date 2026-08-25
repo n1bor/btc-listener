@@ -6,7 +6,7 @@ module Block
         "only Result here guards that length and the octet range beneath it."
         "Every vector below was taken from mainnet or computed from the published"
         "genesis parameters, never written from memory."
-    exposes [BlockHeader, wireOrder, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, networkOf, locatorHeights, getHeadersPayload, Carried, carriedOf]
+    exposes [BlockHeader, wireOrder, merkleRootOf, targetOf, meetsTarget, headerLength, decodeHeader, headersOf, blockIdOf, idOfWholeBlock, transactionsOf, txidsOf, genesisBlockId, networkOf, locatorHeights, getHeadersPayload, Carried, carriedOf, locatorIn, headersPayload, headersCap]
     depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Network, Domain.Transaction]
     effects []
 
@@ -603,3 +603,82 @@ verify wireOrder
     wireOrder("") => Result.Ok([])
     wireOrder("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
     wireOrder("0") => Result.Err("Bytes.fromHex: expected an even number of hex characters")
+
+fn headersCap() -> Int
+    ? "The most Headers one headers Message may carry."
+      "Two thousand, which is Bitcoin Core's limit and therefore what every"
+      "Peer expects: a syncing node asks again from the last one it got, so"
+      "a cap is a pace rather than a refusal."
+    2000
+
+verify headersCap
+    headersCap() => 2000
+
+fn locatorIn(payload: List<Int>) -> List<List<Int>>
+    ? "The Block Ids a getheaders offers as places we might both know."
+      "Newest first, thinning backwards, ending at the genesis Block -- so"
+      "the first one we recognise is the newest agreement, and everything"
+      "after it is what the asker has not got."
+      "The four version bytes come off first, then a count, then that many"
+      "32-byte Ids. The stop hash after them is not read here: this node"
+      "answers with whatever it holds up to the cap, which is what a Peer"
+      "that sent zeroes for a stop hash is asking for anyway."
+    hashesIn(Domain.CompactSize.read(List.drop(payload, 4)), [])
+
+verify locatorIn
+    locatorIn([]) => []
+    locatorIn([128, 17, 1, 0, 0]) => []
+    List.len(locatorIn(List.concat([128, 17, 1, 0, 1], zeros(32, [])))) => 1
+
+fn hashesIn(count: Count, acc: List<List<Int>>) -> List<List<Int>>
+    ? "Each Id, thirty-two bytes at a time."
+    match count.value <= 0
+        true -> List.reverse(acc)
+        false -> oneHashIn(count, acc)
+
+verify hashesIn
+    hashesIn(Count(value = 0, rest = [], width = 1), []) => []
+
+fn oneHashIn(count: Count, acc: List<List<Int>>) -> List<List<Int>>
+    ? "An Id that runs off the end of the Message stops the walk rather than"
+      "being read as a short one -- a Peer that miscounted has told us"
+      "nothing, and a truncated Id would match nothing anyway."
+    match List.len(count.rest) < 32
+        true -> List.reverse(acc)
+        false -> hashesIn(Count(value = count.value - 1, rest = List.drop(count.rest, 32), width = count.width), List.prepend(List.take(count.rest, 32), acc))
+
+verify oneHashIn
+    oneHashIn(Count(value = 1, rest = [], width = 1), []) => []
+    List.len(oneHashIn(Count(value = 1, rest = zeros(32, []), width = 1), [])) => 1
+
+fn headersPayload(headers: List<String>) -> Result<Bytes, String>
+    ? "A headers Message: a count, then each Header followed by a zero."
+      "The zero is where a Transaction count would be. A headers Message"
+      "carries Headers alone, but the serialisation is a Block's, so every"
+      "Header is followed by a count that is always none. Leaving it out"
+      "produces a Message that decodes as garbage from the second Header on."
+    Bytes.fromList(List.concat(Domain.CompactSize.encode(List.len(headers)), headersOnto(headers, [])))
+
+verify headersPayload
+    Bytes.toHex(headersPayload([])?) => "00"
+    Bytes.toHex(headersPayload(["0102"])?) => "01010200"
+
+fn headersOnto(headers: List<String>, acc: List<Int>) -> List<Int>
+    ? "Each Header's bytes, each with its empty Transaction count."
+    match headers
+        [] -> acc
+        [head, ..tail] -> headersOnto(tail, List.concat(acc, List.concat(octetsOfHex(head), [0])))
+
+verify headersOnto
+    headersOnto([], []) => []
+    headersOnto(["0102"], []) => [1, 2, 0]
+
+fn octetsOfHex(hex: String) -> List<Int>
+    ? "Hex to bytes, and unreadable hex to nothing -- which shows up as a"
+      "Header the asking Peer will reject rather than as a Message this node"
+      "refuses to build."
+    Bytes.octets(Result.withDefault(Bytes.fromHex(hex), Bytes.fromList([])))
+
+verify octetsOfHex
+    octetsOfHex("0102") => [1, 2]
+    octetsOfHex("nonsense") => []
