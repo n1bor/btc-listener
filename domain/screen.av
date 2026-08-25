@@ -195,27 +195,30 @@ verify mempoolPanelLines
     mempoolPanelLines(MempoolView(held = 3, bytes = 900, cap = 5000000, floorRate = 1000)) => ["", "Mempool: 3 Transaction(s), 900 of 5000000 bytes", "minimum fee rate to enter: 1000 sat/kB"]
 
 fn transactionsPanelLines(snapshot: Snapshot, nowMs: Int) -> List<String>
-    ? "The Transactions Panel (#133): the newest confirmed Transactions,"
-      "each with the fee connect computed, and how long ago its Block came."
-      "Mempool arrivals join this Panel when #28's relay feeds them through."
+    ? "The Transactions Panel (#133): the newest Transactions, each with the"
+      "fee connect computed, and how long ago it arrived."
+      "Both kinds are here (#164). A Transaction joins the ring when the"
+      "Mempool admits it and the same row flips when a Block takes it, so"
+      "what this Panel shows is the flow rather than only its end."
     List.concat([
         "",
-        "last confirmed Transactions:",
+        "last Transactions:",
     ], transactionRows(snapshot.rings.transactions, nowMs, []))
 
 verify transactionsPanelLines
-    transactionsPanelLines(Domain.Snapshot.started(0), 0) => ["", "last confirmed Transactions:", "  none confirmed yet"]
-    List.len(transactionsPanelLines(Domain.Snapshot.notedTransaction(Domain.Snapshot.started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)), 5000)) => 3
+    transactionsPanelLines(Domain.Snapshot.started(0), 0) => ["", "last Transactions:", "  none yet"]
+    List.len(transactionsPanelLines(Domain.Snapshot.notedTransaction(Domain.Snapshot.started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0, confirmed = true)), 5000)) => 3
 
 fn transactionRows(views: List<TxView>, nowMs: Int, acc: List<String>) -> List<String>
     ? "One row per Transaction, newest first."
     match views
-        [] -> anyRows(List.reverse(acc), "  none confirmed yet")
+        [] -> anyRows(List.reverse(acc), "  none yet")
         [head, ..tail] -> transactionRows(tail, nowMs, List.prepend("  {Domain.Screenlines.transactionLine(head)}  ({ageText(head.atMs, nowMs)} ago)", acc))
 
 verify transactionRows
-    transactionRows([], 0, []) => ["  none confirmed yet"]
-    transactionRows([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 3000)], 5000, []) => ["  tx tt fee 1000 sat  (2s ago)"]
+    transactionRows([], 0, []) => ["  none yet"]
+    transactionRows([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 3000, confirmed = true)], 5000, []) => ["  tx tt fee 1000 sat  (2s ago)"]
+    transactionRows([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 3000, confirmed = false)], 5000, []) => ["  tx tt fee 1000 sat  in Mempool  (2s ago)"]
 
 fn blocksPanelLines(snapshot: Snapshot, nowMs: Int) -> List<String>
     ? "The Blocks Panel (#132): the newest Blocks, then anything the chain"
@@ -271,9 +274,10 @@ verify orphanRow
 
 fn peersPanelLines(company: Company, nowMs: Int) -> List<String>
     ? "The Peers Panel (#131): the pool one line per Peer, then the Book."
-      "Direction reads out for every Peer because every Peer is one this"
-      "node dialled; inbound Peers arrive with #30, and the column exists"
-      "now so that day changes a value and not a shape."
+      "Direction is read from the Standing rather than assumed (#164). The"
+      "column was written when every Peer was one this node dialled and was"
+      "left as a promise that the day inbound Peers arrived would change a"
+      "value and not a shape; #30 brought them, and this is that day."
     List.concat([
         "",
         Domain.Screenlines.peersLine(company, nowMs),
@@ -283,7 +287,19 @@ fn peersPanelLines(company: Company, nowMs: Int) -> List<String>
 
 verify peersPanelLines
     List.len(peersPanelLines(Company(peers = [], candidates = 0), 0)) => 5
-    peersPanelLines(Company(peers = [], candidates = 0), 0) => ["", "0 Peers, 0 Candidates, quietest heard 0s ago", "", "key  dir  address                version  sent      received  heard   agent", "  none connected"]
+    peersPanelLines(Company(peers = [], candidates = 0), 0) => ["", "0 Peers (0 out, 0 in), 0 Candidates, quietest heard 0s ago", "", "key  dir  address                version  sent      received  heard   agent", "  none connected"]
+
+fn directionOf(inbound: Bool) -> String
+    ? "Which side opened the connection: in for a Peer that dialled us, out"
+      "for one we dialled. Two letters and three, so the column holds either"
+      "without moving."
+    match inbound
+        true -> "in"
+        false -> "out"
+
+verify directionOf
+    directionOf(true) => "in"
+    directionOf(false) => "out"
 
 fn peerLines(peers: List<PeerView>, nowMs: Int, acc: List<String>) -> List<String>
     ? "One line per Peer, in key order as the pool keeps them."
@@ -293,7 +309,7 @@ fn peerLines(peers: List<PeerView>, nowMs: Int, acc: List<String>) -> List<Strin
 
 verify peerLines
     peerLines([], 0, []) => ["  none connected"]
-    List.len(peerLines([PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 0, sent = 0, received = 0)], 5000, [])) => 1
+    List.len(peerLines([PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 0, sent = 0, received = 0, inbound = false)], 5000, [])) => 1
 
 fn anyPeers(lines: List<String>) -> List<String>
     ? "No Peers is said, not left blank."
@@ -307,10 +323,11 @@ verify anyPeers
 
 fn peerLine(peer: PeerView, nowMs: Int) -> String
     ? "One Peer: who, which way, how much has crossed, how fresh."
-    "{padTo(String.fromInt(peer.key), 5)}{padTo("out", 5)}{padTo(peer.address, 23)}{padTo(String.fromInt(peer.version), 9)}{padTo(String.fromInt(peer.sent), 10)}{padTo(String.fromInt(peer.received), 10)}{padTo(agoText(peer.lastHeardMs, nowMs), 8)}{peer.agent}"
+    "{padTo(String.fromInt(peer.key), 5)}{padTo(directionOf(peer.inbound), 5)}{padTo(peer.address, 23)}{padTo(String.fromInt(peer.version), 9)}{padTo(String.fromInt(peer.sent), 10)}{padTo(String.fromInt(peer.received), 10)}{padTo(agoText(peer.lastHeardMs, nowMs), 8)}{peer.agent}"
 
 verify peerLine
-    peerLine(PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 3000, sent = 120, received = 4096), 5000) => "0    out  1.2.3.4:8333           70016    120       4096      2s ago  /Satoshi/"
+    peerLine(PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 3000, sent = 120, received = 4096, inbound = false), 5000) => "0    out  1.2.3.4:8333           70016    120       4096      2s ago  /Satoshi/"
+    peerLine(PeerView(key = 1, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 3000, sent = 120, received = 4096, inbound = true), 5000) => "1    in   1.2.3.4:8333           70016    120       4096      2s ago  /Satoshi/"
 
 fn agoText(atMs: Int, nowMs: Int) -> String
     ? "How long since this Peer said anything."
@@ -397,7 +414,7 @@ fn transactionLines(views: List<TxView>, acc: List<String>) -> List<String>
 
 verify transactionLines
     transactionLines([], []) => ["  none seen yet"]
-    transactionLines([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0)], []) => ["  tx tt fee 1000 sat"]
+    transactionLines([TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 0, confirmed = true)], []) => ["  tx tt fee 1000 sat"]
 
 fn noneYet(lines: List<String>) -> List<String>
     ? "An empty list of Transaction lines reads as a sentence instead."

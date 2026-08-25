@@ -8,7 +8,7 @@ module Snapshot
         "The rings are bounded on purpose: a Snapshot is what the node would"
         "want to say about now, not a log, so the newest few of everything is"
         "the whole point and forgetting the rest is correct."
-    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, rateOf, etaSecsOf, percentOf, quietestSecsOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
+    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, notedArrival, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, rateOf, etaSecsOf, percentOf, quietestSecsOf, inboundOf, outboundOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
     depends []
     effects []
 
@@ -39,6 +39,7 @@ record PeerView
     lastHeardMs: Int
     sent: Int
     received: Int
+    inbound: Bool
 
 record BlockView
     height: Int
@@ -58,6 +59,7 @@ record TxView
     fee: Int
     coinbase: Bool
     atMs: Int
+    confirmed: Bool
 
 record Company
     peers: List<PeerView>
@@ -300,21 +302,142 @@ verify notedOrphan
 
 fn notedTransaction(snapshot: Snapshot, view: TxView) -> Snapshot
     ? "A Transaction connected, its fee already computed by connect."
-    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
+      "A Transaction the Mempool already put on the ring flips where it"
+      "stands rather than appearing twice under one Id (#164): the row a"
+      "watcher has been looking at is the row that changes."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = ringWith(snapshot.rings.transactions, view)))
 
 verify notedTransaction
-    notedTransaction(started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)).rings.transactions => [TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5)]
+    notedTransaction(started(0), TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5, confirmed = true)).rings.transactions => [TxView(txId = "tt", fee = 1000, coinbase = false, atMs = 5, confirmed = true)]
+
+fn notedArrival(snapshot: Snapshot, view: TxView) -> Snapshot
+    ? "A Transaction the Mempool admitted, on the ring before any Block holds"
+      "it (#164). This is the flow a Core user watches in mempool terms: it"
+      "arrives, it waits, and a Block takes it -- and the same row says all"
+      "three things in turn."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
+
+verify notedArrival
+    notedArrival(started(0), sampleTx("tt", false)).rings.transactions => [sampleTx("tt", false)]
+    List.len(notedArrival(notedArrival(started(0), sampleTx("aa", false)), sampleTx("bb", false)).rings.transactions) => 2
+
+fn ringWith(views: List<TxView>, view: TxView) -> List<TxView>
+    ? "The ring after a Block took this Transaction: the row it already has"
+      "under that Id, replaced in place, or a new row at the front."
+    match holdsTx(views, view.txId)
+        true -> flippedRows(views, view, [])
+        false -> List.take(List.prepend(view, views), transactionLimit())
+
+verify ringWith
+    ringWith([], sampleTx("tt", true)) => [sampleTx("tt", true)]
+    ringWith([sampleTx("tt", false)], sampleTx("tt", true)) => [sampleTx("tt", true)]
+    ringWith([sampleTx("aa", true), sampleTx("tt", false)], sampleTx("tt", true)) => [sampleTx("aa", true), sampleTx("tt", true)]
+    List.len(ringWith([sampleTx("aa", true)], sampleTx("tt", true))) => 2
+
+fn holdsTx(views: List<TxView>, txId: String) -> Bool
+    ? "Whether the ring already names this Transaction."
+    match views
+        [] -> false
+        [head, ..tail] -> sameTxOrRest(head, txId, tail)
+
+verify holdsTx
+    holdsTx([], "tt") => false
+    holdsTx([sampleTx("tt", false)], "tt") => true
+    holdsTx([sampleTx("aa", false)], "tt") => false
+
+fn sameTxOrRest(head: TxView, txId: String, tail: List<TxView>) -> Bool
+    ? "This row, or the rest of them."
+    match head.txId == txId
+        true -> true
+        false -> holdsTx(tail, txId)
+
+verify sameTxOrRest
+    sameTxOrRest(sampleTx("tt", false), "tt", []) => true
+    sameTxOrRest(sampleTx("aa", false), "tt", [sampleTx("tt", false)]) => true
+    sameTxOrRest(sampleTx("aa", false), "tt", []) => false
+
+fn flippedRows(views: List<TxView>, view: TxView, acc: List<TxView>) -> List<TxView>
+    ? "Every row kept where it is, with the one under this Id replaced."
+    match views
+        [] -> List.reverse(acc)
+        [head, ..tail] -> flippedRows(tail, view, List.prepend(flippedRow(head, view), acc))
+
+verify flippedRows
+    flippedRows([], sampleTx("tt", true), []) => []
+    flippedRows([sampleTx("tt", false)], sampleTx("tt", true), []) => [sampleTx("tt", true)]
+
+fn flippedRow(head: TxView, view: TxView) -> TxView
+    ? "The Block's view of it, if this is the same Transaction."
+    match head.txId == view.txId
+        true -> view
+        false -> head
+
+verify flippedRow
+    flippedRow(sampleTx("tt", false), sampleTx("tt", true)) => sampleTx("tt", true)
+    flippedRow(sampleTx("aa", false), sampleTx("tt", true)) => sampleTx("aa", false)
+
+fn sampleTx(txId: String, confirmed: Bool) -> TxView
+    ? "A Transaction view for the cases above, which care about two fields."
+    TxView(txId = txId, fee = 1000, coinbase = false, atMs = 5, confirmed = confirmed)
+
+verify sampleTx
+    sampleTx("tt", true).txId => "tt"
+    sampleTx("tt", false).confirmed => false
 
 fn withRings(snapshot: Snapshot, rings: Rings) -> Snapshot
     ? "The Snapshot, with its rings moved on."
     Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = rings)
+
+fn inboundOf(peers: List<PeerView>) -> Int
+    ? "How many of these Peers dialled us (#164)."
+    countingIn(peers, 0)
+
+verify inboundOf
+    inboundOf([]) => 0
+    inboundOf([samplePeer(false), samplePeer(true), samplePeer(true)]) => 2
+
+fn countingIn(peers: List<PeerView>, acc: Int) -> Int
+    ? "One Peer at a time, adding the ones that came to us."
+    match peers
+        [] -> acc
+        [head, ..tail] -> countingIn(tail, addedIf(acc, head.inbound))
+
+verify countingIn
+    countingIn([], 4) => 4
+    countingIn([samplePeer(true)], 4) => 5
+
+fn addedIf(acc: Int, inbound: Bool) -> Int
+    ? "One more, or the same."
+    match inbound
+        true -> acc + 1
+        false -> acc
+
+verify addedIf
+    addedIf(3, true) => 4
+    addedIf(3, false) => 3
+
+fn outboundOf(peers: List<PeerView>) -> Int
+    ? "How many of these Peers we dialled: the rest of them."
+    List.len(peers) - inboundOf(peers)
+
+verify outboundOf
+    outboundOf([]) => 0
+    outboundOf([samplePeer(false), samplePeer(true), samplePeer(true)]) => 1
+
+fn samplePeer(inbound: Bool) -> PeerView
+    ? "A Peer view for the cases above, which care about one field of it."
+    PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 0, sent = 0, received = 0, inbound = inbound)
+
+verify samplePeer
+    samplePeer(true).inbound => true
+    samplePeer(false).inbound => false
 
 fn withPeers(snapshot: Snapshot, peers: List<PeerView>) -> Snapshot
     ? "Who the node is talking to, refreshed whole each tick."
     Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = peers, candidates = snapshot.company.candidates), mempool = snapshot.mempool, rings = snapshot.rings)
 
 verify withPeers
-    List.len(withPeers(started(0), [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 9, sent = 0, received = 0)]).company.peers) => 1
+    List.len(withPeers(started(0), [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 9, sent = 0, received = 0, inbound = false)]).company.peers) => 1
 
 fn withCandidates(snapshot: Snapshot, count: Int) -> Snapshot
     ? "How many Candidates the Address Book holds."
@@ -340,7 +463,7 @@ fn quietestSecsOf(peers: List<PeerView>, nowMs: Int) -> Int
 
 verify quietestSecsOf
     quietestSecsOf([], 99999) => 0
-    quietestSecsOf([PeerView(key = 0, address = "a", version = 1, agent = "x", lastHeardMs = 4000, sent = 0, received = 0), PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 1000, sent = 0, received = 0)], 10000) => 9
+    quietestSecsOf([PeerView(key = 0, address = "a", version = 1, agent = "x", lastHeardMs = 4000, sent = 0, received = 0, inbound = false), PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 1000, sent = 0, received = 0, inbound = false)], 10000) => 9
 
 fn earliestHeard(peers: List<PeerView>, sofar: Int) -> Int
     ? "The oldest last-heard among the Peers."
@@ -350,4 +473,4 @@ fn earliestHeard(peers: List<PeerView>, sofar: Int) -> Int
 
 verify earliestHeard
     earliestHeard([], 7) => 7
-    earliestHeard([PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 3, sent = 0, received = 0)], 7) => 3
+    earliestHeard([PeerView(key = 1, address = "b", version = 1, agent = "x", lastHeardMs = 3, sent = 0, received = 0, inbound = false)], 7) => 3

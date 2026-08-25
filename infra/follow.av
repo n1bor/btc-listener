@@ -599,7 +599,22 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders.watch))?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(afterHeaders.watch))?
     upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding), tipHeight, aligned.unconfirmed)?
-    toppedUp(drainSpare(upToTip))
+    standing = toppedUp(drainSpare(upToTip))?
+    backAtTip(standing)
+
+fn backAtTip(state: Following) -> Result<Following, String>
+    ? "The catch-up has returned, so the Snapshot says so."
+      "The walks leave the phase where they left it -- headersAt and"
+      "bodiesAt both set one -- and only a Block that connects used to put"
+      "it back. At the tip a turn that finds one new Header and no Block"
+      "therefore left the Screen showing the catching-up form until the next"
+      "Block arrived, and the Transactions Panel a Mempool arrival lands on"
+      "(#164) is not drawn in that form at all."
+      "This is the same call the Screen already makes the moment it opens,"
+      "at the same moment: the catch-up returned."
+    ! [Infra.Kv.get, Time.unixMs]
+    placed = Infra.Headers.tipOf(state.store)?
+    Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving)))
 
 fn eyeOf(watch: Watching) -> Eye
     ? "The Eye a walk carries, opened from what the loop already knows."
@@ -1178,7 +1193,7 @@ fn peerViews(standing: Map<Int, Standing>, watch: Watching, keys: List<Int>, acc
 
 verify peerViews
     peerViews(Domain.Inbox.noStanding(), freshWatch(0), [], []) => []
-    peerViews(Map.fromList([(0, Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false))]), freshWatch(5), [0], []) => [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 5, sent = 0, received = 0)]
+    peerViews(Map.fromList([(0, Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false))]), freshWatch(5), [0], []) => [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 5, sent = 0, received = 0, inbound = false)]
 
 fn peerView(standing: Map<Int, Standing>, watch: Watching, key: Int) -> PeerView
     ? "What the Snapshot shows of one Peer."
@@ -1190,13 +1205,14 @@ fn peerView(standing: Map<Int, Standing>, watch: Watching, key: Int) -> PeerView
 fn viewOf(key: Int, standing: Option<Standing>, heardMs: Int) -> PeerView
     ? "The Standing folded into a view, or the unknown Peer."
     match standing
-        Option.None -> PeerView(key = key, address = "unknown", version = 0, agent = "", lastHeardMs = heardMs, sent = 0, received = 0)
-        Option.Some(one) -> PeerView(key = key, address = one.address, version = one.version, agent = one.agent, lastHeardMs = heardMs, sent = one.sent, received = one.received)
+        Option.None -> PeerView(key = key, address = "unknown", version = 0, agent = "", lastHeardMs = heardMs, sent = 0, received = 0, inbound = false)
+        Option.Some(one) -> PeerView(key = key, address = one.address, version = one.version, agent = one.agent, lastHeardMs = heardMs, sent = one.sent, received = one.received, inbound = one.inbound)
 
 verify viewOf
-    viewOf(2, Option.None, 7) => PeerView(key = 2, address = "unknown", version = 0, agent = "", lastHeardMs = 7, sent = 0, received = 0)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 120, received = 4096, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096)
+    viewOf(2, Option.None, 7) => PeerView(key = 2, address = "unknown", version = 0, agent = "", lastHeardMs = 7, sent = 0, received = 0, inbound = false)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0, inbound = false)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 120, received = 4096, inbound = false)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096, inbound = false)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = [], version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = true)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0, inbound = true)
 
 fn saidStats(state: Following, nowMs: Int) -> Following
     ? "The Peer stats line, when it has come due and not before."
@@ -1487,7 +1503,15 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
     _said = Console.print("mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
     told = toldOthers(state.pool, Infra.Peers.peerKeys(state.pool), key, payload)?
-    listen(Following(pool = told, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = after, rebuilding = state.rebuilding))
+    seen = arrivedOnRing(state, held, Time.unixMs())
+    listen(Following(pool = told, store = seen.store, blocks = seen.blocks, book = seen.book, nextKey = seen.nextKey, watch = seen.watch, mempool = after, rebuilding = seen.rebuilding))
+
+fn arrivedOnRing(state: Following, held: Domain.Mempool.Held, nowMs: Int) -> Following
+    ? "The Transactions Panel learns about it now rather than when a Block"
+      "takes it (#164). The fee is already computed here, which is why this"
+      "is where the ring is fed: the same row will flip to confirmed under"
+      "the same Id when connect sees it in a Block."
+    withWatch(state, Watching(snapshot = Domain.Snapshot.notedArrival(state.watch.snapshot, TxView(txId = held.txid, fee = held.fee, coinbase = false, atMs = nowMs, confirmed = false)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn toldOthers(pool: Pool, keys: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
     ? "The Announcement, to every Peer but the one that told us."

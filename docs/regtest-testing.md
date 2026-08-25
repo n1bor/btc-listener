@@ -751,6 +751,55 @@ no comfortable handle on. `Infra.Peers.settlingOn` is where it happens —
 `reading(pool, ready)` before the dial is looked at — and the shape of the
 code is the argument until someone finds a way to test it.
 
+### 14. The Screen, without a terminal to watch it in
+
+The Screen only draws to a real terminal — `Terminal.enableRawMode` needs a
+pty — so a headless check has to give it one. `script` does, and its capture
+is an ordinary file with the escape codes left in, which is enough to grep:
+
+```bash
+script -qf -c "timeout 150 $BIN regtest follow 127.0.0.1:18444 $D screen serve:18455" screen.txt
+```
+
+The Overview is the frame it opens on, and it carries both halves of #164 at
+once, so no keypresses have to be fed in. Read it back by pattern rather than
+by eye:
+
+```bash
+grep -ao "[0-9]* Peers ([0-9]* out, [0-9]* in)" screen.txt | sort -u
+grep -ao "tx $TXID fee [0-9]* sat\(  in Mempool\)\?" screen.txt | sort | uniq -c
+```
+
+```
+1 Peers (1 out, 0 in)
+2 Peers (1 out, 1 in)
+
+     44 tx b038e27f... fee 2760 sat  in Mempool
+     39 tx b038e27f... fee 2760 sat
+```
+
+Two counts of one txid, one marked and one not, is the whole of the Mempool
+half: the row was on the Panel before a Block held it, and the **same** row
+flipped rather than a second appearing.
+
+**Wait for the tip before sending the Transaction.** A relayed Transaction
+only reaches the Mempool once the node is in its listen loop; sent during a
+catch-up it arrives inside the Block instead, the row appears already
+confirmed, and nothing about the Panel is wrong — the test simply asked the
+question too early. `Mempool: 0 Transaction(s)` in every frame is the tell.
+
+**Frames are chronological, so byte offsets order events.** When a run
+disagrees with what a log line says happened, `grep -abo` on the capture
+settles which came first:
+
+```bash
+grep -abo "mempool admitted $TXID" screen.txt | head -1   # 13220
+grep -abo "$TXID fee" screen.txt | head -1                # 22454
+```
+
+That gap is what showed the Screen was in the catching-up form for the whole
+time the Transaction was held — the phase bug `backAtTip` fixes.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
