@@ -1,0 +1,104 @@
+module CompactBlockCases
+    intent =
+        "One real compact Block, as Bitcoin Core sent it."
+        "Captured off the wire on regtest by"
+        "tools/regtest/cmpctblock-capture.py, which speaks just enough of the"
+        "protocol to be sent one. Every number below is Core's, not ours."
+        "What it is here to catch is the naming. The SipHash key is derived"
+        "from the Header and a nonce, and the six-byte short ids follow from"
+        "that key; an implementation that derives either subtly wrongly --"
+        "the double SHA-256 instead of the single, the Transaction Id instead"
+        "of the Witness Transaction Id, the bytes in reading order instead of"
+        "wire order -- matches nothing, reconstructs nothing, and reports no"
+        "fault while doing it. Our own fixtures cannot catch that. Core can."
+        "The Block is 7e2eb275b31ac84e..., 3 Transactions: a coinbase"
+        "sent whole and 2 named by short id."
+        "Regenerate with tools/cmpct_oracle_to_aver.py; the capture needs a"
+        "regtest node, so this file is committed rather than rebuilt in CI."
+    exposes [key, shortIdFor, decodedNonce, decodedShortIds, decodedPrefilled]
+    depends [Domain.CompactBlock]
+    effects []
+
+fn payload() -> List<Int>
+    ? "The cmpctblock Message body, exactly as it arrived."
+    [0, 0, 0, 48, 201, 220, 52, 176, 36, 247, 221, 182, 248, 238, 82, 216, 25, 77, 181, 126, 213, 231, 220, 88, 100, 178, 154, 98, 195, 254, 179, 159, 184, 95, 164, 48, 151, 193, 25, 185, 145, 136, 178, 124, 51, 68, 159, 183, 5, 197, 47, 68, 245, 82, 166, 202, 23, 5, 148, 230, 191, 141, 135, 154, 138, 207, 219, 9, 164, 235, 140, 106, 255, 255, 127, 32, 1, 0, 0, 0, 169, 252, 199, 114, 11, 88, 50, 74, 2, 247, 8, 141, 225, 90, 179, 194, 48, 218, 248, 1, 203, 1, 0, 2, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 4, 2, 171, 0, 0, 255, 255, 255, 255, 2, 14, 11, 3, 149, 0, 0, 0, 0, 22, 0, 20, 184, 239, 86, 176, 139, 16, 111, 215, 117, 107, 63, 149, 187, 98, 239, 45, 228, 31, 205, 34, 0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 74, 75, 122, 217, 17, 4, 156, 38, 98, 31, 134, 90, 30, 75, 103, 46, 248, 45, 59, 197, 217, 96, 104, 113, 62, 118, 29, 11, 173, 157, 51, 72, 1, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+verify payload
+    List.len(payload()) => 272
+
+fn header() -> List<Int>
+    ? "Its eighty Header bytes."
+    [0, 0, 0, 48, 201, 220, 52, 176, 36, 247, 221, 182, 248, 238, 82, 216, 25, 77, 181, 126, 213, 231, 220, 88, 100, 178, 154, 98, 195, 254, 179, 159, 184, 95, 164, 48, 151, 193, 25, 185, 145, 136, 178, 124, 51, 68, 159, 183, 5, 197, 47, 68, 245, 82, 166, 202, 23, 5, 148, 230, 191, 141, 135, 154, 138, 207, 219, 9, 164, 235, 140, 106, 255, 255, 127, 32, 1, 0, 0, 0]
+
+verify header
+    List.len(header()) => 80
+
+fn key() -> Tuple<Int, Int>
+    ? "The SipHash key this Block names Transactions under."
+    Domain.CompactBlock.keyOf(header(), 5346432513835793577)
+
+verify key
+    key() => (133619242621263181, 637337126333332522)
+
+fn shortIdFor(wtxid: List<Int>) -> Int
+    ? "The short id this Block gives one Witness Transaction Id."
+    Domain.CompactBlock.shortIdOf(key(), wtxid)
+
+verify shortIdFor
+    shortIdFor([164, 244, 153, 201, 22, 217, 51, 92, 166, 182, 111, 246, 123, 169, 80, 147, 39, 57, 146, 108, 249, 131, 50, 126, 7, 91, 23, 16, 42, 41, 40, 148]) => 197202912545015
+    shortIdFor([0, 128, 87, 121, 252, 75, 124, 207, 145, 248, 86, 162, 143, 38, 230, 193, 31, 161, 89, 20, 203, 26, 242, 233, 151, 5, 16, 16, 197, 173, 172, 81]) => 223209330454722
+
+fn decodedNonce(body: List<Int>) -> Int
+    ? "The nonce, read back out of the Message."
+    nonceIn(Domain.CompactBlock.decodeCompact(body))
+
+verify decodedNonce
+    decodedNonce(payload()) => 5346432513835793577
+    decodedNonce([]) => 0
+
+fn nonceIn(decoded: Result<Compact, String>) -> Int
+    ? "Zero for a Message that would not decode, which the cases above"
+      "distinguish by asking a Message that does."
+    match decoded
+        Result.Err(why) -> 0
+        Result.Ok(compact) -> compact.nonce
+
+verify nonceIn
+    nonceIn(Result.Err("no")) => 0
+    nonceIn(Domain.CompactBlock.decodeCompact(payload())) => 5346432513835793577
+
+fn decodedShortIds(body: List<Int>) -> List<Int>
+    ? "The short ids, read back out of the Message."
+    shortIdsIn(Domain.CompactBlock.decodeCompact(body))
+
+verify decodedShortIds
+    decodedShortIds(payload()) => [197202912545015, 223209330454722]
+    decodedShortIds([]) => []
+
+fn shortIdsIn(decoded: Result<Compact, String>) -> List<Int>
+    ? "Empty for a Message that would not decode."
+    match decoded
+        Result.Err(why) -> []
+        Result.Ok(compact) -> compact.shortIds
+
+verify shortIdsIn
+    shortIdsIn(Result.Err("no")) => []
+    shortIdsIn(Domain.CompactBlock.decodeCompact(payload())) => [197202912545015, 223209330454722]
+
+fn decodedPrefilled(body: List<Int>) -> Int
+    ? "How many Transactions came whole, which is at least the coinbase."
+    prefilledIn(Domain.CompactBlock.decodeCompact(body))
+
+verify decodedPrefilled
+    decodedPrefilled(payload()) => 1
+    decodedPrefilled([]) => 0
+
+fn prefilledIn(decoded: Result<Compact, String>) -> Int
+    ? "Zero for a Message that would not decode."
+    match decoded
+        Result.Err(why) -> 0
+        Result.Ok(compact) -> List.len(compact.prefilled)
+
+verify prefilledIn
+    prefilledIn(Result.Err("no")) => 0
+    prefilledIn(Domain.CompactBlock.decodeCompact(payload())) => 1

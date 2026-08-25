@@ -1,0 +1,304 @@
+module CompactBlock
+    intent =
+        "BIP152: a Block sent as its Header, a list of short names, and the"
+        "few Transactions the sender guesses we have not got."
+        "The saving is the point. A Block near the tip is one to two"
+        "megabytes and almost all of it is Transactions the receiving node"
+        "already holds unconfirmed. A compact Block replaces each of those"
+        "with six bytes, so the same Block crosses the wire in perhaps fifteen"
+        "kilobytes, and the receiver rebuilds it from its own Mempool."
+        "That is why this sits on Stage 6 rather than beside it: without a"
+        "Mempool there is nothing to rebuild from, and a compact Block would"
+        "be a Block with extra round trips."
+        "The short names are keyed, and the key changes every Block. An"
+        "attacker who could find two Transactions sharing a short id could"
+        "make reconstruction fail; the key is SHA-256 of the Header and a"
+        "nonce the sender picked, so the collision would have to be found"
+        "after the Header exists and before the Block spreads. Domain.SipHash"
+        "does the hashing and this decides what is hashed."
+        "Nothing here talks to a Peer or reads a Store. It decodes what"
+        "arrived, says which positions are still missing, and builds the"
+        "request that asks for them; the loop does the asking."
+    exposes [Compact, Prefilled, Wanted, keyOf, shortIdOf, decodeCompact, decodeBlockTxn, sendCompactPayload, getBlockTxnPayload, wantedFrom, totalOf, protocolVersion]
+    depends [Bytes, Crypto.Digest32, Domain.CompactSize, Domain.Message, Domain.SipHash, Domain.Transaction]
+    effects []
+
+record Prefilled
+    index: Int
+    raw: List<Int>
+
+record Compact
+    header: List<Int>
+    nonce: Int
+    shortIds: List<Int>
+    prefilled: List<Prefilled>
+
+record Wanted
+    indexes: List<Int>
+    haveByPosition: List<Int>
+
+fn protocolVersion() -> Int
+    ? "The compact Block version this node speaks."
+      "Two, which is the SegWit one: short ids are taken over the Witness"
+      "Transaction Id rather than the Transaction Id, so that a Block full of"
+      "SegWit spends can be named at all. Version 1 predates SegWit and is"
+      "not offered -- a node that only speaks it will simply not send us"
+      "compact Blocks, which costs bandwidth and nothing else."
+    2
+
+verify protocolVersion
+    protocolVersion() => 2
+
+fn sendCompactPayload(announce: Bool, version: Int) -> Result<Bytes, String>
+    ? "The Message that says whether to send us compact Blocks unasked."
+      "One byte and then eight. False here is low-bandwidth mode: announce"
+      "the Block first and let us ask. That is what this node wants until the"
+      "reconstruction path has been proven against a real Peer, because"
+      "high-bandwidth mode means a Peer pushing whole compact Blocks at us"
+      "before we have said we want them."
+    Bytes.fromList(List.concat([announcing(announce)], Domain.Message.littleEndian(version, 8)))
+
+verify sendCompactPayload
+    Bytes.toHex(sendCompactPayload(false, 2)?) => "000200000000000000"
+    Bytes.toHex(sendCompactPayload(true, 2)?) => "010200000000000000"
+    Bytes.toHex(sendCompactPayload(false, 1)?) => "000100000000000000"
+
+fn announcing(announce: Bool) -> Int
+    ? "The first byte: one asks for Blocks unasked, zero asks to be asked."
+    match announce
+        true -> 1
+        false -> 0
+
+verify announcing
+    announcing(true) => 1
+    announcing(false) => 0
+
+fn keyOf(header: List<Int>, nonce: Int) -> Tuple<Int, Int>
+    ? "The SipHash key both ends derive for one compact Block."
+      "SHA-256 of the eighty Header bytes followed by the nonce, and the"
+      "first sixteen bytes of that read as two little-endian words. Single"
+      "SHA-256, not the double Bitcoin uses elsewhere -- BIP152 says so, and"
+      "using the double would give two nodes different keys and no way to"
+      "find out why."
+    keyFrom(Bytes.octets(Crypto.Digest32.bytes(Crypto.sha256(Result.withDefault(Bytes.fromList(List.concat(header, Domain.Message.littleEndian(nonce, 8))), Bytes.fromList([]))))))
+
+fn keyFrom(digest: List<Int>) -> Tuple<Int, Int>
+    ? "The first sixteen bytes of the digest, as two words."
+    (wordAt(List.take(digest, 8)), wordAt(List.take(List.drop(digest, 8), 8)))
+
+verify keyFrom
+    keyFrom([1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]) => (1, 2)
+    keyFrom([]) => (0, 0)
+
+fn wordAt(bytes: List<Int>) -> Int
+    ? "Eight bytes, little-endian, as one number."
+    wordInto(bytes, 0, 0)
+
+verify wordAt
+    wordAt([1, 0, 0, 0, 0, 0, 0, 0]) => 1
+    wordAt([0, 1]) => 256
+    wordAt([]) => 0
+
+fn wordInto(bytes: List<Int>, shift: Int, acc: Int) -> Int
+    ? "One byte at a time, least significant first."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> wordInto(tail, shift + 8, Bits.or(acc, Result.withDefault(Bits.shiftLeft(head, shift), 0)))
+
+verify wordInto
+    wordInto([], 0, 0) => 0
+    wordInto([2], 0, 0) => 2
+    wordInto([0, 1], 0, 0) => 256
+
+fn shortIdOf(key: Tuple<Int, Int>, id: List<Int>) -> Int
+    ? "The six-byte name this Block gives one Transaction."
+      "The id passed in is the Witness Transaction Id under version 2, and"
+      "the plain Transaction Id under version 1. Which one is the caller's to"
+      "know; getting it wrong makes every short id miss, which reconstruction"
+      "reports as a Block we cannot fill rather than as a fault."
+    match key
+        (k0, k1) -> Domain.SipHash.shortIdOf(k0, k1, id)
+
+verify shortIdOf
+    shortIdOf((506097522914230528, 1084818905618843912), []) => 241101697846833
+    shortIdOf((0, 0), []) => 83139619127511
+
+fn decodeCompact(body: List<Int>) -> Result<Compact, String>
+    ? "A cmpctblock Message, taken apart."
+      "Eighty bytes of Header, eight of nonce, then the short ids and then"
+      "the Transactions the sender sent whole."
+    match List.len(body) < 89
+        true -> Result.Err("a compact Block is at least 89 bytes, got {List.len(body)}")
+        false -> withHeader(List.take(body, 80), List.drop(body, 80))
+
+verify decodeCompact
+    decodeCompact([]) => Result.Err("a compact Block is at least 89 bytes, got 0")
+
+fn withHeader(header: List<Int>, rest: List<Int>) -> Result<Compact, String>
+    ? "The nonce follows the Header."
+    withShortIdCount(header, wordAt(List.take(rest, 8)), Domain.CompactSize.read(List.drop(rest, 8)))
+
+fn withShortIdCount(header: List<Int>, nonce: Int, count: Count) -> Result<Compact, String>
+    ? "How many short ids, then the ids themselves."
+    shortIdsRead(header, nonce, count.value, count.rest, [])
+
+fn shortIdsRead(header: List<Int>, nonce: Int, left: Int, rest: List<Int>, acc: List<Int>) -> Result<Compact, String>
+    ? "Six bytes each, little-endian."
+    match left == 0
+        true -> withPrefilledCount(header, nonce, List.reverse(acc), Domain.CompactSize.read(rest))
+        false -> oneShortId(header, nonce, left, rest, acc)
+
+verify shortIdsRead
+    shortIdsRead([], 0, 0, [0], []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = []))
+    shortIdsRead([], 0, 1, [], []) => Result.Err("a compact Block claimed more short ids than it carries")
+
+fn oneShortId(header: List<Int>, nonce: Int, left: Int, rest: List<Int>, acc: List<Int>) -> Result<Compact, String>
+    ? "A short id that runs off the end of the Message is a Peer that lied"
+      "about its own count, and is refused rather than read as a zero."
+    match List.len(rest) < 6
+        true -> Result.Err("a compact Block claimed more short ids than it carries")
+        false -> shortIdsRead(header, nonce, left - 1, List.drop(rest, 6), List.prepend(wordAt(List.take(rest, 6)), acc))
+
+verify oneShortId
+    oneShortId([], 0, 1, [], []) => Result.Err("a compact Block claimed more short ids than it carries")
+    oneShortId([], 0, 1, [1, 0, 0, 0, 0, 0, 0], []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [1], prefilled = []))
+
+fn withPrefilledCount(header: List<Int>, nonce: Int, shortIds: List<Int>, count: Count) -> Result<Compact, String>
+    ? "The Transactions the sender guessed we would not have."
+      "There is always at least one: the coinbase cannot be in anybody's"
+      "Mempool, so every compact Block carries it whole at index 0."
+    prefilledRead(header, nonce, shortIds, count.value, count.rest, 0 - 1, [])
+
+verify withPrefilledCount
+    withPrefilledCount([], 0, [], Count(value = 0, rest = [], width = 1)) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = []))
+
+fn prefilledRead(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, rest: List<Int>, previous: Int, acc: List<Prefilled>) -> Result<Compact, String>
+    ? "Each one carries how far past the last it sits, not where it sits."
+      "Differential encoding: the first index stands as written and every"
+      "later one is the gap since the last, minus one. A decoder that forgets"
+      "the minus one produces a Block whose Transactions are in almost the"
+      "right places, which is the worst kind of wrong -- the Merkle Root"
+      "catches it, but only after the work of rebuilding."
+    match left == 0
+        true -> Result.Ok(Compact(header = header, nonce = nonce, shortIds = shortIds, prefilled = List.reverse(acc)))
+        false -> onePrefilled(header, nonce, shortIds, left, Domain.CompactSize.read(rest), previous, acc)
+
+verify prefilledRead
+    prefilledRead([], 0, [], 0, [], 0 - 1, []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = []))
+    prefilledRead([], 0, [], 1, [], 0 - 1, []) => Result.Err("a prefilled Transaction at index 0 would not decode: Transaction ends before its lock time")
+
+fn onePrefilled(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, index: Count, previous: Int, acc: List<Prefilled>) -> Result<Compact, String>
+    ? "The index, and then the Transaction, whose length nothing states."
+      "A Transaction carries no length prefix, so the only way to find where"
+      "it ends is to decode it -- the same fact the Block scan rests on. The"
+      "bytes are kept as they arrived as well as decoded, because rebuilding"
+      "the Block means hashing exactly these bytes again."
+    atIndex(header, nonce, shortIds, left, index.value + previous + 1, index.rest, acc)
+
+verify onePrefilled
+    onePrefilled([], 0, [], 1, Count(value = 0, rest = [], width = 1), 0 - 1, []) => Result.Err("a prefilled Transaction at index 0 would not decode: Transaction ends before its lock time")
+
+fn atIndex(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, at: Int, bytes: List<Int>, acc: List<Prefilled>) -> Result<Compact, String>
+    ? "The Transaction at this position, or why it could not be read."
+    match Domain.Transaction.decodeNext(bytes)
+        Result.Err(why) -> Result.Err("a prefilled Transaction at index {at} would not decode: {why}")
+        Result.Ok(one) -> carried(header, nonce, shortIds, left, at, bytes, one.rest, acc)
+
+verify atIndex
+    atIndex([], 0, [], 1, 0, [], []) => Result.Err("a prefilled Transaction at index 0 would not decode: Transaction ends before its lock time")
+
+fn carried(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, at: Int, bytes: List<Int>, rest: List<Int>, acc: List<Prefilled>) -> Result<Compact, String>
+    ? "What it consumed is what is no longer left."
+    prefilledRead(header, nonce, shortIds, left - 1, rest, at, List.prepend(Prefilled(index = at, raw = List.take(bytes, List.len(bytes) - List.len(rest))), acc))
+
+verify carried
+    carried([], 0, [], 1, 0, [], [], []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = [Prefilled(index = 0, raw = [])]))
+
+fn totalOf(compact: Compact) -> Int
+    ? "How many Transactions the Block holds."
+      "Every position is either named by a short id or sent whole, so the"
+      "two lists together are the Block."
+    List.len(compact.shortIds) + List.len(compact.prefilled)
+
+verify totalOf
+    totalOf(Compact(header = [], nonce = 0, shortIds = [], prefilled = [])) => 0
+    totalOf(Compact(header = [], nonce = 0, shortIds = [1, 2], prefilled = [])) => 2
+
+fn wantedFrom(compact: Compact, held: List<Int>) -> Wanted
+    ? "Which positions we cannot fill from what we hold."
+      "held is the short id of every Transaction in our Mempool, computed"
+      "under this Block's key. A short id we do not hold is a position we"
+      "have to ask for; everything else is already here."
+    wantedInto(compact.shortIds, held, 0, [], [])
+
+verify wantedFrom
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), []) => Wanted(indexes = [], haveByPosition = [])
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [7]) => Wanted(indexes = [], haveByPosition = [7])
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), []) => Wanted(indexes = [0], haveByPosition = [])
+
+fn wantedInto(shortIds: List<Int>, held: List<Int>, position: Int, missing: List<Int>, have: List<Int>) -> Wanted
+    ? "Walking the short ids in the order the Block puts them."
+    match shortIds
+        [] -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
+        [head, ..tail] -> oneWanted(head, tail, held, position, missing, have)
+
+verify wantedInto
+    wantedInto([], [], 0, [], []) => Wanted(indexes = [], haveByPosition = [])
+
+fn oneWanted(shortId: Int, rest: List<Int>, held: List<Int>, position: Int, missing: List<Int>, have: List<Int>) -> Wanted
+    ? "Held, or asked for."
+    match List.contains(held, shortId)
+        true -> wantedInto(rest, held, position + 1, missing, List.prepend(shortId, have))
+        false -> wantedInto(rest, held, position + 1, List.prepend(position, missing), have)
+
+verify oneWanted
+    oneWanted(7, [], [7], 0, [], []) => Wanted(indexes = [], haveByPosition = [7])
+    oneWanted(7, [], [], 0, [], []) => Wanted(indexes = [0], haveByPosition = [])
+
+fn getBlockTxnPayload(blockHash: List<Int>, indexes: List<Int>) -> Result<Bytes, String>
+    ? "The request that asks for the positions we could not fill."
+      "The Block is named by its Id and the positions are differentially"
+      "encoded: the first as it stands, each later one as the gap since the"
+      "last, minus one. The minus one is not a flourish -- two positions"
+      "cannot be equal, so the gap is always at least one and encoding it"
+      "saves a byte on the common case of neighbours."
+    Bytes.fromList(List.concat(List.concat(blockHash, Domain.CompactSize.encode(List.len(indexes))), differences(indexes, 0 - 1, [])))
+
+verify getBlockTxnPayload
+    Bytes.toHex(getBlockTxnPayload([], [])?) => "00"
+    Bytes.toHex(getBlockTxnPayload([], [0])?) => "0100"
+    Bytes.toHex(getBlockTxnPayload([], [0, 1])?) => "020000"
+    Bytes.toHex(getBlockTxnPayload([], [0, 5])?) => "020004"
+
+fn differences(indexes: List<Int>, previous: Int, acc: List<Int>) -> List<Int>
+    ? "Each position as the gap since the one before it."
+    match indexes
+        [] -> List.reverse(acc)
+        [head, ..tail] -> differences(tail, head, prependedAll(Domain.CompactSize.encode(head - previous - 1), acc))
+
+verify differences
+    differences([], 0 - 1, []) => []
+    differences([0], 0 - 1, []) => [0]
+    differences([0, 1], 0 - 1, []) => [0, 0]
+    differences([0, 5], 0 - 1, []) => [0, 4]
+
+fn prependedAll(bytes: List<Int>, acc: List<Int>) -> List<Int>
+    ? "A whole encoding onto the front of a reversed accumulator."
+    match bytes
+        [] -> acc
+        [head, ..tail] -> prependedAll(tail, List.prepend(head, acc))
+
+verify prependedAll
+    prependedAll([], []) => []
+    prependedAll([1, 2], []) => [2, 1]
+
+fn decodeBlockTxn(body: List<Int>) -> Result<Tuple<List<Int>, List<Int>>, String>
+    ? "A blocktxn Message: the Block it answers for, and the Transactions."
+      "The Transactions are handed back as the bytes they arrived as, in"
+      "order, for the caller to slot into the positions it asked about."
+    match List.len(body) < 33
+        true -> Result.Err("a blocktxn is at least 33 bytes, got {List.len(body)}")
+        false -> Result.Ok((List.take(body, 32), List.drop(body, 32)))
+
+verify decodeBlockTxn
+    decodeBlockTxn([]) => Result.Err("a blocktxn is at least 33 bytes, got 0")

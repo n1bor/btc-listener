@@ -264,6 +264,49 @@ A Mempool resolving Inputs through `o:` accepts double spends, relays them, and
 passes every other test in this document — and its held count would not fall to
 zero here, because what it holds was never really spendable.
 
+### 8. A compact Block, from Core's own hand
+
+BIP152 names Transactions by six-byte short ids: a slice of a SipHash under a
+key both nodes derive from the Header and a nonce the sender chose. Nothing in
+this repository can check that we derive it the way everyone else does —
+`Domain.CompactBlock`'s own cases are fixtures we wrote, and a wrong key
+matches nothing, reconstructs nothing, and reports no fault while doing it.
+
+`tools/regtest/cmpctblock-capture.py` speaks just enough of the protocol to be
+sent a real one. It handshakes, says `sendcmpct`, and waits:
+
+```bash
+python3 tools/regtest/cmpctblock-capture.py 127.0.0.1 18444 cap.json &
+sleep 2
+$C sendtoaddress $($C getnewaddress "" bech32) 0.6     # something to name
+$C sendtoaddress $($C getnewaddress "" bech32m) 0.7
+$C generatetoaddress 1 "$($C getnewaddress)"
+```
+
+```
+captured a compact Block for 7e2eb275b31ac84e…: 2 short id(s), 1 prefilled
+```
+
+Two short ids and one prefilled is the shape to expect: the two spends are
+named, and the coinbase is sent whole because it cannot be in anybody's
+Mempool. Then turn the capture into cases and run them:
+
+```bash
+python3 tools/cmpct_oracle_to_aver.py cap.json
+aver verify domain/compactblockcases.av --module-root .
+```
+
+The cases pin three things against Core: the key derived from the Header and
+nonce, the short id of each Witness Transaction Id under that key, and the
+decoding of the Message itself. **Do not skip the key case.** Four plausible
+mistakes all produce a decoder that looks like it works — the double SHA-256
+instead of the single, the Transaction Id instead of the Witness Transaction
+Id, the digest read big-endian, the id in reading order rather than wire
+order — and each of them silently names every Transaction wrongly.
+
+**This capture needs a node, so the generated file is committed** rather than
+rebuilt in CI, the same way the Core corpora are.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
