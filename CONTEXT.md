@@ -183,6 +183,30 @@ refused by consensus never is. Peers enforce Policy on each other socially —
 by dropping and banning — which is why a node cannot opt out alone.
 _Avoid_: standardness (that is one Policy, not the boundary), relay rules
 
+### The Screen
+
+**Screen**:
+The live terminal view `follow` runs when asked to (the `screen` word): raw
+mode, a frame redrawn from the Snapshot, keys switching Panels, and a stop
+question behind `q`. Owned by the loop that owns everything else, and every
+way out — quit, polite stop, error — gives the terminal back.
+_Avoid_: GUI, TUI, dashboard, display, console
+
+**Panel**:
+One of the Screen's five views — Overview, Peers, Blocks, Transactions,
+Mempool — each a pure rendering of the Snapshot, switched by a single key. A
+Panel not yet built says which issue it is waiting for, because a blank Panel
+and an unbuilt Panel should not look alike.
+_Avoid_: screen (that is the whole), tab, page, view, widget
+
+**Snapshot**:
+One picture of the running node, assembled every tick of `follow`'s loop:
+the tip, catch-up progress, who it is talking to, what the Mempool holds, and
+the retention rings of the newest few Blocks, Reorganisations and
+Transactions. Everything shown — Panel or log line — is a rendering of it,
+and it is never a log: the rings forget on purpose.
+_Avoid_: state, status, metrics, telemetry, model
+
 ### What we store
 
 **Store**:
