@@ -27,11 +27,11 @@ record Realigned
     store: Store
     from: Int
     dropped: Int
-    unconfirmed: List<Transaction>
+    unconfirmed: List<Carried>
 
 record Removed
     store: Store
-    unconfirmed: List<Transaction>
+    unconfirmed: List<Carried>
 
 fn realigned(store: Store, blocks: BlockStore, eye: Eye) -> Result<Realigned, String>
     ? "Where the next Block goes, once the Set is back on the chain h: names."
@@ -181,24 +181,36 @@ fn removingOne(store: Store, blocks: BlockStore, placement: Placement, rest: Lis
       "first, because a child spends its parent and a Mempool re-admitting"
       "them meets them in an order that can work."
     ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
-    transactions = bodyOf(store, blocks, placement.blockId)?
-    applied = Infra.Utxo.disconnectBlock(store, placement.blockId, transactions)?
+    carried = bodyOf(store, blocks, placement.blockId)?
+    applied = Infra.Utxo.disconnectBlock(store, placement.blockId, transactionsIn(carried, []))?
     standing = parked(applied.store, placement.height - 1, placement.parentId)?
     _said = saidIfPlain(eye, "  height {placement.height} disconnected: set +{applied.added} -{applied.removed}")
     deeper2 = removing(standing, blocks, rest, eye)?
-    Result.Ok(Removed(store = deeper2.store, unconfirmed = List.concat(deeper2.unconfirmed, restorable(transactions))))
+    Result.Ok(Removed(store = deeper2.store, unconfirmed = List.concat(deeper2.unconfirmed, restorable(carried))))
 
-fn restorable(transactions: List<Transaction>) -> List<Transaction>
-    ? "Everything but the coinbase."
-    match transactions
+fn restorable(carried: List<Carried>) -> List<Carried>
+    ? "Everything but the coinbase, each Transaction beside the bytes it"
+      "arrived as -- a Mempool re-admitting one must be able to serve it"
+      "verbatim, and nothing here can re-serialise (#28, #29)."
+    match carried
         [] -> []
         [coinbase, ..rest] -> rest
 
 verify restorable
     restorable([]) => []
-    List.len(restorable([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cb", size = 0, isSegWit = false)])) => 0
+    restorable([Carried(transaction = Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cb", size = 0, isSegWit = false), bytes = [1])]) => []
 
-fn bodyOf(store: Store, blocks: BlockStore, blockId: String) -> Result<List<Transaction>, String>
+fn transactionsIn(carried: List<Carried>, acc: List<Transaction>) -> List<Transaction>
+    ? "Just the decoded Transactions, for the disconnect that spends them."
+    match carried
+        [] -> List.reverse(acc)
+        [head, ..tail] -> transactionsIn(tail, List.prepend(head.transaction, acc))
+
+verify transactionsIn
+    transactionsIn([], []) => []
+    transactionsIn([Carried(transaction = Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cb", size = 0, isSegWit = false), bytes = [1])], []) => [Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "cb", size = 0, isSegWit = false)]
+
+fn bodyOf(store: Store, blocks: BlockStore, blockId: String) -> Result<List<Carried>, String>
     ? "A Block being disconnected has to be read, because its Undo Data says"
       "what it spent and only the Block itself says what it made."
     ! [Disk.readBytesAt, Infra.Kv.get]
@@ -207,11 +219,11 @@ fn bodyOf(store: Store, blocks: BlockStore, blockId: String) -> Result<List<Tran
         Option.None -> Result.Err("Block {blockId} has to come off the Set but its body is not held; it was pruned or never fetched, so the Set has to be rebuilt")
         Option.Some(text) -> bodyAt(blocks, Domain.Index.decodeLocation(text))
 
-fn bodyAt(blocks: BlockStore, location: Result<Location, String>) -> Result<List<Transaction>, String>
-    ? "The Transactions at a Location."
+fn bodyAt(blocks: BlockStore, location: Result<Location, String>) -> Result<List<Carried>, String>
+    ? "The Transactions at a Location, each beside its bytes."
     ! [Disk.readBytesAt]
     at = location?
-    Domain.Block.transactionsOf(Infra.Blocks.read(blocks, at)?)
+    Domain.Block.carriedOf(Infra.Blocks.read(blocks, at)?)
 
 fn parked(store: Store, height: Int, blockId: String) -> Result<Store, String>
     ? "Record that the Set now stands on this Block."

@@ -22,7 +22,7 @@ module Follow
         "which is Stage 8 and waits on a runtime that can accept a connection"
         "at all (jasisz/aver#1131)."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store]
+    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
@@ -492,7 +492,7 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders.watch))?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(afterHeaders.watch))?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool), tipHeight)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool), tipHeight, aligned.unconfirmed)?
     toppedUp(drainSpare(upToTip))
 
 fn eyeOf(watch: Watching) -> Eye
@@ -511,7 +511,7 @@ fn saidBookIfPlain(watch: Watching, before: Int, after: Int) -> Unit
         Option.None -> saidBook(before, after)
         Option.Some(view) -> Unit
 
-fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
+fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Following, String>
     ? "The Set forward to the tip, and one line saying where that leaves it."
       "When only a few Blocks moved -- a node at the tip, hearing one Block"
       "every ten minutes -- each one gets its own line, because those are the"
@@ -525,10 +525,12 @@ fn connected(state: Following, tipHeight: Int) -> Result<Following, String>
         Time.now, Time.unixMs,
     ]
     built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight, eyeOf(state.watch))?
+    backOut = List.concat(unconfirmed, built.unconfirmed)
     seen = watchSeen(state.watch, built.eye)
     _each = saidLinesIfPlain(seen, blockLinesOf(built.blocks, built.views))
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
+    _waiting = restorable(backOut)
     Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = swept), watchAfterBuild(seen, built.views)))
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
@@ -620,6 +622,15 @@ fn keyForRest(txid: String, rest: List<String>) -> Result<Bytes, String>
 verify keyForRest
     keyForRest("aa", []) => Result.Err("an Output name is a Transaction Id and a position, got only aa")
     keyForRest("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", ["0"]) => Domain.UtxoStore.unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)
+
+fn restorable(unconfirmed: List<Carried>) -> Int
+    ? "The Transactions a Reorganisation put back in flight, counted where"
+      "Domain.Mempool.restored will take them (#28's open half): the sweep"
+      "above leaves, this hands back, and the two belong side by side."
+    List.len(unconfirmed)
+
+verify restorable
+    restorable([]) => 0
 
 fn saidLineIfPlain(watch: Watching, line: String) -> Unit
     ? "One line for the plain log; the Screen draws the same fact."
