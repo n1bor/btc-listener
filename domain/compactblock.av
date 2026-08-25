@@ -225,35 +225,66 @@ verify totalOf
     totalOf(Compact(header = [], nonce = 0, shortIds = [1, 2], prefilled = [])) => 2
 
 fn wantedFrom(compact: Compact, held: List<Int>) -> Wanted
-    ? "Which positions we cannot fill from what we hold."
+    ? "Which positions of the Block we cannot fill from what we hold."
       "held is the short id of every Transaction in our Mempool, computed"
-      "under this Block's key. A short id we do not hold is a position we"
-      "have to ask for; everything else is already here."
-    wantedInto(compact.shortIds, held, 0, [], [])
+      "under this Block's key. What comes back are positions in the Block,"
+      "which is what a getblocktxn names -- not offsets into the short id"
+      "list. The two are the same number only when nothing was prefilled, and"
+      "something always is: the coinbase cannot be in anybody's Mempool, so"
+      "every real compact Block prefills position 0 and every short id after"
+      "it sits one place further on than its own index. Asking by the wrong"
+      "one asks for the coinbase and never gets the Transaction that was"
+      "missing."
+    wantedInto(compact, held, totalOf(compact), 0, compact.shortIds, [], [])
 
 verify wantedFrom
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), []) => Wanted(indexes = [], haveByPosition = [])
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [7]) => Wanted(indexes = [], haveByPosition = [7])
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), []) => Wanted(indexes = [0], haveByPosition = [])
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [7], prefilled = [Prefilled(index = 0, raw = [1])]), []) => Wanted(indexes = [1], haveByPosition = [])
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [7, 8], prefilled = [Prefilled(index = 0, raw = [1])]), [7]) => Wanted(indexes = [2], haveByPosition = [7])
+    wantedFrom(Compact(header = [], nonce = 0, shortIds = [7, 8], prefilled = [Prefilled(index = 1, raw = [1])]), [8]) => Wanted(indexes = [0], haveByPosition = [8])
 
-fn wantedInto(shortIds: List<Int>, held: List<Int>, position: Int, missing: List<Int>, have: List<Int>) -> Wanted
-    ? "Walking the short ids in the order the Block puts them."
-    match shortIds
-        [] -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
-        [head, ..tail] -> oneWanted(head, tail, held, position, missing, have)
+fn wantedInto(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+    ? "Walking the Block's positions, not the short ids."
+    match at >= total
+        true -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
+        false -> wantedAt(compact, held, total, at, shortIds, missing, have, prefilledAt(compact.prefilled, at))
 
 verify wantedInto
-    wantedInto([], [], 0, [], []) => Wanted(indexes = [], haveByPosition = [])
+    wantedInto(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], 0, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
 
-fn oneWanted(shortId: Int, rest: List<Int>, held: List<Int>, position: Int, missing: List<Int>, have: List<Int>) -> Wanted
-    ? "Held, or asked for."
+fn wantedAt(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>, sent: Option<List<Int>>) -> Wanted
+    ? "A position the sender filled in is one we never have to ask for, and it"
+      "consumes no short id."
+    match sent
+        Option.Some(raw) -> wantedInto(compact, held, total, at + 1, shortIds, missing, have)
+        Option.None -> wantedShortId(compact, held, total, at, shortIds, missing, have)
+
+verify wantedAt
+    wantedAt(Compact(header = [], nonce = 0, shortIds = [7], prefilled = [Prefilled(index = 0, raw = [1])]), [], 2, 0, [7], [], [], Option.Some([1])) => Wanted(indexes = [1], haveByPosition = [])
+
+fn wantedShortId(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+    ? "The next short id names this position."
+      "Running out of them means the Message's counts disagree with its own"
+      "positions; there is nothing further to want and assembled will refuse"
+      "the Block when it is asked to build it."
+    match shortIds
+        [] -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
+        [head, ..tail] -> oneWanted(compact, held, total, at, head, tail, missing, have)
+
+verify wantedShortId
+    wantedShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], 1, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
+
+fn oneWanted(compact: Compact, held: List<Int>, total: Int, at: Int, shortId: Int, rest: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+    ? "Held, or asked for by the position it sits at."
     match List.contains(held, shortId)
-        true -> wantedInto(rest, held, position + 1, missing, List.prepend(shortId, have))
-        false -> wantedInto(rest, held, position + 1, List.prepend(position, missing), have)
+        true -> wantedInto(compact, held, total, at + 1, rest, missing, List.prepend(shortId, have))
+        false -> wantedInto(compact, held, total, at + 1, rest, List.prepend(at, missing), have)
 
 verify oneWanted
-    oneWanted(7, [], [7], 0, [], []) => Wanted(indexes = [], haveByPosition = [7])
-    oneWanted(7, [], [], 0, [], []) => Wanted(indexes = [0], haveByPosition = [])
+    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [7], 1, 0, 7, [], [], []) => Wanted(indexes = [], haveByPosition = [7])
+    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [], 1, 0, 7, [], [], []) => Wanted(indexes = [0], haveByPosition = [])
 
 fn getBlockTxnPayload(blockHash: List<Int>, indexes: List<Int>) -> Result<Bytes, String>
     ? "The request that asks for the positions we could not fill."
