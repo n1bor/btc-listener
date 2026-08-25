@@ -45,7 +45,7 @@ that passes every gate. **When you test something that document does not cover,
 add it there** — the coverage only grows if each person leaves behind what they
 had to work out.
 
-**Two failures that only `cargo build` finds.** Both survive `check`, `verify`
+**Failures that only `cargo build` finds.** All survive `check`, `verify`
 and `compile`.
 
 - A type named after a builtin is silently resolved to the builtin
@@ -56,11 +56,6 @@ and `compile`.
   field must satisfy them — so no opaque record (`PeerAddress`) and no record
   that lacks the derives (`Frame`) can live inside one. #27 lost a per-Peer
   Frame queue to this and was better for it.
-- The carrier-based Eq/Hash derive resolves by **unqualified type name**, so
-  a record sharing a name with any type the analysis wants `Eq`/`Hash` on
-  gets its twin's derives — and fails E0277 if a field cannot carry them
-  (`Progress` twice, jasisz/aver#1134; the bodies walk state is `Fetched`
-  because of it). Grep the repo for a record's name before adding it.
 - Every module in a `depends` list is glob-imported into the generated Rust.
   Two of them defining the same name is usually harmless — this repo has 157
   such pairs — but it becomes `E0659` the moment a **parameter or binding**
