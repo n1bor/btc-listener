@@ -1,0 +1,136 @@
+module Metrics
+    intent =
+        "An append-only record of what a run spent its time on."
+        "A run with a Screen open leaves nothing behind: every walk asks the"
+        "Eye whether it may speak and stays silent when a View is present, so"
+        "the hours a catch-up takes are drawn once per frame and then gone."
+        "A plain run is barely better off -- its lines scroll past. This is"
+        "the same numbers written where they survive the run (#180)."
+        "One line a minute and one at every phase boundary, fields in a fixed"
+        "order and separated by spaces, so a finished run reads with awk and"
+        "needs no parser."
+        "The field worth having is the last pair: how much of the window went"
+        "inside Tcp.poll and how much outside it. Everything else here is"
+        "already on the Overview and could be reconstructed from the store"
+        "afterwards; the split between waiting for a Peer and working on what"
+        "it sent exists only while it is happening."
+        "Append rather than write, one line at a time, so a run stopped with"
+        "Ctrl-C leaves a log whole to its last complete record."
+    exposes [Log, none, toFile, opened, marked, windowMs]
+    depends [Domain.Text]
+    effects [Disk.appendText, Time.unixMs]
+
+record Log
+    path: Option<String>
+    openedMs: Int
+    lastMs: Int
+    lastPolledMs: Int
+    lastBlocks: Int
+    lastBytes: Int
+
+fn none() -> Log
+    ? "The log a run without the word keeps: a path of nothing, which every"
+      "write checks before it does anything."
+    Log(path = Option.None, openedMs = 0, lastMs = 0, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0)
+
+verify none
+    none().path => Option.None
+    none().openedMs => 0
+
+fn toFile(path: String, nowMs: Int) -> Log
+    ? "A log that will be written to this file."
+    Log(path = Option.Some(path), openedMs = nowMs, lastMs = nowMs, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0)
+
+verify toFile
+    toFile("m.log", 5).path => Option.Some("m.log")
+    toFile("m.log", 5).openedMs => 5
+
+fn windowMs() -> Int
+    ? "How often a record is due while a phase runs. One a minute, which is"
+      "the cadence the progress lines already use, so a reader comparing the"
+      "two is comparing like with like."
+    60000
+
+verify windowMs
+    windowMs() => 60000
+
+fn opened(log: Log, network: String, from: Int, to: Int) -> Result<Log, String>
+    ? "The header line, so a log names the run it belongs to."
+    ! [Disk.appendText, Time.unixMs]
+    match log.path
+        Option.None -> Result.Ok(log)
+        Option.Some(path) -> openedOn(log, path, network, from, to)
+
+fn openedOn(log: Log, path: String, network: String, from: Int, to: Int) -> Result<Log, String>
+    ? "The header written, and the clock started."
+    ! [Disk.appendText, Time.unixMs]
+    nowMs = Time.unixMs()
+    _written = Disk.appendText(path, "# btc-listener metrics {network} from {from} to {to} started {nowMs}\n")?
+    _fields = Disk.appendText(path, "# atMs phase height target blocks bytes polledMs workedMs peers candidates\n")?
+    Result.Ok(Log(path = log.path, openedMs = nowMs, lastMs = nowMs, lastPolledMs = log.lastPolledMs, lastBlocks = log.lastBlocks, lastBytes = log.lastBytes))
+
+fn marked(log: Log, phase: String, height: Int, target: Int, blocks: Int, bytes: Int, polledMs: Int, peers: Int, candidates: Int, forced: Bool) -> Result<Log, String>
+    ? "One record, if a record is due or the caller says it must be."
+      "A phase boundary is forced, because the boundary is the one moment a"
+      "reader wants exactly and a minute gate would round away."
+    ! [Disk.appendText, Time.unixMs]
+    match log.path
+        Option.None -> Result.Ok(log)
+        Option.Some(path) -> markedOn(log, path, phase, height, target, blocks, bytes, polledMs, peers, candidates, forced, Time.unixMs())
+
+fn markedOn(log: Log, path: String, phase: String, height: Int, target: Int, blocks: Int, bytes: Int, polledMs: Int, peers: Int, candidates: Int, forced: Bool, nowMs: Int) -> Result<Log, String>
+    ? "Due when the window has passed, or when the caller forces it."
+    ! [Disk.appendText]
+    match Bool.or(forced, nowMs - log.lastMs >= windowMs())
+        false -> Result.Ok(log)
+        true -> written(log, path, phase, height, target, blocks, bytes, polledMs, peers, candidates, nowMs)
+
+fn written(log: Log, path: String, phase: String, height: Int, target: Int, blocks: Int, bytes: Int, polledMs: Int, peers: Int, candidates: Int, nowMs: Int) -> Result<Log, String>
+    ? "The record itself: this window's share of everything, not the running"
+      "total, because a window is what a rate is computed from."
+    ! [Disk.appendText]
+    _written = Disk.appendText(path, lineOf(phase, height, target, sinceLast(log.lastBlocks, blocks), sinceLast(log.lastBytes, bytes), sinceLast(log.lastPolledMs, polledMs), nowMs - log.lastMs, peers, candidates, nowMs))?
+    Result.Ok(Log(path = log.path, openedMs = log.openedMs, lastMs = nowMs, lastPolledMs = polledMs, lastBlocks = blocks, lastBytes = bytes))
+
+fn sinceLast(last: Int, now: Int) -> Int
+    ? "How much this window added to a counter."
+      "A counter that has gone backwards has not lost anything: it means a"
+      "new phase started counting from zero, and the body walk's Block and"
+      "byte totals are exactly that -- Infra.Bodies counts its own walk and"
+      "the phases either side of it count nothing. Reporting the difference"
+      "blindly wrote a negative into the log at every phase boundary, which"
+      "read as a fault and would have summed to nonsense under awk."
+    match now < last
+        true -> now
+        false -> now - last
+
+verify sinceLast
+    sinceLast(0, 2000) => 2000
+    sinceLast(2000, 2400) => 400
+    sinceLast(2000, 0) => 0
+    sinceLast(0, 0) => 0
+    sinceLast(499857, 12) => 12
+
+fn lineOf(phase: String, height: Int, target: Int, blocks: Int, bytes: Int, polledMs: Int, elapsedMs: Int, peers: Int, candidates: Int, nowMs: Int) -> String
+    ? "One record, fields in a fixed order and separated by single spaces."
+      "workedMs is the window less what was spent inside the poll, floored at"
+      "zero: the two clock readings bracket the poll and nothing else, but a"
+      "window that is entirely poll can round to a hair below zero and a"
+      "negative there would read as a fault rather than as arithmetic."
+    "{nowMs} {phase} {height} {target} {blocks} {bytes} {polledMs} {atLeastZero(elapsedMs - polledMs)} {peers} {candidates}\n"
+
+verify lineOf
+    lineOf("bodies", 500, 2000, 40, 1000, 200, 1000, 3, 41, 900) => "900 bodies 500 2000 40 1000 200 800 3 41\n"
+    lineOf("headers", 0, 0, 0, 0, 0, 0, 0, 0, 5) => "5 headers 0 0 0 0 0 0 0 0\n"
+    lineOf("set", 10, 20, 1, 2, 900, 800, 1, 0, 7) => "7 set 10 20 1 2 900 0 1 0\n"
+
+fn atLeastZero(value: Int) -> Int
+    ? "A count that cannot sensibly be negative."
+    match value < 0
+        true -> 0
+        false -> value
+
+verify atLeastZero
+    atLeastZero(5) => 5
+    atLeastZero(0) => 0
+    atLeastZero(0 - 3) => 0

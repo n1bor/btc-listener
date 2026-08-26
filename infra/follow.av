@@ -23,10 +23,10 @@ module Follow
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -44,6 +44,7 @@ record Following
     watch: Watching
     mempool: Mempool
     rebuilding: Option<Rebuilding>
+    log: Log
 
 record Rebuilding
     blockId: String
@@ -147,9 +148,9 @@ verify mempoolCap
 
 fn withWatch(state: Following, watch: Watching) -> Following
     ? "The state, with what the loop knows about its watching moved on."
-    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch, mempool = state.mempool, rebuilding = state.rebuilding)
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
-fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool, answering: Option<Int>) -> Result<Unit, String>
+fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool, answering: Option<Int>, logging: Option<String>) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
       "With screened true the listen loop runs as the Screen (#130): raw"
       "mode is entered once the catch-up is done, and however the session"
@@ -163,7 +164,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
       "catching up."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -171,12 +172,13 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
+    metricsLog = Infra.Metrics.opened(logOf(logging, Time.unixMs()), Domain.Network.nameOf(network), 0, 0)?
     book = bootstrapped(network, addresses)?
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Infra.Peers.peerKeys(pool))?
     told = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
     bound = listeningIf(told, store, answering)?
-    started = firstSeated(Following(pool = bound, store = store, blocks = blocks, book = book, nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), Domain.AddressBook.sizeOf(book))?
+    started = firstSeated(Following(pool = bound, store = store, blocks = blocks, book = book, nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None, log = metricsLog), Domain.AddressBook.sizeOf(book))?
     outcome = session(started, screened)
     _given = restoredIf(screened)
     closeAfter(bound, outcome)
@@ -269,6 +271,38 @@ verify textsOf
     textsOf([], []) => []
     List.len(textsOf([Domain.Address.fromPeerText("1.2.3.4:8333", 8333)?], [])) => 1
 
+fn markingCounts(state: Following, pool: Pool, phase: String, height: Int, target: Int, blocks: Int, bytes: Int, forced: Bool) -> Result<Log, String>
+    ? "One metrics record carrying what a walk counted (#180)."
+      "The body walk is the only phase that knows a Block count and a byte"
+      "count, and it knows them only while it is running -- Fetched is handed"
+      "back once, at the end. So the walk's own totals are read out of it"
+      "here rather than being asked for again from the store."
+    ! [Disk.appendText, Time.unixMs]
+    Infra.Metrics.marked(state.log, phase, height, target, blocks, bytes, Infra.Peers.polledMsOf(pool), List.len(Infra.Peers.peerKeys(pool)), Domain.AddressBook.sizeOf(state.book), forced)
+
+fn marking(state: Following, pool: Pool, phase: String, height: Int, target: Int, forced: Bool) -> Result<Log, String>
+    ? "One metrics record, at a phase boundary or when a window is due (#180)."
+      "Reads the counters out of the pool it is handed rather than the one in"
+      "the state, because a walk hands back a pool that has done the waiting"
+      "and the state's is the one from before it."
+    ! [Disk.appendText, Time.unixMs]
+    markingCounts(state, pool, phase, height, target, 0, 0, forced)
+
+fn withLog(state: Following, log: Log) -> Following
+    ? "The state, with the metrics log moved on."
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = log)
+
+fn logOf(logging: Option<String>, nowMs: Int) -> Log
+    ? "The metrics log this run keeps, which is none unless a path was asked"
+      "for (#180)."
+    match logging
+        Option.None -> Infra.Metrics.none()
+        Option.Some(path) -> Infra.Metrics.toFile(path, nowMs)
+
+verify logOf
+    logOf(Option.None, 5).path => Option.None
+    logOf(Option.Some("m.log"), 5).path => Option.Some("m.log")
+
 fn restoredIf(screened: Bool) -> Unit
     ? "Give the terminal back if the Screen ever had it; restoring a"
       "terminal that was never taken changes nothing."
@@ -327,7 +361,7 @@ fn drainSpare(state: Following) -> Following
       "the two questions are asked seconds apart, and the answers do not"
       "arrive in the order they were asked. The pool keeps what it was not"
       "asked for; this is where it is looked at, and emptied."
-    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
+    Following(pool = Infra.Peers.withoutSpare(state.pool), store = state.store, blocks = state.blocks, book = bookAfter(state.book, Infra.Peers.spareOf(state.pool)), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
 fn bookAfter(book: Map<String, Candidate>, spare: List<Spare>) -> Map<String, Candidate>
     ? "The Address Book, grown by whatever those Messages said."
@@ -402,7 +436,7 @@ fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String
         Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
+    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
     match parsed
         Result.Err(why) -> Result.Ok(tried)
         Result.Ok(peer) -> reaching(tried, address, peer)
@@ -440,7 +474,7 @@ fn reached(state: Following, address: String, joined: Pool) -> Result<Following,
     ! [Console.print, Tcp.writeBytes]
     _said = saidLineIfPlain(state.watch, "peer {state.nextKey} is {address}, from the Address Book")
     asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
-    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding))
+    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -528,7 +562,7 @@ fn session(state: Following, screened: Bool) -> Result<Unit, String>
       "behind -- which is to say it would refuse it, correctly, and stop."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -608,7 +642,7 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
       "left. Each attempt removes a Peer, so the retrying stops."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -624,7 +658,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
     ? "Drop the Peer that would not do it, then look for another."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -634,13 +668,13 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
     ]
     _said = Console.error("dropping peer {key}: {why}")
     shrunk = Infra.Peers.dropOne(state.pool, key)?
-    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding), why)
+    onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log), why)
 
 fn onwardWith(state: Following, why: String) -> Result<Following, String>
     ? "Another Peer to ask, or nobody left and the reason the last one gave."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -672,7 +706,7 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
       "time the Headers have."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -682,15 +716,19 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     ]
     have = haveOf(state.store)?
     grown = Infra.Download.headersOn(state.pool, key, state.store, have, eyeOf(state.watch))?
-    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watchSeen(state.watch, grown.eye), mempool = state.mempool, rebuilding = state.rebuilding))
+    headersLog = marking(state, grown.pool, "headers", haveOf(grown.store)?, 0, true)?
+    drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watchSeen(state.watch, grown.eye), mempool = state.mempool, rebuilding = state.rebuilding, log = headersLog))
     _heard = saidBookIfPlain(drained.watch, Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
     afterHeaders = toppedUp(drained)?
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders.watch))?
+    startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(afterHeaders.watch))?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding), tipHeight, aligned.unconfirmed)?
+    bodiesLog = markingCounts(withLog(afterHeaders, startLog), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
     standing = toppedUp(drainSpare(upToTip))?
-    backAtTip(standing)
+    setLog = marking(standing, standing.pool, "set", tipHeight, tipHeight, true)?
+    backAtTip(withLog(standing, setLog))
 
 fn backAtTip(state: Following) -> Result<Following, String>
     ? "The catch-up has returned, so the Snapshot says so."
@@ -742,7 +780,7 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
     restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding), watchAfterBuild(seen, built.views)))
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = state.log), watchAfterBuild(seen, built.views)))
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."
@@ -1037,7 +1075,7 @@ fn listen(state: Following) -> Result<Unit, String>
       "recursion does not grow the stack however long it runs."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1076,7 +1114,7 @@ fn turning(state: Following) -> Result<Unit, String>
       "means what it meant; it is only noticed in one-second steps now."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1087,13 +1125,13 @@ fn turning(state: Following) -> Result<Unit, String>
     drained = drainSpare(state)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
-    onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool, rebuilding = topped.rebuilding), topped.watch), ticked.arrived)
+    onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool, rebuilding = topped.rebuilding, log = state.log), topped.watch), ticked.arrived)
 
 fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
     ? "A Message to handle, or a moment to look at the clock."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1123,7 +1161,7 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
       "Snapshot's company up to date, say what has come due, and go round."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1134,8 +1172,9 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
     _somebody = anyoneLeft(List.len(Infra.Peers.peerKeys(state.pool)))?
     _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
     fresh = refreshed(state, nowMs)
-    taken = Infra.Peers.accepting(fresh.pool, fresh.nextKey)?
-    admitted = afterAccepting(fresh, taken)
+    kept = withLog(fresh, marking(fresh, fresh.pool, "listen", fresh.watch.snapshot.tip.height, fresh.watch.snapshot.tip.height, false)?)
+    taken = Infra.Peers.accepting(kept.pool, kept.nextKey)?
+    admitted = afterAccepting(kept, taken)
     match staleRebuild(admitted.rebuilding, nowMs)
         Option.Some(pending) -> fellBack(admitted, pending.key, "peer {pending.key} did not send the compact Block for {pending.blockId} within {Int.div(rebuildDeadlineMs(), 1000)} seconds")
         Option.None -> quietOnward(admitted, nowMs)
@@ -1145,7 +1184,7 @@ fn afterAccepting(state: Following, taken: Accepted) -> Following
       "Asked on every quiet turn rather than waited on: accept answers None"
       "for an empty backlog without blocking, so this costs a syscall a"
       "second and needs no wait of its own."
-    Following(pool = taken.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = nextAfter(state.nextKey, taken.seated), watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
+    Following(pool = taken.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = nextAfter(state.nextKey, taken.seated), watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
 fn nextAfter(nextKey: Int, seated: Option<Int>) -> Int
     ? "One further on if a caller took a key, unchanged if none did."
@@ -1161,7 +1200,7 @@ fn quietOnward(state: Following, nowMs: Int) -> Result<Unit, String>
     ? "The rest of the quiet turn, once no rebuild is overdue."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1203,7 +1242,7 @@ fn screenTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
       "watch one more redraw before it is answered."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1224,7 +1263,7 @@ fn drawnTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
       "arrives with the rest of #130."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1301,7 +1340,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
       "does is still telling us the chain moved."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1329,7 +1368,7 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
       "Block, and the Transactions in it will be offered again by somebody."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1350,7 +1389,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
       "one so that a Peer feeding us rubbish can be seen to have done it."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1361,7 +1400,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
     offered = Domain.Addr.addressesOf(body)
     grown = Domain.AddressBook.heardAll(state.book, renderedAll(offered, []), key)
     _said = heardIfPlain(state.watch, List.len(offered), key, Domain.AddressBook.sizeOf(grown))
-    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding))
+    listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn heardIfPlain(watch: Watching, offered: Int, key: Int, held: Int) -> Unit
     ? "The heard line for the plain log; the Panel shows the Book."
@@ -1399,7 +1438,7 @@ fn onMoved(state: Following, key: Int, why: String) -> Result<Unit, String>
       "held simply moves nothing."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1415,7 +1454,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Reply with the same nonce, to the Peer that sent it."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1425,7 +1464,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ]
     payload = Bytes.fromList(body)?
     sent = Infra.Peers.send(state.pool, key, "pong", payload)?
-    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding))
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn onOffered(state: Following, key: Int, offered: List<List<Int>>) -> Result<Unit, String>
     ? "Transactions a Peer says it holds."
@@ -1439,7 +1478,7 @@ fn onOffered(state: Following, key: Int, offered: List<List<Int>>) -> Result<Uni
       "orphan pool needs. Both are deferred by n1bor/btc-listener#28."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1478,7 +1517,7 @@ fn asking(state: Following, key: Int, hashes: List<List<Int>>) -> Result<Unit, S
       "Scripts need."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1488,7 +1527,7 @@ fn asking(state: Following, key: Int, hashes: List<List<Int>>) -> Result<Unit, S
     ]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
     sent = Infra.Peers.send(state.pool, key, "getdata", payload)?
-    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding))
+    listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn onTransaction(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "A Transaction we asked for, or one a Peer sent unasked."
@@ -1497,7 +1536,7 @@ fn onTransaction(state: Following, key: Int, body: List<Int>) -> Result<Unit, St
       "want -- and admission is the thing that decides, not who sent it."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1517,7 +1556,7 @@ fn landed(state: Following, key: Int, landing: Landing) -> Result<Unit, String>
       "answer its own Announcements."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1538,7 +1577,7 @@ fn notHeld(state: Following, why: String) -> Result<Unit, String>
       "counter on a Panel instead."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1556,7 +1595,7 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
       "that wants it asks, and most will already have it."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1568,7 +1607,7 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
     told = toldOthers(state.pool, Infra.Peers.peerKeys(state.pool), key, payload)?
     seen = arrivedOnRing(state, held, Time.unixMs())
-    listen(Following(pool = told, store = seen.store, blocks = seen.blocks, book = seen.book, nextKey = seen.nextKey, watch = seen.watch, mempool = after, rebuilding = seen.rebuilding))
+    listen(Following(pool = told, store = seen.store, blocks = seen.blocks, book = seen.book, nextKey = seen.nextKey, watch = seen.watch, mempool = after, rebuilding = seen.rebuilding, log = state.log))
 
 fn arrivedOnRing(state: Following, held: Domain.Mempool.Held, nowMs: Int) -> Following
     ? "The Transactions Panel learns about it now rather than when a Block"
@@ -1611,7 +1650,7 @@ fn onAsked(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
       "Core does with a getdata for something it no longer holds."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1738,7 +1777,7 @@ fn onAnnouncedBlocks(state: Following, key: Int, announced: List<List<Int>>, fir
       "lets the fallback do the work."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1757,7 +1796,7 @@ fn askingCompact(state: Following, key: Int, announced: List<List<Int>>, first: 
       "hold, and whole copies of the ones it does not."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1780,17 +1819,17 @@ verify compactBlockType
 
 fn withPool(state: Following, pool: Pool) -> Following
     ? "The state, with the pool moved on."
-    Following(pool = pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)
+    Following(pool = pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
 fn waitingFor(state: Following, key: Int, hash: List<Int>, nowMs: Int) -> Following
     ? "Remember which Block we are rebuilding and when we asked."
       "The clock matters: a Peer that never answers must not leave the node"
       "waiting for a Block it could simply have fetched."
-    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = Option.Some(Rebuilding(blockId = Domain.Hash.reversedHex(hash), hash = hash, key = key, askedMs = nowMs, compact = Option.None, asked = [])))
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = Option.Some(Rebuilding(blockId = Domain.Hash.reversedHex(hash), hash = hash, key = key, askedMs = nowMs, compact = Option.None, asked = [])), log = state.log)
 
 fn givenUp(state: Following) -> Following
     ? "Nothing being rebuilt any more."
-    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = Option.None)
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = Option.None, log = state.log)
 
 fn rebuildDeadlineMs() -> Int
     ? "How long a Peer has to answer a compact Block request."
@@ -1806,7 +1845,7 @@ fn onCompact(state: Following, key: Int, body: List<Int>) -> Result<Unit, String
     ? "A compact Block arrived. Rebuild it from the Mempool if we can."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1822,7 +1861,7 @@ fn filling(state: Following, key: Int, compact: Compact) -> Result<Unit, String>
     ? "Rename the Mempool under this Block's key, and see what is missing."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1858,7 +1897,7 @@ fn askingFor(state: Following, key: Int, compact: Compact, indexes: List<Int>) -
     ? "getblocktxn for the positions the Mempool could not fill."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1889,7 +1928,7 @@ verify hashOfRebuild
 
 fn awaiting(state: Following, compact: Compact, indexes: List<Int>) -> Following
     ? "Hold the compact Block while its missing parts are fetched."
-    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = heldRebuild(state.rebuilding, compact, indexes))
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = heldRebuild(state.rebuilding, compact, indexes), log = state.log)
 
 fn heldRebuild(rebuilding: Option<Rebuilding>, compact: Compact, indexes: List<Int>) -> Option<Rebuilding>
     ? "The same rebuild, now carrying what it is waiting on."
@@ -1905,7 +1944,7 @@ fn onBlockTxn(state: Following, key: Int, body: List<Int>) -> Result<Unit, Strin
     ? "The Transactions we asked for, to finish a rebuild."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1921,7 +1960,7 @@ fn withAnswer(state: Following, key: Int, answer: Tuple<List<Int>, List<Int>>) -
     ? "The Block it answers for, and the Transactions in it."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1936,7 +1975,7 @@ fn finishing(state: Following, key: Int, carried: Result<List<Carried>, String>)
     ? "Decode what arrived, keeping each Transaction's own bytes."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1961,7 +2000,7 @@ fn assembling(state: Following, key: Int, supplied: List<List<Int>>) -> Result<U
     ? "Fill the holes with what arrived and check the whole Block."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1977,7 +2016,7 @@ fn withPending(state: Following, key: Int, pending: Rebuilding, supplied: List<L
     ? "The compact Block we kept, now that its missing parts are here."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1996,7 +2035,7 @@ fn completed(state: Following, key: Int, compact: Compact, built: Result<Bytes, 
       "do and what the node would have done anyway."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -2017,7 +2056,7 @@ fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplie
       "nothing."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -2029,7 +2068,7 @@ fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplie
     blockId = Domain.Block.blockIdOf(Result.withDefault(Bytes.fromList(compact.header), Bytes.fromList([])))
     kept = Infra.Store.put(state.store, Domain.IndexKeys.blockKey(blockId)?, Domain.Index.encodeLocation(appended.location))?
     _said = saidRebuilt(blockId, Domain.CompactBlock.totalOf(compact), supplied, List.len(Bytes.octets(payload)))
-    onMoved(givenUp(Following(pool = state.pool, store = kept, blocks = appended.store, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding)), key, "Block {blockId} rebuilt from the Mempool")
+    onMoved(givenUp(Following(pool = state.pool, store = kept, blocks = appended.store, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)), key, "Block {blockId} rebuilt from the Mempool")
 
 fn saidRebuilt(blockId: String, total: Int, supplied: Int, bytes: Int) -> Unit
     ? "What the rebuild saved, which is the reason the stage exists."
@@ -2044,7 +2083,7 @@ fn fellBack(state: Following, key: Int, why: String) -> Result<Unit, String>
       "where it would have been without compact Blocks at all."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -2064,7 +2103,7 @@ fn onAskedHeaders(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
       "missing."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,

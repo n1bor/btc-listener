@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf]
     depends [Bytes, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -41,6 +41,7 @@ record Pool
     height: Int
     heardMs: Map<Int, Int>
     anyHeardMs: Int
+    polledMs: Int
 
 record Waited
     pool: Pool
@@ -274,7 +275,7 @@ fn seating(pool: Pool, key: Int, connection: Tcp.Connection, address: String) ->
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
     _said = Console.print("peer {key} dialled us from {address}")
     greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", true))
 
@@ -375,18 +376,18 @@ fn listening(pool: Pool, port: Int, services: Int, height: Int) -> Result<Pool, 
       "is not its own memory to fill."
     ! [Tcp.listen]
     listener = Tcp.listen(port, 16)?
-    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs))
+    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs))
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0)
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0)
 
 fn withStanding(pool: Pool, standing: Map<Int, Standing>) -> Pool
     ? "The pool, with what is known about the Peers moved on."
       "The sockets and the standing are kept in step by only ever changing"
       "one of them here: the pure half is Domain.Inbox's and this is the one"
       "place it is folded back in."
-    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
 
 fn spareLimit() -> Int
     ? "How many unasked-for Messages to keep for the caller."
@@ -406,7 +407,7 @@ fn spareOf(pool: Pool) -> List<Spare>
 
 fn withoutSpare(pool: Pool) -> Pool
     ? "The pool, with the kept Messages handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
 
 fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept for whoever wants it later (#168)."
@@ -419,7 +420,7 @@ fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
 
 fn sparing(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept, oldest dropped once the bound is reached."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
 
 fn bounded(spare: List<Spare>) -> List<Spare>
     ? "Keep the newest, because an address heard a minute ago is worth more"
@@ -617,7 +618,7 @@ fn seatedOut(pool: Pool, key: Int, address: PeerAddress, connection: Tcp.Connect
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
     introducedOrDropped(seated, key, address)
 
 fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
@@ -935,20 +936,45 @@ fn pumpedTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
       "A poll that reports nobody is the tick itself, handed back with"
       "nothing in it."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    before = Time.unixMs()
     ready = Tcp.poll(pollable(pool), tickMs)?
+    waited = polledFor(pool, Time.unixMs() - before)
     match ready
-        [] -> Result.Ok(Tick(pool = pool, arrived = Option.None))
-        [head, ..tail] -> awaitTick(reading(pool, ready)?, tickMs)
+        [] -> Result.Ok(Tick(pool = waited, arrived = Option.None))
+        [head, ..tail] -> awaitTick(reading(waited, ready)?, tickMs)
+
+fn polledFor(pool: Pool, elapsedMs: Int) -> Pool
+    ? "The wall clock spent inside one Tcp.poll, added to the pool's running"
+      "total (#180)."
+      "This is the only number a catch-up cannot work out afterwards. Every"
+      "other thing worth knowing -- Heights, bytes, Peers -- is on disk or on"
+      "the Overview when the run ends, but the split between waiting for a"
+      "Peer and working on what it sent exists only while it is happening."
+      "Wall clock is what Aver can offer, and here it is the better measure"
+      "anyway: it attributes the wait to the Peer rather than to the"
+      "scheduler."
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs + elapsedMs)
+
+verify polledFor
+    polledMsOf(polledFor(opened(Network.Regtest), 40)) => 40
+    polledMsOf(polledFor(polledFor(opened(Network.Regtest), 40), 25)) => 65
+    polledMsOf(polledFor(opened(Network.Regtest), 0)) => 0
+
+fn polledMsOf(pool: Pool) -> Int
+    ? "How long this pool has waited inside Tcp.poll, in total."
+    pool.polledMs
 
 fn pumped(pool: Pool) -> Result<Pool, String>
     ? "One turn of the loop: ask which Peers have something, and read them."
       "A poll that reports nobody is the whole pool silent for the idle"
       "deadline, which is not a slow Peer but a connection that is gone."
     ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Time.unixMs]
+    before = Time.unixMs()
     ready = Tcp.poll(pollable(pool), idleDeadlineMs())?
+    waited = polledFor(pool, Time.unixMs() - before)
     match ready
         [] -> Result.Err("no Peer said anything for {Int.div(idleDeadlineMs(), 1000)} seconds")
-        [head, ..tail] -> reading(pool, ready)
+        [head, ..tail] -> reading(waited, ready)
 
 fn reading(pool: Pool, ready: List<Int>) -> Result<Pool, String>
     ? "Take what each ready Peer has said, one after another."
@@ -1003,12 +1029,12 @@ fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: List<Int>) -> Result
       "be looking at the Peers Panel."
     ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
     heard = Time.unixMs()
-    marked = Pool(network = pool.network, sockets = pool.sockets, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard)
+    marked = Pool(network = pool.network, sockets = pool.sockets, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard, polledMs = pool.polledMs)
     reading(marked, rest)
 
 fn forgotten(pool: Pool, key: Int) -> Pool
     ? "Forget a Peer, without closing anything."
-    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
+    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs)
 
 fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
     ? "Close one Peer's socket and forget it."
