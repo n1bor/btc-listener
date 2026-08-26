@@ -466,7 +466,7 @@ fn reachedOrNot(state: Following, address: String, outcome: Joined) -> Result<Fo
 fn unreachable(state: Following, address: String, why: String) -> Result<Following, String>
     ? "Say who would not have us, and leave it marked as tried."
     ! [Console.error]
-    _said = Console.error("candidate {address} did not answer: {why}")
+    _said = saidErrorIfPlain(state.watch, "candidate {address} did not answer: {why}")
     Result.Ok(state)
 
 fn reached(state: Following, address: String, joined: Pool) -> Result<Following, String>
@@ -601,7 +601,8 @@ fn takenTerminal(state: Following) -> Result<Following, String>
     ]
     _taken = Infra.Screen.entered()?
     placed = Infra.Headers.tipOf(state.store)?
-    Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()), leaving = state.watch.leaving)))
+    quiet = withPool(state, Infra.Peers.drawnElsewhere(state.pool))
+    Result.Ok(withWatch(quiet, Watching(snapshot = atTip(quiet.watch.snapshot, placed, Time.unixMs()), heard = quiet.watch.heard, anyHeardMs = quiet.watch.anyHeardMs, saidPeersMs = quiet.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()), leaving = quiet.watch.leaving)))
 
 fn atTip(snapshot: Snapshot, placed: Option<Placement>, nowMs: Int) -> Snapshot
     ? "The Snapshot standing on the tree's best tip, when the tree has one."
@@ -666,7 +667,7 @@ fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, Str
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _said = Console.error("dropping peer {key}: {why}")
+    _said = saidErrorIfPlain(state.watch, "dropping peer {key}: {why}")
     shrunk = Infra.Peers.dropOne(state.pool, key)?
     onwardWith(Following(pool = shrunk, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log), why)
 
@@ -961,6 +962,17 @@ fn saidLineIfPlain(watch: Watching, line: String) -> Unit
         Option.None -> Console.print(line)
         Option.Some(view) -> Unit
 
+fn saidErrorIfPlain(watch: Watching, line: String) -> Unit
+    ? "One line of complaint for the plain log, and silence under a Screen."
+      "The Screen owns the terminal in raw mode: a line printed into it lands"
+      "wherever the cursor happens to be, and with no carriage return the next"
+      "one starts from that column. That is what turned a frame into a"
+      "staircase."
+    ! [Console.error]
+    match watch.view
+        Option.None -> Console.error(line)
+        Option.Some(view) -> Unit
+
 fn saidLinesIfPlain(watch: Watching, lines: List<String>) -> Unit
     ? "The same, for several."
     ! [Console.print]
@@ -1102,7 +1114,7 @@ fn stopping(state: Following) -> Result<Unit, String>
         Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
     ]
     _screen = restoredFor(state.watch.view)
-    _said = Console.print("stop requested; closing the pool and releasing the claim")
+    _said = saidLineIfPlain(state.watch, "stop requested; closing the pool and releasing the claim")
     _closed = Infra.Peers.closeAll(state.pool)
     Result.Ok(Unit)
 
@@ -1593,7 +1605,7 @@ fn notHeld(state: Following, why: String) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _said = Console.print("mempool refused a Transaction: it {why}")
+    _said = saidLineIfPlain(state.watch, "mempool refused a Transaction: it {why}")
     listen(state)
 
 fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.Held) -> Result<Unit, String>
@@ -1611,7 +1623,7 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _said = Console.print("mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
+    _said = saidLineIfPlain(state.watch, "mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
     told = toldOthers(state.pool, Infra.Peers.peerKeys(state.pool), key, payload)?
     seen = arrivedOnRing(state, held, Time.unixMs())
@@ -1750,7 +1762,7 @@ fn sendingBlock(state: Following, key: Int, rest: List<List<Int>>, location: Loc
     ]
     payload = Infra.Blocks.read(state.blocks, location)?
     sent = Infra.Peers.send(state.pool, key, "block", payload)?
-    _said = Console.print("served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
+    _said = saidLineIfPlain(state.watch, "served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
     servingBlocks(withPool(state, sent), key, rest)
 
 fn serving(pool: Pool, mempool: Mempool, key: Int, asked: List<List<Int>>) -> Result<Pool, String>
@@ -1922,7 +1934,7 @@ fn saidAsking(state: Following, missing: Int, total: Int) -> Unit
     ? "Say how much of the Block the Mempool already held, which is the whole"
       "point of a compact Block and the number worth watching."
     ! [Console.print]
-    Console.print("compact Block: {total - missing} of {total} Transaction(s) already held, asking for {missing}")
+    saidLineIfPlain(state.watch, "compact Block: {total - missing} of {total} Transaction(s) already held, asking for {missing}")
 
 fn hashOfRebuild(rebuilding: Option<Rebuilding>) -> List<Int>
     ? "The Block Id a getblocktxn names, in wire order."
@@ -2075,13 +2087,13 @@ fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplie
     appended = Infra.Blocks.append(state.blocks, payload)?
     blockId = Domain.Block.blockIdOf(Result.withDefault(Bytes.fromList(compact.header), Bytes.fromList([])))
     kept = Infra.Store.put(state.store, Domain.IndexKeys.blockKey(blockId)?, Domain.Index.encodeLocation(appended.location))?
-    _said = saidRebuilt(blockId, Domain.CompactBlock.totalOf(compact), supplied, List.len(Bytes.octets(payload)))
+    _said = saidRebuilt(state.watch, blockId, Domain.CompactBlock.totalOf(compact), supplied, List.len(Bytes.octets(payload)))
     onMoved(givenUp(Following(pool = state.pool, store = kept, blocks = appended.store, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)), key, "Block {blockId} rebuilt from the Mempool")
 
-fn saidRebuilt(blockId: String, total: Int, supplied: Int, bytes: Int) -> Unit
+fn saidRebuilt(watch: Watching, blockId: String, total: Int, supplied: Int, bytes: Int) -> Unit
     ? "What the rebuild saved, which is the reason the stage exists."
     ! [Console.print]
-    Console.print("compact Block {blockId}: {total} Transaction(s), {supplied} fetched, {bytes} bytes rebuilt from the Mempool")
+    saidLineIfPlain(watch, "compact Block {blockId}: {total} Transaction(s), {supplied} fetched, {bytes} bytes rebuilt from the Mempool")
 
 fn fellBack(state: Following, key: Int, why: String) -> Result<Unit, String>
     ? "A rebuild that did not work is a Block to fetch the ordinary way."
@@ -2099,7 +2111,7 @@ fn fellBack(state: Following, key: Int, why: String) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _said = Console.print("{why}; fetching it whole instead")
+    _said = saidLineIfPlain(state.watch, "{why}; fetching it whole instead")
     onMoved(givenUp(state), key, "falling back to a whole Block from peer {key}")
 
 fn onAskedHeaders(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
@@ -2131,15 +2143,15 @@ fn sendingHeaders(state: Following, key: Int, headers: List<String>) -> Result<F
     ! [Console.print, Tcp.writeBytes]
     payload = Domain.Block.headersPayload(headers)?
     sent = Infra.Peers.send(state.pool, key, "headers", payload)?
-    _said = saidServed(List.len(headers), key)
+    _said = saidServed(state.watch, List.len(headers), key)
     Result.Ok(withPool(state, sent))
 
-fn saidServed(howMany: Int, key: Int) -> Unit
+fn saidServed(watch: Watching, howMany: Int, key: Int) -> Unit
     ? "Say what was served, unless it was nothing."
     ! [Console.print]
     match howMany == 0
         true -> Unit
-        false -> Console.print("served {howMany} Header(s) to peer {key}")
+        false -> saidLineIfPlain(watch, "served {howMany} Header(s) to peer {key}")
 
 fn agreedHeight(store: Store, locator: List<List<Int>>) -> Result<Int, String>
     ? "The Height of the newest Block Id in the Locator that is on our active"

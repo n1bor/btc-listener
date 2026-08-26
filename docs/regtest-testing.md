@@ -935,6 +935,50 @@ already true of the single-Peer walk and `infra/prune.av` says so in as many
 words — so fetching from three Peers at once needs no reordering before the
 write, and this audit is what proves the Locations are right anyway.
 
+### 16b. Nothing prints into the Screen
+
+The Screen owns the terminal in raw mode, so a `Console.print` while it is up
+lands wherever the cursor happens to be — and with no carriage return after
+it, the next frame line starts from that column. One escaped line turns the
+whole frame into a staircase, and it looks like a redraw bug rather than a
+print.
+
+It only shows on a node with something to say, which is why it survived: on
+regtest with one Peer and an empty Mempool, nothing ever escapes. Give it
+something:
+
+```bash
+script -qf -c "timeout 80 $BIN regtest follow 127.0.0.1:19444 $D screen" screen.txt &
+sleep 45
+$A sendtoaddress "$($A getnewaddress)" 0.11      # a Mempool arrival to announce
+```
+
+Then grep the capture for lines that should never be in it:
+
+```bash
+for p in "mempool admitted" "mempool refused" "dropping peer" \
+         "closed the connection" "did not answer" "compact Block"; do
+  printf "%-24s %s\n" "$p" "$(grep -aoc "$p" screen.txt)"
+done
+```
+
+**Every count must be 0**, and `grep -aoc "o overview" screen.txt` must not
+be, or the Screen has stopped drawing rather than stopped leaking.
+
+**Check the plain run in the same pass.** The guards are `Option.None` on the
+View, so a bug that silences a Screen run silences the log run too, and that
+is the worse failure — a node that says nothing for hours.
+
+```bash
+$BIN regtest follow 127.0.0.1:19444 $D > plain.log 2>&1 &
+grep -c "mempool admitted" plain.log     # must be non-zero
+```
+
+`Infra.Peers` prints too and knows nothing about Screens. It carries a `plain`
+flag on the Pool instead, set false by `drawnElsewhere` when the Screen takes
+the terminal — so the module's question is "may I speak", not "is there a
+Screen", which is the only thing it can sensibly know.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
