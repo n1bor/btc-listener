@@ -1324,6 +1324,39 @@ the ordinary generated binary is the host — `aver compile` then `cargo build`,
 before. A provider declaring the wrong `contract_hash` is refused at startup
 rather than called.
 
+### The same contracts through a Node wasm-gc host
+
+[`wasm/host.mjs`](wasm/host.mjs) is a lightweight second host for the complete
+application. It instantiates the `main.av` wasm-gc artifact, supplies the
+standard capabilities through Node, and binds both project contracts through
+Aver's public custom-capability ABI. `Disk` is confined to a fresh temporary
+directory, `Infra.Kv` uses an in-memory Map, and `Tcp` implements the full
+listener/dial/connection reactor over Node sockets and JSPI. The ABI carries
+`Bytes`, `Result`, `Option`, lists, tuples and opaque resources without JSON.
+
+CI starts a local regtest Bitcoin Peer and invokes the real CLI as
+`regtest 127.0.0.1 <port>`. The actual program performs its non-blocking dial,
+`Tcp.poll` loop and `version`/`verack` handshake. The Peer then sends a `ping`
+whose checksum is deliberately wrong; the test succeeds only after the real
+framing and inbox code diagnoses it, drops the Peer, closes the connection and
+returns through `main`. This exercises the application graph rather than a
+purpose-built smoke guest. Node 26 is used because that is the first Node line
+this host supports without experimental JSPI flags.
+
+```bash
+aver compile main.av --module-root . --target wasm-gc -o /tmp/btc-listener-wasm
+npm ci --prefix wasm
+npm --prefix wasm run test:node -- /tmp/btc-listener-wasm/main.wasm
+```
+
+The final line prints `full btc-listener listener path: ok (...)`. This proves
+the complete listener path through the real application artifact, not parity
+with the native deployment or every CLI command. Its KV token owns an in-memory
+Map and its Disk root is deleted after each run, whereas the native production
+provider below owns durable RocksDB and ordinary files. The host does use real
+RIPEMD-160, SHA-1 and secp256k1 implementations (`node:crypto` and
+`@noble/curves`), rather than canned provider answers.
+
 The curve is a provider on purpose. RIPEMD-160 was written in Aver first and
 passed all eight published vectors, but a curve is not a hash: 256 bits of field
 arithmetic whose edge cases *are* consensus rules, where a wrong answer is a
