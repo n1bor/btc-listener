@@ -59,13 +59,14 @@ had to work out.
 **Failures that only `cargo build` finds.** All survive `check`, `verify`
 and `compile`.
 
-- **A binding whose name two depended-on modules both expose** is ambiguous in
-  the emitted Rust (`E0659`), because every module in a `depends` list is
-  glob-imported. Match binders were fixed by jasisz/aver#1043; **`let` bindings
-  were not**, and that is jasisz/aver#1151 with a reproducer. It bites when you
-  add one module to a `depends` list, not when you write the binding, so before
-  adding a dependency: `grep -rn "\bname\b" --include=*.av .` for anything you
-  bind. Rename the binding to fix it.
+- ~~**A binding whose name two depended-on modules both expose** is ambiguous
+  in the emitted Rust (`E0659`)~~ — **fixed upstream, both forms.** Match
+  binders went with jasisz/aver#1043 and `let` bindings with jasisz/aver#1152,
+  which closed the issue this project filed as jasisz/aver#1151. The pin from
+  `f6d7992c` carries it, and the reproducer that failed on `794f4af3` now
+  builds clean. It cost this project four renames in a day, so it is left here
+  struck through rather than deleted: if a binding ever goes ambiguous again,
+  this is what it was and `cargo build` is still the only gate that sees it.
 - A type named after a builtin is silently resolved to the builtin
   (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
   not proof a module compiles** — only reachability from `main.av` is, so
@@ -74,13 +75,11 @@ and `compile`.
   field must satisfy them — so no opaque record (`PeerAddress`) and no record
   that lacks the derives (`Frame`) can live inside one. #27 lost a per-Peer
   Frame queue to this and was better for it.
-- Every module in a `depends` list is glob-imported into the generated Rust.
-  Two of them defining the same name is usually harmless — this repo has 157
-  such pairs — but it becomes `E0659` the moment a **parameter or binding**
-  takes that name, because rustc has to rule the identifier out as a unit
-  pattern first (`Infra.Rewind.standing` against `Domain.AssumeValid.standing`
-  through `Infra.ChainState`, #26). Renaming either the helper or the binding
-  fixes it.
+- Every module in a `depends` list is glob-imported into the generated Rust,
+  and two of them defining the same name is harmless — this repo has 157 such
+  pairs. It **used** to become `E0659` the moment a parameter or binding took
+  that name (`Infra.Rewind.standing` against `Domain.AssumeValid.standing`
+  through `Infra.ChainState`, #26); the entry above is why it no longer does.
 
 ## Commands
 
