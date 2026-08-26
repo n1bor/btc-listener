@@ -935,6 +935,64 @@ already true of the single-Peer walk and `infra/prune.av` says so in as many
 words — so fetching from three Peers at once needs no reordering before the
 write, and this audit is what proves the Locations are right anyway.
 
+### 17. The metrics log
+
+A run with a Screen open leaves no record of itself: every walk asks the Eye
+whether it may speak and stays silent when a View is present. `log` writes the
+same numbers where they survive the run (#180).
+
+```bash
+$BIN regtest follow $PEERS $D log            # writes $D/metrics.log
+$BIN regtest follow $PEERS $D screen log     # the same, with a Screen
+$BIN regtest follow $PEERS $D log:/tmp/m.log # somewhere else
+```
+
+```
+# atMs phase height target blocks bytes polledMs workedMs peers candidates
+... headers 2001    0    0      0     40    518  3 0
+... bodies     1 2000    0      0      0      0  3 0
+... bodies  2000 2000 2000 499857      0    702  3 0
+... set     2000 2000    0      0      0  13788  3 0
+... listen  2000 2000    0      0  60014      3  3 0
+```
+
+**`polledMs` and `workedMs` are the pair worth having.** Everything else is
+already on the Overview or recoverable from the store afterwards; the split
+between waiting for a Peer and working on what it sent exists only while it is
+happening. `Tcp.poll` is bracketed by two clock readings, so `polledMs` is
+wall clock inside the poll and `workedMs` is the rest of the window.
+
+Read the shape of a regtest run and you can see what it is telling you:
+
+- `set 0 / 13788` — the Set phase waits for nothing. That is pure CPU, and it
+  is the number a "build the Set during the download" question needs.
+- `bodies 0 / 702` — barely any waiting, **because these Peers are loopback**.
+  On real Peers this inverts, which is why a measurement that matters has to
+  be run against seed Peers rather than a node on the same machine.
+- `listen 60014 / 3` — an idle node at the tip is all poll, which is the
+  sanity check that the two readings bracket the right thing.
+
+#### What to check
+
+```bash
+grep -vc '^#' $D/metrics.log                 # records written
+awk '/^#/{next} NF != 10 {bad++} END {print bad+0}' $D/metrics.log
+```
+
+- **A Screen run writes records and leaks nothing onto the frame.** Grep the
+  pty capture for a record line — it must find none.
+- **A plain run keeps its stdout lines as well**, so `log` adds a file rather
+  than replacing what was already printed.
+- **Ctrl-C leaves the log whole.** Every line is ten fields and the file ends
+  with a newline, because records are appended one line at a time and a run
+  that stops mid-phase simply has no record for it.
+
+**A phase boundary resets the Block and byte counters.** `Infra.Bodies` counts
+its own walk and the phases either side count nothing, so a record's counters
+can go backwards; `sinceLast` reports the raw value when they do. Written the
+obvious way it emitted `-2000` at every boundary, which reads as a fault and
+would sum to nonsense under `awk`.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
