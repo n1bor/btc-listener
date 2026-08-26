@@ -184,13 +184,48 @@ jobs:
       - name: Build the release binary
         run: cargo build --release --manifest-path build/Cargo.toml
 
+  wasm-node:
+    name: wasm-gc graph and Node host
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: wasm/package-lock.json
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver/aver
+          sudo chown -R "$USER" /home/owensr/aver
+          git -C /home/owensr/aver/aver init --quiet
+          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
+          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
+      - name: Cache the wasm-enabled Aver toolchain
+        id: aver-wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-wasm-node-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install wasm-enabled Aver from that source
+        if: steps.aver-wasm-cache.outputs.cache-hit != 'true'
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked --features wasm
+      - name: Install the lightweight Node provider host
+        run: npm ci --prefix wasm
+      - name: Compile the complete application graph to wasm-gc
+        run: aver compile main.av --module-root . --target wasm-gc -o "$RUNNER_TEMP/btc-listener-wasm"
+      - name: Run the complete listener against a local Bitcoin Peer
+        run: node wasm/host.mjs "$RUNNER_TEMP/btc-listener-wasm/main.wasm"
+
   binary:
     name: publish the binary for main
     # The download server does not build anything -- it is handed a binary, and
     # this is where that binary comes from (issue #138). Only on main, and only
     # behind every gate: a binary that failed verify is worse than none.
     if: github.ref == 'refs/heads/main'
-    needs: [format, check, verify, provider-tests, compile]
+    needs: [format, check, verify, provider-tests, compile, wasm-node]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
