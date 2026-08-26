@@ -201,9 +201,47 @@ holding a copy of the whole `Map`. Every batch in `infra/download.av`,
 `infra/txindex.av` and `infra/prune.av` earns its keep, and `absorbAll`,
 `forgetAll` and `replayApplied` still have to keep `Map.set` out of a helper.
 
+### Re-measured 26 August 2026, and half of it has gone
+
+[#890](https://github.com/jasisz/aver/issues/890) closed on 20 August, so the
+numbers above were re-taken on the `f6d7992c` pin, same machine, same shapes.
+The result is a split, and the split is the useful part.
+
+**A helper returning a bare `Map` is fixed.** Same three folds, compiled:
+
+| fold | 17 August, 80,000 | 26 August, 80,000 |
+|---|---|---|
+| `Map.set` inline in the recursive call | 48 ms | 14 ms |
+| branch, then tail-call | 49 ms | 14 ms |
+| via a helper that returns a `Map` | 105,633 ms | **13 ms** |
+
+Not 2,150× any more. Not measurable: the three are indistinguishable across
+repeated runs (11–16 ms), and the obvious helper is as fast as anything else.
+
+**A helper returning a record that holds a `Map` is not fixed.** Same machine,
+same size, compiled, 40,000 entries:
+
+| shape | time |
+|---|---|
+| helper returns a bare `Map` | 7 ms |
+| helper returns a record holding a `Map` — what `put` does | **15,660 ms** |
+
+That is still about 2,200×, and the only difference between the two is the
+record wrapper. So the Store's own table stands, with smaller numbers:
+**8 ms** through one `putAll` against **15,660 ms** one `put` at a time, where
+it was 52 ms against 24,404 ms.
+
+**Which means the batching keeps its original reason.** It was tempting, on
+seeing #890 close, to say the batches now survive only on
+[ADR 0006](0006-a-leveldb-under-the-index.md)'s atomicity argument — one
+`Kv.putAll` is one RocksDB `WriteBatch`. They survive on speed as well:
+`Infra.Store.put` hands back a `Store`, and a `Store` is a record holding a
+`Map`. Filed upstream as [jasisz/aver#1160](https://github.com/jasisz/aver/issues/1160), the sibling of #890.
+
 Curiously the three folds are now *equal* under `aver run` — 6,423 / 6,666 /
 6,055 ms at 40,000 — because all three are equally slowed by something else. See
-below.
+below. **Re-measured 26 August: 28 / 27 / 28 ms at the same size**, so they are
+still equal and the something else has gone too.
 
 ### What did come out: the two-pass replay
 
@@ -231,6 +269,10 @@ One shape is still quadratic under `aver run`: a `Map` filled with keys
 **interpolated in the loop that inserts them**. 40,000 inserts take 7,023 ms that
 way, 27 ms when the keys come from a list built beforehand, and 29 ms when they
 are sliced out of one large String. Compiled, all three are linear.
+
+**Re-measured 26 August: 54 ms interpolated against 39 ms from a list**, under
+`aver run` at the same size. #963's residue is gone, which is also why the fold
+table above went from about 6,000 ms to about 28 ms — those folds interpolate.
 
 That is why the fold table above went flat interpreted — all three folds
 interpolate, so all three pay it — and it is
@@ -271,9 +313,9 @@ being plain about:
   atomicity does not stop being wanted because the copy it also avoided is
   gone.
 
-What **is** now stale is the arithmetic. Every number in this document —
-2,150× for the obvious helper, 52 ms against 24,404 ms for 40,000 entries —
-was measured against a compiler that copied the `Map`. They are the reason the
-folds are shaped as they are, and they no longer describe the toolchain. They
-are left as written rather than adjusted by guesswork; re-measuring them is
-n1bor/btc-listener#188.
+The arithmetic was re-measured on 26 August 2026 (#188) and the result is
+above, under *Re-measured 26 August 2026, and half of it has gone*. Half the
+document's numbers were stale and half were not, which is why they were left
+standing until somebody ran them rather than adjusted by guesswork: the
+2,150× for a helper returning a bare `Map` is gone entirely, and the Store's
+own penalty for a helper returning a *record* holding one is intact.
