@@ -59,6 +59,13 @@ had to work out.
 **Failures that only `cargo build` finds.** All survive `check`, `verify`
 and `compile`.
 
+- **A binding whose name two depended-on modules both expose** is ambiguous in
+  the emitted Rust (`E0659`), because every module in a `depends` list is
+  glob-imported. Match binders were fixed by jasisz/aver#1043; **`let` bindings
+  were not**, and that is jasisz/aver#1151 with a reproducer. It bites when you
+  add one module to a `depends` list, not when you write the binding, so before
+  adding a dependency: `grep -rn "\bname\b" --include=*.av .` for anything you
+  bind. Rename the binding to fix it.
 - A type named after a builtin is silently resolved to the builtin
   (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
   not proof a module compiles** — only reachability from `main.av` is, so
