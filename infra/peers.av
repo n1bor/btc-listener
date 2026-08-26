@@ -1048,11 +1048,13 @@ fn closingSocket(pool: Pool, key: Int, socket: Tcp.Socket) -> Result<Pool, Strin
     ? "A Peer's socket released, and the key forgotten."
       "Only the Connected arm releases anything, and that is all this call"
       "is for: dropOne drops a Peer, and a Peer is never the listener --"
-      "listenerKey() is a key of its own. A Listener or Dial found under a"
-      "Peer key is forgotten rather than released, which is a leak on the"
-      "close-everything path and is n1bor/btc-listener#181. The unused"
-      "Tcp.closeListener in this module's effects is that issue's marker and"
-      "is deliberately left declared."
+      "listenerKey() is a key of its own. Anything else found under a Peer key"
+      "is forgotten here and released by closeAll, which is the call that owns"
+      "every socket rather than one Peer's (#181)."
+      "Putting the releases here instead would be the obvious fix and the"
+      "wrong one: dropOne is reachable from nearly the whole program, so"
+      "Tcp.closeListener would follow it into most of the call graph, every"
+      "function claiming a path that drops a Peer might close the listener."
     ! [Tcp.close]
     match socket
         Tcp.Socket.Connected(connection) -> closedOne(pool, key, connection)
@@ -1066,13 +1068,55 @@ fn closedOne(pool: Pool, key: Int, connection: Tcp.Connection) -> Result<Pool, S
     Result.Ok(forgotten(pool, key))
 
 fn closeAll(pool: Pool) -> Result<Pool, String>
-    ? "Release every socket the pool holds."
-    ! [Tcp.close]
+    ? "Release every socket the pool holds, whatever kind it is (#181)."
+      "This walked every key into dropOne, which is built for Peers and"
+      "forgets anything that is not one. So closing the pool left the bound"
+      "port held and any dial handle open -- and nothing noticed, because a"
+      "command that closes its pool is usually a process about to exit and the"
+      "operating system reclaims both. A follow that stopped and started again"
+      "inside one process would have found its own serve: port taken."
+    ! [Tcp.close, Tcp.closeDial, Tcp.closeListener]
     closingEach(pool, Map.keys(pool.sockets))
 
 fn closingEach(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "One at a time, so one failure does not strand the rest."
-    ! [Tcp.close]
+    ! [Tcp.close, Tcp.closeDial, Tcp.closeListener]
     match keys
         [] -> Result.Ok(pool)
-        [head, ..tail] -> closingEach(dropOne(pool, head)?, tail)
+        [head, ..tail] -> closingEach(releasing(pool, head)?, tail)
+
+fn releasing(pool: Pool, key: Int) -> Result<Pool, String>
+    ? "One socket of any kind, released and forgotten."
+    ! [Tcp.close, Tcp.closeDial, Tcp.closeListener]
+    match Map.get(pool.sockets, key)
+        Option.None -> Result.Ok(pool)
+        Option.Some(socket) -> releasingSocket(pool, key, socket)
+
+fn releasingSocket(pool: Pool, key: Int, socket: Tcp.Socket) -> Result<Pool, String>
+    ? "Each state released by its own call; none of them is the others."
+      "Which is what closingSocket's comment used to claim while two of its"
+      "three arms released nothing. This is the call that makes it true."
+      "The Dialing arm is unreachable from here today -- a dial is held as a"
+      "local by joined and never parked in pool.sockets (#172), so the only"
+      "kinds under a key are a Listener and a Connection. It releases the dial"
+      "anyway, because the type says a key can name one and unreachable today"
+      "is not unreachable."
+    ! [Tcp.close, Tcp.closeDial, Tcp.closeListener]
+    match socket
+        Tcp.Socket.Connected(connection) -> closedOne(pool, key, connection)
+        Tcp.Socket.Listening(listener) -> closedListening(pool, key, listener)
+        Tcp.Socket.Dialing(dial) -> closedDialing(pool, key, dial)
+
+fn closedListening(pool: Pool, key: Int, listener: Tcp.Listener) -> Result<Pool, String>
+    ? "The bound port released, then the key forgotten."
+      "The result is ignored on purpose, as it is for a Connection: this runs"
+      "on the way out, and a close that fails has nothing left to tell."
+    ! [Tcp.closeListener]
+    _closed = Tcp.closeListener(listener)
+    Result.Ok(forgotten(pool, key))
+
+fn closedDialing(pool: Pool, key: Int, dial: Tcp.Dial) -> Result<Pool, String>
+    ? "The dial cancelled, then the key forgotten."
+    ! [Tcp.closeDial]
+    _closed = Tcp.closeDial(dial)
+    Result.Ok(forgotten(pool, key))
