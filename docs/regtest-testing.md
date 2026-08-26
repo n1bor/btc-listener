@@ -800,6 +800,60 @@ grep -abo "$TXID fee" screen.txt | head -1                # 22454
 That gap is what showed the Screen was in the catching-up form for the whole
 time the Transaction was held — the phase bug `backAtTip` fixes.
 
+### 15. Starting with no address at all
+
+`follow <dir>` with no Peer named bootstraps from the Network's DNS seeds
+(#166). Regtest cannot test the happy path — `seedsOf(Regtest)` is `[]` by
+definition — but it tests the two things regtest *can* say:
+
+```bash
+$BIN regtest follow $D
+```
+
+```
+no Peer given; asking the regtest DNS seeds
+error: the regtest Network has no DNS seeds
+```
+
+That is a usage error naming the reason, not a lookup that fails. And a run
+that **does** name Peers must not quietly widen to DNS — check the first line
+is the Peer, not a seed lookup:
+
+```bash
+$BIN regtest follow 127.0.0.1:18444 $D
+```
+
+```
+peer 0 is 127.0.0.1:18444
+```
+
+The happy path needs a Network that has seeds. On signet, into a scratch
+directory that is not the one any long climb is using:
+
+```
+no Peer given; asking the signet DNS seeds
+20 Candidate(s) from the DNS seeds
+peer 0 is 109.160.122.56:38333, from the Address Book
+headers to 2000
+```
+
+**`from the Address Book` is the line that matters.** It says the Peer came
+out of the Book rather than off the command line, which is the whole of the
+change: the seeds fill the Book with Candidates and the ordinary dial loop
+does the rest.
+
+**The grammar is arity plus two words, not a flag.** `follow <dir>`,
+`follow <dir> screen` and `follow <dir> serve:18455` all read the first
+argument as the directory, because nothing following it is anything but
+`screen`, `serve` or `serve:PORT`. A directory actually named `screen` would
+be read as the word — the price of a grammar with no flags in it.
+
+**The Book is not persisted.** `domain/addressbook.av` keeps it in memory by
+design, so it is empty at every start and the seeds are asked on the first
+turn of every run that names no Peer. Once gossip has filled it the dial loop
+takes Candidates from the Book instead, which is the rule either way: ask the
+seeds when the Book cannot supply.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

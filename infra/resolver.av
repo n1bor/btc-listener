@@ -7,7 +7,7 @@ module Resolver
         "DNS over TCP puts a two-byte length in front of the message, which"
         "makes the exchange exactly the shape exact-length reads are for: read"
         "two bytes to learn the size, then read precisely that many."
-    exposes [discover, seedsOf, resolverHost]
+    exposes [discover, discoverAll, seedsOf, resolverHost]
     depends [Bytes, Domain.Dns, Domain.Address, Domain.Network]
     effects [
         Random.int,
@@ -62,10 +62,108 @@ verify mainnetSeeds
 fn discover(network: Network) -> Result<PeerAddress, String>
     ? "Ask a randomly chosen seed for Peers, and pick one of its answers."
       "A Network with no seeds is an answer, not a lookup that fails."
+      "One address is what the bare listener wants: one question to one"
+      "server, one Peer to listen to. A node that means to keep company"
+      "wants the whole answer, which is discoverAll."
     ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes]
     match seedsOf(network)
         [] -> Result.Err("the {Domain.Network.nameOf(network)} Network has no DNS seeds")
         [head, ..rest] -> chooseAddress(lookup(pick(List.prepend(head, rest), head))?, Domain.Network.portOf(network))
+
+fn discoverAll(network: Network) -> Result<List<PeerAddress>, String>
+    ? "Every address a seed answered with, for a node that wants company"
+      "rather than a Peer (#166)."
+      "Seeds are tried in a random order and the first that answers with"
+      "anything is taken. A seed that answers nothing is not a failure --"
+      "it is a seed having a bad day -- so the next one is asked, and only"
+      "running out of seeds is an error."
+      "One seed's answer skews towards one operator's view of the Network."
+      "That is worth knowing and is not fixed here: n1bor/btc-listener#118"
+      "is where eclipse resistance belongs, and until it lands the Address"
+      "Book is a convenience rather than a defence."
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes]
+    match seedsOf(network)
+        [] -> Result.Err("the {Domain.Network.nameOf(network)} Network has no DNS seeds")
+        [head, ..rest] -> askingSeeds(shuffled(List.prepend(head, rest), []), network, [])
+
+fn askingSeeds(seeds: List<String>, network: Network, tried: List<String>) -> Result<List<PeerAddress>, String>
+    ? "Each seed in turn, until one answers with addresses."
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes]
+    match seeds
+        [] -> Result.Err("no DNS seed for the {Domain.Network.nameOf(network)} Network answered with an address; tried {List.len(tried)}")
+        [head, ..rest] -> askedSeed(head, rest, network, tried)
+
+fn askedSeed(seed: String, rest: List<String>, network: Network, tried: List<String>) -> Result<List<PeerAddress>, String>
+    ? "One seed asked. A lookup that fails outright is the same as one that"
+      "answers nothing: try the next."
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes]
+    gave = lookup(seed)
+    match gave
+        Result.Err(why) -> askingSeeds(rest, network, List.prepend(seed, tried))
+        Result.Ok(octets) -> seedAnswered(octets, seed, rest, network, tried)
+
+fn seedAnswered(octets: List<List<Int>>, seed: String, rest: List<String>, network: Network, tried: List<String>) -> Result<List<PeerAddress>, String>
+    ? "An empty answer sends us to the next seed; anything else is what we"
+      "came for."
+    ! [Random.int, Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes]
+    match octets
+        [] -> askingSeeds(rest, network, List.prepend(seed, tried))
+        [head, ..tail] -> addressesOn(octets, Domain.Network.portOf(network), [])
+
+fn addressesOn(octets: List<List<Int>>, port: Int, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
+    ? "Each set of octets as an Address on the Network's port."
+    match octets
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> addressesOn(tail, port, List.prepend(Domain.Address.fromOctetsOn(head, port)?, acc))
+
+verify addressesOn
+    addressesOn([], 8333, []) => Result.Ok([])
+    List.len(Result.withDefault(addressesOn([[1, 2, 3, 4]], 8333, []), [])) => 1
+    List.len(Result.withDefault(addressesOn([[1, 2, 3, 4], [5, 6, 7, 8]], 8333, []), [])) => 2
+
+fn shuffled(seeds: List<String>, acc: List<String>) -> List<String>
+    ? "The seeds in a random order, so one operator is not always asked"
+      "first."
+    ! [Random.int]
+    match seeds
+        [] -> List.reverse(acc)
+        [head, ..tail] -> takenOut(List.prepend(head, tail), acc)
+
+fn takenOut(seeds: List<String>, acc: List<String>) -> List<String>
+    ? "One seed drawn at random, then the rest of them."
+    ! [Random.int]
+    drawnAt(seeds, chosenIndex(seeds), acc)
+
+fn chosenIndex(seeds: List<String>) -> Int
+    ? "Which one to draw. A roll nobody could make is the first."
+    ! [Random.int]
+    Result.withDefault(Random.int(0, List.len(seeds) - 1), 0)
+
+fn drawnAt(seeds: List<String>, index: Int, acc: List<String>) -> List<String>
+    ? "The seed at that position moved across, and the others carried on."
+    ! [Random.int]
+    shuffled(withoutAt(seeds, index, 0, []), List.prepend(itemAt(seeds, index, ""), acc))
+
+fn withoutAt(seeds: List<String>, index: Int, at: Int, acc: List<String>) -> List<String>
+    ? "Every seed but the one at that position."
+    match seeds
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keptUnless(head, tail, index, at, acc)
+
+verify withoutAt
+    withoutAt(["a", "b", "c"], 1, 0, []) => ["a", "c"]
+    withoutAt(["a"], 0, 0, []) => []
+    withoutAt([], 0, 0, []) => []
+
+fn keptUnless(head: String, tail: List<String>, index: Int, at: Int, acc: List<String>) -> List<String>
+    ? "This one, unless it is the one being drawn."
+    match at == index
+        true -> withoutAt(tail, index, at + 1, acc)
+        false -> withoutAt(tail, index, at + 1, List.prepend(head, acc))
+
+verify keptUnless
+    keptUnless("a", [], 0, 0, []) => []
+    keptUnless("a", [], 1, 0, []) => ["a"]
 
 fn pick(candidates: List<String>, fallback: String) -> String
     ? "One of the candidates, chosen at random."
