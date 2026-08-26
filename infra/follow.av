@@ -404,66 +404,89 @@ verify sampleAddrBody
     Domain.Addr.addressesOf(sampleAddrBody()) => [Domain.Address.fromOctetsOn([1, 2, 3, 4], 8333)?]
 
 fn toppedUp(state: Following) -> Result<Following, String>
-    ? "Dial a Candidate when the node is short of Peers."
-      "One per turn of the loop rather than a rush of them: a Handshake is a"
-      "conversation and this loop is the only thing that can have one, so"
-      "every dial is time the Peers we already have are not being read."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    match List.len(Infra.Peers.peerKeys(state.pool)) >= targetPeers()
+    ? "Start a dial when the node is short of Peers, and do not wait for it."
+      "One at a time rather than a rush of them: a Handshake is a"
+      "conversation and this loop is the only thing that can have one."
+      "What #202 changed is that the rate is no longer bought with the"
+      "loop's wall clock. This used to stand in Infra.Peers.joined until the"
+      "dial settled -- five seconds on an address out of an Address Book,"
+      "against a tick of one -- so a node short of Peers spent five of every"
+      "six seconds here and got through one Message in each of them. With"
+      "2,751 Candidates to work through it admitted no Transactions at all."
+      "The dial is parked on the pool now and asked once a turn what it has"
+      "become; a Candidate still costs its five seconds, but they are the"
+      "dial's seconds and not the loop's."
+    ! [Tcp.beginConnect, Time.unixMs]
+    match Bool.or(List.len(Infra.Peers.peerKeys(state.pool)) >= targetPeers(), Infra.Peers.dialingNow(state.pool))
         true -> Result.Ok(state)
-        false -> dialling(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
+        false -> choosing(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
 
-fn dialling(state: Following, chosen: Option<String>) -> Result<Following, String>
+fn choosing(state: Following, chosen: Option<String>) -> Result<Following, String>
     ? "Nothing worth dialling is the usual answer, and not a problem."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
+    ! [Tcp.beginConnect, Time.unixMs]
     match chosen
         Option.None -> Result.Ok(state)
         Option.Some(address) -> dialled(state, address, Domain.Address.fromPeerText(address, Domain.Network.portOf(state.pool.network)))
 
 fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String>) -> Result<Following, String>
     ? "A Candidate whose address will not parse is one a Peer made up."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
+    ! [Tcp.beginConnect, Time.unixMs]
     tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
     match parsed
         Result.Err(why) -> Result.Ok(tried)
-        Result.Ok(peer) -> reaching(tried, address, peer)
+        Result.Ok(peer) -> Result.Ok(reaching(tried, peer))
 
-fn reaching(state: Following, address: String, peer: PeerAddress) -> Result<Following, String>
-    ? "One Candidate that would not answer is one Candidate, not the end."
+fn reaching(state: Following, peer: PeerAddress) -> Following
+    ? "The dial started, and the key it will seat under taken."
+      "Taken now rather than on success, because the success comes back some"
+      "turns later and nothing else may use the key in between. It costs an"
+      "identifier per Candidate that will not answer, which is a number and"
+      "not a Peer -- the startup walk still hands keys out only to Peers"
+      "that seat, and regtest section 13 still reads key 0."
+    ! [Tcp.beginConnect, Time.unixMs]
+    withNextKey(withPool(state, Infra.Peers.dialling(state.pool, state.nextKey, peer)), state.nextKey + 1)
+
+fn withNextKey(state: Following, nextKey: Int) -> Following
+    ? "The state, with the next identifier a Peer will take."
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
+
+fn dialsAsked(state: Following) -> Result<Following, String>
+    ? "Ask the dial what it became, and say so."
+      "The pair the loop does every turn, done here as well because a"
+      "catch-up is hours long and the dial started at the last phase"
+      "boundary would otherwise sit parked until the walk ended and its"
+      "deadline had long since passed. It costs one Tcp.dialled and no"
+      "waiting, which is the whole point of #202."
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    match Infra.Peers.joined(state.pool, state.nextKey, peer)
-        Result.Err(why) -> unreachable(state, address, why)
-        Result.Ok(outcome) -> reachedOrNot(state, address, outcome)
+    drainSettled(withPool(state, Infra.Peers.advanced(state.pool)?))
 
-fn reachedOrNot(state: Following, address: String, outcome: Joined) -> Result<Following, String>
-    ? "A Candidate that would not have us hands the pool back anyway."
-      "The dial is polled alongside the Peers now, so the seconds it spent"
-      "waiting were seconds those Peers were being read: throwing the pool"
-      "away with the failure would throw their bytes away with it."
+fn drainSettled(state: Following) -> Result<Following, String>
+    ? "What the dials became while the loop was doing something else."
+      "Kept on the pool rather than returned, the same as the spare"
+      "Messages, so a dial that settles during a walk is still said out loud"
+      "when the walk ends rather than being lost with the walk's pool."
     ! [Console.error, Console.print, Tcp.writeBytes]
-    match outcome.seated
-        true -> reached(state, address, outcome.pool)
-        false -> unreachable(withPool(state, outcome.pool), address, outcome.why)
+    saying(withPool(state, Infra.Peers.withoutSettled(state.pool)), Infra.Peers.settledOf(state.pool))
+
+fn saying(state: Following, outcomes: List<Outcome>) -> Result<Following, String>
+    ? "One at a time, oldest first."
+    ! [Console.error, Console.print, Tcp.writeBytes]
+    match outcomes
+        [] -> Result.Ok(state)
+        [head, ..tail] -> saying(said(state, head)?, tail)
+
+fn said(state: Following, one: Outcome) -> Result<Following, String>
+    ? "A Candidate that answered is a Peer to greet; one that did not is a"
+      "line and nothing more."
+    ! [Console.error, Console.print, Tcp.writeBytes]
+    match one.seated
+        false -> unreachable(state, one.address, one.why)
+        true -> reached(state, one.address, one.key)
 
 fn unreachable(state: Following, address: String, why: String) -> Result<Following, String>
     ? "Say who would not have us, and leave it marked as tried."
@@ -471,12 +494,12 @@ fn unreachable(state: Following, address: String, why: String) -> Result<Followi
     _said = saidErrorIfPlain(state.watch, "candidate {address} did not answer: {why}")
     Result.Ok(state)
 
-fn reached(state: Following, address: String, joined: Pool) -> Result<Following, String>
+fn reached(state: Following, address: String, key: Int) -> Result<Following, String>
     ? "A Candidate has become a Peer, so ask it who it knows."
     ! [Console.print, Tcp.writeBytes]
-    _said = saidLineIfPlain(state.watch, "peer {state.nextKey} is {address}, from the Address Book")
-    asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
-    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
+    _said = saidLineIfPlain(state.watch, "peer {key} is {address}, from the Address Book")
+    asked = Infra.Peers.send(state.pool, key, "getaddr", Bytes.fromList([]))?
+    Result.Ok(withPool(state, asked))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -707,6 +730,11 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
       "that on the one Peer it was started with, which is the arrangement"
       "this stage exists to end. The answer to a getaddr has arrived by the"
       "time the Headers have."
+      "The top-up between phases costs nothing now (#202): it asks the dial"
+      "in flight what it became and starts another, and neither waits. Those"
+      "two calls used to be five seconds each, and they are the 5011 and"
+      "5034 ms that stood between the phase boundaries in every metrics log"
+      "this project has recorded."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -722,14 +750,14 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     headersLog = marking(withLog(state, grown.eye.log), grown.pool, "headers", haveOf(grown.store)?, 0, true)?
     drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watchSeen(state.watch, grown.eye), mempool = state.mempool, rebuilding = state.rebuilding, log = headersLog))
     _heard = saidBookIfPlain(drained.watch, Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
-    afterHeaders = toppedUp(drained)?
+    afterHeaders = toppedUp(dialsAsked(drained)?)?
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)))?
     bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
     upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
-    standing = toppedUp(drainSpare(upToTip))?
+    standing = toppedUp(dialsAsked(drainSpare(upToTip))?)?
     setLog = marking(standing, standing.pool, "set", tipHeight, tipHeight, true)?
     backAtTip(withLog(standing, setLog))
 
@@ -1128,7 +1156,13 @@ fn restoredFor(view: Option<View>) -> Unit
         Option.Some(one) -> Infra.Screen.restored()
 
 fn turning(state: Following) -> Result<Unit, String>
-    ? "One ordinary turn of the loop."
+    ? "One ordinary turn of the loop: ask the dial what it has become, say"
+      "so, take what arrived unasked-for, start a dial if the pool is short,"
+      "then wait a tick."
+      "The dial is asked rather than waited for (#202). Tcp.dialled answers"
+      "on the spot -- the runtime's deadline, the socket's error, or None"
+      "for one still in progress -- so a Candidate that takes five seconds"
+      "takes five turns rather than five seconds of one."
       "The wait is one tick rather than the whole idle deadline (#129): a"
       "Message from any Peer ends it early and is handled exactly as before,"
       "and a tick of silence hands the loop to its own clock -- the silence"
@@ -1144,7 +1178,8 @@ fn turning(state: Following) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    drained = drainSpare(state)
+    told = dialsAsked(state)?
+    drained = drainSpare(told)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
     onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool, rebuilding = topped.rebuilding, log = state.log), topped.watch), ticked.arrived)
