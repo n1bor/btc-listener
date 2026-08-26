@@ -854,6 +854,87 @@ turn of every run that names no Peer. Once gossip has filled it the dial loop
 takes Candidates from the Book instead, which is the rule either way: ask the
 seeds when the Book cannot supply.
 
+### 16. Bodies from several Peers at once
+
+The body phase asks every Peer at once and takes Blocks from whoever answers
+(#168). Three Cores serving the same chain is enough to see it. Give them
+distinct ports so nothing collides with the pair §1 already uses:
+
+```bash
+# pa 19444/19443, pb 19454/19453, pc 19464/19463, same bitcoin.conf shape
+$A generatetoaddress 2000 "$($A getnewaddress)"
+$B addnode "127.0.0.1:19444" onetry; $C addnode "127.0.0.1:19444" onetry
+$BIN regtest follow 127.0.0.1:19444,127.0.0.1:19454,127.0.0.1:19464 $D
+```
+
+**Read the proof off Core, not off our own log.** Turn net logging on at
+runtime — no restart needed — and the counterparty records both halves:
+
+```bash
+$A logging '["net"]'          # and on the other two
+grep -o "received getdata ([0-9]* invsz" pa/regtest/debug.log | sort | uniq -c
+grep -c "sending block " pa/regtest/debug.log
+```
+
+```
+122x1  1x16          <- batch sizes: one of sixteen, then top-ups of one
+pa 138  pb 144  pc 118 blocks       <- 400 blocks, split three ways
+```
+
+`16 invsz` is the per-Peer ceiling being filled; the `1 invsz` top-ups that
+follow are the walk keeping it full as each Block lands, which is what
+Bitcoin Core's own downloader does. Sixteen outstanding per Peer across three
+Peers is 48 Blocks in flight at all times.
+
+The Peers Panel says the same thing from our side — every row's `received`
+counter moves, where a one-Peer walk moves only one:
+
+```
+0    out  127.0.0.1:19444    70016    9019    70501
+1    out  127.0.0.1:19454    70016    8594    39429
+2    out  127.0.0.1:19464    70016    7130    32864
+```
+
+#### Killing a Peer mid-download
+
+The point of the in-flight bookkeeping is that a Peer dying does not strand
+the Blocks it was owing. Stop one while the walk is running:
+
+```bash
+$BIN regtest follow 127.0.0.1:19444,127.0.0.1:19454,127.0.0.1:19464 $D &
+sleep 12
+bitcoin-cli -datadir=$PWD/pb ... stop
+```
+
+```
+peer 1 closed the connection
+...
+following at Height 2000: 2000 connected, 0 disconnected, set +2000 -0
+```
+
+The walk finishes. What the dead Peer was owing goes back on the wanted list
+and is asked of whoever is left. **A hang here is the failure mode** — the
+walk waiting forever for a Block nothing is going to send.
+
+#### And then audit it
+
+This is the test that matters, because it is the one that would catch a
+Segment written wrong:
+
+```bash
+$BIN regtest audit $D 1 2000
+```
+
+```
+blocks 2000  transactions 2000  ...  CLEAN (faults 0, script failures 0)
+```
+
+Every Block is read back by the Location the Index holds for it. **Blocks are
+appended in the order they arrive and never in Height order** — that was
+already true of the single-Peer walk and `infra/prune.av` says so in as many
+words — so fetching from three Peers at once needs no reordering before the
+write, and this audit is what proves the Locations are right anyway.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

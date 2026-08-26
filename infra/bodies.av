@@ -37,6 +37,23 @@ record Fetched
     pace: Pace
     eye: Eye
 
+record Owed
+    key: Int
+    height: Int
+
+record Claim
+    blockId: String
+    height: Int
+
+record Plan
+    wanted: List<Int>
+    owed: Map<String, Owed>
+
+record Flight
+    progress: Fetched
+    plan: Plan
+    heardMs: Int
+
 fn locationBatch() -> Int
     ? "How many Locations to hold before writing them."
       "A Store hands back a copy of itself, so one put per Block costs the size"
@@ -83,17 +100,66 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
       "where it sits, and this is what turns that into a body on disk the"
       "UTXO Set can be connected from. A Height whose Block is already held is"
       "skipped, so re-running it over a range that overlaps costs nothing."
+      "The key names the Peer the caller was talking to; it is where the"
+      "first Blocks are asked from and no longer the only Peer asked (#168)."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    walked = walk(Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), key, from, to)?
-    settled(walked)
+    started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye)
+    flown = flying(Flight(progress = started, plan = Plan(wanted = heightsFrom(from, to, []), owed = Map.fromList([])), heardMs = Time.unixMs()), to)?
+    settled(flown)
+
+fn heightsFrom(from: Int, to: Int, acc: List<Int>) -> List<Int>
+    ? "The Heights in a range, lowest first, which is the order they are"
+      "asked for in."
+    match to < from
+        true -> acc
+        false -> heightsFrom(from, to - 1, List.prepend(to, acc))
+
+verify heightsFrom
+    heightsFrom(1, 3, []) => [1, 2, 3]
+    heightsFrom(2, 2, []) => [2]
+    heightsFrom(5, 4, []) => []
+    heightsFrom(0, 0, []) => [0]
+
+fn perPeer() -> Int
+    ? "How many Blocks one Peer may owe at once."
+      "Sixteen is Bitcoin Core's own MAX_BLOCKS_IN_TRANSIT_PER_PEER, and the"
+      "reason for a ceiling at all is that the slowest Peer decides when the"
+      "walk finishes: whatever it has been given, everyone else is waiting"
+      "on. Bounded work per Peer means a slow one holds up a bounded amount"
+      "of the range and the rest of the pool absorbs it."
+    16
+
+verify perPeer
+    perPeer() => 16
+
+fn tickMs() -> Int
+    ? "How long one turn waits for a Block before looking at its own clock."
+      "The same cadence the loop uses: long enough not to spin, short enough"
+      "that a Screen redraw and the stop flag are answered promptly."
+    1000
+
+verify tickMs
+    tickMs() => 1000
+
+fn stallMs() -> Int
+    ? "How long the walk waits with Blocks owed and nothing arriving before"
+      "it decides the Peers owing them are not going to answer."
+      "A Peer that takes a getdata and says nothing is worse than one that"
+      "refuses: it holds part of the range and the walk cannot finish. Thirty"
+      "seconds is well past any honest round trip, including a Peer serving a"
+      "Block from spinning disk."
+    30000
+
+verify stallMs
+    stallMs() => 30000
 
 fn settled(progress: Fetched) -> Result<Fetched, String>
     ? "Write whatever Locations are still held back."
@@ -101,8 +167,9 @@ fn settled(progress: Fetched) -> Result<Fetched, String>
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
     Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, pace = progress.pace, eye = progress.eye))
 
-fn walk(progress: Fetched, key: Int, height: Int, to: Int) -> Result<Fetched, String>
-    ? "Each Height in turn, until the range is exhausted."
+fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "One turn: hand out what can be handed out, then take whatever comes"
+      "back from whoever has it."
       "Each turn asks the stop flag first, so a Ctrl-C during a long fetch"
       "ends the walk at a Block boundary with what is already stored, and the"
       "command's claim is released the ordinary way (#112)."
@@ -111,120 +178,422 @@ fn walk(progress: Fetched, key: Int, height: Int, to: Int) -> Result<Fetched, St
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    match Bool.or(height > to, Bool.or(Process.stopRequested(), progress.eye.stopped))
-        true -> Result.Ok(progress)
-        false -> atHeight(progress, key, height, to)
+    match Bool.or(Process.stopRequested(), flight.progress.eye.stopped)
+        true -> Result.Ok(flight.progress)
+        false -> flyingOn(flight, to)
 
-fn atHeight(progress: Fetched, key: Int, height: Int, to: Int) -> Result<Fetched, String>
-    ? "A Height the Index does not name cannot be fetched, and ends the walk."
+fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "Nothing wanted and nothing owed is a range that is on disk."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    named = Domain.Index.blockIdIn(Infra.Store.get(progress.store, Domain.IndexKeys.heightKey(height)?)?)
+    match Bool.and(List.len(flight.plan.wanted) == 0, Map.len(flight.plan.owed) == 0)
+        true -> Result.Ok(flight.progress)
+        false -> turning(flight, to)
+
+fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "A turn needs somebody to ask. The pool emptying is the one way this"
+      "walk fails outright: every other fault costs one Peer and is carried"
+      "by the others."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match Infra.Peers.peerKeys(flight.progress.pool)
+        [] -> Result.Err("no Peer is left to fetch Blocks from")
+        [head, ..tail] -> asking(requeued(flight, List.prepend(head, tail)), List.prepend(head, tail), to)
+
+fn asking(flight: Flight, live: List<Int>, to: Int) -> Result<Fetched, String>
+    ? "Every Peer topped up to what it may hold, then one wait."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    filled = assigned(flight, live)?
+    waitingFor(filled, to)
+
+fn requeued(flight: Flight, live: List<Int>) -> Flight
+    ? "Blocks owed by a Peer that has gone go back on the wanted list (#168)."
+      "A Peer that closes mid-walk is dropped inside the pool, quietly and"
+      "correctly -- it is one Peer of several. What it was owing would"
+      "otherwise be owed by nobody, and the walk would wait for a Block that"
+      "nothing was going to send. They go to the front, because they are the"
+      "lowest Heights outstanding and the walk is measured by its lowest."
+    withPlan(flight, regathered(flight.plan, Map.keys(flight.plan.owed), live))
+
+fn regathered(plan: Plan, ids: List<String>, live: List<Int>) -> Plan
+    ? "Each owed Block in turn."
+    match ids
+        [] -> plan
+        [head, ..tail] -> regathered(backIfGone(plan, head, Map.get(plan.owed, head), live), tail, live)
+
+verify regathered
+    regathered(samplePlan(), ["aa"], [0]) => samplePlan()
+    regathered(samplePlan(), ["aa"], [9]) => Plan(wanted = [5, 3, 7], owed = Map.fromList([]))
+    regathered(samplePlan(), [], []) => samplePlan()
+
+fn backIfGone(plan: Plan, blockId: String, owed: Option<Owed>, live: List<Int>) -> Plan
+    ? "One owed Block, back on the list if the Peer that owed it is gone."
+    match owed
+        Option.None -> plan
+        Option.Some(one) -> backUnlessLive(plan, blockId, one, List.contains(live, one.key))
+
+verify backIfGone
+    backIfGone(samplePlan(), "zz", Option.None, []) => samplePlan()
+    backIfGone(samplePlan(), "aa", Option.Some(Owed(key = 0, height = 5)), [0]) => samplePlan()
+
+fn backUnlessLive(plan: Plan, blockId: String, owed: Owed, alive: Bool) -> Plan
+    ? "A live Peer keeps what it owes; a departed one gives it up."
+    match alive
+        true -> plan
+        false -> Plan(wanted = List.prepend(owed.height, plan.wanted), owed = Map.remove(plan.owed, blockId))
+
+verify backUnlessLive
+    backUnlessLive(samplePlan(), "aa", Owed(key = 0, height = 5), true) => samplePlan()
+    backUnlessLive(samplePlan(), "aa", Owed(key = 0, height = 5), false) => Plan(wanted = [5, 3, 7], owed = Map.fromList([]))
+
+fn samplePlan() -> Plan
+    ? "A Plan for the cases above: one Height wanted and one owed by Peer 0."
+    Plan(wanted = [3, 7], owed = Map.fromList([("aa", Owed(key = 0, height = 5))]))
+
+verify samplePlan
+    samplePlan().wanted => [3, 7]
+    Map.len(samplePlan().owed) => 1
+
+fn assigned(flight: Flight, live: List<Int>) -> Result<Flight, String>
+    ? "Each Peer given as much as it has room for."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    match live
+        [] -> Result.Ok(flight)
+        [head, ..tail] -> assignedOn(flight, head, tail)
+
+fn assignedOn(flight: Flight, key: Int, rest: List<Int>) -> Result<Flight, String>
+    ? "One Peer topped up, then the others."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    toppedUp = batching(flight, key, perPeer() - owedBy(flight.plan, Map.keys(flight.plan.owed), key, 0), [])?
+    assigned(toppedUp, rest)
+
+fn owedBy(plan: Plan, ids: List<String>, key: Int, acc: Int) -> Int
+    ? "How many Blocks this Peer already owes."
+    match ids
+        [] -> acc
+        [head, ..tail] -> owedBy(plan, tail, key, countedFor(Map.get(plan.owed, head), key, acc))
+
+verify owedBy
+    owedBy(samplePlan(), Map.keys(samplePlan().owed), 0, 0) => 1
+    owedBy(samplePlan(), Map.keys(samplePlan().owed), 9, 0) => 0
+    owedBy(samplePlan(), [], 0, 0) => 0
+
+fn countedFor(owed: Option<Owed>, key: Int, acc: Int) -> Int
+    ? "One more if this Block is owed by that Peer."
+    match owed
+        Option.None -> acc
+        Option.Some(one) -> addedIfSame(one.key == key, acc)
+
+verify countedFor
+    countedFor(Option.None, 0, 4) => 4
+    countedFor(Option.Some(Owed(key = 0, height = 3)), 0, 4) => 5
+    countedFor(Option.Some(Owed(key = 1, height = 3)), 0, 4) => 4
+
+fn batching(flight: Flight, key: Int, room: Int, taken: List<Claim>) -> Result<Flight, String>
+    ? "Take Heights off the wanted list until this Peer is full."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    match Bool.or(room <= 0, List.len(flight.plan.wanted) == 0)
+        true -> requesting(flight, key, taken)
+        false -> nextWanted(flight, key, room, taken)
+
+fn nextWanted(flight: Flight, key: Int, room: Int, taken: List<Claim>) -> Result<Flight, String>
+    ? "The next Height, or nothing left to want."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    match flight.plan.wanted
+        [] -> requesting(flight, key, taken)
+        [head, ..tail] -> claiming(withPlan(flight, withWanted(flight.plan, tail)), key, room, taken, head)
+
+fn claiming(flight: Flight, key: Int, room: Int, taken: List<Claim>, height: Int) -> Result<Flight, String>
+    ? "A Height the Index does not name cannot be fetched, and ends the walk."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    named = Domain.Index.blockIdIn(Infra.Store.get(flight.progress.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
-        Option.Some(blockId) -> maybeFetch(progress, key, height, to, blockId)
+        Option.Some(blockId) -> claimingHeld(flight, key, room, taken, height, blockId)
 
-fn maybeFetch(progress: Fetched, key: Int, height: Int, to: Int, blockId: String) -> Result<Fetched, String>
-    ? "A Block already held is skipped, which is what makes the phase resumable."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
-        Time.unixMs,
-    ]
-    held = Infra.Store.has(progress.store, Domain.IndexKeys.blockKey(blockId)?)?
+fn claimingHeld(flight: Flight, key: Int, room: Int, taken: List<Claim>, height: Int, blockId: String) -> Result<Flight, String>
+    ? "A Block already held is skipped, which is what makes the phase"
+      "resumable. A skipped Height costs no room, so a walk over a range"
+      "mostly held still fills every Peer."
+    ! [Infra.Kv.get, Tcp.writeBytes]
+    held = Infra.Store.has(flight.progress.store, Domain.IndexKeys.blockKey(blockId)?)?
     match held
-        true -> walk(progress, key, height + 1, to)
-        false -> fetch(progress, key, height, to, blockId)
+        true -> batching(flight, key, room, taken)
+        false -> batching(flight, key, room - 1, List.prepend(Claim(blockId = blockId, height = height), taken))
 
-fn fetch(progress: Fetched, key: Int, height: Int, to: Int, blockId: String) -> Result<Fetched, String>
-    ? "Ask for one Block and wait for it."
+fn requesting(flight: Flight, key: Int, taken: List<Claim>) -> Result<Flight, String>
+    ? "Nothing to ask for is the ordinary end of a top-up."
+    ! [Tcp.writeBytes]
+    match taken
+        [] -> Result.Ok(flight)
+        [head, ..tail] -> requested(flight, key, List.prepend(head, tail))
+
+fn requested(flight: Flight, key: Int, taken: List<Claim>) -> Result<Flight, String>
+    ? "One getdata naming every Block this Peer is being given."
+      "A getdata carries a list, so a batch is one Message rather than one"
+      "each: the Peer sees the whole of what it owes at once and can answer"
+      "in whatever order suits it."
+    ! [Tcp.writeBytes]
+    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), hashesOf(taken, [])?)?
+    sent = Infra.Peers.send(flight.progress.pool, key, "getdata", payload)?
+    Result.Ok(Flight(progress = withPool(flight.progress, sent), plan = owedWith(flight.plan, taken, key), heardMs = flight.heardMs))
+
+fn owedWith(plan: Plan, taken: List<Claim>, key: Int) -> Plan
+    ? "Every claimed Block recorded against the Peer that was asked for it."
+    match taken
+        [] -> plan
+        [head, ..tail] -> owedWith(Plan(wanted = plan.wanted, owed = Map.set(plan.owed, head.blockId, Owed(key = key, height = head.height))), tail, key)
+
+verify owedWith
+    owedWith(samplePlan(), [], 1) => samplePlan()
+    Map.len(owedWith(samplePlan(), [Claim(blockId = "bb", height = 7)], 1).owed) => 2
+    owedWith(samplePlan(), [Claim(blockId = "bb", height = 7)], 1).wanted => [3, 7]
+
+fn waitingFor(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "One bounded wait on the whole pool."
+      "Where the single-Peer walk waited on one identifier, this waits on"
+      "everybody and takes whichever answers first -- which is the whole of"
+      "the speed-up (#168). A tick with nothing in it is a turn to look at"
+      "the clock, not a fault."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    wanted = Domain.Block.wireOrder(blockId)?
-    payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), [wanted])?
-    sent = Infra.Peers.send(progress.pool, key, "getdata", payload)?
-    waited = Infra.Peers.awaitFrom(sent, key, "block")?
-    keep(asked(progress, waited.pool), key, height, to, blockId, waited.frame)
+    ticked = Infra.Peers.awaitTick(flight.progress.pool, tickMs())?
+    landed(withPool2(flight, ticked.pool), ticked.arrived, to)
 
-fn asked(progress: Fetched, pool: Pool) -> Fetched
-    ? "The walk, carrying the pool the last question left."
-    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = progress.eye)
-
-fn keep(progress: Fetched, key: Int, height: Int, to: Int, blockId: String, frame: Frame) -> Result<Fetched, String>
-    ? "Write the Block to a Segment, then record where it went."
-      "The bytes are on disk before the Index names them, so a crash between the"
-      "two costs a Block that is fetched again rather than an entry pointing at"
-      "nothing."
+fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Fetched, String>
+    ? "Something said, or a tick of silence."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match arrived
+        Option.None -> quiet(flight, to)
+        Option.Some(one) -> sorted(flight, one, to)
+
+fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Fetched, String>
+    ? "A Block is the walk's business, a ping has to be answered, and"
+      "anything else is kept for the loop that will want it (#168)."
+      "The walk hears everything every Peer says while it runs -- an inv, an"
+      "addr, a headers -- and none of it is its to decide about. Keeping"
+      "rather than dropping is what lets follow answer it the moment the"
+      "walk returns."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match one.frame.command
+        "block" -> blockIn(flight, one.frame, to)
+        "ping" -> ponged(flight, one.key, one.frame, to)
+        _ -> flying(withPool2(flight, Infra.Peers.spared(flight.progress.pool, one.key, one.frame)), to)
+
+fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Fetched, String>
+    ? "A ping answered mid-walk, because a Peer that is not ponged drops us"
+      "-- and over a body phase of hours it will."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     payload = Bytes.fromList(frame.body)?
-    _matched = matchesRequest(key, blockId, Domain.Block.idOfWholeBlock(payload))?
-    appended = Infra.Blocks.append(progress.blocks, payload)?
-    held = Fetched(pool = progress.pool, store = progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), progress.pending), waiting = progress.waiting + 1, count = progress.count + 1, pace = progress.pace, eye = progress.eye)
-    written = maybeWrite(held)?
-    announce(written, key, height, to, List.len(frame.body))
+    sent = Infra.Peers.send(flight.progress.pool, key, "pong", payload)?
+    flying(withPool2(flight, sent), to)
 
-fn matchesRequest(key: Int, wanted: String, arrived: String) -> Result<Unit, String>
-    ? "The Block that arrived has to be the Block that was asked for."
-      "A getdata names a Block Id and a Peer answers with bytes. Nothing made"
-      "those the same thing: until this check, whatever arrived was written"
-      "to a Segment and the Index was told it was the Block we wanted, so one"
-      "dishonest or confused Peer could put anything under any Block Id."
-      "It is cheap -- one double-SHA256 over eighty bytes -- and it is the"
-      "difference between an Index that records what a Peer said and one that"
-      "records what it checked. show has always verified this on the way back"
-      "out, which is how it would eventually have been noticed, a long way"
-      "from the Peer that did it."
+fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Fetched, String>
+    ? "Which Block this is, decided by hashing it rather than by who sent"
+      "it or when."
+      "A getdata names a Block Id and a Peer answers with bytes; nothing on"
+      "the wire makes those the same thing. Hashing what arrived and looking"
+      "it up in what is owed answers both questions at once -- whether it"
+      "was asked for, and which Height it belongs at -- so Blocks arriving"
+      "out of order and interleaved across Peers attribute themselves, and"
+      "one dishonest Peer cannot put anything under any Block Id."
       "idOfWholeBlock rather than blockIdOf: a Block is its eighty-byte"
       "Header followed by its Transactions and only the Header is hashed."
-      "Written the wrong way round first, which accused an honest Bitcoin"
-      "Core node of sending the wrong Block for every Block it sent -- the"
-      "check was right and the thing being compared was not."
-    match wanted == arrived
-        true -> Result.Ok(Unit)
-        false -> Result.Err("peer {key} was asked for Block {wanted} and sent {arrived}")
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    payload = Bytes.fromList(frame.body)?
+    arrived = Domain.Block.idOfWholeBlock(payload)
+    matched(flight, payload, arrived, Map.get(flight.plan.owed, arrived), List.len(frame.body), to)
 
-verify matchesRequest
-    matchesRequest(0, "aa", "aa") => Result.Ok(Unit)
-    matchesRequest(3, "aa", "bb") => Result.Err("peer 3 was asked for Block aa and sent bb")
+fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, size: Int, to: Int) -> Result<Fetched, String>
+    ? "A Block nobody is owed is passed over rather than treated as a fault."
+      "It is the ordinary outcome of a requeue: a Peer that went quiet long"
+      "enough to have its work reassigned may still answer, and by then the"
+      "Block is on disk from somebody else. Nothing is gained by dropping"
+      "the Peer for being late."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match owed
+        Option.None -> flying(flight, to)
+        Option.Some(one) -> kept(flight, payload, blockId, one, size, to)
 
-fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
-    ? "Write the batch once it is big enough, and start a new one."
-    ! [Infra.Kv.putAll]
-    match progress.waiting >= locationBatch()
-        false -> Result.Ok(progress)
-        true -> settled(progress)
+fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, to: Int) -> Result<Fetched, String>
+    ? "Write the Block to a Segment, then record where it went."
+      "The bytes are on disk before the Index names them, so a crash between"
+      "the two costs a Block that is fetched again rather than an entry"
+      "pointing at nothing."
+      "Segments hold Blocks in the order they were fetched and never in"
+      "Height order -- Infra.Prune says so and looks rather than assumes --"
+      "so Blocks arriving from several Peers at once need no reordering"
+      "before the write. The Location records where each one went."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    appended = Infra.Blocks.append(flight.progress.blocks, payload)?
+    held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, pace = flight.progress.pace, eye = flight.progress.eye)
+    written = maybeWrite(held)?
+    reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs()), to)
 
-fn announce(progress: Fetched, key: Int, height: Int, to: Int, size: Int) -> Result<Fetched, String>
+fn quiet(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "A tick with no Block in it. Usually there is simply nothing to say"
+      "yet; past the stall deadline it means the Peers owing Blocks are not"
+      "going to send them."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match Bool.and(Time.unixMs() - flight.heardMs > stallMs(), Map.len(flight.plan.owed) > 0)
+        true -> stalled(flight, to)
+        false -> reporting(flight, to)
+
+fn stalled(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "Drop every Peer that owes a Block and has not sent one, and want"
+      "again what they were owing."
+      "A Peer that accepts a getdata and then says nothing holds part of the"
+      "range for as long as it is left in the pool, and nothing else can"
+      "make progress on it. Dropping is what makes the walk finish: the"
+      "Heights go back on the list, whoever is left is asked, and a pool"
+      "that empties this way ends the walk with a reason rather than"
+      "hanging."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    shed = dropping(flight.progress.pool, owingKeys(flight.plan, Map.keys(flight.plan.owed), []))?
+    flying(Flight(progress = withPool(flight.progress, shed), plan = Plan(wanted = List.concat(owedHeights(flight.plan, Map.keys(flight.plan.owed), []), flight.plan.wanted), owed = Map.fromList([])), heardMs = Time.unixMs()), to)
+
+fn dropping(pool: Pool, keys: List<Int>) -> Result<Pool, String>
+    ? "Each silent Peer closed and forgotten."
+    ! [Console.error, Tcp.close]
+    match keys
+        [] -> Result.Ok(pool)
+        [head, ..tail] -> droppingOn(pool, head, tail)
+
+fn droppingOn(pool: Pool, key: Int, rest: List<Int>) -> Result<Pool, String>
+    ? "One of them, said out loud because a Peer leaving is worth knowing."
+    ! [Console.error, Tcp.close]
+    _said = Console.error("dropping peer {key}: owed Blocks and sent none for {Int.div(stallMs(), 1000)} seconds")
+    dropping(Infra.Peers.dropOne(pool, key)?, rest)
+
+fn owingKeys(plan: Plan, ids: List<String>, acc: List<Int>) -> List<Int>
+    ? "Every Peer that owes at least one Block, named once."
+    match ids
+        [] -> acc
+        [head, ..tail] -> owingKeys(plan, tail, keyOnce(Map.get(plan.owed, head), acc))
+
+verify owingKeys
+    owingKeys(samplePlan(), Map.keys(samplePlan().owed), []) => [0]
+    owingKeys(samplePlan(), [], []) => []
+
+fn addedUnlessThere(key: Int, acc: List<Int>) -> List<Int>
+    ? "A list that names each Peer once."
+    match List.contains(acc, key)
+        true -> acc
+        false -> List.prepend(key, acc)
+
+verify addedUnlessThere
+    addedUnlessThere(2, []) => [2]
+    addedUnlessThere(2, [2]) => [2]
+    addedUnlessThere(2, [3]) => [2, 3]
+
+fn owedHeights(plan: Plan, ids: List<String>, acc: List<Int>) -> List<Int>
+    ? "The Heights that were owed, to be wanted again."
+    match ids
+        [] -> acc
+        [head, ..tail] -> owedHeights(plan, tail, heightOnce(Map.get(plan.owed, head), acc))
+
+verify owedHeights
+    owedHeights(samplePlan(), Map.keys(samplePlan().owed), []) => [5]
+    owedHeights(samplePlan(), [], []) => []
+
+fn reporting(flight: Flight, to: Int) -> Result<Fetched, String>
     ? "A progress line each minute, rather than a line for every Block."
       "The walk fetches thousands of Blocks a minute at the start of the"
       "chain, and a reader watching it wants where it is, how fast it is"
@@ -235,28 +604,164 @@ fn announce(progress: Fetched, key: Int, height: Int, to: Int, size: Int) -> Res
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    saying(progress, key, height, to, Time.unixMs())
+    saying(flight, to, Time.unixMs())
 
-fn saying(progress: Fetched, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
+fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Fetched, String>
     ? "Say where the walk is when a line is due, and stay quiet otherwise."
     ! [
         Console.error, Console.print,
         Disk.appendBytes,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    looked = Infra.Screen.glanced(Infra.Screen.eyeing(progress.eye, Domain.Snapshot.withPeers(Domain.Snapshot.bodiesAt(progress.eye.snapshot, height, to, nowMs), Infra.Peers.company(progress.pool))), nowMs)?
-    seen = withEye(progress, looked)
+    at = positionOf(flight.plan, to)
+    looked = Infra.Screen.glanced(Infra.Screen.eyeing(flight.progress.eye, Domain.Snapshot.withPeers(Domain.Snapshot.bodiesAt(flight.progress.eye.snapshot, at, to, nowMs), Infra.Peers.company(flight.progress.pool))), nowMs)?
+    seen = withEye(flight.progress, looked)
     match Bool.and(Infra.Pace.due(seen.pace, nowMs, seen.count - 1), plainly(seen.eye))
-        false -> walk(seen, key, height + 1, to)
-        true -> said(seen, key, height, to, nowMs)
+        false -> flying(withProgress(flight, seen), to)
+        true -> said(flight, seen, at, to, nowMs)
+
+fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
+    ? "The line, and the Pace the next one measures from."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    _said = Console.print("{lineAt(at, to, progress.count, progress.pace, nowMs)}")
+    flying(withProgress(flight, Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye)), to)
+
+fn positionOf(plan: Plan, to: Int) -> Int
+    ? "Where the walk has got to: the lowest Height it still wants or is"
+      "still owed. Everything below that is on disk."
+      "With one Peer the position was simply the Height being fetched. With"
+      "several there is no single Height being fetched, and the honest"
+      "number is the low-water mark -- which is also the one that cannot go"
+      "backwards when a high Block arrives before a low one."
+    settledAt(lowestOwed(plan, Map.keys(plan.owed), Option.None), plan.wanted, to)
+
+verify positionOf
+    positionOf(samplePlan(), 100) => 3
+    positionOf(Plan(wanted = [], owed = Map.fromList([])), 100) => 100
+    positionOf(Plan(wanted = [9], owed = Map.fromList([])), 100) => 9
+
+fn settledAt(owedLow: Option<Int>, wanted: List<Int>, to: Int) -> Int
+    ? "The lower of what is owed and what is still wanted; the end of the"
+      "range when neither holds anything."
+    match owedLow
+        Option.None -> firstOr(wanted, to)
+        Option.Some(low) -> lowerOfHead(low, wanted)
+
+verify settledAt
+    settledAt(Option.None, [], 100) => 100
+    settledAt(Option.None, [7, 8], 100) => 7
+    settledAt(Option.Some(4), [7, 8], 100) => 4
+    settledAt(Option.Some(9), [7, 8], 100) => 7
+
+fn firstOr(wanted: List<Int>, to: Int) -> Int
+    ? "The first Height still wanted, or the end of the range."
+    match wanted
+        [] -> to
+        [head, ..tail] -> head
+
+verify firstOr
+    firstOr([], 100) => 100
+    firstOr([7, 8], 100) => 7
+
+fn lowerOfHead(low: Int, wanted: List<Int>) -> Int
+    ? "The lower of an owed Height and the first still wanted."
+    match wanted
+        [] -> low
+        [head, ..tail] -> lowerOf(low, head)
+
+verify lowerOfHead
+    lowerOfHead(4, []) => 4
+    lowerOfHead(4, [7]) => 4
+    lowerOfHead(9, [7]) => 7
+
+fn lowerOf(a: Int, b: Int) -> Int
+    ? "The smaller of two Heights."
+    match a <= b
+        true -> a
+        false -> b
+
+verify lowerOf
+    lowerOf(4, 7) => 4
+    lowerOf(7, 4) => 4
+    lowerOf(4, 4) => 4
+
+fn lowestOwed(plan: Plan, ids: List<String>, best: Option<Int>) -> Option<Int>
+    ? "The lowest Height any Peer still owes."
+    match ids
+        [] -> best
+        [head, ..tail] -> lowestOwed(plan, tail, betterLow(best, Map.get(plan.owed, head)))
+
+verify lowestOwed
+    lowestOwed(samplePlan(), Map.keys(samplePlan().owed), Option.None) => Option.Some(5)
+    lowestOwed(samplePlan(), [], Option.None) => Option.None
+
+fn loweredBy(best: Option<Int>, height: Int) -> Option<Int>
+    ? "The lower of a Height and one we may not have."
+    match best
+        Option.None -> Option.Some(height)
+        Option.Some(current) -> Option.Some(lowerOf(current, height))
+
+verify loweredBy
+    loweredBy(Option.None, 5) => Option.Some(5)
+    loweredBy(Option.Some(3), 5) => Option.Some(3)
+    loweredBy(Option.Some(7), 5) => Option.Some(5)
+
+fn withWanted(plan: Plan, wanted: List<Int>) -> Plan
+    ? "The Plan, with its wanted list moved on."
+    Plan(wanted = wanted, owed = plan.owed)
+
+verify withWanted
+    withWanted(samplePlan(), [9]).wanted => [9]
+    Map.len(withWanted(samplePlan(), [9]).owed) => 1
+
+fn withPlan(flight: Flight, plan: Plan) -> Flight
+    ? "The flight, with its bookkeeping moved on."
+    Flight(progress = flight.progress, plan = plan, heardMs = flight.heardMs)
+
+fn withProgress(flight: Flight, progress: Fetched) -> Flight
+    ? "The flight, with the walk's own state moved on."
+    Flight(progress = progress, plan = flight.plan, heardMs = flight.heardMs)
+
+fn withPool2(flight: Flight, pool: Pool) -> Flight
+    ? "The flight, carrying the pool a wait or a send left behind."
+    withProgress(flight, withPool(flight.progress, pool))
+
+fn withPool(progress: Fetched, pool: Pool) -> Fetched
+    ? "The walk, carrying the pool the last question left."
+    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = progress.pace, eye = progress.eye)
+
+fn addedIfSame(same: Bool, acc: Int) -> Int
+    ? "One more, or the same."
+    match same
+        true -> acc + 1
+        false -> acc
+
+verify addedIfSame
+    addedIfSame(true, 3) => 4
+    addedIfSame(false, 3) => 3
+
+fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
+    ? "Write the batch once it is big enough, and start a new one."
+    ! [Infra.Kv.putAll]
+    match progress.waiting >= locationBatch()
+        false -> Result.Ok(progress)
+        true -> settled(progress)
 
 fn withEye(progress: Fetched, eye: Eye) -> Fetched
     ? "The walk's state, with its Eye moved on."
@@ -272,19 +777,46 @@ verify plainly
     plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0))) => true
     plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0))) => false
 
-fn said(progress: Fetched, key: Int, height: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
-    ? "The line, and the Pace the next one measures from."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes,
-        Infra.Kv.get, Infra.Kv.putAll,
-        Process.stopRequested,
-        Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
-        Time.unixMs,
-    ]
-    _said = Console.print("{lineAt(height, to, progress.count, progress.pace, nowMs)}")
-    walk(Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye), key, height + 1, to)
+fn hashesOf(taken: List<Claim>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+    ? "Every claimed Block Id in the order the wire wants them."
+    match taken
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> hashesOf(tail, List.prepend(Domain.Block.wireOrder(head.blockId)?, acc))
+
+verify hashesOf
+    hashesOf([], []) => Result.Ok([])
+    List.len(Result.withDefault(hashesOf([Claim(blockId = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", height = 1)], []), [])) => 1
+
+fn keyOnce(owed: Option<Owed>, acc: List<Int>) -> List<Int>
+    ? "One Peer added, unless it is already named."
+    match owed
+        Option.None -> acc
+        Option.Some(one) -> addedUnlessThere(one.key, acc)
+
+verify keyOnce
+    keyOnce(Option.None, [4]) => [4]
+    keyOnce(Option.Some(Owed(key = 2, height = 9)), []) => [2]
+
+fn heightOnce(owed: Option<Owed>, acc: List<Int>) -> List<Int>
+    ? "One Height added, if the Block is owed at all."
+    match owed
+        Option.None -> acc
+        Option.Some(one) -> List.prepend(one.height, acc)
+
+verify heightOnce
+    heightOnce(Option.None, [4]) => [4]
+    heightOnce(Option.Some(Owed(key = 2, height = 9)), []) => [9]
+
+fn betterLow(best: Option<Int>, owed: Option<Owed>) -> Option<Int>
+    ? "Keep whichever Height is lower."
+    match owed
+        Option.None -> best
+        Option.Some(one) -> loweredBy(best, one.height)
+
+verify betterLow
+    betterLow(Option.Some(3), Option.None) => Option.Some(3)
+    betterLow(Option.None, Option.Some(Owed(key = 0, height = 5))) => Option.Some(5)
+    betterLow(Option.Some(9), Option.Some(Owed(key = 0, height = 5))) => Option.Some(5)
 
 fn lineAt(height: Int, to: Int, count: Int, pace: Pace, nowMs: Int) -> String
     ? "The walk's first line has no window to read a rate off, and says so"
