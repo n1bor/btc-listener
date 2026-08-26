@@ -59,6 +59,7 @@ record Watching
     heard: Map<Int, Int>
     anyHeardMs: Int
     saidPeersMs: Int
+    tendedMs: Int
     view: Option<View>
     leaving: Bool
 
@@ -66,11 +67,12 @@ fn freshWatch(nowMs: Int) -> Watching
     ? "What the loop knows about its own watching, before anything happens:"
       "an empty Snapshot, nobody heard yet -- but the clock starts now, so"
       "silence is measured from joining and not from 1970."
-    Watching(snapshot = Domain.Snapshot.started(nowMs), heard = Map.fromList([]), anyHeardMs = nowMs, saidPeersMs = nowMs, view = Option.None, leaving = false)
+    Watching(snapshot = Domain.Snapshot.started(nowMs), heard = Map.fromList([]), anyHeardMs = nowMs, saidPeersMs = nowMs, tendedMs = 0, view = Option.None, leaving = false)
 
 verify freshWatch
     freshWatch(5).anyHeardMs => 5
     freshWatch(5).saidPeersMs => 5
+    freshWatch(5).tendedMs => 0
     Map.len(freshWatch(5).heard) => 0
 
 fn tickMs() -> Int
@@ -602,7 +604,7 @@ fn takenTerminal(state: Following) -> Result<Following, String>
     _taken = Infra.Screen.entered()?
     placed = Infra.Headers.tipOf(state.store)?
     quiet = withPool(state, Infra.Peers.drawnElsewhere(state.pool))
-    Result.Ok(withWatch(quiet, Watching(snapshot = atTip(quiet.watch.snapshot, placed, Time.unixMs()), heard = quiet.watch.heard, anyHeardMs = quiet.watch.anyHeardMs, saidPeersMs = quiet.watch.saidPeersMs, view = Option.Some(Domain.Screen.opened()), leaving = quiet.watch.leaving)))
+    Result.Ok(withWatch(quiet, Watching(snapshot = atTip(quiet.watch.snapshot, placed, Time.unixMs()), heard = quiet.watch.heard, anyHeardMs = quiet.watch.anyHeardMs, saidPeersMs = quiet.watch.saidPeersMs, tendedMs = quiet.watch.tendedMs, view = Option.Some(Domain.Screen.opened()), leaving = quiet.watch.leaving)))
 
 fn atTip(snapshot: Snapshot, placed: Option<Placement>, nowMs: Int) -> Snapshot
     ? "The Snapshot standing on the tree's best tip, when the tree has one."
@@ -743,7 +745,7 @@ fn backAtTip(state: Following) -> Result<Following, String>
       "at the same moment: the catch-up returned."
     ! [Infra.Kv.get, Time.unixMs]
     placed = Infra.Headers.tipOf(state.store)?
-    Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving)))
+    Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving)))
 
 fn eyeOf(state: Following) -> Eye
     ? "The Eye a walk carries, opened from what the loop already knows --"
@@ -756,7 +758,7 @@ fn eyeOf(state: Following) -> Eye
 fn watchSeen(watch: Watching, eye: Eye) -> Watching
     ? "What a walk's Eye saw, folded back: the Snapshot it advanced, the"
       "View keys may have switched, and whether q was answered with y."
-    Watching(snapshot = eye.snapshot, heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs, view = eye.view, leaving = Bool.or(watch.leaving, eye.stopped))
+    Watching(snapshot = eye.snapshot, heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs, tendedMs = watch.tendedMs, view = eye.view, leaving = Bool.or(watch.leaving, eye.stopped))
 
 fn saidBookIfPlain(watch: Watching, before: Int, after: Int) -> Unit
     ? "The Book line for the plain log; the Panel shows the count."
@@ -1021,7 +1023,7 @@ fn watchAfterBuild(watch: Watching, views: List<BlockView>) -> Watching
       "held leaves the Snapshot exactly as it was."
     match views
         [] -> watch
-        [newest, ..older] -> Watching(snapshot = Domain.Snapshot.tipAt(ringed(watch.snapshot, List.reverse(views)), newest.height, newest.blockId, newest.atMs), heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs, view = watch.view, leaving = watch.leaving)
+        [newest, ..older] -> Watching(snapshot = Domain.Snapshot.tipAt(ringed(watch.snapshot, List.reverse(views)), newest.height, newest.blockId, newest.atMs), heard = watch.heard, anyHeardMs = watch.anyHeardMs, saidPeersMs = watch.saidPeersMs, tendedMs = watch.tendedMs, view = watch.view, leaving = watch.leaving)
 
 verify watchAfterBuild
     watchAfterBuild(freshWatch(0), []).snapshot.tip.height => 0
@@ -1161,7 +1163,33 @@ fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
     ]
     match arrived
         Option.None -> quietTurn(state, Time.unixMs())
-        Option.Some(spare) -> handle(heardFrom(state, spare.key, Time.unixMs()), spare.key, spare.frame.command, spare.frame.body)
+        Option.Some(spare) -> busyTurn(state, spare, Time.unixMs())
+
+fn busyTurn(state: Following, spare: Spare, nowMs: Int) -> Result<Unit, String>
+    ? "A Message arrived, and the loop looks at its own clock before acting"
+      "on it."
+      "Until #201 the clock was on the other arm of that match, so a loop"
+      "that never went quiet never drew a frame, never answered a key and"
+      "never wrote a record. A node short of Peers is exactly that loop: it"
+      "dials a Candidate before every tick (#202), the dial spends five"
+      "seconds reading every Peer, and a Message is therefore always waiting"
+      "when the tick comes. Measured on signet: twelve minutes of a dead"
+      "frame answering nothing, ended by the pool reaching its target and"
+      "the dialling stopping."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    looked = minding(heardFrom(state, spare.key, nowMs), nowMs)?
+    match looked.watch.leaving
+        true -> stopping(looked)
+        false -> handle(looked, spare.key, spare.frame.command, spare.frame.body)
 
 fn heardFrom(state: Following, key: Int, nowMs: Int) -> Following
     ? "This Peer just spoke; remember when, for it and for the pool."
@@ -1169,16 +1197,28 @@ fn heardFrom(state: Following, key: Int, nowMs: Int) -> Following
 
 fn heardAt(watch: Watching, key: Int, nowMs: Int) -> Watching
     ? "One Peer's voice moves its own timestamp and the pool's."
-    Watching(snapshot = watch.snapshot, heard = Map.set(watch.heard, key, nowMs), anyHeardMs = nowMs, saidPeersMs = watch.saidPeersMs, view = watch.view, leaving = watch.leaving)
+    Watching(snapshot = watch.snapshot, heard = Map.set(watch.heard, key, nowMs), anyHeardMs = nowMs, saidPeersMs = watch.saidPeersMs, tendedMs = watch.tendedMs, view = watch.view, leaving = watch.leaving)
 
 verify heardAt
     heardAt(freshWatch(0), 3, 900).anyHeardMs => 900
     Map.get(heardAt(freshWatch(0), 3, 900).heard, 3) => Option.Some(900)
     heardAt(freshWatch(7), 3, 900).saidPeersMs => 7
+    heardAt(sampleTended(55), 3, 900).tendedMs => 55
+
+fn sampleTended(tendedMs: Int) -> Watching
+    ? "A Watching that has looked at its clock, for the cases here."
+    Watching(snapshot = Domain.Snapshot.started(0), heard = Map.fromList([]), anyHeardMs = 0, saidPeersMs = 0, tendedMs = tendedMs, view = Option.None, leaving = false)
+
+verify sampleTended
+    sampleTended(55).tendedMs => 55
 
 fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
-    ? "A tick with nothing on it: check the silence rule, bring the"
-      "Snapshot's company up to date, say what has come due, and go round."
+    ? "A tick with nothing on it: the two rules that silence itself decides,"
+      "then the same clock every other turn looks at."
+      "Only the silence rule and the empty pool belong here now. Everything"
+      "the loop owes its watcher -- a frame, a key answered, a record, a"
+      "caller admitted -- moved into minding (#201), because none of it was"
+      "ever about nothing having arrived."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -1191,19 +1231,33 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
     ]
     _somebody = anyoneLeft(List.len(Infra.Peers.peerKeys(state.pool)))?
     _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
-    fresh = refreshed(state, nowMs)
-    kept = withLog(fresh, marking(fresh, fresh.pool, "listen", fresh.watch.snapshot.tip.height, fresh.watch.snapshot.tip.height, false)?)
-    taken = Infra.Peers.accepting(kept.pool, kept.nextKey)?
-    admitted = afterAccepting(kept, taken)
-    match staleRebuild(admitted.rebuilding, nowMs)
-        Option.Some(pending) -> fellBack(admitted, pending.key, "peer {pending.key} did not send the compact Block for {pending.blockId} within {Int.div(rebuildDeadlineMs(), 1000)} seconds")
-        Option.None -> quietOnward(admitted, nowMs)
+    looked = minding(state, nowMs)?
+    match looked.watch.leaving
+        true -> stopping(looked)
+        false -> ontoRebuild(looked, nowMs)
+
+fn ontoRebuild(state: Following, nowMs: Int) -> Result<Unit, String>
+    ? "A rebuild nobody has answered for too long, or another turn."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match staleRebuild(state.rebuilding, nowMs)
+        Option.Some(pending) -> fellBack(state, pending.key, "peer {pending.key} did not send the compact Block for {pending.blockId} within {Int.div(rebuildDeadlineMs(), 1000)} seconds")
+        Option.None -> listen(state)
 
 fn afterAccepting(state: Following, taken: Accepted) -> Following
     ? "A caller admitted takes the next key, so the one after it is free."
-      "Asked on every quiet turn rather than waited on: accept answers None"
-      "for an empty backlog without blocking, so this costs a syscall a"
-      "second and needs no wait of its own."
+      "Asked on every look at the clock rather than waited on: accept answers"
+      "None for an empty backlog without blocking, so this costs a syscall a"
+      "second and needs no wait of its own. It was every quiet turn until"
+      "#201, which meant a node with something to say admitted nobody."
     Following(pool = taken.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = nextAfter(state.nextKey, taken.seated), watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
 fn nextAfter(nextKey: Int, seated: Option<Int>) -> Int
@@ -1216,21 +1270,74 @@ verify nextAfter
     nextAfter(4, Option.None) => 4
     nextAfter(4, Option.Some(4)) => 5
 
-fn quietOnward(state: Following, nowMs: Int) -> Result<Unit, String>
-    ? "The rest of the quiet turn, once no rebuild is overdue."
+fn tendEveryMs() -> Int
+    ? "How often the loop looks at its own clock: once a second, which is"
+      "the cadence a quiet tick already gave it."
+      "It is a clock and not a tick because a busy turn takes it too now"
+      "(#201). A node handling a Message a millisecond would otherwise"
+      "redraw a frame and walk its Peers for every one of them, and the"
+      "watcher cannot read a frame faster than this anyway."
+    1000
+
+verify tendEveryMs
+    tendEveryMs() => 1000
+
+fn minding(state: Following, nowMs: Int) -> Result<Following, String>
+    ? "The loop's own clock, looked at on every turn whether or not a"
+      "Message arrived, and at most once a second."
+      "This is everything the loop owes somebody watching it: the frame, the"
+      "keys, the record that has come due, and a caller waiting to be"
+      "admitted. None of it was ever about the pool being silent, and all of"
+      "it used to happen only when the pool was (#201)."
     ! [
         Console.error, Console.print,
-        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
-        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Process.stopRequested,
+        Disk.appendText,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
-        Time.now, Time.unixMs,
+        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match Domain.Screenlines.due(state.watch.tendedMs, nowMs, tendEveryMs())
+        false -> Result.Ok(state)
+        true -> minded(state, nowMs)
+
+fn minded(state: Following, nowMs: Int) -> Result<Following, String>
+    ? "The clock has come round: the Snapshot's company brought up to date,"
+      "the record written if it is due, a caller admitted, and then the"
+      "Screen's share or the plain log's."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    fresh = withTended(refreshed(state, nowMs), nowMs)
+    kept = withLog(fresh, marking(fresh, fresh.pool, "listen", fresh.watch.snapshot.tip.height, fresh.watch.snapshot.tip.height, false)?)
+    taken = Infra.Peers.accepting(kept.pool, kept.nextKey)?
+    tended(afterAccepting(kept, taken), nowMs)
+
+fn tended(state: Following, nowMs: Int) -> Result<Following, String>
+    ? "A Screen gets a frame, a plain run gets the line that has come due."
+    ! [
+        Console.print,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
     ]
     match state.watch.view
-        Option.None -> listen(saidStats(state, nowMs))
-        Option.Some(view) -> screenTurn(state, view, nowMs)
+        Option.None -> Result.Ok(saidStats(state, nowMs))
+        Option.Some(view) -> attended(state, view, nowMs)
+
+fn withTended(state: Following, nowMs: Int) -> Following
+    ? "The state, with the clock that gates the next look moved on."
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = nowMs, view = state.watch.view, leaving = state.watch.leaving))
+
+fn leavingNow(state: Following) -> Following
+    ? "The state, told that q was answered with y."
+      "Said rather than done, because the turn this was decided on may have"
+      "a Message in its hand: the caller stops on the way out and the"
+      "terminal is given back there, in the one place that does it."
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = true))
 
 fn staleRebuild(rebuilding: Option<Rebuilding>, nowMs: Int) -> Option<Rebuilding>
     ? "A rebuild nobody has answered for too long."
@@ -1256,47 +1363,29 @@ verify staleOr
     staleOr(Rebuilding(blockId = "", hash = [], key = 0, askedMs = 0, compact = Option.None, asked = []), 20000) => Option.Some(Rebuilding(blockId = "", hash = [], key = 0, askedMs = 0, compact = Option.None, asked = []))
     staleOr(Rebuilding(blockId = "", hash = [], key = 0, askedMs = 0, compact = Option.None, asked = []), 500) => Option.None
 
-fn screenTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
-    ? "The Screen's share of a quiet tick: keys first, then the frame."
+fn attended(state: Following, view: View, nowMs: Int) -> Result<Following, String>
+    ? "The Screen's share of a turn: keys first, then the frame."
       "Keys first, because a q pressed a second ago should not have to"
       "watch one more redraw before it is answered."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
-        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Process.stopRequested,
-        Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
-        Time.now, Time.unixMs,
-    ]
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey]
     keys = Infra.Screen.drainedKeys()?
     acted = Domain.Screen.pressedAll(view, keys)
     match acted.answer
-        Answer.StopNode -> stopping(state)
-        _ -> drawnTurn(withView(state, acted.view), acted.view, nowMs)
+        Answer.StopNode -> Result.Ok(leavingNow(withView(state, acted.view)))
+        _ -> drawnNow(withView(state, acted.view), acted.view, nowMs)
 
-fn drawnTurn(state: Following, view: View, nowMs: Int) -> Result<Unit, String>
-    ? "Draw the frame and go round."
-      "Every quiet tick redraws: at the tip that is once a second, and the"
-      "frame is a handful of lines. The catch-up's ten-second cadence"
-      "arrives with the rest of #130."
-    ! [
-        Console.error, Console.print,
-        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
-        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
-        Process.stopRequested,
-        Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
-        Time.now, Time.unixMs,
-    ]
+fn drawnNow(state: Following, view: View, nowMs: Int) -> Result<Following, String>
+    ? "The frame onto the terminal."
+      "Every look redraws: at the tip that is once a second, and the frame"
+      "is a handful of lines. The catch-up's ten-second cadence arrives with"
+      "the rest of #130."
+    ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
     _drawn = Infra.Screen.shown(Domain.Screen.frameOf(view, state.watch.snapshot, nowMs))?
-    listen(state)
+    Result.Ok(state)
 
 fn withView(state: Following, view: View) -> Following
     ? "The state, with the Screen's View moved on."
-    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = Option.Some(view), leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = Option.Some(view), leaving = state.watch.leaving))
 
 fn anyoneLeft(held: Int) -> Result<Unit, String>
     ? "A pool with nobody in it ends the run."
@@ -1330,7 +1419,7 @@ fn refreshed(state: Following, nowMs: Int) -> Following
       "The rows come from the pool (#168), which is the only thing that"
       "knows them, and which the catch-up walks hold too -- so the Panel is"
       "the same Panel whichever phase draws it."
-    withWatch(state, Watching(snapshot = Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, Infra.Peers.company(state.pool)), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, Infra.Peers.company(state.pool)), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn mempoolView(pool: Mempool) -> MempoolView
     ? "The Mempool's four numbers, read through the accessors #28 built for"
@@ -1348,7 +1437,7 @@ fn saidStatsNow(state: Following, nowMs: Int) -> Following
     ? "Say it, and remember when it was said."
     ! [Console.print]
     _said = Console.print(Domain.Screenlines.peersLine(state.watch.snapshot.company, nowMs))
-    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = nowMs, view = state.watch.view, leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = nowMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Result<Unit, String>
     ? "The three Messages this loop acts on; every other one is ignored."
@@ -1634,7 +1723,7 @@ fn arrivedOnRing(state: Following, held: Domain.Mempool.Held, nowMs: Int) -> Fol
       "takes it (#164). The fee is already computed here, which is why this"
       "is where the ring is fed: the same row will flip to confirmed under"
       "the same Id when connect sees it in a Block."
-    withWatch(state, Watching(snapshot = Domain.Snapshot.notedArrival(state.watch.snapshot, TxView(txId = held.txid, fee = held.fee, coinbase = false, atMs = nowMs, confirmed = false)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = Domain.Snapshot.notedArrival(state.watch.snapshot, TxView(txId = held.txid, fee = held.fee, coinbase = false, atMs = nowMs, confirmed = false)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn toldOthers(pool: Pool, keys: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
     ? "The Announcement, to every Peer but the one that told us."
