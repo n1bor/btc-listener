@@ -979,6 +979,102 @@ flag on the Pool instead, set false by `drawnElsewhere` when the Screen takes
 the terminal — so the module's question is "may I speak", not "is there a
 Screen", which is the only thing it can sensibly know.
 
+### 16c. The Screen keeps its clock while the loop is busy
+
+The frame, the keys, the metrics record and an inbound caller all used to
+happen on one arm of one match: the arm `awaitTick` takes when **no Message
+arrived**. A loop that never goes quiet therefore never drew, never answered a
+key and never wrote a record — and a node short of Peers is exactly that loop,
+because it dials a Candidate before every tick and the dial spends five
+seconds reading every Peer it has (#201, #202).
+
+Regtest hides this by default, and it hid it through two whole runs of this
+section before the Book was looked at. **One Peer and an empty Address Book
+means nothing is ever dialled**, so the loop goes quiet every tick and the
+Screen draws once a second whatever the code does. You have to give it a Book
+full of addresses that will not answer.
+
+`addpeeraddress` is the handle, but Core will not store a documentation range
+— `198.51.100.0/24`, `192.0.2.0/24` and `203.0.113.0/24` are all RFC5737 and
+`IsRoutable()` refuses them, silently, with `{"success": false}`. **`240.0.0.0/4`
+is the range that works**: reserved and unallocated, so Core gossips it and a
+SYN to it blackholes rather than being refused. `192.88.99.0/24` looks
+promising and is not — it is refused in microseconds, which is the case that
+does *not* stall a dial.
+
+```bash
+for x in $(seq 0 15); do for y in $(seq 0 15); do for z in $(seq 1 8); do
+  $C addpeeraddress 240.$x.$y.$z 18444 >/dev/null
+done; done; done
+$C getnodeaddresses 0 | grep -c '"address"'          # ~900 of 2048 survive bucketing
+```
+
+**Then restart Core.** `getaddr` replies are cached per network for a day, so
+a node that asked while the addrman held forty addresses gets forty back for
+the rest of the day however many you add afterwards. Restarting rebuilds the
+cache; the reply is ~23% of the addrman, so ~900 stored gives a Book of ~208.
+
+Now run it with a Peer to talk to and something to say, and count the frames
+in the capture. `\033[2J` is drawn once and never again — the frame moves the
+cursor rather than clearing — so count the key line instead, and count
+occurrences rather than lines: the whole capture is one line with no newline
+in it, and `grep -c` will answer 1 for a frame drawn a hundred times.
+
+```bash
+script -qf -c "timeout 150 $BIN regtest follow 127.0.0.1:18444 $D screen log" screen.txt &
+for i in $(seq 1 50); do $C sendtoaddress "$($C getnewaddress)" 0.01 >/dev/null; sleep 3; done
+```
+
+```bash
+strings screen.txt | grep -c "o overview  p peers"     # frames drawn
+grep -c listen $D/metrics.log                          # records written
+ss -tn | grep -c 'SYN-SENT.*:18444'                    # sample this during the run
+```
+
+Measured across a 150-second run with a dial to a dead Candidate in flight on
+every one of thirty samples:
+
+| | before #201 | after |
+|---|---|---|
+| frames drawn | **3** | **31** |
+| `listen` records | **0** | **2** |
+| `q` answered | no — killed by `timeout` at 90s | yes, exits at 47s |
+
+Thirty-one and not a hundred and fifty because `minding` is looked at once per
+**turn**, and while the Book has dead Candidates in it a turn is five seconds
+long. That is #202 and not this; the fix here is that the Screen gets every
+turn rather than none of them.
+
+**Read the `polledMs` column while you are here.** The dial's poll is counted
+now (`Infra.Peers.settlingOn`), and it is the one poll in the module that used
+not to be. `workedMs` is the window less the poll, so an uncounted wait was
+reported as work: the same minute reads `polledMs 30835 workedMs 30015` before
+and `polledMs 60000 workedMs 7` after. The second is the truth — the node was
+asleep on a socket for the whole minute — and it is what makes a starved loop
+legible from `metrics.log` without going near `/proc`.
+
+**Check `q` under the dial, not just under an idle node.** Feed the pty:
+
+```bash
+( sleep 25; printf 'q'; sleep 2; printf 'y'; sleep 70 ) \
+  | script -qf -c "timeout 90 $BIN regtest follow 127.0.0.1:18444 $D screen" q.txt
+```
+
+It must exit **before** the timeout. Before #201 it ran the full ninety
+seconds and the capture ends with the SIGTERM path, which prints the same
+`stopped following` line — so read the elapsed time, not the last line.
+
+**And check the plain run in the same pass**, for the reason 16b gives. It
+still says `candidate ... did not answer` once per dial. Do not expect a
+`Peers (...)` line in a short run: that is on a five-minute clock, not a
+one-minute one.
+
+One number worth keeping from this, because it is about the node and not the
+Screen: over the same 150 seconds and the same Transactions sent, a node with
+**8** Candidates admitted **46** of them and a node with **208** admitted
+**none**. A loop that spends five of every six seconds dialling is not a loop
+that is doing its job. That is the whole of #202 in one line.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
