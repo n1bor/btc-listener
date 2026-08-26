@@ -906,6 +906,21 @@ function standardImports() {
         return unitErr("Tcp.close", error);
       }
     },
+    // Suspending, because releasing a bound port is asynchronous in Node and
+    // the contract is that the port is free when this returns. Sockets that
+    // arrived but were never accepted go with it; ones already accepted are
+    // their own resources and stay live, which is what the contract says.
+    tcp_close_listener: suspending(async (listenerRef, _caller) => {
+      try {
+        const state = listenerState(listenerRef);
+        for (const socket of state.pending) socket.destroy();
+        await closeServer(state.server);
+        resources.delete(state.id);
+        return unitOk();
+      } catch (error) {
+        return unitErr("Tcp.closeListener", error);
+      }
+    }),
   };
 }
 
