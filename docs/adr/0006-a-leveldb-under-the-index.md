@@ -79,9 +79,9 @@ never once invoked on any backend. It can come back the day something calls it.
 
 **The batching stays.** `putAll` and `deleteAll` exist because
 [jasisz/aver#890](https://github.com/jasisz/aver/issues/890) makes per-entry
-`Map` writes quadratic: 52 ms against 24,404 ms for 40,000 entries. That issue
-is still open, and the Memory and Logged backends still route through `Map`, so
-the reason still holds for two backends out of three. On the database arm the
+`Map` writes quadratic: 52 ms against 24,404 ms for 40,000 entries. **That
+issue closed on 20 August 2026**, so that reason has expired and the numbers
+above describe a compiler we no longer run (n1bor/btc-listener#188). On the database arm the
 same shape earns its keep differently — one `Kv.putAll` is one LevelDB
 `WriteBatch`, which is where the all-or-nothing guarantee comes from — so there
 is no version of this API that stops being batched.

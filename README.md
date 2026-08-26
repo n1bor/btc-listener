@@ -1413,6 +1413,16 @@ Then, before opening the PR, **look for workarounds the move retires**:
 grep -rhoE "jasisz/aver#[0-9]+" --include="*.av" --include="*.md" --include="*.yml" . | sort -u
 ```
 
+**Check the sentence, not just the number.** That list tells you which issues
+are cited; it does not tell you what the prose around them claims. A paragraph
+saying an issue is *still open* passes the grep looking exactly like one saying
+it closed, and two of them in `docs/adr/0003` went six days out of date that
+way. Grep the claim as well:
+
+```bash
+grep -rniE "(still |remains? |is )(open|outstanding|unfixed|pending|blocked)" --include="*.md" --include="*.av" .
+```
+
 Every upstream issue this repository cites is either history (a docstring
 saying what was once worked around and why the shape survived on merit) or a
 live workaround — a filter, a flag, a module kept whole, a cache oversized.
