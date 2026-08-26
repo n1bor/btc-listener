@@ -17,6 +17,16 @@ Aver is not a language you already know. Before writing any `.av` code, read
 (single-line match arms, qualified constructors like `Result.Ok`, no `if`/`else`,
 no lambdas, no type parameters, `verify` blocks colocated with pure functions,
 explicit effect lists on both the module and each effectful function).
+
+**An effect list has to be exact, not merely sufficient.** Under-declaring has
+always been an error; since the `8a45a945` pin, declaring an effect the
+function does not use is a `warning[unused-effect]` naming the correct set in
+its `used:` clause, so `aver check` will tell you what the list should say
+rather than only that it is wrong. Adding a genuinely new effect propagates one
+function at a time up every caller and then through the module boundary, which
+fails separately — loop `aver check` until it is quiet rather than trying to
+predict the fan-out. n1bor/btc-listener#178 narrowed 58 lists this way and
+every one of them was a copy-paste of a caller's list.
 `../aver/docs/` has the deep dives (`language.md`, `types.md`, `effects.md`,
 `cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
 whatever that checkout was at when it was last installed — and **`aver

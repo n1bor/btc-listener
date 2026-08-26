@@ -614,7 +614,7 @@ fn seatedOut(pool: Pool, key: Int, address: PeerAddress, connection: Tcp.Connect
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs)
@@ -628,7 +628,7 @@ fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joi
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match introduced(pool, key, address)
@@ -1018,7 +1018,14 @@ fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
         Option.Some(socket) -> closingSocket(pool, key, socket)
 
 fn closingSocket(pool: Pool, key: Int, socket: Tcp.Socket) -> Result<Pool, String>
-    ? "Each state is released by its own call; none of them is the others."
+    ? "A Peer's socket released, and the key forgotten."
+      "Only the Connected arm releases anything, and that is all this call"
+      "is for: dropOne drops a Peer, and a Peer is never the listener --"
+      "listenerKey() is a key of its own. A Listener or Dial found under a"
+      "Peer key is forgotten rather than released, which is a leak on the"
+      "close-everything path and is n1bor/btc-listener#181. The unused"
+      "Tcp.closeListener in this module's effects is that issue's marker and"
+      "is deliberately left declared."
     ! [Tcp.close]
     match socket
         Tcp.Socket.Connected(connection) -> closedOne(pool, key, connection)
