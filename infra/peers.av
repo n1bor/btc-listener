@@ -19,8 +19,8 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere]
-    depends [Bytes, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Topped, toppedUp, targetPeers]
+    depends [Bytes, Domain.Address, Domain.AddressBook, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
         Disk.appendText,
@@ -186,6 +186,100 @@ fn complainedIfPlain(pool: Pool, line: String) -> Unit
     match pool.plain
         true -> Console.error(line)
         false -> Unit
+
+record Topped
+    pool: Pool
+    book: Map<String, Candidate>
+    nextKey: Int
+
+fn targetPeers() -> Int
+    ? "How many Peers the node tries to keep."
+      "Eight, which is Bitcoin Core's outbound default and is chosen for the"
+      "same reason: enough that losing one is routine and that no single Peer"
+      "decides what the node believes."
+    8
+
+verify targetPeers
+    targetPeers() => 8
+
+fn toppedUp(pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Result<Topped, String>
+    ? "Dial a Candidate when the pool is short of Peers."
+      "One per turn rather than a rush of them: a Handshake is a conversation"
+      "and whoever is calling this is the only thing that can have one, so"
+      "every dial is time the Peers already held are not being read."
+      "It lives here rather than in the follow loop (#199) because the loop is"
+      "not the only thing that takes turns. A body walk polls, waits and hands"
+      "out work for hours, and while it did not dial, the pool could only"
+      "shrink for the whole of a catch-up."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match List.len(peerKeys(pool)) >= targetPeers()
+        true -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
+        false -> dialling(pool, book, nextKey, Domain.AddressBook.nextUntried(book, Domain.Inbox.addressesHeld(pool.standing)))
+
+fn dialling(pool: Pool, book: Map<String, Candidate>, nextKey: Int, chosen: Option<String>) -> Result<Topped, String>
+    ? "Nothing worth dialling is the usual answer, and not a problem."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match chosen
+        Option.None -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
+        Option.Some(address) -> dialledOne(pool, book, nextKey, address, Domain.Address.fromPeerText(address, Domain.Network.portOf(pool.network)))
+
+fn dialledOne(pool: Pool, book: Map<String, Candidate>, nextKey: Int, address: String, parsed: Result<PeerAddress, String>) -> Result<Topped, String>
+    ? "A Candidate whose address will not parse is one a Peer made up."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    tried = Domain.AddressBook.marked(book, address)
+    match parsed
+        Result.Err(why) -> Result.Ok(Topped(pool = pool, book = tried, nextKey = nextKey))
+        Result.Ok(peer) -> reaching(pool, tried, nextKey, address, peer)
+
+fn reaching(pool: Pool, book: Map<String, Candidate>, nextKey: Int, address: String, peer: PeerAddress) -> Result<Topped, String>
+    ? "One Candidate that would not answer is one Candidate, not the end."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match joined(pool, nextKey, peer)
+        Result.Err(why) -> unreachable(pool, book, nextKey, address, why)
+        Result.Ok(outcome) -> reachedOrNot(book, nextKey, address, outcome)
+
+fn reachedOrNot(book: Map<String, Candidate>, nextKey: Int, address: String, outcome: Joined) -> Result<Topped, String>
+    ? "A Candidate that would not have us hands the pool back anyway."
+      "The dial is polled alongside the Peers, so the seconds it spent waiting"
+      "were seconds those Peers were being read: throwing the pool away with"
+      "the failure would throw their bytes away with it."
+    ! [Console.error, Console.print, Tcp.writeBytes]
+    match outcome.seated
+        true -> reached(outcome.pool, book, nextKey, address)
+        false -> unreachable(outcome.pool, book, nextKey, address, outcome.why)
+
+fn reached(pool: Pool, book: Map<String, Candidate>, nextKey: Int, address: String) -> Result<Topped, String>
+    ? "A Candidate has become a Peer, so ask it who it knows."
+    ! [Console.print, Tcp.writeBytes]
+    _said = saidIfPlain(pool, "peer {nextKey} is {address}, from the Address Book")
+    asked = send(pool, nextKey, "getaddr", Bytes.fromList([]))?
+    Result.Ok(Topped(pool = asked, book = book, nextKey = nextKey + 1))
+
+fn unreachable(pool: Pool, book: Map<String, Candidate>, nextKey: Int, address: String, why: String) -> Result<Topped, String>
+    ? "Say who would not have us, and leave it marked as tried."
+    ! [Console.error]
+    _said = complainedIfPlain(pool, "candidate {address} did not answer: {why}")
+    Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
 
 fn peerKeys(pool: Pool) -> List<Int>
     ? "Every key that names a Peer, which is every key but the listener's."
@@ -1032,10 +1126,28 @@ fn readingInto(pool: Pool, key: Int, connection: Tcp.Connection, rest: List<Int>
       "not the end of the run. What ends the run is the pool emptying, which"
       "the caller notices rather than this."
     ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
-    arrived = Bytes.octets(Tcp.readSome(connection, readChunk())?)
+    match Tcp.readSome(connection, readChunk())
+        Result.Err(why) -> resetBy(pool, key, rest, why)
+        Result.Ok(bytes) -> readingBytes(pool, key, rest, Bytes.octets(bytes))
+
+fn readingBytes(pool: Pool, key: Int, rest: List<Int>, arrived: List<Int>) -> Result<Pool, String>
+    ? "An empty read is a clean close; anything else is bytes to keep."
+    ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
     match arrived
         [] -> closedBy(pool, key, rest)
         [head, ..tail] -> buffered(pool, key, rest, arrived)
+
+fn resetBy(pool: Pool, key: Int, rest: List<Int>, why: String) -> Result<Pool, String>
+    ? "A read that failed costs that Peer and no more (#203)."
+      "This went out through the ? and ended the whole run, while an empty"
+      "read -- a clean close -- was handled one line below and carried on. A"
+      "reset is the ordinary way a real Peer disappears, far commoner than a"
+      "clean FIN, so on a catch-up measured in hours one reset from any of"
+      "eight Peers ended it. What ends a run is the pool emptying, which"
+      "pumped reports; this is one Peer gone."
+    ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
+    _said = complainedIfPlain(pool, "peer {key} went: {why}")
+    reading(forgotten(pool, key), rest)
 
 fn closedBy(pool: Pool, key: Int, rest: List<Int>) -> Result<Pool, String>
     ? "Say which Peer went, then carry on with the others."

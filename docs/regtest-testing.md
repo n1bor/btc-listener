@@ -979,6 +979,47 @@ flag on the Pool instead, set false by `drawnElsewhere` when the Screen takes
 the terminal — so the module's question is "may I speak", not "is there a
 Screen", which is the only thing it can sensibly know.
 
+### 16c. The pool grows during a walk, and a reset costs one Peer
+
+Two things a short regtest run cannot show, because it needs gossip to fill
+the Address Book and real Peers to reset. Read them off signet instead, from
+the metrics log, sampling **while it runs** -- a signet catch-up takes days
+and there is nothing to wait for:
+
+```bash
+$BIN signet follow $D log &
+sleep 600
+grep -v '^#' $D/metrics.log | awk '{printf "%-8s height %-9s peers %s\n", $2, $3, $9}'
+```
+
+```
+bodies   height 43444     peers 1
+bodies   height 62273     peers 2      <- dialled mid-walk
+bodies   height 75713     peers 2
+```
+
+**The peers column must rise, or at least hold.** Before #199 it could only
+fall for the hours a body phase lasts: `toppedUp` ran between phases and never
+inside one, so a Peer that dropped was gone until the walk ended.
+
+**Do not test this on a quiet tick.** The first attempt dialled only when a
+tick brought no Block, which never fires -- a walk keeping sixteen Blocks in
+flight per Peer has a Block on almost every tick, and the peers column stayed
+at 1 through a whole run. The dial is on a ten-second clock instead, which
+fires whether the walk is busy or not.
+
+For the reset, grep the run rather than the log:
+
+```bash
+grep -c "went: " follow.log     # Peers lost to a reset
+tail -2 follow.log              # must NOT be "no Peer could bring the chain up to date"
+```
+
+A `Connection reset by peer` used to end the run outright even with other
+Peers held (#203), because `Tcp.readSome` errors went out through the `?`
+while an empty read -- a clean close -- was handled one line below. A reset is
+the commoner of the two on a real network.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

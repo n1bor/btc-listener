@@ -403,78 +403,18 @@ verify sampleAddrBody
 
 fn toppedUp(state: Following) -> Result<Following, String>
     ? "Dial a Candidate when the node is short of Peers."
-      "One per turn of the loop rather than a rush of them: a Handshake is a"
-      "conversation and this loop is the only thing that can have one, so"
-      "every dial is time the Peers we already have are not being read."
+      "The dialling itself lives in Infra.Peers now (#199), because the"
+      "follow loop is not the only thing that takes turns: a body walk polls"
+      "and waits for hours, and while it could not dial, the pool could only"
+      "shrink for the whole of a catch-up. This is the loop's turn at it."
     ! [
         Console.error, Console.print,
         Random.int,
         Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    match List.len(Infra.Peers.peerKeys(state.pool)) >= targetPeers()
-        true -> Result.Ok(state)
-        false -> dialling(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
-
-fn dialling(state: Following, chosen: Option<String>) -> Result<Following, String>
-    ? "Nothing worth dialling is the usual answer, and not a problem."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    match chosen
-        Option.None -> Result.Ok(state)
-        Option.Some(address) -> dialled(state, address, Domain.Address.fromPeerText(address, Domain.Network.portOf(state.pool.network)))
-
-fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String>) -> Result<Following, String>
-    ? "A Candidate whose address will not parse is one a Peer made up."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
-    match parsed
-        Result.Err(why) -> Result.Ok(tried)
-        Result.Ok(peer) -> reaching(tried, address, peer)
-
-fn reaching(state: Following, address: String, peer: PeerAddress) -> Result<Following, String>
-    ? "One Candidate that would not answer is one Candidate, not the end."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    match Infra.Peers.joined(state.pool, state.nextKey, peer)
-        Result.Err(why) -> unreachable(state, address, why)
-        Result.Ok(outcome) -> reachedOrNot(state, address, outcome)
-
-fn reachedOrNot(state: Following, address: String, outcome: Joined) -> Result<Following, String>
-    ? "A Candidate that would not have us hands the pool back anyway."
-      "The dial is polled alongside the Peers now, so the seconds it spent"
-      "waiting were seconds those Peers were being read: throwing the pool"
-      "away with the failure would throw their bytes away with it."
-    ! [Console.error, Console.print, Tcp.writeBytes]
-    match outcome.seated
-        true -> reached(state, address, outcome.pool)
-        false -> unreachable(withPool(state, outcome.pool), address, outcome.why)
-
-fn unreachable(state: Following, address: String, why: String) -> Result<Following, String>
-    ? "Say who would not have us, and leave it marked as tried."
-    ! [Console.error]
-    _said = saidErrorIfPlain(state.watch, "candidate {address} did not answer: {why}")
-    Result.Ok(state)
-
-fn reached(state: Following, address: String, joined: Pool) -> Result<Following, String>
-    ? "A Candidate has become a Peer, so ask it who it knows."
-    ! [Console.print, Tcp.writeBytes]
-    _said = saidLineIfPlain(state.watch, "peer {state.nextKey} is {address}, from the Address Book")
-    asked = Infra.Peers.send(joined, state.nextKey, "getaddr", Bytes.fromList([]))?
-    Result.Ok(Following(pool = asked, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey + 1, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
+    topped = Infra.Peers.toppedUp(state.pool, state.book, state.nextKey)?
+    Result.Ok(Following(pool = topped.pool, store = state.store, blocks = state.blocks, book = topped.book, nextKey = topped.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -724,9 +664,9 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
-    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)))?
+    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)), afterHeaders.book, afterHeaders.nextKey)?
     bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
     standing = toppedUp(drainSpare(upToTip))?
     setLog = marking(standing, standing.pool, "set", tipHeight, tipHeight, true)?
     backAtTip(withLog(standing, setLog))
