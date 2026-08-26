@@ -24,6 +24,7 @@ const KV_MODULE =
   "aver:user/cap-n496e6672612e4b76-cb502cc65850614dfd4e4950b3493eb857d456d7cfbad23279512ada5fdfdfc32";
 const REGTEST_MAGIC = Buffer.from([0xfa, 0xbf, 0xb5, 0xda]);
 const TCP_BODY_LIMIT = 10 * 1024 * 1024;
+const FAKE_FRAME_BYTES = Number(process.env.BTC_LISTENER_FAKE_FRAME_BYTES ?? 8);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -108,23 +109,27 @@ function arrayToList(type, values, convert = (value) => value) {
   return list;
 }
 
+function writeBytesToLinearMemory(value) {
+  const bytes = Uint8Array.from(value);
+  ensureBytes(bytes.length);
+  memory().set(bytes, 0);
+  return bytes.length;
+}
+
 function averBytesToJs(value) {
-  const octets = helper("Bytes", `field_n${hexName("values")}`)(value);
-  return Uint8Array.from(
-    listToArray("Int", octets, (integer) => Number(averIntToBigInt(integer))),
-  );
+  const length = guest.__rt_bytes_to_lm(value);
+  return Uint8Array.from(new Uint8Array(guest.memory.buffer, 0, length));
 }
 
 function jsBytesToAver(value) {
-  const octets = arrayToList("Int", value, (byte) => bigIntToAver(BigInt(byte)));
-  return helper("Bytes", "make")(octets);
+  return guest.__rt_bytes_from_lm(writeBytesToLinearMemory(value));
+}
+
+function resultBytesOk(value) {
+  return guest.__rt_result_bytes_string_ok_from_lm(writeBytesToLinearMemory(value));
 }
 
 function resultOk(payloadType, value) {
-  if (payloadType === "Bytes") {
-    const octets = helper("Bytes", `field_n${hexName("values")}`)(value);
-    return guest.__rt_result_bytes_string_ok(octets);
-  }
   if (payloadType === "Unit") return guest.__rt_result_unit_string_ok();
   return helper(`Result<${payloadType}, String>`, "ok")(value);
 }
@@ -506,7 +511,7 @@ async function startFakePeer() {
           state.handshake = true;
           setTimeout(() => {
             if (!socket.destroyed) {
-              const nonce = Buffer.alloc(8);
+              const nonce = Buffer.alloc(FAKE_FRAME_BYTES);
               nonce.writeBigUInt64LE(7n);
               socket.write(bitcoinMessage("ping", nonce, true));
               state.corruptSent = true;
@@ -673,7 +678,7 @@ function standardImports() {
         const count = intArgument(countRef, "Disk.readBytesAt");
         if (offset < 0 || count < 0) throw new Error("offset and count must be non-negative");
         const bytes = readFileSync(safeDiskPath(averToJs(pathRef))).subarray(offset, offset + count);
-        return resultOk("Bytes", jsBytesToAver(bytes));
+        return resultBytesOk(bytes);
       } catch (error) {
         return resultErr("Bytes", `Disk.readBytesAt: ${error.message}`);
       }
@@ -860,7 +865,9 @@ function standardImports() {
         if (maximum <= 0 || maximum > TCP_BODY_LIMIT) {
           throw new Error(`maxBytes ${maximum} must be within 1..=${TCP_BODY_LIMIT}`);
         }
-        return resultOk("Bytes", jsBytesToAver(await readSome(connectionState(connectionRef), maximum)));
+        return resultBytesOk(
+          await readSome(connectionState(connectionRef), maximum),
+        );
       } catch (error) {
         return resultErr("Bytes", `Tcp.readSome: ${error.message}`);
       }
@@ -891,7 +898,9 @@ function standardImports() {
         if (count < 0 || count > TCP_BODY_LIMIT) {
           throw new Error(`count ${count} must be within 0..=${TCP_BODY_LIMIT}`);
         }
-        return resultOk("Bytes", jsBytesToAver(await readExactly(connectionState(connectionRef), count)));
+        return resultBytesOk(
+          await readExactly(connectionState(connectionRef), count),
+        );
       } catch (error) {
         return resultErr("Bytes", `Tcp.readBytes: ${error.message}`);
       }
@@ -963,19 +972,17 @@ async function main() {
       throw new Error("full CLI did not select and report the local regtest Peer");
     }
     if (!output.includes("handshake complete") || !fake.state.handshake) {
-      throw new Error("full Peer handshake did not complete in both directions");
+      throw new Error(`full Peer handshake did not complete in both directions; returned: ${failure}`);
     }
     if (!fake.state.corruptSent || !errors.some((line) => line.includes("checksum"))) {
       throw new Error(`listener path did not diagnose the corrupt checksum; returned: ${failure}`);
     }
     console.log(`full btc-listener listener path: ok (${failure})`);
   } finally {
-    if (fake === null) {
-      const seconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
-      console.log(
-        `Node host wire sample: ${wireBytesRead} B read, ${wireBytesWritten} B written in ${seconds.toFixed(1)} s`,
-      );
-    }
+    const seconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
+    console.log(
+      `Node host wire sample: ${wireBytesRead} B read, ${wireBytesWritten} B written in ${seconds.toFixed(1)} s`,
+    );
     for (const state of resources.values()) {
       if (state.kind === "listener") {
         for (const socket of state.pending) socket.destroy();
