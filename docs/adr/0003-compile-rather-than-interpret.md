@@ -92,9 +92,10 @@ out — no longer holds. Small experiments interpret perfectly well.
 > and the README was right to say the downloader must be compiled.
 
 Note that [#890](https://github.com/jasisz/aver/issues/890) — a `Map` returned
-from a function is copied — is a separate defect and is still open. It is the
-reason `infra/store.av` folds the way it does, and it is unaffected by any of
-the above.
+from a function is copied — is a separate defect. It is the reason
+`infra/store.av` folds the way it does, and it is unaffected by any of the
+above. **It closed on 20 August 2026**; what that means for the folds is at
+the end of this document.
 
 ## Update, 14 August 2026 — a necessity again, for a different reason
 
@@ -241,8 +242,38 @@ million and a half entries while a 40,000-iteration benchmark does not.
 
 ### What is left to retire
 
-#890 closing would let `infra/store.av` be written the natural way and would
-remove the batching from three callers.
+**Both of the issues this section used to be waiting on closed on 20 August
+2026, and this section did not notice for six days.** That is worth recording
+as a failure of the pin-moving routine rather than quietly editing away: the
+routine greps for `jasisz/aver#` and checks whether each issue is closed, and
+a paragraph that says "still open" in prose passes that grep looking exactly
+like a paragraph that says "closed".
+
 [#782](https://github.com/jasisz/aver/issues/782), the 30-second TCP read
-deadline, is also still open and still hardcoded in `aver-rt/src/tcp.rs`, so the
-note in the README about an idle peer stands.
+deadline, was answered by **removing** the deadline rather than making it
+configurable — timing out part way through a frame leaves the stream silently
+desynchronised — and every frame now starts with `Tcp.poll` at the message
+boundary, which is the one place a timeout abandons nothing. The README has
+said so correctly all along; only this section was stale.
+
+[#890](https://github.com/jasisz/aver/issues/890), a `Map` returned from a
+function being copied, closed too. **It retires no code here**, which is worth
+being plain about:
+
+- `absorbAll`, `forgetAll` and `replayApplied` are already written the natural
+  way — a tail-recursive walk with `Map.set` inline in the recursive call. The
+  workaround #890 forced was a constraint on *how* to write them, not an extra
+  layer to take out. There is nothing to delete.
+- `putAll` and `deleteAll` keep their batching, and [ADR
+  0006](0006-a-leveldb-under-the-index.md) already gives the reason that
+  outlives #890: one `Kv.putAll` is one RocksDB `WriteBatch`, which is where
+  the all-or-nothing guarantee comes from. A batched API that exists for
+  atomicity does not stop being wanted because the copy it also avoided is
+  gone.
+
+What **is** now stale is the arithmetic. Every number in this document —
+2,150× for the obvious helper, 52 ms against 24,404 ms for 40,000 entries —
+was measured against a compiler that copied the `Map`. They are the reason the
+folds are shaped as they are, and they no longer describe the toolchain. They
+are left as written rather than adjusted by guesswork; re-measuring them is
+n1bor/btc-listener#188.
