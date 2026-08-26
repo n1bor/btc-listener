@@ -22,7 +22,7 @@ module Audit
     depends [Domain.Network, Bytes, Domain.TxCheck, Domain.BlockWork, Domain.ScriptWork, Infra.Pace, Domain.Block, Domain.Checks, Domain.Index, Domain.Rules, Domain.Spend, Domain.SpendScript, Domain.Transaction, Infra.Blocks, Infra.Chain, Infra.Spends, Infra.Store, Domain.IndexKeys]
     effects [
         Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]
@@ -40,7 +40,7 @@ fn run(network: Network, dir: String, from: Int, to: Int) -> Result<Counts, Stri
     ? "Walk the range, checking every Block and every Transaction in it."
     ! [
         Console.print,
-        Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
         Infra.Kv.get, Infra.Kv.open,
         Time.now, Time.unixMs,
     ]
@@ -199,14 +199,14 @@ record Gathered
 
 fn walk(network: Network, store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "A batch of Heights at a time."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
+    ! [Console.print, Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
     match height > to
         true -> Result.Ok(counts)
         false -> overBatch(network, store, blocks, height, to, counts, pace)
 
 fn overBatch(network: Network, store: Store, blocks: BlockStore, height: Int, to: Int, counts: Counts, pace: Pace) -> Result<Counts, String>
     ? "Gather what the chain has to say, decide it away from the chain, then walk it."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
+    ! [Console.print, Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
     got = gathering(store, blocks, height, to, batchSize(), [])?
     prepared = Domain.BlockWork.preparedAcross(got.waiting)?
     done = processed(network, store, blocks, prepared, counts, pace)?
@@ -218,7 +218,7 @@ fn continued(network: Network, store: Store, blocks: BlockStore, got: Gathered, 
       "The second is not reachable from the gathering below, which always moves"
       "on or ends, but a walk that could loop over the same Height forever is"
       "not a thing to leave to reasoning."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
+    ! [Console.print, Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Time.now, Time.unixMs]
     match Bool.or(got.ended, got.next <= height)
         true -> Result.Ok(counts)
         false -> walk(network, store, blocks, got.next, to, counts, pace)
@@ -227,14 +227,14 @@ fn gathering(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, 
     ? "Read up to left Blocks out of the chain, and nothing else."
       "Everything here touches the disk or the database, and nothing here"
       "decides anything, which is what lets the deciding be fanned out."
-    ! [Disk.readBytesAt, Infra.Kv.get]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get]
     match Bool.or(left < 1, height > to)
         true -> Result.Ok(Gathered(waiting = List.reverse(acc), next = height, ended = false))
         false -> atHeight(store, blocks, height, to, left, acc)
 
 fn atHeight(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, acc: List<Unchecked>) -> Result<Gathered, String>
     ? "A Height the Index does not name ends the range."
-    ! [Disk.readBytesAt, Infra.Kv.get]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get]
     holding = Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?)
     match holding
         Option.None -> Result.Ok(Gathered(waiting = List.reverse(acc), next = height, ended = true))
@@ -243,7 +243,7 @@ fn atHeight(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, a
 fn atBlock(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, acc: List<Unchecked>, blockId: String) -> Result<Gathered, String>
     ? "A Block whose body is not held is stepped over, and does not fill a place."
       "A pruned stretch would otherwise hand the branches a batch of one."
-    ! [Disk.readBytesAt, Infra.Kv.get]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get]
     located = Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> gathering(store, blocks, height + 1, to, left, acc)
@@ -251,7 +251,7 @@ fn atBlock(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, ac
 
 fn readBlock(store: Store, blocks: BlockStore, height: Int, to: Int, left: Int, acc: List<Unchecked>, blockId: String, stored: Bytes) -> Result<Gathered, String>
     ? "One positional read of exactly the Block's bytes."
-    ! [Disk.readBytesAt, Infra.Kv.get]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get]
     location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(blocks, location)?
     parent = parentOf(store, height)?

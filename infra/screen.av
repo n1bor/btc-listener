@@ -7,8 +7,8 @@ module Screen
         "purpose: restore is the last thing done on every way out, and a"
         "restore that fails has nowhere better to send its complaint than"
         "the terminal it failed to restore (#130)."
-    exposes [Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing]
-    depends [Domain.Screen, Domain.Snapshot]
+    exposes [Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing, logging]
+    depends [Domain.Screen, Domain.Snapshot, Infra.Metrics]
     effects [
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
     ]
@@ -18,18 +18,30 @@ record Eye
     snapshot: Snapshot
     shownMs: Int
     stopped: Bool
+    log: Log
 
-fn unwatched(snapshot: Snapshot) -> Eye
+fn unwatched(snapshot: Snapshot, log: Log) -> Eye
     ? "An Eye for a caller with no Screen: every glance is free and blind."
-    Eye(view = Option.None, snapshot = snapshot, shownMs = 0, stopped = false)
+      "Blind to a terminal, not to the metrics log -- a run with no Screen"
+      "still records itself (#180)."
+    Eye(view = Option.None, snapshot = snapshot, shownMs = 0, stopped = false, log = log)
 
-fn watchedBy(view: Option<View>, snapshot: Snapshot) -> Eye
-    ? "The Eye a screened follow threads through its walks (#130)."
-    Eye(view = view, snapshot = snapshot, shownMs = 0, stopped = false)
+fn watchedBy(view: Option<View>, snapshot: Snapshot, log: Log) -> Eye
+    ? "The Eye a screened follow threads through its walks (#130), carrying"
+      "the metrics log those walks write to (#180)."
+      "The Eye is what a long walk carries to report itself, and there are"
+      "two ways to report: draw a frame, and write a record. It carries the"
+      "log rather than writing it, so the walk decides what a record says --"
+      "only the walk knows which phase it is or how far along."
+    Eye(view = view, snapshot = snapshot, shownMs = 0, stopped = false, log = log)
 
 fn eyeing(eye: Eye, snapshot: Snapshot) -> Eye
     ? "The Eye, with the Snapshot it will draw from moved on."
-    Eye(view = eye.view, snapshot = snapshot, shownMs = eye.shownMs, stopped = eye.stopped)
+    Eye(view = eye.view, snapshot = snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log)
+
+fn logging(eye: Eye, log: Log) -> Eye
+    ? "The Eye, with the metrics log moved on after a record."
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = log)
 
 fn redrawEveryMs() -> Int
     ? "How often a catch-up frame is redrawn: every ten seconds, the cadence"
@@ -55,7 +67,7 @@ fn glancedAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     keys = drainedKeys()?
     acted = Domain.Screen.pressedAll(view, keys)
     match acted.answer
-        Answer.StopNode -> Result.Ok(Eye(view = Option.Some(acted.view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = true))
+        Answer.StopNode -> Result.Ok(Eye(view = Option.Some(acted.view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = true, log = eye.log))
         Answer.Redraw -> drawnAt(eye, acted.view, nowMs)
         Answer.Unchanged -> maybeDrawn(eye, acted.view, nowMs)
 
@@ -64,13 +76,13 @@ fn maybeDrawn(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
     match nowMs - eye.shownMs >= redrawEveryMs()
         true -> drawnAt(eye, view, nowMs)
-        false -> Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped))
+        false -> Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log))
 
 fn drawnAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     ? "The frame onto the terminal, and the clock that gates the next one."
     ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
     _drawn = shown(Domain.Screen.frameOf(view, eye.snapshot, nowMs))?
-    Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = nowMs, stopped = eye.stopped))
+    Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = nowMs, stopped = eye.stopped, log = eye.log))
 
 fn entered() -> Result<Unit, String>
     ? "Take the terminal: raw mode, no cursor, a clean slate."

@@ -21,10 +21,10 @@ module ChainState
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
     exposes [Built, build]
-    depends [Bytes, Domain.AssumeValid, Domain.Connect, Domain.Transaction, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Infra.Metrics, Domain.Connect, Domain.Transaction, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -56,7 +56,7 @@ fn build(network: Network, store: Store, blocks: BlockStore, to: Int, eye: Eye) 
       "have to come off before anything goes on."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -82,8 +82,8 @@ fn plainly(eye: Eye) -> Bool
         Option.Some(view) -> false
 
 verify plainly
-    plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0))) => true
-    plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0))) => false
+    plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none())) => true
+    plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0), Infra.Metrics.none())) => false
 
 fn saidRange(from: Int, to: Int) -> Unit
     ? "Say what is about to be connected, when anything is."
@@ -107,7 +107,7 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
     ? "Each Height in turn, stopping at the first one the chain cannot supply."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -120,7 +120,7 @@ fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk,
     ? "A Height the Index does not name ends the walk."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -136,7 +136,7 @@ fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String)
       "existed. The outputs phase can step over a gap; this cannot."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -150,7 +150,7 @@ fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: Stri
     ? "Read the Block and put it into the Set."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
@@ -170,14 +170,15 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
       "would stop being true the next time h: is re-pointed."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
-    looked = Infra.Screen.glanced(Infra.Screen.eyeing(state.eye, confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs), applied.confirmed, view.atMs)), view.atMs)?
-    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
+    reachedPut = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
+    setRecord = Infra.Metrics.marked(state.eye.log, "set", height, to, state.counted.blocks, 0, 0, 0, 0, state.counted.added, state.counted.removed, false)?
+    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs), applied.confirmed, view.atMs)), setRecord), view.atMs)?
+    counted = Built(store = reachedPut, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
     walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked), height + 1, to)
 

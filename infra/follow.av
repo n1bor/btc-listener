@@ -278,7 +278,7 @@ fn markingCounts(state: Following, pool: Pool, phase: String, height: Int, targe
       "back once, at the end. So the walk's own totals are read out of it"
       "here rather than being asked for again from the store."
     ! [Disk.appendText, Time.unixMs]
-    Infra.Metrics.marked(state.log, phase, height, target, blocks, bytes, Infra.Peers.polledMsOf(pool), List.len(Infra.Peers.peerKeys(pool)), Domain.AddressBook.sizeOf(state.book), forced)
+    Infra.Metrics.marked(state.log, phase, height, target, blocks, bytes, Infra.Peers.polledMsOf(pool), List.len(Infra.Peers.peerKeys(pool)), Domain.AddressBook.sizeOf(state.book), 0, 0, forced)
 
 fn marking(state: Following, pool: Pool, phase: String, height: Int, target: Int, forced: Bool) -> Result<Log, String>
     ? "One metrics record, at a phase boundary or when a window is due (#180)."
@@ -715,16 +715,16 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
         Time.now, Time.unixMs,
     ]
     have = haveOf(state.store)?
-    grown = Infra.Download.headersOn(state.pool, key, state.store, have, eyeOf(state.watch))?
-    headersLog = marking(state, grown.pool, "headers", haveOf(grown.store)?, 0, true)?
+    grown = Infra.Download.headersOn(state.pool, key, state.store, have, eyeOf(state))?
+    headersLog = marking(withLog(state, grown.eye.log), grown.pool, "headers", haveOf(grown.store)?, 0, true)?
     drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watchSeen(state.watch, grown.eye), mempool = state.mempool, rebuilding = state.rebuilding, log = headersLog))
     _heard = saidBookIfPlain(drained.watch, Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
     afterHeaders = toppedUp(drained)?
     tipHeight = tipHeightOf(afterHeaders.store)?
-    aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders.watch))?
+    aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
-    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(afterHeaders.watch))?
-    bodiesLog = markingCounts(withLog(afterHeaders, startLog), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
+    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)))?
+    bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
     upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
     standing = toppedUp(drainSpare(upToTip))?
     setLog = marking(standing, standing.pool, "set", tipHeight, tipHeight, true)?
@@ -744,9 +744,13 @@ fn backAtTip(state: Following) -> Result<Following, String>
     placed = Infra.Headers.tipOf(state.store)?
     Result.Ok(withWatch(state, Watching(snapshot = atTip(state.watch.snapshot, placed, Time.unixMs()), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, view = state.watch.view, leaving = state.watch.leaving)))
 
-fn eyeOf(watch: Watching) -> Eye
-    ? "The Eye a walk carries, opened from what the loop already knows."
-    Infra.Screen.watchedBy(watch.view, watch.snapshot)
+fn eyeOf(state: Following) -> Eye
+    ? "The Eye a walk carries, opened from what the loop already knows --"
+      "including the metrics log, because a walk records itself as well as"
+      "drawing itself (#180). The walk hands it back advanced, and the"
+      "caller folds it into the state so the next phase carries on from"
+      "where it left off."
+    Infra.Screen.watchedBy(state.watch.view, state.watch.snapshot, state.log)
 
 fn watchSeen(watch: Watching, eye: Eye) -> Watching
     ? "What a walk's Eye saw, folded back: the Snapshot it advanced, the"
@@ -768,19 +772,19 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
       "the walk's own minute lines instead."
     ! [
         Console.print,
-        Disk.readBytesAt,
+        Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight, eyeOf(state.watch))?
+    built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight, eyeOf(state))?
     backOut = List.concat(unconfirmed, built.unconfirmed)
     seen = watchSeen(state.watch, built.eye)
     _each = saidLinesIfPlain(seen, blockLinesOf(built.blocks, built.views))
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
     restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = state.log), watchAfterBuild(seen, built.views)))
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = built.eye.log), watchAfterBuild(seen, built.views)))
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."
@@ -889,14 +893,14 @@ fn restoring(network: Network, store: Store, pool: Mempool, unconfirmed: List<Ca
       "They arrive lowest Block first, so a parent is offered before any child"
       "that spends it. Offered the other way round, the child would find its"
       "parent's Output missing from the Set and be refused for good."
-    ! [Console.print, Infra.Kv.get]
+    ! [Console.print, Disk.appendText, Infra.Kv.get]
     match unconfirmed
         [] -> saidRestored(pool, back, offered)
         [head, ..tail] -> restoringOne(network, store, pool, head, tail, tipHeight, back, offered)
 
 fn restoringOne(network: Network, store: Store, pool: Mempool, one: Carried, rest: List<Carried>, tipHeight: Int, back: Int, offered: Int) -> Result<Mempool, String>
     ? "One of them, through the ordinary door."
-    ! [Console.print, Infra.Kv.get]
+    ! [Console.print, Disk.appendText, Infra.Kv.get]
     landing = Infra.Mempool.admitting(network, store, pool, one.bytes, tipHeight)?
     restoring(network, store, poolAfter(pool, landing), rest, tipHeight, back + oneIfAdmitted(landing), offered)
 
