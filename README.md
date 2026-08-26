@@ -965,9 +965,40 @@ credentials:
 ```bash
 curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/main -o main
 curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/SHA256SUMS -o SHA256SUMS
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 chmod +x main && ./main help
 ```
+
+### The same program as wasm-gc
+
+The same release carries `main.wasm`: the whole listener compiled to
+WebAssembly, and **the exact module CI ran a Peer handshake through** rather
+than a second build of it.
+
+```bash
+curl -sL https://github.com/n1bor/btc-listener/releases/download/main-build/main.wasm -o main.wasm
+```
+
+It is not a second way to run a node. A wasm module has no capabilities of its
+own, so it needs a host to supply them; [`wasm/host.mjs`](wasm/host.mjs) is
+one, on Node 26 — or Node 24 with `--experimental-wasm-jspi`, because it needs
+JSPI for `Tcp.poll` to suspend.
+
+```bash
+node wasm/host.mjs main.wasm                                  # self-test against a fake Peer
+node wasm/host.mjs main.wasm regtest 127.0.0.1 18444          # a real one
+node wasm/host.mjs main.wasm regtest headers 127.0.0.1:18444 chain-a
+```
+
+**That host sandboxes `Disk` to a temporary directory and deletes it on exit**,
+so directories must be relative and nothing survives the run — an absolute path
+is refused by name (`Disk path escapes host sandbox`). It is a conformance
+harness: proof the same source runs on a second backend, not somewhere to keep
+a chain. The binary above is what a server wants.
+
+`--ignore-missing` because `SHA256SUMS` covers both the binary and
+`main.wasm`, and most people want only one of them; without it, `sha256sum`
+fails on the file you deliberately did not fetch.
 
 **Check the hash rather than skipping it.** Nothing inside the binary says
 which commit produced it; `SHA256SUMS` and the release title are the only

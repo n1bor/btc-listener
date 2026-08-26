@@ -218,6 +218,16 @@ jobs:
         run: aver compile main.av --module-root . --target wasm-gc -o "$RUNNER_TEMP/btc-listener-wasm"
       - name: Run the complete listener against a local Bitcoin Peer
         run: node wasm/host.mjs "$RUNNER_TEMP/btc-listener-wasm/main.wasm"
+      # Kept so the release publishes the exact module this job proved, rather
+      # than a second build of it. The binary job installs aver without
+      # --features wasm and could not produce one anyway.
+      - name: Keep the proven module for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-wasm
+          path: ${{ runner.temp }}/btc-listener-wasm/main.wasm
+          if-no-files-found: error
+          retention-days: 1
 
   binary:
     name: publish the binary for main
@@ -265,6 +275,11 @@ jobs:
         run: |
           aver compile main.av --module-root . -o build
           cargo build --release --manifest-path build/Cargo.toml
+      - name: Collect the wasm-gc module the Node host proved
+        uses: actions/download-artifact@v4
+        with:
+          name: main-wasm
+          path: build/target/release
       # Built on 22.04 rather than on ubuntu-latest on purpose. The binary's
       # floor is whatever glibc it was built against, and a 24.04 runner would
       # quietly raise that floor above the servers this is for. 22.04 runs on
@@ -277,7 +292,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd build/target/release && sha256sum main > SHA256SUMS && cd -
+          cd build/target/release && sha256sum main main.wasm > SHA256SUMS && cd -
           floor=$(objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1)
           # Deleted and recreated rather than edited, so the tag names the
           # commit that actually produced the asset hanging off it.
@@ -296,6 +311,21 @@ jobs:
               "Needs **$floor** or newer, so Ubuntu 22.04 and up, x86-64. RocksDB and" \
               "libsecp256k1 are compiled in; the only shared libraries are stock ones." \
               "" \
-              "This release is replaced on every push to main. \`SHA256SUMS\` is beside it." \
-              "Setting a server up with it: #138.")" \
-            build/target/release/main build/target/release/SHA256SUMS
+              "### The same program as wasm-gc" \
+              "" \
+              "\`main.wasm\` is the whole listener compiled to WebAssembly, and it is the" \
+              "exact module the Node host ran a Peer handshake through in CI." \
+              "" \
+              "\`\`\`bash" \
+              "curl -sL https://github.com/${GITHUB_REPOSITORY}/releases/download/main-build/main.wasm -o main.wasm" \
+              "\`\`\`" \
+              "" \
+              "It needs a host that supplies the capability imports and JSPI --" \
+              "\`wasm/host.mjs\` in this repository is one, on Node 26 or Node 24 with" \
+              "\`--experimental-wasm-jspi\`. That host sandboxes Disk to a temporary" \
+              "directory it deletes on exit, so it is a conformance harness rather than" \
+              "a way to run a node that keeps a chain." \
+              "" \
+              "This release is replaced on every push to main. \`SHA256SUMS\` covers both" \
+              "files. Setting a server up with it: #138.")" \
+            build/target/release/main build/target/release/main.wasm build/target/release/SHA256SUMS
