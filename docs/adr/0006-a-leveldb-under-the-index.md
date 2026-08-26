@@ -79,9 +79,12 @@ never once invoked on any backend. It can come back the day something calls it.
 
 **The batching stays.** `putAll` and `deleteAll` exist because
 [jasisz/aver#890](https://github.com/jasisz/aver/issues/890) makes per-entry
-`Map` writes quadratic: 52 ms against 24,404 ms for 40,000 entries. **That
-issue closed on 20 August 2026**, so that reason has expired and the numbers
-above describe a compiler we no longer run (n1bor/btc-listener#188). On the database arm the
+`Map` writes quadratic: 52 ms against 24,404 ms for 40,000 entries. #890 closed
+on 20 August 2026 and the numbers were re-taken on 26 August: **8 ms against
+15,660 ms** at the same size. Smaller, and the same shape — because #890 fixed
+a helper returning a bare `Map` and not one returning a *record* holding a
+`Map`, which is exactly what `Infra.Store.put` does. The reason has not
+expired. See [ADR 0003](0003-compile-rather-than-interpret.md). On the database arm the
 same shape earns its keep differently — one `Kv.putAll` is one LevelDB
 `WriteBatch`, which is where the all-or-nothing guarantee comes from — so there
 is no version of this API that stops being batched.
