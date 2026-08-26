@@ -118,6 +118,15 @@ Chain Work behind it. A Header whose parent is not the Tip starts a Branch, and
 that is ordinary rather than an error.
 _Avoid_: fork, side chain, alternate chain, candidate
 
+**Catch-up**:
+The run from where the node stands to the Tip it is following: the Header
+phase, then the body phase, then the Set phase. Bounded at both ends — it
+starts from what the directory already holds and ends when the UTXO Set stands
+on the Tip, not merely when the last body is on disk. A node that has caught up
+still catches up again every time a Peer announces a Block; the same three
+phases over a range of one.
+_Avoid_: sync, IBD, initial block download, backfill, bootstrap
+
 **Chain Work**:
 How much hashing a Branch represents: for each Header, the whole 256-bit space
 divided by the values its target admits, summed from the first Block. What
