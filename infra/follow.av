@@ -23,14 +23,14 @@ module Follow
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -167,17 +167,107 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
+    book = bootstrapped(network, addresses)?
     pool = joining(Infra.Peers.opened(network), addresses, 0)?
     asked = askingAll(pool, Infra.Peers.peerKeys(pool))?
     told = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
     bound = listeningIf(told, store, answering)?
-    outcome = session(Following(pool = bound, store = store, blocks = blocks, book = Domain.AddressBook.noBook(), nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), screened)
+    started = firstSeated(Following(pool = bound, store = store, blocks = blocks, book = book, nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None), Domain.AddressBook.sizeOf(book))?
+    outcome = session(started, screened)
     _given = restoredIf(screened)
     closeAfter(bound, outcome)
+
+fn firstSeated(state: Following, left: Int) -> Result<Following, String>
+    ? "A session that named no Peer starts with an empty pool, so it dials"
+      "one out of the Book before anything asks a Peer a question (#166)."
+      "The catch-up speaks to a Peer by identifier, and there is no"
+      "identifier to speak to until a Handshake has completed. A session"
+      "that named its Peers is already seated and passes straight through."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match List.len(Infra.Peers.peerKeys(state.pool)) > 0
+        true -> Result.Ok(state)
+        false -> seatingMore(state, left)
+
+fn seatingMore(state: Following, left: Int) -> Result<Following, String>
+    ? "One more Candidate tried, while there are any left to try."
+      "Every Candidate refused is a Candidate marked tried, so this walks"
+      "the Book once rather than circling it."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match left <= 0
+        true -> Result.Err("no Candidate answered; none of the addresses the DNS seeds gave could be reached")
+        false -> firstSeated(toppedUp(state)?, left - 1)
+
+fn bootstrapped(network: Network, addresses: List<PeerAddress>) -> Result<Map<String, Candidate>, String>
+    ? "The Address Book a session starts with (#166)."
+      "Named Peers mean an empty Book: the caller said who to talk to, and a"
+      "regtest or a controlled test must not have that quietly widened by a"
+      "DNS lookup. Nothing named means the seeds are the bootstrap, which is"
+      "what the glossary has always said they were."
+      "The Book is held in memory only, so it is empty at every start and"
+      "the seeds are always asked on the first turn. Once gossip has filled"
+      "it, the dial loop takes Candidates from the Book and the seeds are"
+      "not asked again -- which is the rule wanted either way: ask when the"
+      "Book cannot supply."
+    ! [
+        Console.print,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+    ]
+    match addresses
+        [head, ..tail] -> Result.Ok(Domain.AddressBook.noBook())
+        [] -> fromSeeds(network)
+
+fn fromSeeds(network: Network) -> Result<Map<String, Candidate>, String>
+    ? "Ask the Network's seeds and put what they answer in the Book as"
+      "Candidates -- claimed addresses, not Peers, which is what every"
+      "address that has not completed a Handshake is."
+    ! [
+        Console.print,
+        Random.int,
+        Tcp.close, Tcp.connect, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+    ]
+    _asking = Console.print("no Peer given; asking the {Domain.Network.nameOf(network)} DNS seeds")
+    found = Infra.Resolver.discoverAll(network)?
+    seeded(Domain.AddressBook.heardAll(Domain.AddressBook.noBook(), textsOf(found, []), Domain.AddressBook.fromSeed()), network)
+
+fn seeded(book: Map<String, Candidate>, network: Network) -> Result<Map<String, Candidate>, String>
+    ? "A Book with nothing in it cannot start a node, and saying so beats"
+      "dialling nothing in a loop."
+    ! [Console.print]
+    match Domain.AddressBook.sizeOf(book) == 0
+        true -> Result.Err("the {Domain.Network.nameOf(network)} DNS seeds answered with no address to dial")
+        false -> saidSeeded(book)
+
+fn saidSeeded(book: Map<String, Candidate>) -> Result<Map<String, Candidate>, String>
+    ? "How many Candidates the bootstrap found."
+    ! [Console.print]
+    _said = Console.print("{Domain.AddressBook.sizeOf(book)} Candidate(s) from the DNS seeds")
+    Result.Ok(book)
+
+fn textsOf(addresses: List<PeerAddress>, acc: List<String>) -> List<String>
+    ? "The Book keys on the text of an Address, which is how a Peer names"
+      "one in an addr Message too."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> textsOf(tail, List.prepend(Domain.Address.toString(head), acc))
+
+verify textsOf
+    textsOf([], []) => []
+    List.len(textsOf([Domain.Address.fromPeerText("1.2.3.4:8333", 8333)?], [])) => 1
 
 fn restoredIf(screened: Bool) -> Unit
     ? "Give the terminal back if the Screen ever had it; restoring a"
@@ -1529,8 +1619,8 @@ fn onAsked(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    answered = serving(state.pool, state.mempool, key, Domain.Inventory.requestedTxHashesOf(body))?
-    blocksOut = servingBlocks(withPool(state, answered), key, List.take(Domain.Inventory.requestedBlockHashesOf(body), servedBlockCap()))?
+    txsOut = serving(state.pool, state.mempool, key, Domain.Inventory.requestedTxHashesOf(body))?
+    blocksOut = servingBlocks(withPool(state, txsOut), key, List.take(Domain.Inventory.requestedBlockHashesOf(body), servedBlockCap()))?
     listen(blocksOut)
 
 fn servedBlockCap() -> Int
@@ -1984,8 +2074,8 @@ fn onAskedHeaders(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
     ]
     from = agreedHeight(state.store, Domain.Block.locatorIn(body))?
     headers = headersFrom(state.store, from + 1, Domain.Block.headersCap(), [])?
-    answered = sendingHeaders(state, key, headers)?
-    listen(answered)
+    headersOut = sendingHeaders(state, key, headers)?
+    listen(headersOut)
 
 fn sendingHeaders(state: Following, key: Int, headers: List<String>) -> Result<Following, String>
     ? "The Headers we hold above what they know, up to the cap."

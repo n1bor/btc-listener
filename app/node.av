@@ -14,7 +14,7 @@ module Node
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -27,7 +27,7 @@ fn follow(network: Network, rest: List<String>) -> Result<Unit, String>
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -43,13 +43,71 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match keywordOnly(more)
+        true -> parsed(network, Result.Ok([]), address, screenAsked(more), servePort(more, network))
+        false -> namedPeers(network, address, more)
+
+fn namedPeers(network: Network, address: String, more: List<String>) -> Result<Unit, String>
+    ? "Peers were named, so only those are dialled -- a regtest or a"
+      "controlled test never depends on DNS (#166)."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.writeBytes, Disk.writeText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
         [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network))
+
+fn keywordOnly(more: List<String>) -> Bool
+    ? "Whether what follows the first argument is only words, which is how"
+      "follow <dir> is told apart from follow <peer-addresses> <dir> (#166)."
+      "Arity plus two reserved words settles it: nothing after the directory,"
+      "or nothing but screen and serve. A directory actually named screen"
+      "would be read as the word, which is a price worth paying for a"
+      "grammar with no flag in it."
+    match more
+        [] -> true
+        [head, ..tail] -> keywordThenRest(head, tail)
+
+verify keywordOnly
+    keywordOnly([]) => true
+    keywordOnly(["screen"]) => true
+    keywordOnly(["serve"]) => true
+    keywordOnly(["serve:18455"]) => true
+    keywordOnly(["screen", "serve"]) => true
+    keywordOnly(["/tmp/chain"]) => false
+    keywordOnly(["/tmp/chain", "screen"]) => false
+
+fn keywordThenRest(head: String, tail: List<String>) -> Bool
+    ? "This word, then the rest of them."
+    match isKeyword(head)
+        false -> false
+        true -> keywordOnly(tail)
+
+verify keywordThenRest
+    keywordThenRest("screen", []) => true
+    keywordThenRest("/tmp/chain", []) => false
+
+fn isKeyword(word: String) -> Bool
+    ? "The words that are not a directory: screen, serve, and serve:PORT."
+    Bool.or(word == "screen", Bool.or(word == "serve", String.startsWith(word, "serve:")))
+
+verify isKeyword
+    isKeyword("screen") => true
+    isKeyword("serve") => true
+    isKeyword("serve:18455") => true
+    isKeyword("/tmp/chain") => false
+    isKeyword("served") => false
 
 fn servePort(extra: List<String>, network: Network) -> Option<Int>
     ? "Which port to answer callers on, if the word serve was given (#30)."
@@ -148,7 +206,7 @@ fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: S
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -172,7 +230,7 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
@@ -192,7 +250,7 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String, screen
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
