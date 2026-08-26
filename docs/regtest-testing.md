@@ -987,6 +987,38 @@ awk '/^#/{next} NF != 10 {bad++} END {print bad+0}' $D/metrics.log
   with a newline, because records are appended one line at a time and a run
   that stops mid-phase simply has no record for it.
 
+**Records come from inside the walks, not only at their edges.** Each of the
+three long walks -- `Infra.Download`, `Infra.Bodies`, `Infra.ChainState` --
+writes at the same point it already decides to redraw, so a phase that runs
+for hours writes a line a minute throughout it. The first version of this
+wrote only at phase boundaries and in the listen tick, which meant a mainnet
+body phase produced **nothing at all** for hours; the tell is a log whose last
+line is `bodies <from> <to>` with zeros in every count.
+
+**Testing that on regtest needs the window shortened.** A regtest walk
+finishes in under a minute, so the real 60-second gate never fires and only
+the boundary records appear -- which is exactly what the broken version
+produced. Drop `Infra.Metrics.windowMs` to `250` temporarily, run, and count:
+
+```bash
+awk '/^#/{next} {n[$2]++} END {for (p in n) printf "%-8s %d\n", p, n[p]}' $D/metrics.log
+```
+
+```
+headers  2
+bodies   3
+set      27
+listen   83
+```
+
+Anything other than 1 for `set` and 2 for `bodies` means the walks are
+writing. Put `windowMs` back to `60000` before committing.
+
+**`peers` and `polledMs` are 0 for the set phase.** That walk holds no pool:
+`polledMs` is genuinely zero because it does no network I/O -- which is the
+finding, not a gap -- but `peers` is *unknown* rather than none, so do not
+read a zero there as a node with no Peers.
+
 **A phase boundary resets the Block and byte counters.** `Infra.Bodies` counts
 its own walk and the phases either side count nothing, so a record's counters
 can go backwards; `sinceLast` reports the raw value when they do. Written the

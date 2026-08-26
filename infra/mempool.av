@@ -24,7 +24,7 @@ module Mempool
         "refused rather than admitted on a guess."
     exposes [Landing, admitting, paidOut]
     depends [Bytes, Domain.Mempool, Domain.Network, Domain.Rules, Domain.ScriptWork, Domain.Spend, Domain.SpendScript, Domain.Standard, Domain.Transaction, Domain.UtxoStore, Infra.Spends, Infra.Store]
-    effects [Infra.Kv.get]
+    effects [Disk.appendText, Infra.Kv.get]
 
 type Landing
     Admitted(Mempool, Held)
@@ -43,7 +43,7 @@ fn admitting(network: Network, store: Store, pool: Mempool, raw: List<Int>, tipH
       "A Result.Err here is the Store failing, not the Transaction failing."
       "A Transaction we will not have is a Landing.Rejected and an ordinary"
       "outcome: most of what a Peer offers is refused by somebody."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     hex = Bytes.toHex(Bytes.fromList(raw)?)
     match Domain.Transaction.decode(raw)
         Result.Err(why) -> Result.Ok(Landing.Rejected("would not decode: {why}"))
@@ -53,34 +53,34 @@ fn known(network: Network, store: Store, pool: Mempool, transaction: Transaction
     ? "Something already held is answered before any work is done on it."
       "A Peer sending what we hold is the ordinary shape of relay rather than"
       "a fault, and this is the cheap way to say so."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     match Domain.Mempool.holds(pool, Domain.Transaction.txidOf(transaction))
         true -> Result.Ok(Landing.Duplicate)
         false -> shaped(network, store, pool, transaction, tipHeight, hex)
 
 fn shaped(network: Network, store: Store, pool: Mempool, transaction: Transaction, tipHeight: Int, hex: String) -> Result<Landing, String>
     ? "Policy before consensus, because Policy is the cheaper question."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     match Domain.Standard.standardOf(transaction)
         Standardness.Nonstandard(why) -> Result.Ok(Landing.Rejected("is not standard: it {why}"))
         Standardness.Standard -> againstSet(network, store, pool, transaction, tipHeight, hex)
 
 fn againstSet(network: Network, store: Store, pool: Mempool, transaction: Transaction, tipHeight: Int, hex: String) -> Result<Landing, String>
     ? "Every Input followed into the UTXO Set."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     gathered = gathering(store, transaction, 0, Domain.Transaction.inputsOf(transaction), Gathering(tally = Domain.Spend.started(), pending = [], spends = [], raw = hex), tipHeight)?
     conserving(network, pool, transaction, gathered, tipHeight)
 
 fn gathering(store: Store, transaction: Transaction, index: Int, inputs: List<Input>, held: Gathering, tipHeight: Int) -> Result<Gathering, String>
     ? "One Input at a time, holding what the Scripts will need."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     match inputs
         [] -> Result.Ok(Gathering(tally = held.tally, pending = List.reverse(held.pending), spends = List.reverse(held.spends), raw = held.raw))
         [head, ..tail] -> gatheringOne(store, transaction, index, head, tail, held, tipHeight)
 
 fn gatheringOne(store: Store, transaction: Transaction, index: Int, input: Input, rest: List<Input>, held: Gathering, tipHeight: Int) -> Result<Gathering, String>
     ? "This Input's parent, out of the Set."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     key = Domain.UtxoStore.unspentKey(Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input))?
     stored = Infra.Store.get(store, key)?
     coined(store, transaction, index, input, rest, held, tipHeight, Domain.Transaction.previousTxidOf(input), Domain.Transaction.previousIndexOf(input), stored)
@@ -88,7 +88,7 @@ fn gatheringOne(store: Store, transaction: Transaction, index: Int, input: Input
 fn coined(store: Store, transaction: Transaction, index: Int, input: Input, rest: List<Input>, held: Gathering, tipHeight: Int, previousTxid: String, position: Int, stored: Option<Bytes>) -> Result<Gathering, String>
     ? "An Output the Set does not hold is spent or was never there, and the"
       "two are the same answer to a node that only holds what is unspent."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     match stored
         Option.None -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Unknown("the Set does not hold {previousTxid}:{position}")), tipHeight)
         Option.Some(value) -> decoded(store, transaction, index, input, rest, held, tipHeight, Domain.UtxoStore.decodeCoin(previousTxid, position, value)?)
@@ -98,7 +98,7 @@ fn decoded(store: Store, transaction: Transaction, index: Int, input: Input, res
       "Transaction spending one too early is invalid rather than merely"
       "unwelcome -- a Block containing it would be rejected by every node."
       "The spend would happen in the next Block, so it is judged there."
-    ! [Infra.Kv.get]
+    ! [Disk.appendText, Infra.Kv.get]
     match Domain.UtxoStore.matured(unspent, tipHeight + 1)
         false -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Invalid("spends a coinbase from Height {unspent.height} that is not spendable until {unspent.height + Domain.UtxoStore.maturity()}")), tipHeight)
         true -> gathering(store, transaction, index + 1, rest, absorbed(held, input, index, Spend.Resolved(unspent.value, unspent.script)), tipHeight)

@@ -20,7 +20,7 @@ module TxIndex
         "Transactions and one near genesis holds one."
     exposes [Built, build]
     depends [Bytes, Domain.Block, Domain.Index, Infra.Blocks, Infra.Chain, Infra.Store, Domain.IndexKeys]
-    effects [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    effects [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
 
 record Built
     blocks: Int
@@ -47,7 +47,7 @@ fn build(store: Store, blocks: BlockStore, from: Int, to: Int) -> Result<Built, 
       "A Height whose body is absent is stepped over rather than refused: the"
       "range is what the caller asked for, and what is held inside it is what"
       "there is to index."
-    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     walked = walk(Walk(store = store, blocks = blocks, pending = [], waiting = 0, counted = Built(blocks = 0, transactions = 0)), from, to)?
     _flushed = flushed(walked)?
     Result.Ok(walked.counted)
@@ -61,14 +61,14 @@ fn flushed(state: Walk) -> Result<Store, String>
 
 fn walk(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn."
-    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     match height > to
         true -> Result.Ok(state)
         false -> atHeight(state, height, to)
 
 fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "A Height the Index does not name ends the range early."
-    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     named = Domain.Index.blockIdIn(Infra.Store.get(state.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Ok(state)
@@ -76,7 +76,7 @@ fn atHeight(state: Walk, height: Int, to: Int) -> Result<Walk, String>
 
 fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
     ? "A Block whose body is not held has no Transactions to record."
-    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     located = Infra.Store.get(state.store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> walk(state, height + 1, to)
@@ -84,7 +84,7 @@ fn atBlock(state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, S
 
 fn indexBody(state: Walk, height: Int, to: Int, blockId: String, stored: Bytes) -> Result<Walk, String>
     ? "Read the Block and write one entry per Transaction it holds."
-    ! [Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Disk.appendText, Disk.readBytesAt, Infra.Kv.get, Infra.Kv.putAll]
     location = Domain.Index.decodeLocation(stored)?
     payload = Infra.Blocks.read(state.blocks, location)?
     transactions = Domain.Block.transactionsOf(payload)?
