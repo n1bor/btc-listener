@@ -531,7 +531,33 @@ fn admitting(pool: Pool, key: Int, connection: Tcp.Connection) -> Result<Accepte
     ]
     match inboundHeld(pool) >= inboundLimit()
         true -> refusedInbound(pool, connection)
-        false -> seating(pool, key, connection, Tcp.peerAddress(connection)?)
+        false -> seatingIfNamed(pool, key, connection, Tcp.peerAddress(connection))
+
+fn seatingIfNamed(pool: Pool, key: Int, connection: Tcp.Connection, named: Result<String, String>) -> Result<Accepted, String>
+    ? "A caller that hung up before it could be asked its address is closed,"
+      "not fatal (#217)."
+      "getpeername on a socket the far side has already reset answers"
+      "ENOTCONN, and this used to carry that through every ? between here"
+      "and main: a stranger who connected to the served port and dropped at"
+      "the right instant ended the node, with the pool full and the chain at"
+      "the tip. The same shape 762508c closed for a silent caller, one call"
+      "further along. It costs the caller and nothing else."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match named
+        Result.Err(why) -> hungUp(pool, connection, why)
+        Result.Ok(address) -> seating(pool, key, connection, address)
+
+fn hungUp(pool: Pool, connection: Tcp.Connection, why: String) -> Result<Accepted, String>
+    ? "Close the caller nobody can name, and carry on."
+    ! [Console.error, Tcp.close]
+    _closed = Tcp.close(connection)
+    _said = complainedIfPlain(pool, "an inbound caller hung up before it could be asked its address: {why}")
+    Result.Ok(Accepted(pool = pool, seated = Option.None))
 
 fn refusedInbound(pool: Pool, connection: Tcp.Connection) -> Result<Accepted, String>
     ? "The cap reached: close the caller and carry on."
@@ -1322,6 +1348,20 @@ fn answeredPing(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Fr
 
 fn awaitAny(pool: Pool, key: Int, deadlineMs: Int) -> Result<Waited, String>
     ? "The next Message this Peer has for us, whatever it is."
+      "A Peer the pump has already forgotten -- it closed the connection --"
+      "is an answer, not a wait (#217). Until this check the pump went on"
+      "polling everybody else for the Peer's whole answer deadline, and"
+      "with nobody else talking for the pool's idle deadline, whose Err"
+      "ended the node: a caller that connected to the served port and hung"
+      "up before its version held the loop for sixty seconds each time, and"
+      "five of them on a quiet pool ended the run."
+    ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    match Map.has(pool.sockets, key)
+        false -> Result.Err("peer {key} closed the connection before answering")
+        true -> awaitHeld(pool, key, deadlineMs)
+
+fn awaitHeld(pool: Pool, key: Int, deadlineMs: Int) -> Result<Waited, String>
+    ? "The next Message from a Peer the pool still holds."
     ! [Console.error, Console.print, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match Domain.Inbox.popped(pool.network, pool.standing, key)
         Result.Err(why) -> Result.Err("peer {key}: {why}")

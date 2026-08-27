@@ -1360,6 +1360,93 @@ with real seeds. What is exercised here is that the walk starts dials, polls
 them, retires them on the deadline and carries on fetching — the seating
 itself is `Infra.Peers.advanced`, shared with the loop, which section 13
 covers.
+### 16h. A caller that hangs up, and a pool that empties
+
+Both cloud nodes died on the same day (#217): signet from a caller on the
+served port that hung up before it could be asked its address, mainnet from
+a Set catch-up long enough for every Peer to give up on us and an empty pool
+that stopped the node with hundreds of Candidates in the Book. Three things
+to prove, in one run against a node with a few hundred Blocks more than the
+directory holds -- `generatetoaddress 400` is enough:
+
+```bash
+$BIN regtest headers 127.0.0.1:18444 $D
+$BIN regtest follow 127.0.0.1:18444 $D serve:18468 log &
+```
+
+**The Set is built in chunks, and the pool is read between them.** The
+catch-up prints one range line per 250 Blocks rather than one for the whole
+walk:
+
+```
+utxo    connecting 1..250
+utxo    connecting 251..500
+utxo    connecting 501..607
+following at Height 607: 607 connected, 0 disconnected, set +1359 -556
+```
+
+That is what keeps Peers through a mainnet Set walk of hours: between two
+chunks every Peer is read, pings answered, the dial asked and the pool topped
+up. Before this the whole walk was one call with no socket in it, and the
+metrics log showed it -- `polledMs 0` in every minute-long `set` window.
+
+**A caller that hangs up costs itself and nothing else.** Empty the pool
+first, so nobody else is talking (`disconnectnode` for each of Core's peers),
+then hang up on the served port five times:
+
+```bash
+for i in 1 2 3 4 5; do nc -z 127.0.0.1 18468; sleep 1; done
+```
+
+Each one is dropped on the spot:
+
+```
+peer 6 dialled us from 127.0.0.1:45364
+peer 6 closed the connection
+dropping inbound peer 6 from 127.0.0.1:45364: peer 6 closed the connection before answering
+```
+
+and the node is still running. Before #217 the answering-side Handshake went
+on waiting for a Peer the pump had already forgotten -- sixty seconds per
+caller with somebody else talking, and with nobody else talking the pool's
+150-second idle deadline, whose `Err` ended the run:
+`error: no Peer said anything for 150 seconds`, exit 1. A caller that resets
+before `getpeername` is answered (`os error 107`) is the same fix one call
+earlier; `nc` closes cleanly and does not force that race, so the strace
+line to look for on a hang-up is `recvfrom(N, "", ...) = 0` followed by the
+drop, not by silence.
+
+**An empty pool with a Book is a node between Peers.** With Core
+disconnected the pool is empty and the Book holds Core's `addr` gossip
+(unroutable `240.0.0.0/8` addresses on regtest, each costing its five-second
+dial). The node keeps dialling rather than stopping. Now have Core dial in
+and mine:
+
+```bash
+$C addnode 127.0.0.1:18468 onetry
+$C generatetoaddress 1 $($C getnewaddress)
+```
+
+The first Peer seated after none is asked to bring the chain up to date,
+and the new Block follows:
+
+```
+peer 11 dialled us from 127.0.0.1:51816
+headers complete: 611 known
+block 610 2282059a... 1 tx 250 bytes
+following at Height 610: 1 connected, 0 disconnected, set +1 -0
+```
+
+What would be a fail: a `dropping inbound peer` line arriving a minute after
+its `closed the connection`; `error: no Peer could bring the chain up to
+date` or `every Peer is gone and the Address Book has nothing left to dial`
+while the Book is not empty; or the node sitting at the old Height after
+Core has dialled in and mined. Only a pool that is empty with nobody left
+to dial ends the run now, and the message names both facts.
+
+Left for its own issue: a seated Peer that closes on us is forgotten
+without `Tcp.close`, so `ss -tn` shows its socket in `CLOSE-WAIT` for the
+life of the process.
 
 ### 17. The metrics log
 

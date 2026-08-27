@@ -700,8 +700,52 @@ fn onwardWith(state: Following, why: String) -> Result<Following, String>
         Time.now, Time.unixMs,
     ]
     match Infra.Peers.peerKeys(state.pool)
-        [] -> Result.Err("no Peer could bring the chain up to date; the last said: {why}")
+        [] -> nobodyLeft(state, why)
         [head, ..tail] -> caughtUp(state, head)
+
+fn nobodyLeft(state: Following, why: String) -> Result<Following, String>
+    ? "Every Peer refused, which used to end the run whatever the Address"
+      "Book held (#217)."
+      "On mainnet it held 602 Candidates when the last of four Peers went,"
+      "and the node stopped rather than dial one. With somebody left to try,"
+      "or a dial already in flight, this is a node between Peers: it goes"
+      "back to the loop, whose top-up dials one Candidate a turn, and the"
+      "first Peer seated after none is asked to bring the chain up to date"
+      "(firstAfterNone). Only nobody to dial ends the run, and the message"
+      "says so rather than blaming the Peers alone."
+    ! [Console.error]
+    match leftToDial(state.book, Infra.Peers.dialingNow(state.pool))
+        false -> Result.Err("no Peer could bring the chain up to date and the Address Book has nobody left to dial; the last said: {why}")
+        true -> Result.Ok(saidBetweenPeers(state, why))
+
+fn saidBetweenPeers(state: Following, why: String) -> Following
+    ? "Say that the pool is empty and the Book is not."
+    ! [Console.error]
+    _said = saidErrorIfPlain(state.watch, "every Peer is gone ({why}); {Domain.AddressBook.sizeOf(state.book)} Candidates in the Address Book, dialling on")
+    state
+
+fn leftToDial(book: Map<String, Candidate>, dialing: Bool) -> Bool
+    ? "Whether an empty pool can still become a pool: a Candidate untried,"
+      "or a dial in flight that has not yet said what it became."
+    match dialing
+        true -> true
+        false -> Option.withDefault(someUntried(Domain.AddressBook.nextUntried(book, [])), false)
+
+verify leftToDial
+    leftToDial(Domain.AddressBook.noBook(), false) => false
+    leftToDial(Domain.AddressBook.noBook(), true) => true
+    leftToDial(Domain.AddressBook.heard(Domain.AddressBook.noBook(), "1.2.3.4:8333", 0), false) => true
+    leftToDial(Domain.AddressBook.marked(Domain.AddressBook.heard(Domain.AddressBook.noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), false) => false
+
+fn someUntried(chosen: Option<String>) -> Option<Bool>
+    ? "An address to try is a yes."
+    match chosen
+        Option.None -> Option.None
+        Option.Some(address) -> Option.Some(true)
+
+verify someUntried
+    someUntried(Option.None) => Option.None
+    someUntried(Option.Some("1.2.3.4:8333")) => Option.Some(true)
 
 fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     ? "The three phases in the one order they can go in, asking one Peer."
@@ -792,22 +836,187 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
       "Blocks a watcher is watching for. A catch-up of thousands stays with"
       "the walk's own minute lines instead."
     ! [
-        Console.print,
+        Console.error, Console.print,
         Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    built = Infra.ChainState.build(state.pool.network, state.store, state.blocks, tipHeight, eyeOf(state))?
+    chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None)?
+    built = chunked.built
+    after = chunked.state
     backOut = List.concat(unconfirmed, built.unconfirmed)
-    seen = watchSeen(state.watch, built.eye)
+    seen = watchSeen(after.watch, built.eye)
     _each = saidLinesIfPlain(seen, blockLinesOf(built.blocks, built.views))
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
-    setLog = Infra.Metrics.marked(built.eye.log, "set", built.reached, tipHeight, built.blocks, 0, Infra.Peers.polledMsOf(state.pool), List.len(Infra.Peers.peerKeys(state.pool)), Domain.AddressBook.sizeOf(state.book), built.added, built.removed, true)?
-    swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
-    restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = setLog), watchAfterBuild(seen, built.views)))
+    setLog = Infra.Metrics.marked(built.eye.log, "set", built.reached, tipHeight, built.blocks, 0, Infra.Peers.polledMsOf(after.pool), List.len(Infra.Peers.peerKeys(after.pool)), Domain.AddressBook.sizeOf(after.book), built.added, built.removed, true)?
+    swept = sweptOf(built.store, after.mempool, built.blocks, built.dropped)?
+    restored = restoring(after.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
+    Result.Ok(withWatch(Following(pool = after.pool, store = built.store, blocks = after.blocks, book = after.book, nextKey = after.nextKey, watch = seen, mempool = restored, rebuilding = after.rebuilding, log = setLog), watchAfterBuild(seen, built.views)))
+
+record Chunked
+    state: Following
+    built: Built
+
+fn chunkOf() -> Int
+    ? "How many Blocks the Set connects between two looks at the pool (#217)."
+      "Bitcoin Core drops a Peer that has not answered a ping in twenty"
+      "minutes. A mainnet Set walk ran for hours without answering one --"
+      "476 minute-long windows with nothing spent in Tcp.poll -- and when"
+      "it returned every Peer had gone. 250 is under a minute at the five"
+      "Blocks a second the 2013 chain connects at, and well inside twenty"
+      "at the half a Block a second of a modern one."
+    250
+
+verify chunkOf
+    chunkOf() => 250
+
+fn standingOf(store: Store) -> Result<Int, String>
+    ? "The Height the Set has been built up to, or zero before it has one."
+      "Read the way Infra.Rewind reads it, so the first chunk is measured"
+      "from where the walk will actually start; a reorganisation since may"
+      "move that lower, which the walk's own realignment handles."
+    ! [Infra.Kv.get]
+    heightIn(Infra.Store.get(store, Domain.UtxoStore.reachedKey()?)?)
+
+fn heightIn(held: Option<Bytes>) -> Result<Int, String>
+    ? "Nothing recorded is Height zero."
+    match held
+        Option.None -> Result.Ok(0)
+        Option.Some(stored) -> Result.Ok(Domain.UtxoStore.decodeReached(stored)?.height)
+
+verify heightIn
+    heightIn(Option.None) => Result.Ok(0)
+    heightIn(Option.Some(Bytes.fromList([1, 2, 3]))) => Result.Err("a Set standing is at least 4 bytes, got 3")
+    heightIn(Option.Some(Domain.UtxoStore.encodeReached(Domain.UtxoStore.Reached(height = 7, blockId = "ab"))?)) => Result.Ok(7)
+
+fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Built>) -> Result<Chunked, String>
+    ? "One chunk of the Set, then the pool, then the next chunk (#217)."
+      "The walk is the same walk: Infra.ChainState.build realigns, connects"
+      "and prunes exactly as it did for the whole range. It is simply asked"
+      "for at most chunkOf Blocks at a time, and between two of them every"
+      "Peer is read, pings are answered, the parked dial is asked what it"
+      "became and the pool topped up -- the three things the body walk does"
+      "at its boundaries, done here at every chunk because a Set walk has"
+      "no other boundaries for hours."
+      "A chunk that comes back short of what it was asked for is a walk that"
+      "stopped -- q, a signal, or a Block the chain cannot supply -- and is"
+      "handed back as it stands rather than asked again."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    chunkTo = Int.min(tipHeight, standing + chunkOf())
+    next = Infra.ChainState.build(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, eyeIn(sofar, eyeOf(state)))?
+    merged = mergedBuilt(sofar, next)
+    match Bool.or(next.reached < chunkTo, chunkTo >= tipHeight)
+        true -> Result.Ok(Chunked(state = state, built = merged))
+        false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(merged))
+
+fn storeIn(sofar: Option<Built>, before: Store) -> Store
+    ? "The Store the next chunk continues from: the walk's own once it has one."
+    match sofar
+        Option.None -> before
+        Option.Some(built) -> built.store
+
+verify storeIn
+    storeIn(Option.None, sampleBuilt(1, 1).store) => sampleBuilt(1, 1).store
+    storeIn(Option.Some(sampleBuilt(1, 1)), Infra.Store.fixture([])) => sampleBuilt(1, 1).store
+
+fn eyeIn(sofar: Option<Built>, before: Eye) -> Eye
+    ? "The Eye the next chunk carries: the walk's own once it has one, so"
+      "the frame clock and the metrics log run on across chunks."
+    match sofar
+        Option.None -> before
+        Option.Some(built) -> built.eye
+
+verify eyeIn
+    eyeIn(Option.None, sampleBuilt(1, 1).eye).candidates => 0
+    eyeIn(Option.Some(sampleBuilt(1, 1)), sampleBuilt(1, 1).eye).stopped => false
+
+fn mergedBuilt(sofar: Option<Built>, next: Built) -> Built
+    ? "Two chunks of one walk, counted as one."
+      "Views are newest first, so the later chunk's go in front; the"
+      "unconfirmed come back out in the order they were disconnected."
+    match sofar
+        Option.None -> next
+        Option.Some(acc) -> Built(store = next.store, blocks = acc.blocks + next.blocks, added = acc.added + next.added, removed = acc.removed + next.removed, fees = acc.fees + next.fees, reached = next.reached, dropped = acc.dropped + next.dropped, views = List.take(List.concat(next.views, acc.views), Domain.Snapshot.blockLimit()), eye = next.eye, unconfirmed = List.concat(acc.unconfirmed, next.unconfirmed))
+
+verify mergedBuilt
+    mergedBuilt(Option.None, sampleBuilt(3, 10)).blocks => 3
+    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).blocks => 7
+    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).reached => 14
+    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).added => 14
+    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).dropped => 0
+    List.len(mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).views) => 2
+    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).views => [sampleView(14), sampleView(10)]
+
+fn sampleBuilt(blocks: Int, upTo: Int) -> Built
+    ? "A chunk that connected this many Blocks and got this far, for the cases."
+    Built(store = Infra.Store.fixture([]), blocks = blocks, added = blocks * 2, removed = blocks, fees = 0, reached = upTo, dropped = 0, views = [sampleView(upTo)], eye = Infra.Screen.watchedBy(Option.None, Domain.Snapshot.started(0), Infra.Metrics.none(), 0), unconfirmed = [])
+
+verify sampleBuilt
+    sampleBuilt(3, 10).blocks => 3
+    sampleBuilt(3, 10).reached => 10
+
+fn sampleView(height: Int) -> BlockView
+    ? "One Block's view at a Height, for the cases."
+    BlockView(height = height, blockId = "", transactions = 1, bytes = 100, atMs = 0)
+
+verify sampleView
+    sampleView(5).height => 5
+
+fn tendedBetween(state: Following) -> Result<Following, String>
+    ? "What the loop owes the pool between two chunks of the Set (#217)."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    toppedUp(dialsAsked(withPool(state, tendedPool(state.pool, spareLimit())?))?)
+
+fn spareLimit() -> Int
+    ? "How many Messages one tending reads before going back to the Set."
+      "Bounded so a Peer that never stops talking cannot hold the walk; the"
+      "pool keeps this many unasked-for Messages anyway."
+    64
+
+verify spareLimit
+    spareLimit() => 64
+
+fn tendedPool(pool: Pool, budget: Int) -> Result<Pool, String>
+    ? "Read what every Peer has already sent, without waiting for more."
+      "A poll of zero milliseconds is the question 'is anything there'; a"
+      "ping is answered and everything else kept as spare for the loop,"
+      "exactly as the body walk does mid-phase."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    match budget <= 0
+        true -> Result.Ok(pool)
+        false -> tendedOnce(Infra.Peers.awaitTick(pool, 0)?, budget)
+
+fn tendedOnce(ticked: Tick, budget: Int) -> Result<Pool, String>
+    ? "Nothing there, or one Message to sort."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    match ticked.arrived
+        Option.None -> Result.Ok(ticked.pool)
+        Option.Some(one) -> tendedWith(ticked.pool, one, budget)
+
+fn tendedWith(pool: Pool, one: Spare, budget: Int) -> Result<Pool, String>
+    ? "A ping is answered; anything else is the loop's, later."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    match one.frame.command
+        "ping" -> tendedPool(Infra.Peers.send(pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1)
+        _ -> tendedPool(Infra.Peers.spared(pool, one.key, one.frame), budget - 1)
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."
@@ -1170,12 +1379,33 @@ fn turning(state: Following) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    told = dialsAsked(state)?
+    told = firstAfterNone(dialsAsked(state)?, List.len(Infra.Peers.peerKeys(state.pool)))?
     knownAt = saidAdvertised(told, Infra.Peers.told(told.pool, Time.unixMs())?)
     drained = drainSpare(knownAt)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
     onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool, rebuilding = topped.rebuilding, log = state.log), topped.watch), ticked.arrived)
+
+fn firstAfterNone(state: Following, heldBefore: Int) -> Result<Following, String>
+    ? "A Peer seated into an empty pool is asked to bring the chain up to"
+      "date (#217), because whatever was missed while alone is what it has."
+      "Nothing else re-runs the catch-up: an inv does, and a node that lost"
+      "every Peer mid-walk will not hear one until a Peer is seated. Its"
+      "Handshake counts as being heard from, so the silence rule does not"
+      "end the run for the seconds between seating and its first Message."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    match Bool.and(heldBefore == 0, List.len(Infra.Peers.peerKeys(state.pool)) > 0)
+        false -> Result.Ok(state)
+        true -> caughtUp(heardFrom(state, firstKey(state.pool), Time.unixMs()), firstKey(state.pool))
 
 fn onTicked(state: Following, arrived: Option<Spare>) -> Result<Unit, String>
     ? "A Message to handle, or a moment to look at the clock."
@@ -1257,7 +1487,7 @@ fn quietTurn(state: Following, nowMs: Int) -> Result<Unit, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    _somebody = anyoneLeft(List.len(Infra.Peers.peerKeys(state.pool)))?
+    _somebody = anyoneLeft(List.len(Infra.Peers.peerKeys(state.pool)), leftToDial(state.book, Infra.Peers.dialingNow(state.pool)))?
     _alive = stillHeard(nowMs - state.watch.anyHeardMs)?
     looked = minding(state, nowMs)?
     match looked.watch.leaving
@@ -1415,17 +1645,21 @@ fn withView(state: Following, view: View) -> Following
     ? "The state, with the Screen's View moved on."
     withWatch(state, Watching(snapshot = state.watch.snapshot, heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = Option.Some(view), leaving = state.watch.leaving))
 
-fn anyoneLeft(held: Int) -> Result<Unit, String>
-    ? "A pool with nobody in it ends the run."
-      "The top-up a moment ago was this turn's chance to refill it, so an"
-      "empty pool here means the Address Book had nothing left to dial."
-    match held > 0
+fn anyoneLeft(held: Int, someoneToDial: Bool) -> Result<Unit, String>
+    ? "A pool with nobody in it and nobody to dial ends the run."
+      "Until #217 an empty pool alone did, on the reasoning that the top-up"
+      "a moment ago was this turn's chance to refill it. That stopped being"
+      "true with #202: the top-up starts a dial and does not wait, so the"
+      "pool is empty for the five turns a Candidate takes to answer -- and"
+      "was empty here with 602 Candidates in the Book when mainnet stopped."
+    match Bool.or(held > 0, someoneToDial)
         true -> Result.Ok(Unit)
         false -> Result.Err("every Peer is gone and the Address Book has nothing left to dial")
 
 verify anyoneLeft
-    anyoneLeft(1) => Result.Ok(Unit)
-    anyoneLeft(0) => Result.Err("every Peer is gone and the Address Book has nothing left to dial")
+    anyoneLeft(1, false) => Result.Ok(Unit)
+    anyoneLeft(0, true) => Result.Ok(Unit)
+    anyoneLeft(0, false) => Result.Err("every Peer is gone and the Address Book has nothing left to dial")
 
 fn stillHeard(silentMs: Int) -> Result<Unit, String>
     ? "Whether anybody has said anything inside the idle deadline."
