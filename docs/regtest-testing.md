@@ -1278,6 +1278,89 @@ the blocks fetched across every window come to far less, the boundary row is
 reporting the target. That is how this was found: a run whose blocks summed to
 112,113 signed off at 319,491.
 
+### 16g. The walk takes a turn at dialling
+
+A body phase holds the pool for hours and, before #199, did nothing with it
+but fetch. Every dial the node makes is in the follow loop, and the loop is
+not running: the pool could only shrink for the whole of a catch-up. Mainnet
+`metrics.log` shows it going 4, 4, 3, 3 against a target of 8.
+
+Sixteen Blocks in flight per Peer (#168) is what makes that expensive. A Peer
+lost mid-walk is not a share of a serial download any more, it is a sixteenth
+of the parallelism, and the walk hands what it was owing to whoever is left.
+
+**The body phase has to be long enough to dial in.** A dial costs its five
+seconds whether or not anyone waits for it, so a phase of three seconds
+proves nothing either way. Ten thousand regtest Blocks is a body phase of
+3.5 seconds; **fifty thousand is about seventy seconds**, which is fourteen
+dials' worth. Generating them takes about half an hour at ~60 Blocks/s:
+
+```bash
+for i in $(seq 1 5); do $A generatetoaddress 10000 "$($A getnewaddress)" >/dev/null; done
+```
+
+Then the Book, exactly as 16c builds it — `240.0.0.0/4`, then **restart Core**
+so the `getaddr` cache is rebuilt — and one run per binary:
+
+```bash
+timeout 300 $BIN regtest follow 127.0.0.1:19444 $D log > run.log 2>&1
+grep -c 'Address Book holds' run.log      # 1 = the Book filled; 0 = the run proves nothing
+grep -c 'did not answer'      run.log     # Candidates dialled
+```
+
+**Check the Book line before you read the count.** Two runs of this section
+recorded `candidates 0` in `metrics.log` and no dial from either binary, and
+they looked like a fix that did nothing. Core had not sent the `addr` at all,
+so there was nothing in the Book to dial and the two builds were being
+compared on an empty one. The `ss -tn | grep 240\.` sample that seemed to
+confirm it was reading **Core's own** outbound attempts to its addrman, not
+ours — same addresses, wrong process. A run whose Book never filled is a run
+to throw away.
+
+Three pairs, same chain, same seeded Book, ~49,500 Blocks:
+
+| | before #199 | after |
+|---|---|---|
+| Candidates dialled during the body phase | **1**, **1**, **1** | **15**, **14**, **13** |
+| body phase, `polledMs + workedMs` | 65.7s, 67.6s, 61.5s | 72.4s, 68.0s, 61.2s |
+
+The **1** is not zero because the catch-up tops up at the headers/bodies
+boundary: that dial is started and then sits parked for the whole phase,
+because nothing asks it what it became. After, it settles inside the walk and
+another follows it — thirteen to fifteen over seventy seconds is one per five,
+which is the dial deadline and the same rate the loop uses. It is not a rush:
+`Infra.Peers.dialingNow` still allows one at a time, and a turn comes round
+about seven hundred times a second at this Block rate.
+
+The second row is what makes the first safe. Two of the three pairs are
+within half a percent; the first pair's ten percent is run-to-run variance and
+not a cost, which is worth knowing because the poll and the top-up now happen
+on **every** turn of the walk rather than on a clock.
+
+And audit both, which is what proves the Blocks still landed where the Index
+says:
+
+```bash
+$BIN regtest audit $D 1 49538
+```
+
+```
+blocks 49538  transactions 49543  ...  unresolved 5  CLEAN (faults 0, script failures 0)
+```
+
+Byte for byte the same line from both builds. The five unresolved are the
+`sendtoaddress` Transactions this datadir collected in earlier sections
+spending parents outside the audited range — a property of the chain, not of
+either binary, which is why the control run matters.
+
+**What regtest still cannot show** is the half worth having: a Candidate the
+walk dials that *answers*. Every address in the Book is a blackhole by
+construction, and 16d says why there is no way around that without a Network
+with real seeds. What is exercised here is that the walk starts dials, polls
+them, retires them on the deadline and carries on fetching — the seating
+itself is `Infra.Peers.advanced`, shared with the loop, which section 13
+covers.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

@@ -15,7 +15,7 @@ module Bodies
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
     exposes [Fetched, bodies, bodiesOn]
-    depends [Bytes, Domain.Address, Infra.Metrics, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
+    depends [Bytes, Domain.Address, Domain.AddressBook, Infra.Metrics, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
@@ -38,6 +38,8 @@ record Fetched
     pace: Pace
     eye: Eye
     reached: Int
+    book: Map<String, Candidate>
+    nextKey: Int
 
 record Owed
     key: Int
@@ -81,7 +83,7 @@ fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockSto
         Time.unixMs,
     ]
     pool = Infra.Peers.joinedOnly(Infra.Peers.opened(network), soleKey(), address)?
-    closed(pool, bodiesOn(pool, soleKey(), store, blocks, from, to, Infra.Screen.unwatched(Domain.Snapshot.started(Time.unixMs()), Infra.Metrics.none())))
+    closed(pool, bodiesOn(pool, soleKey(), store, blocks, from, to, Infra.Screen.unwatched(Domain.Snapshot.started(Time.unixMs()), Infra.Metrics.none()), Domain.AddressBook.noBook(), soleKey() + 1))
 
 fn soleKey() -> Int
     ? "The identifier a pool of one Peer keys it under."
@@ -96,7 +98,7 @@ fn closed(pool: Pool, outcome: Result<Fetched, String>) -> Result<Fetched, Strin
     _closed = Infra.Peers.closeAll(pool)
     outcome
 
-fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int, eye: Eye) -> Result<Fetched, String>
+fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, to: Int, eye: Eye, book: Map<String, Candidate>, nextKey: Int) -> Result<Fetched, String>
     ? "The same range walk on a pool somebody else opened."
       "What a node following the tip needs: the Headers say a Block exists and"
       "where it sits, and this is what turns that into a body on disk the"
@@ -104,16 +106,21 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
       "skipped, so re-running it over a range that overlaps costs nothing."
       "The key names the Peer the caller was talking to; it is where the"
       "first Blocks are asked from and no longer the only Peer asked (#168)."
+      "The Book and the next key come in and go back out because the walk"
+      "dials now (#199): it holds the pool for hours, so it has to do what"
+      "the follow loop does once a turn or the pool only shrinks. A caller"
+      "with nothing to dial hands over an empty Book and gets it back."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, reached = from)
+    started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, reached = from, book = book, nextKey = nextKey)
     flown = flying(Flight(progress = started, plan = Plan(wanted = heightsFrom(from, to, []), owed = Map.fromList([])), heardMs = Time.unixMs()), to)?
     settled(flown)
 
@@ -167,7 +174,7 @@ fn settled(progress: Fetched) -> Result<Fetched, String>
     ? "Write whatever Locations are still held back."
     ! [Infra.Kv.putAll]
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached))
+    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey))
 
 fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
     ? "One turn: hand out what can be handed out, then take whatever comes"
@@ -180,7 +187,8 @@ fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -195,13 +203,63 @@ fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     match Bool.and(List.len(flight.plan.wanted) == 0, Map.len(flight.plan.owed) == 0)
         true -> Result.Ok(reachedAt(flight, to))
-        false -> turning(flight, to)
+        false -> tended(flight, to)
+
+fn tended(flight: Flight, to: Int) -> Result<Fetched, String>
+    ? "The walk takes its turn at dialling (#199)."
+      "A body phase is hours long and it holds the pool for all of them, so"
+      "everything the follow loop does once a turn has to be done here as"
+      "well or it is not done at all. Before this, the pool could only"
+      "shrink across a catch-up: mainnet metrics show Peers going 4, 4, 3, 3"
+      "against a target of 8, and since #168 each Peer lost is sixteen"
+      "Blocks of parallelism, not a share of a serial download."
+      "Both halves are needed and neither waits. The poll is what a dial"
+      "parked at the last phase boundary needs to become a Peer -- without"
+      "it, it sits in flight until the walk ends and its deadline has long"
+      "since passed. The top-up is what starts the next one. The rate is"
+      "still one dial at a time, which Infra.Peers.dialingNow decides, so a"
+      "turn that comes round every few milliseconds does not become a rush"
+      "of Handshakes."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    polled = withPool2(flight, Infra.Peers.advanced(flight.progress.pool)?)
+    dialStarted(polled, Infra.Peers.toppedUp(polled.progress.pool, polled.progress.book, polled.progress.nextKey)?, to)
+
+fn dialStarted(flight: Flight, done: Infra.Peers.Topped, to: Int) -> Result<Fetched, String>
+    ? "What the top-up did, folded back, and on with the turn."
+      "The Outcomes stay on the pool rather than being said here: the walk"
+      "does not own the plain log or the Panel, and Infra.Peers.reported"
+      "keeps them precisely so the loop can say them when the walk ends."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    turning(withBook(flight, done.pool, done.book, done.nextKey), to)
+
+fn withBook(flight: Flight, pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Flight
+    ? "The flight, carrying what a turn at dialling left behind."
+    withProgress(flight, Fetched(pool = pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = book, nextKey = nextKey))
 
 fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
     ? "A turn needs somebody to ask. The pool emptying is the one way this"
@@ -212,7 +270,8 @@ fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -227,7 +286,8 @@ fn asking(flight: Flight, live: List<Int>, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -388,7 +448,8 @@ fn waitingFor(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -402,7 +463,8 @@ fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Fetched, St
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -422,7 +484,8 @@ fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -439,7 +502,8 @@ fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Fetched, St
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -463,7 +527,8 @@ fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -482,7 +547,8 @@ fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, 
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -504,12 +570,13 @@ fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, 
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     appended = Infra.Blocks.append(flight.progress.blocks, payload)?
-    held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached)
+    held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = flight.progress.book, nextKey = flight.progress.nextKey)
     written = maybeWrite(held)?
     reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs()), to)
 
@@ -522,7 +589,8 @@ fn quiet(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -544,7 +612,8 @@ fn stalled(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -606,7 +675,8 @@ fn reporting(flight: Flight, to: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -619,7 +689,8 @@ fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Fetched, String>
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
@@ -638,12 +709,13 @@ fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Resu
         Disk.appendBytes, Disk.appendText,
         Infra.Kv.get, Infra.Kv.putAll,
         Process.stopRequested,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
     _said = Console.print("{lineAt(at, to, progress.count, progress.pace, nowMs)}")
-    flying(withProgress(flight, Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye, reached = progress.reached)), to)
+    flying(withProgress(flight, Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey)), to)
 
 fn reachedAt(flight: Flight, to: Int) -> Fetched
     ? "The walk's state, stamped with the Height it actually reached (#205)."
@@ -651,7 +723,7 @@ fn reachedAt(flight: Flight, to: Int) -> Fetched
       "fault ends it. Only the first reaches the target, and the caller could"
       "not tell which had happened -- so the phase-boundary record reported"
       "the target every time and a stopped phase looked complete."
-    Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, reached = positionOf(flight.plan, to))
+    Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, reached = positionOf(flight.plan, to), book = flight.progress.book, nextKey = flight.progress.nextKey)
 
 fn positionOf(plan: Plan, to: Int) -> Int
     ? "Where the walk has got to: the lowest Height it still wants or is"
@@ -755,7 +827,7 @@ fn withPool2(flight: Flight, pool: Pool) -> Flight
 
 fn withPool(progress: Fetched, pool: Pool) -> Fetched
     ? "The walk, carrying the pool the last question left."
-    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached)
+    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey)
 
 fn addedIfSame(same: Bool, acc: Int) -> Int
     ? "One more, or the same."
@@ -776,7 +848,7 @@ fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
 
 fn withEye(progress: Fetched, eye: Eye) -> Fetched
     ? "The walk's state, with its Eye moved on."
-    Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = eye, reached = progress.reached)
+    Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey)
 
 fn plainly(eye: Eye) -> Bool
     ? "Whether this walk speaks in printed lines; the Screen draws instead."
