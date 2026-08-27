@@ -1388,6 +1388,12 @@ provider below owns durable RocksDB and ordinary files. The host does use real
 RIPEMD-160, SHA-1 and secp256k1 implementations (`node:crypto` and
 `@noble/curves`), rather than canned provider answers.
 
+For the byte-pipeline regression workload, set
+`BTC_LISTENER_FAKE_FRAME_BYTES=3500000` on the final command. The fake Peer then
+sends one large, deliberately corrupt `ping` frame through the same TCP,
+framing, hashing and teardown path, and the host prints the transferred byte
+counts and elapsed time.
+
 The curve is a provider on purpose. RIPEMD-160 was written in Aver first and
 passed all eight published vectors, but a curve is not a hash: 256 bits of field
 arithmetic whose edge cases *are* consensus rules, where a wrong answer is a
