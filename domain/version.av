@@ -5,7 +5,7 @@ module Version
         "Building it is pure — the caller supplies the clock reading and the nonce"
         "rather than this module reaching for them — so the exact bytes are"
         "checkable against a known-good vector instead of against a live Peer."
-    exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf]
+    exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf, addrRecvOffset, addrRecvOf]
     depends [Bytes, Domain.Message, Domain.Address]
     effects []
 
@@ -130,6 +130,74 @@ fn peerVersionOf(body: List<Int>) -> Int
 verify peerVersionOf
     peerVersionOf([128, 17, 1, 0, 9, 9]) => 70016
     peerVersionOf([]) => 0
+
+fn addrRecvOffset() -> Int
+    ? "Where addr_recv's sixteen address bytes begin in a version payload:"
+      "after four of version, eight of services and eight of timestamp, then"
+      "eight more of the address's own services word."
+    28
+
+verify addrRecvOffset
+    addrRecvOffset() => 28
+
+fn addrRecvOf(body: List<Int>, port: Int) -> Result<PeerAddress, String>
+    ? "The address a Peer says it sees us at, out of its version payload."
+      "This is the only way a node learns its own address (#210). A node"
+      "behind NAT or on a hosting box cannot read it off an interface, and"
+      "the socket it dialled out on carries an ephemeral port that nobody"
+      "can call back on. The Peer on the other end is looking straight at"
+      "the address we arrived from, and addr_recv is where it writes it"
+      "down."
+      "It is a stranger's word about our own identity, so what it is worth"
+      "is the caller's problem and not this decoder's -- one Peer saying it"
+      "is not the same as knowing it."
+      "The Peer's idea of our port is worthless -- it is whatever our"
+      "outbound socket happened to get -- so the caller passes the port it"
+      "actually listens on and the Peer is believed about the host only."
+    addrRecvIn(List.take(List.drop(body, addrRecvOffset()), 16), port)
+
+verify addrRecvOf
+    Domain.Address.toString(addrRecvOf(Bytes.octets(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff0000000000000000000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001")?), 8333)?) => "10.0.0.1:8333"
+    addrRecvOf([], 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
+    addrRecvOf(List.take(Bytes.octets(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d")?), 40), 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
+
+fn addrRecvIn(sixteen: List<Int>, port: Int) -> Result<PeerAddress, String>
+    ? "Those sixteen bytes as a Peer Address, when they are one we could"
+      "name. An IPv6 Peer reports an IPv6 address and this program has"
+      "nothing to say about it yet, which is the same refusal Domain.Addr"
+      "makes of an IPv6 entry."
+    match mappedIpv4(sixteen)
+        false -> Result.Err("addr_recv is not an IPv4-mapped address")
+        true -> Domain.Address.fromOctetsOn(List.drop(sixteen, 12), port)
+
+verify addrRecvIn
+    Domain.Address.toString(addrRecvIn([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 10, 0, 0, 1], 8333)?) => "10.0.0.1:8333"
+    addrRecvIn([], 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
+    addrRecvIn([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 10, 0, 0, 1], 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
+
+fn mappedIpv4(sixteen: List<Int>) -> Bool
+    ? "Whether sixteen bytes are an IPv4 address wearing an IPv6 shape."
+      "The same test Domain.Addr makes of an addr entry; both are reading"
+      "the same sixteen-byte field out of the same protocol."
+    match List.len(sixteen) < 16
+        true -> false
+        false -> Bool.and(allZero(List.take(sixteen, 10)), List.take(List.drop(sixteen, 10), 2) == [255, 255])
+
+verify mappedIpv4
+    mappedIpv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 1, 2, 3, 4]) => true
+    mappedIpv4([]) => false
+    mappedIpv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 255, 255, 1, 2, 3, 4]) => false
+
+fn allZero(bytes: List<Int>) -> Bool
+    ? "Whether every byte given is zero."
+    match bytes
+        [] -> true
+        [head, ..tail] -> Bool.and(head == 0, allZero(tail))
+
+verify allZero
+    allZero([]) => true
+    allZero([0, 0]) => true
+    allZero([0, 1]) => false
 
 fn peerUserAgentOf(body: List<Int>) -> String
     ? "The user agent a Peer reported, read from its length prefix."

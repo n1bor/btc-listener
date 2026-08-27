@@ -80,6 +80,12 @@ and `compile`.
   pairs. It **used** to become `E0659` the moment a parameter or binding took
   that name (`Infra.Rewind.standing` against `Domain.AssumeValid.standing`
   through `Infra.ChainState`, #26); the entry above is why it no longer does.
+  **A function parameter is the form still live.** `Domain.Addr` exposing a
+  `payload` beside `Domain.Version`'s, with `Infra.Follow` depending on both
+  and having a parameter called `payload`, is `E0659` on a pin that carries
+  #1043 and #1152 — those fixed match binders and `let` bindings, and a
+  parameter is neither. `aver check`, `verify` and `compile` are all quiet.
+  The workaround is a rename: the encoder is `Domain.Addr.offering`.
 
 ## Commands
 

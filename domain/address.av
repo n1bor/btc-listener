@@ -4,7 +4,7 @@ module Address
         "Parsing is the only way in, so an unvalidated address cannot reach the"
         "rest of the program. Octets are kept as numbers rather than as the"
         "original text, so rendering is canonical no matter how it was written."
-    exposes [fromString, fromStringOn, fromPeerText, fromParts, fromOctets, fromOctetsOn, toString, hostOf, portOf, octetsOf]
+    exposes [fromString, fromStringOn, fromPeerText, fromParts, fromOctets, fromOctetsOn, toString, hostOf, portOf, octetsOf, routable]
     exposes opaque [PeerAddress]
     effects []
 
@@ -259,6 +259,208 @@ verify checkOctetRange
 fn hostOf(address: PeerAddress) -> String
     ? "Canonical dotted-quad form, rebuilt from the validated octets."
     joinOctets(address.octets)
+
+fn routable(address: PeerAddress) -> Bool
+    ? "Whether this is an address worth telling another Peer about."
+      "Bitcoin Core calls this IsRoutable and it is not a formality: Core"
+      "silently refuses to store an address outside it, so gossiping one is"
+      "noise that no Peer will keep. Advertising a private address is worse"
+      "than noise -- it says the operator's internal network out loud to"
+      "everyone who asks (#210)."
+      "The ranges are the published ones, not a guess: RFC1918 private,"
+      "RFC2544 benchmarking, RFC3927 link-local, RFC5737 documentation,"
+      "RFC6598 shared address space, loopback, this-network and broadcast."
+    routableOctets(octetsOf(address))
+
+verify routable
+    routable(fromOctetsOn([1, 2, 3, 4], 8333)?) => true
+    routable(fromOctetsOn([62, 210, 113, 61], 38333)?) => true
+    routable(fromOctetsOn([10, 0, 0, 1], 8333)?) => false
+    routable(fromOctetsOn([127, 0, 0, 1], 8333)?) => false
+    routable(fromOctetsOn([192, 168, 1, 1], 8333)?) => false
+    routable(fromOctetsOn([172, 16, 0, 1], 8333)?) => false
+    routable(fromOctetsOn([172, 32, 0, 1], 8333)?) => true
+    routable(fromOctetsOn([169, 254, 1, 1], 8333)?) => false
+    routable(fromOctetsOn([198, 51, 100, 1], 8333)?) => false
+    routable(fromOctetsOn([192, 0, 2, 1], 8333)?) => false
+    routable(fromOctetsOn([203, 0, 113, 1], 8333)?) => false
+    routable(fromOctetsOn([100, 64, 0, 1], 8333)?) => false
+    routable(fromOctetsOn([100, 128, 0, 1], 8333)?) => true
+    routable(fromOctetsOn([198, 18, 0, 1], 8333)?) => false
+    routable(fromOctetsOn([255, 255, 255, 255], 8333)?) => false
+    routable(fromOctetsOn([240, 0, 0, 1], 8333)?) => true
+
+fn routableOctets(octets: List<Int>) -> Bool
+    ? "The same, on four plain octets."
+      "240.0.0.0/4 is deliberately left routable: it is reserved and"
+      "unallocated, Core stores it, and docs/regtest-testing.md leans on"
+      "exactly that to fill an Address Book with Candidates that will never"
+      "answer."
+    match List.len(octets) == 4
+        false -> false
+        true -> firstOf(octets)
+
+verify routableOctets
+    routableOctets([1, 2, 3, 4]) => true
+    routableOctets([]) => false
+    routableOctets([1, 2, 3]) => false
+
+fn firstOf(octets: List<Int>) -> Bool
+    ? "Four octets, taken one at a time."
+    match octets
+        [] -> false
+        [a, ..rest] -> withFirst(a, rest)
+
+verify firstOf
+    firstOf([1, 2, 3, 4]) => true
+    firstOf([]) => false
+
+fn withFirst(a: Int, rest: List<Int>) -> Bool
+    ? "The first octet, and on to the second."
+    match rest
+        [] -> false
+        [b, ..more] -> withSecond(a, b, more)
+
+verify withFirst
+    withFirst(1, [2, 3, 4]) => true
+    withFirst(1, []) => false
+
+fn withSecond(a: Int, b: Int, more: List<Int>) -> Bool
+    ? "The third octet is the last one any of these ranges needs."
+    match more
+        [] -> false
+        [c, ..last] -> routableParts(a, b, c)
+
+verify withSecond
+    withSecond(1, 2, [3, 4]) => true
+    withSecond(1, 2, []) => false
+
+fn routableParts(a: Int, b: Int, c: Int) -> Bool
+    ? "One test per published range, read in the order Core reads them."
+    match a == 0
+        true -> false
+        false -> notReserved(a, b, c)
+
+verify routableParts
+    routableParts(1, 2, 3) => true
+    routableParts(0, 0, 0) => false
+
+fn notReserved(a: Int, b: Int, c: Int) -> Bool
+    ? "Everything after this-network."
+    Bool.and(notPrivate(a, b), notSpecial(a, b, c))
+
+verify notReserved
+    notReserved(1, 2, 3) => true
+    notReserved(10, 0, 0) => false
+
+fn notPrivate(a: Int, b: Int) -> Bool
+    ? "RFC1918, loopback, RFC6598 and the broadcast address."
+    Bool.and(Bool.and(a != 10, a != 127), Bool.and(Bool.and(a != 255, notSixteenTwelve(a, b)), Bool.and(notOneNineTwo(a, b), notShared(a, b))))
+
+verify notPrivate
+    notPrivate(1, 2) => true
+    notPrivate(10, 0) => false
+    notPrivate(127, 0) => false
+    notPrivate(255, 255) => false
+
+fn notSixteenTwelve(a: Int, b: Int) -> Bool
+    ? "172.16.0.0/12 is private; 172.32.0.0 is not."
+    match a == 172
+        false -> true
+        true -> Bool.or(b < 16, b > 31)
+
+verify notSixteenTwelve
+    notSixteenTwelve(172, 16) => false
+    notSixteenTwelve(172, 31) => false
+    notSixteenTwelve(172, 32) => true
+    notSixteenTwelve(173, 16) => true
+
+fn notOneNineTwo(a: Int, b: Int) -> Bool
+    ? "192.168.0.0/16 is private."
+    match a == 192
+        false -> true
+        true -> b != 168
+
+verify notOneNineTwo
+    notOneNineTwo(192, 168) => false
+    notOneNineTwo(192, 0) => true
+    notOneNineTwo(193, 168) => true
+
+fn notShared(a: Int, b: Int) -> Bool
+    ? "RFC6598 shared address space is 100.64.0.0/10."
+    match a == 100
+        false -> true
+        true -> Bool.or(b < 64, b > 127)
+
+verify notShared
+    notShared(100, 64) => false
+    notShared(100, 127) => false
+    notShared(100, 128) => true
+    notShared(101, 64) => true
+
+fn notSpecial(a: Int, b: Int, c: Int) -> Bool
+    ? "RFC3927 link-local, RFC2544 benchmarking and the three RFC5737"
+      "documentation ranges."
+    Bool.and(Bool.and(notLinkLocal(a, b), notBenchmark(a, b)), notDocumentation(a, b, c))
+
+verify notSpecial
+    notSpecial(1, 2, 3) => true
+    notSpecial(169, 254, 1) => false
+
+fn notLinkLocal(a: Int, b: Int) -> Bool
+    ? "169.254.0.0/16."
+    match a == 169
+        false -> true
+        true -> b != 254
+
+verify notLinkLocal
+    notLinkLocal(169, 254) => false
+    notLinkLocal(169, 253) => true
+
+fn notBenchmark(a: Int, b: Int) -> Bool
+    ? "198.18.0.0/15."
+    match a == 198
+        false -> true
+        true -> Bool.or(b < 18, b > 19)
+
+verify notBenchmark
+    notBenchmark(198, 18) => false
+    notBenchmark(198, 19) => false
+    notBenchmark(198, 20) => true
+
+fn notDocumentation(a: Int, b: Int, c: Int) -> Bool
+    ? "192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24."
+    Bool.and(Bool.and(notTestNetOne(a, b, c), notTestNetTwo(a, b, c)), notTestNetThree(a, b, c))
+
+verify notDocumentation
+    notDocumentation(192, 0, 2) => false
+    notDocumentation(198, 51, 100) => false
+    notDocumentation(203, 0, 113) => false
+    notDocumentation(1, 2, 3) => true
+
+fn notTestNetOne(a: Int, b: Int, c: Int) -> Bool
+    ? "192.0.2.0/24."
+    Bool.not(Bool.and(a == 192, Bool.and(b == 0, c == 2)))
+
+verify notTestNetOne
+    notTestNetOne(192, 0, 2) => false
+    notTestNetOne(192, 0, 3) => true
+
+fn notTestNetTwo(a: Int, b: Int, c: Int) -> Bool
+    ? "198.51.100.0/24."
+    Bool.not(Bool.and(a == 198, Bool.and(b == 51, c == 100)))
+
+verify notTestNetTwo
+    notTestNetTwo(198, 51, 100) => false
+    notTestNetTwo(198, 51, 101) => true
+
+fn notTestNetThree(a: Int, b: Int, c: Int) -> Bool
+    ? "203.0.113.0/24."
+    Bool.not(Bool.and(a == 203, Bool.and(b == 0, c == 113)))
+
+verify notTestNetThree
+    notTestNetThree(203, 0, 113) => false
+    notTestNetThree(203, 0, 114) => true
 
 fn octetsOf(address: PeerAddress) -> List<Int>
     ? "The four validated octets, for building an address field on the wire."
