@@ -1179,7 +1179,8 @@ fn turning(state: Following) -> Result<Unit, String>
         Time.now, Time.unixMs,
     ]
     told = dialsAsked(state)?
-    drained = drainSpare(told)
+    knownAt = withPool(told, Infra.Peers.told(told.pool, Time.unixMs())?)
+    drained = drainSpare(knownAt)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
     onTicked(withWatch(Following(pool = ticked.pool, store = topped.store, blocks = topped.blocks, book = topped.book, nextKey = topped.nextKey, watch = topped.watch, mempool = topped.mempool, rebuilding = topped.rebuilding, log = state.log), topped.watch), ticked.arrived)
@@ -1501,6 +1502,7 @@ fn handle(state: Following, key: Int, command: String, body: List<Int>) -> Resul
         "getheaders" -> onAskedHeaders(state, key, body)
         "headers" -> onMoved(state, key, "peer {key} sent Headers unasked")
         "addr" -> onAddresses(state, key, body)
+        "getaddr" -> onAskedAddresses(state, key)
         "ping" -> onPing(state, key, body)
         _ -> listen(state)
 
@@ -1524,6 +1526,72 @@ fn onAnnouncement(state: Following, key: Int, body: List<Int>) -> Result<Unit, S
     match announced
         [] -> onOffered(state, key, Domain.Inventory.txHashesOf(body))
         [head, ..tail] -> onAnnouncedBlocks(state, key, announced, head)
+
+fn servedAddressCap() -> Int
+    ? "How many Candidates one getaddr is answered with."
+      "A quarter of what an addr Message may carry, which is the shape of"
+      "Core's own answer: enough to be worth asking for, short of handing"
+      "over the whole Book to whoever asks first."
+    250
+
+verify servedAddressCap
+    servedAddressCap() => 250
+
+fn onAskedAddresses(state: Following, key: Int) -> Result<Unit, String>
+    ? "A Peer asking who we know, answered out of the Address Book (#210)."
+      "This was in the arm that ignores everything, which made this node a"
+      "dead end in the gossip graph: it asked every Peer for addresses and"
+      "gave none back, so anybody who did find it learned nothing and had"
+      "no reason to keep it."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    offered = parsedAll(List.take(Map.keys(state.book), servedAddressCap()), Domain.Network.portOf(state.pool.network), [])
+    answered = Infra.Peers.send(state.pool, key, "addr", Domain.Addr.offering(offered, Int.div(Time.unixMs(), 1000), 0)?)?
+    listen(saidOffered(withPool(state, answered), List.len(offered), key))
+
+fn parsedAll(addresses: List<String>, port: Int, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "The Book's keys as Peer Addresses, passing over any that will not"
+      "parse -- they came from a Peer and a Peer may say anything."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> parsedAll(tail, port, keptParsed(Domain.Address.fromPeerText(head, port), acc))
+
+verify parsedAll
+    List.len(parsedAll([], 8333, [])) => 0
+    List.len(parsedAll(["1.2.3.4:8333"], 8333, [])) => 1
+    List.len(parsedAll(["not an address"], 8333, [])) => 0
+    parsedAll(["1.2.3.4", "5.6.7.8"], 8333, []) => [Domain.Address.fromOctetsOn([1, 2, 3, 4], 8333)?, Domain.Address.fromOctetsOn([5, 6, 7, 8], 8333)?]
+
+fn keptParsed(parsed: Result<PeerAddress, String>, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "One address in, if it is one."
+    match parsed
+        Result.Err(why) -> acc
+        Result.Ok(address) -> List.prepend(address, acc)
+
+verify keptParsed
+    List.len(keptParsed(Result.Err("no"), [])) => 0
+    List.len(keptParsed(Domain.Address.fromOctetsOn([1, 2, 3, 4], 8333), [])) => 1
+
+fn saidOffered(state: Following, howMany: Int, key: Int) -> Following
+    ? "Say what was handed over, unless it was nothing."
+    ! [Console.print]
+    match howMany == 0
+        true -> state
+        false -> saidOfferedNow(state, howMany, key)
+
+fn saidOfferedNow(state: Following, howMany: Int, key: Int) -> Following
+    ? "The line itself."
+    ! [Console.print]
+    _said = saidLineIfPlain(state.watch, "offered {howMany} Candidate(s) to peer {key}")
+    state
 
 fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
     ? "Peers this Peer says exist, into the Address Book."

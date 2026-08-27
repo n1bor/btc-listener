@@ -15,8 +15,8 @@ module Addr
         "Nothing here is trusted. An addr entry is a claim by a Peer under no"
         "obligation to be honest, which is why what comes out is Candidates"
         "and not Peers -- the Handshake is what turns one into the other."
-    exposes [entrySize, maxEntries, addressesOf]
-    depends [Domain.Address, Domain.CompactSize, Domain.Message]
+    exposes [entrySize, maxEntries, addressesOf, offering]
+    depends [Bytes, Domain.Address, Domain.CompactSize, Domain.Message]
     effects []
 
 fn entrySize() -> Int
@@ -47,6 +47,100 @@ verify addressesOf
     addressesOf([0]) => []
     List.len(addressesOf(twoEntries())) => 2
     addressesOf(ipv6Entry()) => []
+
+fn offering(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> Result<Bytes, String>
+    ? "An addr Message offering these Peer Addresses."
+      "The half of address gossip this program has never had (#210): it has"
+      "read addr Messages since the Address Book was written and has never"
+      "written one, so no Peer has ever had a way to learn where this node"
+      "is. Reading without writing also makes us a dead end in the gossip"
+      "graph -- anybody who did find us would learn nothing from us."
+      "One timestamp and one services word for the whole Message rather than"
+      "per entry, because every address in one of these is being offered on"
+      "the same terms by the same node at the same moment."
+      "Named offering rather than payload, which is what every other Message"
+      "builder here is called, because Domain.Version already exposes a"
+      "payload and Infra.Follow depends on both. Two glob-imported modules"
+      "exposing one name is harmless until something takes that name, and"
+      "Infra.Follow has a parameter called payload -- which makes the"
+      "emitted Rust E0659 and is caught by cargo build alone. CLAUDE.md"
+      "records match binders and let bindings as fixed upstream; a function"
+      "parameter is the form still live."
+    Bytes.fromList(bodyOf(List.take(addresses, maxEntries()), timestamp, services))
+
+verify offering
+    Bytes.toHex(offering([sampleAddress()?], 100000000, 1)?) => "0100e1f505010000000000000000000000000000000000ffff01020304208d"
+    Bytes.toHex(offering([], 0, 0)?) => "00"
+    List.len(Bytes.octets(offering([sampleAddress()?], 0, 0)?)) => 31
+    List.len(Bytes.octets(offering([sampleAddress()?, sampleAddress()?], 0, 0)?)) => 61
+    addressesOf(Bytes.octets(offering([sampleAddress()?], 7, 0)?)) => [sampleAddress()?]
+    addressesOf(Bytes.octets(offering([sampleAddress()?, otherAddress()?], 7, 0)?)) => [sampleAddress()?, otherAddress()?]
+    addressesOf(Bytes.octets(offering([], 7, 0)?)) => []
+    List.take(Bytes.octets(offering(manyAddresses(maxEntries() + 5, sampleAddress()?, []), 7, 0)?), 3) => [253, 232, 3]
+
+fn bodyOf(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> List<Int>
+    ? "The count that precedes the entries, then one entry each."
+    List.concat(Domain.CompactSize.encode(List.len(addresses)), entriesInto(addresses, timestamp, services))
+
+verify bodyOf
+    bodyOf([], 0, 0) => [0]
+    List.len(bodyOf([sampleAddress()?], 0, 0)) => 31
+
+fn entriesInto(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> List<Int>
+    ? "One thirty-byte entry at a time, in the order given."
+      "The entry goes in front of the rest rather than an accumulator behind"
+      "it, which is the difference between copying thirty bytes per address"
+      "and copying every byte written so far. At the thousand entries"
+      "maxEntries allows, the accumulator form is fifteen million byte"
+      "copies and does not finish inside a verify budget."
+    match addresses
+        [] -> []
+        [head, ..tail] -> List.concat(entryFor(head, timestamp, services), entriesInto(tail, timestamp, services))
+
+verify entriesInto
+    entriesInto([], 0, 0) => []
+    List.len(entriesInto([sampleAddress()?], 0, 0)) => 30
+    List.len(entriesInto([sampleAddress()?, otherAddress()?], 0, 0)) => 60
+
+fn entryFor(address: PeerAddress, timestamp: Int, services: Int) -> List<Int>
+    ? "The thirty bytes entrySize names, written rather than read: four of"
+      "timestamp, eight of services, sixteen of address, two of port."
+      "The port is big-endian for the reason portIn gives -- it is a port on"
+      "a socket rather than a number in a Message -- and it is the only"
+      "field here that is."
+    List.concat(List.concat(Domain.Message.littleEndian(timestamp, 4), Domain.Message.littleEndian(services, 8)), List.concat(mappedOf(Domain.Address.octetsOf(address)), Domain.Message.bigEndian(Domain.Address.portOf(address), 2)))
+
+verify entryFor
+    List.len(entryFor(sampleAddress()?, 0, 0)) => 30
+    List.take(entryFor(sampleAddress()?, 100000000, 1), 4) => [0, 225, 245, 5]
+    List.take(List.drop(entryFor(sampleAddress()?, 0, 1), 4), 8) => [1, 0, 0, 0, 0, 0, 0, 0]
+    List.drop(entryFor(sampleAddress()?, 0, 0), 28) => [32, 141]
+    addressIn(entryFor(sampleAddress()?, 0, 0)) => Result.Ok(sampleAddress()?)
+
+fn mappedOf(octets: List<Int>) -> List<Int>
+    ? "Four octets in the IPv6-mapped shape mappedIpv4 reads back."
+    List.concat([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255], octets)
+
+verify mappedOf
+    mappedOf([1, 2, 3, 4]) => mappedPrefix()
+    mappedIpv4(mappedOf([1, 2, 3, 4])) => true
+
+fn otherAddress() -> Result<PeerAddress, String>
+    ? "A second Peer, so a round trip can show the order is kept."
+    Domain.Address.fromOctetsOn([5, 6, 7, 8], 38333)
+
+verify otherAddress
+    Domain.Address.toString(otherAddress()?) => "5.6.7.8:38333"
+
+fn manyAddresses(count: Int, address: PeerAddress, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "That many of one Peer Address, for the cases here."
+    match count <= 0
+        true -> acc
+        false -> manyAddresses(count - 1, address, List.prepend(address, acc))
+
+verify manyAddresses
+    List.len(manyAddresses(3, sampleAddress()?, [])) => 3
+    manyAddresses(0, sampleAddress()?, []) => []
 
 fn offered(body: List<Int>) -> Int
     ? "How many entries the Message claims, capped at what is allowed."

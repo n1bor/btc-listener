@@ -1160,6 +1160,66 @@ Core will not gossip a loopback or an RFC1918 address, so there is no way to
 put a reachable Candidate in the Book on regtest without root. It needs a
 Network with seeds; section 15 says the same thing about its own happy path.
 
+### 16e. Giving an address back
+
+Until #210 this node took addresses and never gave one: it sent `getaddr`,
+folded the answers into the Book, and had no code anywhere that *wrote* an
+`addr`. So no Peer could learn where it was, and any Peer that did find it
+learned nothing from it.
+
+Two halves, and regtest can show one of them properly and the other only by
+its refusal.
+
+**Answering `getaddr`.** Bind a port and have Core dial in. Core will not
+gossip a loopback address, so it cannot find us on its own — `addnode` is the
+way to put the two together:
+
+```bash
+timeout 75 $BIN regtest follow 127.0.0.1:18444 $D serve:18455 > serve.log 2>&1 &
+sleep 25
+ss -ltn | grep 18455                       # we are bound
+$C addnode "127.0.0.1:18455" onetry        # Core dials us
+sleep 30
+grep -E "dialled us|offered" serve.log
+```
+
+```
+peer 7 dialled us from 127.0.0.1:34034
+offered 208 Candidate(s) to peer 7
+```
+
+Both lines matter. The first is the accept path, which section 11 already
+covers. The second is the new one, and before #210 it did not exist —
+`getaddr` fell into the arm of `handle` that ignores everything.
+
+`$C getpeerinfo` should show the pair from Core's side: one `"inbound": true`
+entry that is our dial out to it, and one `"inbound": false` on port 18455
+that is its dial in to us, both with `"subver": "/aver-btc-listener:0.1/"`.
+
+**Self-advertisement, which regtest can only show refusing.** The node learns
+its own address from `addr_recv` in a Peer's `version` — the only way a node
+behind NAT or on a hosting box can know it — and everything on regtest is on
+loopback. `Domain.Address.routable` refuses `127.0.0.0/8` along with RFC1918,
+RFC3927, RFC5737, RFC6598 and RFC2544, so the observation is never counted and
+nothing is ever advertised.
+
+That refusal is the correct behaviour and is worth checking rather than
+assuming:
+
+```bash
+$C getnodeaddresses 0 | grep -c '"address"'    # same before and after the run
+```
+
+It must not move. A node that advertised `127.0.0.1` would be handing the
+Network an address that reaches nobody, and on a real host the same bug hands
+out the operator's private network.
+
+**The positive path needs a routable address, so it needs signet.** Two Peers
+have to agree before the address is believed (`agreementNeeded`), the port
+advertised is the bound one rather than the socket's, and the first
+advertisement goes out as soon as those agree. None of that can happen on a
+machine talking to itself. Section 15 records the same shape of gap.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
