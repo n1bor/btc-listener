@@ -1020,6 +1020,49 @@ Peers held (#203), because `Tcp.readSome` errors went out through the `?`
 while an empty read -- a clean close -- was handled one line below. A reset is
 the commoner of the two on a real network.
 
+### 16d. A walk that stops says where it stopped, and stops when asked
+
+Two things that only show on a run long enough to interrupt.
+
+**Ctrl-C must end the Set phase.** `Process.stopRequested` is cooperative: the
+signal sets a flag and each walk is expected to notice. The Set walk asked
+only `eye.stopped` -- which is `q` on the Screen -- so a plain-log run had
+nothing to stop it (#206), and on mainnet that phase runs for hours.
+
+Test it without waiting for a `follow` to reach the phase: the `utxo` command
+*is* the Set walk, standalone.
+
+```bash
+$BIN signet utxo $D 12000 &
+sleep 8 && kill -TERM $(pgrep -f "utxo")
+```
+
+```
+4832 Blocks connected to Height 4832; Set +5007 -2644 Outputs, 755629 satoshis in fees
+```
+
+It must stop within a turn -- about two seconds -- and **report the Height it
+reached, not the one it was asked for**. A run that keeps going needs
+`kill -9`, which is the ending that tears a Segment and the one a cooperative
+stop exists to avoid.
+
+**A phase-boundary record must not claim the target.** Walk rows report the
+low-water mark; the boundary row used to report `tipHeight` whatever happened
+(#205), so a stopped phase looked complete:
+
+```bash
+grep -v '^#' $D/metrics.log | awk '{printf "%-8s height %-9s blocks %s\n", $2, $3, $5}'
+```
+
+```
+bodies   height 13155     blocks 113
+```
+
+**Sum the blocks column and compare.** If the blocks fetched across every
+window come to far less than the final row's height, the boundary row is
+reporting the target. That is how this was found: a run whose blocks summed to
+112,113 signed off at 319,491.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

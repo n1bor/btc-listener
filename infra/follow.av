@@ -665,11 +665,10 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)), afterHeaders.book, afterHeaders.nextKey)?
-    bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", tipHeight, tipHeight, fetched.count, fetched.bytes, true)?
+    bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
     upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
     standing = toppedUp(drainSpare(upToTip))?
-    setLog = marking(standing, standing.pool, "set", tipHeight, tipHeight, true)?
-    backAtTip(withLog(standing, setLog))
+    backAtTip(standing)
 
 fn backAtTip(state: Following) -> Result<Following, String>
     ? "The catch-up has returned, so the Snapshot says so."
@@ -715,6 +714,7 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
         Console.print,
         Disk.appendText, Disk.readBytesAt,
         Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
@@ -723,9 +723,10 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
     seen = watchSeen(state.watch, built.eye)
     _each = saidLinesIfPlain(seen, blockLinesOf(built.blocks, built.views))
     _said = saidLineIfPlain(seen, "following at Height {built.reached}: {built.blocks} connected, {built.dropped} disconnected, set +{built.added} -{built.removed}")
+    setLog = Infra.Metrics.marked(built.eye.log, "set", built.reached, tipHeight, built.blocks, 0, Infra.Peers.polledMsOf(state.pool), List.len(Infra.Peers.peerKeys(state.pool)), Domain.AddressBook.sizeOf(state.book), built.added, built.removed, true)?
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
     restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
-    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = built.eye.log), watchAfterBuild(seen, built.views)))
+    Result.Ok(withWatch(Following(pool = state.pool, store = built.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = seen, mempool = restored, rebuilding = state.rebuilding, log = setLog), watchAfterBuild(seen, built.views)))
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."

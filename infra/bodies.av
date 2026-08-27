@@ -39,6 +39,7 @@ record Fetched
     eye: Eye
     book: Map<String, Candidate>
     nextKey: Int
+    reached: Int
 
 record Owed
     key: Int
@@ -116,7 +117,7 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, book = book, nextKey = nextKey)
+    started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, book = book, nextKey = nextKey, reached = from)
     flown = flying(Flight(progress = started, plan = Plan(wanted = heightsFrom(from, to, []), owed = Map.fromList([])), heardMs = Time.unixMs(), dialledMs = Time.unixMs()), to)?
     settled(flown)
 
@@ -170,7 +171,7 @@ fn settled(progress: Fetched) -> Result<Fetched, String>
     ? "Write whatever Locations are still held back."
     ! [Infra.Kv.putAll]
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, book = progress.book, nextKey = progress.nextKey))
+    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, book = progress.book, nextKey = progress.nextKey, reached = progress.reached))
 
 fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
     ? "One turn: hand out what can be handed out, then take whatever comes"
@@ -189,7 +190,7 @@ fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     match Bool.or(Process.stopRequested(), flight.progress.eye.stopped)
-        true -> Result.Ok(flight.progress)
+        true -> Result.Ok(reachedAt(flight, to))
         false -> flyingOn(flight, to)
 
 fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
@@ -205,7 +206,7 @@ fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     match Bool.and(List.len(flight.plan.wanted) == 0, Map.len(flight.plan.owed) == 0)
-        true -> Result.Ok(flight.progress)
+        true -> Result.Ok(reachedAt(flight, to))
         false -> turning(flight, to)
 
 fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
@@ -523,7 +524,7 @@ fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, 
         Time.unixMs,
     ]
     appended = Infra.Blocks.append(flight.progress.blocks, payload)?
-    held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, book = flight.progress.book, nextKey = flight.progress.nextKey)
+    held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, book = flight.progress.book, nextKey = flight.progress.nextKey, reached = flight.progress.reached)
     written = maybeWrite(held)?
     reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs(), dialledMs = flight.dialledMs), to)
 
@@ -596,7 +597,7 @@ fn dialling(flight: Flight, to: Int, nowMs: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     topped = Infra.Peers.toppedUp(flight.progress.pool, flight.progress.book, flight.progress.nextKey)?
-    waitingFor(Flight(progress = Fetched(pool = topped.pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, book = topped.book, nextKey = topped.nextKey), plan = flight.plan, heardMs = flight.heardMs, dialledMs = nowMs), to)
+    waitingFor(Flight(progress = Fetched(pool = topped.pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, book = topped.book, nextKey = topped.nextKey, reached = flight.progress.reached), plan = flight.plan, heardMs = flight.heardMs, dialledMs = nowMs), to)
 
 fn stalled(flight: Flight, to: Int) -> Result<Fetched, String>
     ? "Drop every Peer that owes a Block and has not sent one, and want"
@@ -715,7 +716,15 @@ fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Resu
         Time.unixMs,
     ]
     _said = Console.print("{lineAt(at, to, progress.count, progress.pace, nowMs)}")
-    flying(withProgress(flight, Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye, book = progress.book, nextKey = progress.nextKey)), to)
+    flying(withProgress(flight, Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = Infra.Pace.advanced(progress.pace, nowMs, progress.count, 0), eye = progress.eye, book = progress.book, nextKey = progress.nextKey, reached = progress.reached)), to)
+
+fn reachedAt(flight: Flight, to: Int) -> Fetched
+    ? "The walk's state, stamped with the Height it actually reached (#205)."
+      "A walk ends three ways: the range is done, the stop flag is set, or a"
+      "fault ends it. Only the first reaches the target, and the caller could"
+      "not tell which had happened -- so the phase-boundary record reported"
+      "the target every time and a stopped phase looked complete."
+    Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, book = flight.progress.book, nextKey = flight.progress.nextKey, reached = positionOf(flight.plan, to))
 
 fn positionOf(plan: Plan, to: Int) -> Int
     ? "Where the walk has got to: the lowest Height it still wants or is"
@@ -819,7 +828,7 @@ fn withPool2(flight: Flight, pool: Pool) -> Flight
 
 fn withPool(progress: Fetched, pool: Pool) -> Fetched
     ? "The walk, carrying the pool the last question left."
-    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, book = progress.book, nextKey = progress.nextKey)
+    Fetched(pool = pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, book = progress.book, nextKey = progress.nextKey, reached = progress.reached)
 
 fn addedIfSame(same: Bool, acc: Int) -> Int
     ? "One more, or the same."
@@ -840,7 +849,7 @@ fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
 
 fn withEye(progress: Fetched, eye: Eye) -> Fetched
     ? "The walk's state, with its Eye moved on."
-    Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = eye, book = progress.book, nextKey = progress.nextKey)
+    Fetched(pool = progress.pool, store = progress.store, blocks = progress.blocks, pending = progress.pending, waiting = progress.waiting, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = eye, book = progress.book, nextKey = progress.nextKey, reached = progress.reached)
 
 fn plainly(eye: Eye) -> Bool
     ? "Whether this walk speaks in printed lines; the Screen draws instead."
