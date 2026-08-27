@@ -1196,6 +1196,20 @@ covers. The second is the new one, and before #210 it did not exist —
 entry that is our dial out to it, and one `"inbound": false` on port 18455
 that is its dial in to us, both with `"subver": "/aver-btc-listener:0.1/"`.
 
+**The listener is bound before the Handshakes.** The first line of the run
+must be the listener, not the Peer:
+
+```
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 0, for up to 8 inbound Peer(s)
+peer 0 is 127.0.0.1:18444
+```
+
+The other order is #214: `noticedSelf` will not count an `addr_recv` while the
+port is zero, and the port was bound after the startup Handshakes -- so every
+Peer named on the command line contributed nothing to the tally, and only
+Peers seated later out of the Book did. A node whose Book dials all fail would
+sit with four good Peers and never learn its own address.
+
 **Self-advertisement, which regtest can only show refusing.** The node learns
 its own address from `addr_recv` in a Peer's `version` — the only way a node
 behind NAT or on a hosting box can know it — and everything on regtest is on
@@ -1210,9 +1224,16 @@ assuming:
 $C getnodeaddresses 0 | grep -c '"address"'    # same before and after the run
 ```
 
-It must not move. A node that advertised `127.0.0.1` would be handing the
-Network an address that reaches nobody, and on a real host the same bug hands
-out the operator's private network.
+It must not move, and `grep "told .* Peer" ` must find nothing. A node that
+advertised `127.0.0.1` would be handing the Network an address that reaches
+nobody, and on a real host the same bug hands out the operator's private
+network.
+
+The positive is the same line seen: `told 8 Peer(s) this node is at
+62.210.113.61:38333` in a plain run, and `advertising 62.210.113.61:38333` on
+the end of the Peers Panel line under a Screen. Both exist because neither
+alone was enough (#214) -- the plain line is invisible on the node that most
+wanted it, which runs with a Screen.
 
 **The positive path needs a routable address, so it needs signet.** Two Peers
 have to agree before the address is believed (`agreementNeeded`), the port

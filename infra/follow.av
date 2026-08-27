@@ -176,10 +176,10 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     ]
     metricsLog = Infra.Metrics.opened(logOf(logging, Time.unixMs()), Domain.Network.nameOf(network), 0, 0)?
     book = bootstrapped(network, addresses)?
-    pool = joining(Infra.Peers.opened(network), addresses, 0)?
+    ready = listeningIf(Infra.Peers.opened(network), store, answering)?
+    pool = joining(ready, addresses, 0)?
     asked = askingAll(pool, Infra.Peers.peerKeys(pool))?
-    told = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
-    bound = listeningIf(told, store, answering)?
+    bound = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
     started = firstSeated(Following(pool = bound, store = store, blocks = blocks, book = book, nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None, log = metricsLog), Domain.AddressBook.sizeOf(book))?
     outcome = session(started, screened)
     _given = restoredIf(screened)
@@ -464,6 +464,23 @@ fn dialsAsked(state: Following) -> Result<Following, String>
         Time.unixMs,
     ]
     drainSettled(withPool(state, Infra.Peers.advanced(state.pool)?))
+
+fn saidAdvertised(state: Following, advertised: Advertised) -> Following
+    ? "Say where we told the Network we are, on the turn we told it (#214)."
+      "Once a day, and once more the first time enough Peers agree, so this"
+      "is not a line that scrolls. Without it there is no way to tell a node"
+      "that has advertised from one whose Peers never agreed on an address,"
+      "and only one of those is a fault."
+    ! [Console.print]
+    match advertised.address
+        Option.None -> withPool(state, advertised.pool)
+        Option.Some(one) -> saidAdvertisedNow(withPool(state, advertised.pool), one, advertised.peers)
+
+fn saidAdvertisedNow(state: Following, address: String, peers: Int) -> Following
+    ? "The line itself."
+    ! [Console.print]
+    _said = saidLineIfPlain(state.watch, "told {peers} Peer(s) this node is at {address}")
+    state
 
 fn drainSettled(state: Following) -> Result<Following, String>
     ? "What the dials became while the loop was doing something else."
@@ -1180,7 +1197,7 @@ fn turning(state: Following) -> Result<Unit, String>
         Time.now, Time.unixMs,
     ]
     told = dialsAsked(state)?
-    knownAt = withPool(told, Infra.Peers.told(told.pool, Time.unixMs())?)
+    knownAt = saidAdvertised(told, Infra.Peers.told(told.pool, Time.unixMs())?)
     drained = drainSpare(knownAt)
     topped = toppedUp(drained)?
     ticked = Infra.Peers.awaitTick(topped.pool, tickMs())?
@@ -1456,7 +1473,7 @@ fn refreshed(state: Following, nowMs: Int) -> Following
       "The rows come from the pool (#168), which is the only thing that"
       "knows them, and which the catch-up walks hold too -- so the Panel is"
       "the same Panel whichever phase draws it."
-    withWatch(state, Watching(snapshot = Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, Infra.Peers.company(state.pool)), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving))
+    withWatch(state, Watching(snapshot = Domain.Snapshot.withServing(Domain.Snapshot.withMempool(Domain.Snapshot.withCandidates(Domain.Snapshot.withPeers(state.watch.snapshot, Infra.Peers.company(state.pool)), Domain.AddressBook.sizeOf(state.book)), mempoolView(state.mempool)), Infra.Peers.selfAddress(state.pool)), heard = state.watch.heard, anyHeardMs = state.watch.anyHeardMs, saidPeersMs = state.watch.saidPeersMs, tendedMs = state.watch.tendedMs, view = state.watch.view, leaving = state.watch.leaving))
 
 fn mempoolView(pool: Mempool) -> MempoolView
     ? "The Mempool's four numbers, read through the accessors #28 built for"
