@@ -1220,6 +1220,43 @@ advertised is the bound one rather than the socket's, and the first
 advertisement goes out as soon as those agree. None of that can happen on a
 machine talking to itself. Section 15 records the same shape of gap.
 
+### 16f. A walk that stops says where it stopped, and stops when asked
+
+**Ctrl-C must end the Set phase.** `Process.stopRequested` is cooperative: the
+signal sets a flag and each walk is expected to notice. The Set walk asked
+only `eye.stopped` -- which is `q` on the Screen -- so a plain-log run had
+nothing to stop it (#206), and on mainnet that phase runs for hours.
+
+Test it without waiting for a `follow` to reach the phase: the `utxo` command
+*is* the Set walk, standalone.
+
+```bash
+$BIN signet utxo $D 12000 &
+sleep 8 && kill -TERM $(pgrep -f "signet utxo")
+```
+
+```
+188 Blocks connected to Height 5020; Set +188 -0 Outputs, 0 satoshis in fees
+```
+
+It must stop within a turn -- about two seconds -- and **report the Height it
+reached, not the one it was asked for**. A run that keeps going needs
+`kill -9`, which is the ending that tears a Segment and the one a cooperative
+stop exists to avoid.
+
+**A phase-boundary record must not claim the target.** Walk rows report the
+low-water mark; the boundary row used to report `tipHeight` whatever happened
+(#205), so a stopped phase looked complete.
+
+```bash
+grep -v '^#' $D/metrics.log | awk '{printf "%-8s height %-9s blocks %s\n", $2, $3, $5}'
+```
+
+**Sum the blocks column and compare it against the final row's height.** If
+the blocks fetched across every window come to far less, the boundary row is
+reporting the target. That is how this was found: a run whose blocks summed to
+112,113 signed off at 319,491.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

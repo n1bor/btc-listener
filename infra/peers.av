@@ -1438,10 +1438,28 @@ fn readingInto(pool: Pool, key: Int, connection: Tcp.Connection, rest: List<Int>
       "not the end of the run. What ends the run is the pool emptying, which"
       "the caller notices rather than this."
     ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
-    arrived = Bytes.octets(Tcp.readSome(connection, readChunk())?)
+    match Tcp.readSome(connection, readChunk())
+        Result.Err(why) -> resetBy(pool, key, rest, why)
+        Result.Ok(bytes) -> readingBytes(pool, key, rest, Bytes.octets(bytes))
+
+fn readingBytes(pool: Pool, key: Int, rest: List<Int>, arrived: List<Int>) -> Result<Pool, String>
+    ? "An empty read is a clean close; anything else is bytes to keep."
+    ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
     match arrived
         [] -> closedBy(pool, key, rest)
         [head, ..tail] -> buffered(pool, key, rest, arrived)
+
+fn resetBy(pool: Pool, key: Int, rest: List<Int>, why: String) -> Result<Pool, String>
+    ? "A read that failed costs that Peer and no more (#203)."
+      "This went out through the ? and ended the whole run, while an empty"
+      "read -- a clean close -- was handled one line below and carried on. A"
+      "reset is the ordinary way a real Peer disappears, far commoner than a"
+      "clean FIN, so on a catch-up measured in hours one reset from any of"
+      "eight Peers ended it. What ends a run is the pool emptying, which"
+      "pumped reports; this is one Peer gone."
+    ! [Console.error, Console.print, Tcp.readSome, Time.unixMs]
+    _said = complainedIfPlain(pool, "peer {key} went: {why}")
+    reading(forgotten(pool, key), rest)
 
 fn closedBy(pool: Pool, key: Int, rest: List<Int>) -> Result<Pool, String>
     ? "Say which Peer went, then carry on with the others."
