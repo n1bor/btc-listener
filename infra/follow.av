@@ -313,17 +313,6 @@ fn restoredIf(screened: Bool) -> Unit
         true -> Infra.Screen.restored()
         false -> Unit
 
-fn targetPeers() -> Int
-    ? "How many Peers the node tries to keep."
-      "Eight, which is Bitcoin Core's outbound default and is chosen for the"
-      "same reason: enough that losing one is routine and that no single Peer"
-      "decides what chain we see, few enough that a node is not a burden on"
-      "the Network it joined."
-    8
-
-verify targetPeers
-    targetPeers() => 8
-
 fn tellingCompact(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "Tell every Peer we speak compact Blocks, and which version."
       "Low bandwidth: announce first and let us ask (#29). The alternative"
@@ -416,35 +405,20 @@ fn toppedUp(state: Following) -> Result<Following, String>
       "The dial is parked on the pool now and asked once a turn what it has"
       "become; a Candidate still costs its five seconds, but they are the"
       "dial's seconds and not the loop's."
+      "The deciding and the dialling moved to Infra.Peers with #199, so that"
+      "a body walk can do the same thing for the hours it holds the pool."
+      "This is now the loop saying who it is: the pool, the Book and the"
+      "next key, handed over and taken back."
     ! [Tcp.beginConnect, Time.unixMs]
-    match Bool.or(List.len(Infra.Peers.peerKeys(state.pool)) >= targetPeers(), Infra.Peers.dialingNow(state.pool))
-        true -> Result.Ok(state)
-        false -> choosing(state, Domain.AddressBook.nextUntried(state.book, Domain.Inbox.addressesHeld(state.pool.standing)))
+    toppedInto(state, Infra.Peers.toppedUp(state.pool, state.book, state.nextKey)?)
 
-fn choosing(state: Following, chosen: Option<String>) -> Result<Following, String>
-    ? "Nothing worth dialling is the usual answer, and not a problem."
-    ! [Tcp.beginConnect, Time.unixMs]
-    match chosen
-        Option.None -> Result.Ok(state)
-        Option.Some(address) -> dialled(state, address, Domain.Address.fromPeerText(address, Domain.Network.portOf(state.pool.network)))
+fn toppedInto(state: Following, done: Infra.Peers.Topped) -> Result<Following, String>
+    ? "What the top-up did, folded back into the loop's state."
+    Result.Ok(withNextKey(withBook(withPool(state, done.pool), done.book), done.nextKey))
 
-fn dialled(state: Following, address: String, parsed: Result<PeerAddress, String>) -> Result<Following, String>
-    ? "A Candidate whose address will not parse is one a Peer made up."
-    ! [Tcp.beginConnect, Time.unixMs]
-    tried = Following(pool = state.pool, store = state.store, blocks = state.blocks, book = Domain.AddressBook.marked(state.book, address), nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
-    match parsed
-        Result.Err(why) -> Result.Ok(tried)
-        Result.Ok(peer) -> Result.Ok(reaching(tried, peer))
-
-fn reaching(state: Following, peer: PeerAddress) -> Following
-    ? "The dial started, and the key it will seat under taken."
-      "Taken now rather than on success, because the success comes back some"
-      "turns later and nothing else may use the key in between. It costs an"
-      "identifier per Candidate that will not answer, which is a number and"
-      "not a Peer -- the startup walk still hands keys out only to Peers"
-      "that seat, and regtest section 13 still reads key 0."
-    ! [Tcp.beginConnect, Time.unixMs]
-    withNextKey(withPool(state, Infra.Peers.dialling(state.pool, state.nextKey, peer)), state.nextKey + 1)
+fn withBook(state: Following, book: Map<String, Candidate>) -> Following
+    ? "The state, with the Address Book moved on."
+    Following(pool = state.pool, store = state.store, blocks = state.blocks, book = book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
 fn withNextKey(state: Following, nextKey: Int) -> Following
     ? "The state, with the next identifier a Peer will take."
@@ -771,9 +745,9 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
-    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)))?
+    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)), afterHeaders.book, afterHeaders.nextKey)?
     bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = afterHeaders.book, nextKey = afterHeaders.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
+    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
     standing = toppedUp(dialsAsked(drainSpare(upToTip))?)?
     backAtTip(standing)
 

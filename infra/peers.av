@@ -19,8 +19,8 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
         Disk.appendText,
@@ -786,6 +786,57 @@ fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
     match Tcp.beginConnect(Domain.Address.hostOf(address), Domain.Address.portOf(address))
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
         Result.Ok(dial) -> settling(pool, key, address, dial, Time.unixMs() + dialBudgetMs())
+
+record Topped
+    pool: Pool
+    book: Map<String, Candidate>
+    nextKey: Int
+
+fn targetPeers() -> Int
+    ? "How many Peers the node tries to keep."
+      "Eight, which is Bitcoin Core's outbound default and is chosen for the"
+      "same reason: enough that losing one is routine and that no single Peer"
+      "decides what chain we see, few enough that a node is not a burden on"
+      "the Network it joined."
+    8
+
+verify targetPeers
+    targetPeers() => 8
+
+fn toppedUp(pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Result<Topped, String>
+    ? "Start a dial when the pool is short of Peers, and do not wait for it."
+      "It lives here rather than in the follow loop (#199) because the loop"
+      "is not the only thing that takes turns. A body walk polls, waits and"
+      "hands out work for hours, and while it did none of this the pool"
+      "could only shrink: mainnet metrics show Peers going 4, 4, 3, 3 across"
+      "a catch-up whose target is 8. Since #168 that costs more than a share"
+      "of a serial download -- each Peer is sixteen Blocks of parallelism."
+      "One dial at a time, for the reason dialingNow gives, and the key it"
+      "will seat under is taken now rather than on success, because success"
+      "comes back some turns later and nothing else may use the key in"
+      "between. It costs an identifier per Candidate that will not answer,"
+      "which is a number and not a Peer -- the startup walk still hands keys"
+      "out only to Peers that seat, and regtest section 13 still reads key 0."
+    ! [Tcp.beginConnect, Time.unixMs]
+    match Bool.or(List.len(peerKeys(pool)) >= targetPeers(), dialingNow(pool))
+        true -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
+        false -> topChosen(pool, book, nextKey, Domain.AddressBook.nextUntried(book, Domain.Inbox.addressesHeld(pool.standing)))
+
+fn topChosen(pool: Pool, book: Map<String, Candidate>, nextKey: Int, chosen: Option<String>) -> Result<Topped, String>
+    ? "Nothing worth dialling is the usual answer, and not a problem."
+    ! [Tcp.beginConnect, Time.unixMs]
+    match chosen
+        Option.None -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
+        Option.Some(address) -> topParsed(pool, Domain.AddressBook.marked(book, address), nextKey, Domain.Address.fromPeerText(address, Domain.Network.portOf(pool.network)))
+
+fn topParsed(pool: Pool, book: Map<String, Candidate>, nextKey: Int, parsed: Result<PeerAddress, String>) -> Result<Topped, String>
+    ? "A Candidate whose address will not parse is one a Peer made up."
+      "The book comes in already marked: an address that will not parse is"
+      "one never to try again, the same as one that would not answer."
+    ! [Tcp.beginConnect, Time.unixMs]
+    match parsed
+        Result.Err(why) -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
+        Result.Ok(peer) -> Result.Ok(Topped(pool = dialling(pool, nextKey, peer), book = book, nextKey = nextKey + 1))
 
 fn dialingNow(pool: Pool) -> Bool
     ? "Whether a dial is already in flight."
