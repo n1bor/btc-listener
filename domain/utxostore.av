@@ -105,7 +105,24 @@ fn encodeUndo(removed: List<Unspent>) -> Result<Bytes, String>
 
 verify encodeUndo
     Bytes.octets(encodeUndo([])?) => []
-    List.len(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?)) => 22
+    List.len(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?)) => 25
+    List.len(Bytes.octets(encodeUndo([longScriptCoin()])?)) => 281
+
+fn longScriptCoin() -> Unspent
+    ? "An Output whose scriptPubKey is 257 bytes, which is the case that broke"
+      "the Set at Height 243016 (#218): thirteen bytes of entry and then the"
+      "script is 270, and 270 does not fit in the byte that used to say so."
+    Unspent(txid = "aa", index = 0, value = 5, script = longScriptHex(), height = 7, coinbase = false)
+
+verify longScriptCoin
+    List.len(Bytes.octets(Bytes.fromHex(longScriptCoin().script)?)) => 257
+
+fn longScriptHex() -> String
+    ? "257 bytes of script as hexadecimal."
+    Bytes.toHex(Result.withDefault(Bytes.fromList(Domain.ByteField.filled(257, 171)), Domain.Index.emptyBytes()))
+
+verify longScriptHex
+    List.len(Bytes.octets(Bytes.fromHex(longScriptHex())?)) => 257
 
 fn undoInto(removed: List<Unspent>, acc: List<Int>) -> Result<List<Int>, String>
     ? "One Output at a time, in the order they were taken."
@@ -118,12 +135,19 @@ verify undoInto
 
 fn oneUndo(unspent: Unspent) -> Result<List<Int>, String>
     ? "One removed Output: where it was, then what the Set held about it."
-    key = Domain.ByteField.prefixed(Bytes.octets(unspentKey(unspent.txid, unspent.index)?))
-    entry = Domain.ByteField.prefixed(Bytes.octets(encodeCoin(unspent)?))
+      "The key is a Transaction Id and an Output position, so it is thirty-six"
+      "bytes whatever the Output was, and one length byte describes it for"
+      "good. The entry is thirteen bytes and then the scriptPubKey, which has"
+      "no such bound -- so it takes a wide prefix (#218). Behind one byte, a"
+      "257-byte script made a 270-byte entry whose length would not fit, and"
+      "the Set stopped at Height 243016 and blamed a Peer for it."
+    key = Domain.ByteField.prefixed(Bytes.octets(unspentKey(unspent.txid, unspent.index)?))?
+    entry = Domain.ByteField.prefixedWide(Bytes.octets(encodeCoin(unspent)?))
     Result.Ok(List.concat(key, entry))
 
 verify oneUndo
-    List.len(oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => 22
+    List.len(oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => 25
+    List.len(oneUndo(longScriptCoin())?) => 281
 
 fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
     ? "Read a Block's Undo Data back."
@@ -131,6 +155,8 @@ fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
 
 verify decodeUndo
     decodeUndo(Domain.Index.emptyBytes()) => Result.Ok([])
+    decodeUndo(encodeUndo([longScriptCoin()])?) => Result.Ok([longScriptCoin()])
+    decodeUndo(encodeUndo([longScriptCoin(), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])?) => Result.Ok([longScriptCoin(), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
     decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
     decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
 
@@ -145,14 +171,17 @@ verify eachUndo
 
 fn undoThen(octets: List<Int>, acc: List<Unspent>) -> Result<List<Unspent>, String>
     ? "The key, then the entry, then whatever follows them."
+      "The key behind one length byte and the entry behind four, which is what"
+      "oneUndo writes and why (#218)."
     key = Domain.ByteField.prefixedIn(octets)
     rest = Domain.ByteField.afterPrefixed(octets)
-    entry = Domain.ByteField.prefixedIn(rest)
+    entry = Domain.ByteField.prefixedWideIn(rest)
     one = fromUndo(key, entry)?
-    eachUndo(Domain.ByteField.afterPrefixed(rest), List.prepend(one, acc))
+    eachUndo(Domain.ByteField.afterPrefixedWide(rest), List.prepend(one, acc))
 
 verify undoThen
     undoThen(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?), []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
+    undoThen(Bytes.octets(encodeUndo([longScriptCoin()])?), []) => Result.Ok([longScriptCoin()])
 
 fn fromUndo(key: List<Int>, entry: List<Int>) -> Result<Unspent, String>
     ? "One Output, from the key that named it and the entry the Set held."

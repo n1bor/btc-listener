@@ -16,12 +16,13 @@ module Metrics
         "it sent exists only while it is happening."
         "Append rather than write, one line at a time, so a run stopped with"
         "Ctrl-C leaves a log whole to its last complete record."
-    exposes [Log, none, toFile, opened, marked, windowMs]
-    depends [Domain.Text]
+    exposes [Log, none, toFile, opened, marked, windowMs, noting, notedIn]
+    depends [Domain.Text, Infra.Debug]
     effects [Disk.appendText, Time.unixMs]
 
 record Log
     path: Option<String>
+    note: Note
     openedMs: Int
     lastMs: Int
     lastPolledMs: Int
@@ -33,19 +34,19 @@ record Log
 fn none() -> Log
     ? "The log a run without the word keeps: a path of nothing, which every"
       "write checks before it does anything."
-    Log(path = Option.None, openedMs = 0, lastMs = 0, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0, lastAdded = 0, lastRemoved = 0)
+    Log(path = Option.None, note = Infra.Debug.none(), openedMs = 0, lastMs = 0, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0, lastAdded = 0, lastRemoved = 0)
 
 verify none
     none().path => Option.None
     none().openedMs => 0
 
-fn toFile(path: String, nowMs: Int) -> Log
+fn toFile(path: String, note: Note, nowMs: Int) -> Log
     ? "A log that will be written to this file."
-    Log(path = Option.Some(path), openedMs = nowMs, lastMs = nowMs, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0, lastAdded = 0, lastRemoved = 0)
+    Log(path = Option.Some(path), note = note, openedMs = nowMs, lastMs = nowMs, lastPolledMs = 0, lastBlocks = 0, lastBytes = 0, lastAdded = 0, lastRemoved = 0)
 
 verify toFile
-    toFile("m.log", 5).path => Option.Some("m.log")
-    toFile("m.log", 5).openedMs => 5
+    toFile("m.log", Infra.Debug.none(), 5).path => Option.Some("m.log")
+    toFile("m.log", Infra.Debug.none(), 5).openedMs => 5
 
 fn windowMs() -> Int
     ? "How often a record is due while a phase runs. One a minute, which is"
@@ -69,7 +70,7 @@ fn openedOn(log: Log, path: String, network: String, from: Int, to: Int) -> Resu
     nowMs = Time.unixMs()
     _written = Disk.appendText(path, "# btc-listener metrics {network} from {from} to {to} started {nowMs}\n")?
     _fields = Disk.appendText(path, "# atMs phase height target blocks bytes polledMs workedMs peers candidates added removed\n")?
-    Result.Ok(Log(path = log.path, openedMs = nowMs, lastMs = nowMs, lastPolledMs = log.lastPolledMs, lastBlocks = log.lastBlocks, lastBytes = log.lastBytes, lastAdded = log.lastAdded, lastRemoved = log.lastRemoved))
+    Result.Ok(Log(path = log.path, note = log.note, openedMs = nowMs, lastMs = nowMs, lastPolledMs = log.lastPolledMs, lastBlocks = log.lastBlocks, lastBytes = log.lastBytes, lastAdded = log.lastAdded, lastRemoved = log.lastRemoved))
 
 fn marked(log: Log, phase: String, height: Int, target: Int, blocks: Int, bytes: Int, polledMs: Int, peers: Int, candidates: Int, added: Int, removed: Int, forced: Bool) -> Result<Log, String>
     ? "One record, if a record is due or the caller says it must be."
@@ -92,7 +93,7 @@ fn written(log: Log, path: String, phase: String, height: Int, target: Int, bloc
       "total, because a window is what a rate is computed from."
     ! [Disk.appendText]
     _written = Disk.appendText(path, lineOf(phase, height, target, sinceLast(log.lastBlocks, blocks), sinceLast(log.lastBytes, bytes), sinceLast(log.lastPolledMs, polledMs), nowMs - log.lastMs, peers, candidates, sinceLast(log.lastAdded, added), sinceLast(log.lastRemoved, removed), nowMs))?
-    Result.Ok(Log(path = log.path, openedMs = log.openedMs, lastMs = nowMs, lastPolledMs = polledMs, lastBlocks = blocks, lastBytes = bytes, lastAdded = added, lastRemoved = removed))
+    Result.Ok(Log(path = log.path, note = log.note, openedMs = log.openedMs, lastMs = nowMs, lastPolledMs = polledMs, lastBlocks = blocks, lastBytes = bytes, lastAdded = added, lastRemoved = removed))
 
 fn sinceLast(last: Int, now: Int) -> Int
     ? "How much this window added to a counter."
@@ -136,3 +137,16 @@ verify atLeastZero
     atLeastZero(5) => 5
     atLeastZero(0) => 0
     atLeastZero(0 - 3) => 0
+
+fn noting(log: Log, kind: String, text: String) -> Result<Log, String>
+    ? "One line in the run's own note (#218), carried here because the Log"
+      "already reaches every phase, every walk and the Eye, and a second"
+      "carrier threaded through all of them would say the same thing twice."
+      "Both are the run writing down what it did where the run's end cannot"
+      "take it with it."
+    ! [Disk.appendText, Time.unixMs]
+    notedIn(log, Infra.Debug.noted(log.note, kind, text)?)
+
+fn notedIn(log: Log, note: Note) -> Result<Log, String>
+    ? "The Log, with the note moved on."
+    Result.Ok(Log(path = log.path, note = note, openedMs = log.openedMs, lastMs = log.lastMs, lastPolledMs = log.lastPolledMs, lastBlocks = log.lastBlocks, lastBytes = log.lastBytes, lastAdded = log.lastAdded, lastRemoved = log.lastRemoved))

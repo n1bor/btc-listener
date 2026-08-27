@@ -1,0 +1,59 @@
+module Debug
+    intent =
+        "An append-only line for each thing a run decides, so a fault can be"
+        "read after it rather than guessed at (#218)."
+        "Written because a Screen run leaves nothing behind. Mainnet stopped"
+        "at Height 243016 with a Set record it could not encode, and the only"
+        "way to find out was to stop the node and start it again in plain"
+        "mode: the Screen owns the terminal, so the error that ended four"
+        "catch-up attempts was drawn over and lost. metrics.log had the shape"
+        "of the failure -- Peers falling, Candidates draining -- and not one"
+        "word of its cause."
+        "Not a trace. One line per decision, and a decision is something that"
+        "could have gone another way: a phase started, a chunk attempted, a"
+        "Peer seated or dropped and why, a fault and what it was charged to."
+        "A healthy node at the tip writes a handful of lines an hour; a node"
+        "in trouble writes the reason it is in trouble."
+        "Append rather than write, one line at a time, so a run stopped with"
+        "Ctrl-C leaves a log whole to its last complete line."
+    exposes [Note, none, toFile, opened, noted]
+    depends []
+    effects [Disk.appendText, Time.unixMs]
+
+record Note
+    path: Option<String>
+
+fn none() -> Note
+    ? "The note a run without the word keeps: a path of nothing, which every"
+      "write checks before it does anything."
+    Note(path = Option.None)
+
+verify none
+    none().path => Option.None
+
+fn toFile(path: String) -> Note
+    ? "A note that will be written to this file."
+    Note(path = Option.Some(path))
+
+verify toFile
+    toFile("debug.log").path => Option.Some("debug.log")
+
+fn opened(note: Note, network: String, height: Int, peers: String) -> Result<Note, String>
+    ? "The header line, so a log names the run it belongs to."
+    ! [Disk.appendText, Time.unixMs]
+    noted(note, "start", "{network} at Height {height} from {peers}")
+
+fn noted(note: Note, kind: String, text: String) -> Result<Note, String>
+    ? "One line, if this run is keeping a note at all."
+    ! [Disk.appendText, Time.unixMs]
+    match note.path
+        Option.None -> Result.Ok(note)
+        Option.Some(path) -> writtenTo(note, path, kind, text)
+
+fn writtenTo(note: Note, path: String, kind: String, text: String) -> Result<Note, String>
+    ? "The line itself: when, what kind, and the detail in the kind's own"
+      "words. Two fixed fields and then free text, so grep by kind works and"
+      "nothing has to be parsed."
+    ! [Disk.appendText, Time.unixMs]
+    _written = Disk.appendText(path, "{Time.unixMs()} {kind} {text}\n")?
+    Result.Ok(note)

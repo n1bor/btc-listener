@@ -11,7 +11,7 @@ module ByteField
         "if the bytes are most-significant-first. For a value it does not"
         "matter at all, and the same order is used anyway: two spellings of a"
         "number in one program is one more than anybody can keep straight."
-    exposes [number, numberIn, at, after, prefixed, prefixedIn, afterPrefixed]
+    exposes [number, numberIn, at, after, prefixed, prefixedIn, afterPrefixed, filled, prefixedWide, prefixedWideIn, afterPrefixedWide, widest, wideWidth]
     depends []
     effects []
 
@@ -76,19 +76,102 @@ verify after
     after([1, 2, 3], 1) => [2, 3]
     after([1, 2, 3], 9) => []
 
-fn prefixed(body: List<Int>) -> List<Int>
+fn filled(count: Int, value: Int) -> List<Int>
+    ? "A run of one byte repeated, for the cases that need a long field."
+    filling(count, value, [])
+
+verify filled
+    filled(0, 7) => []
+    filled(3, 7) => [7, 7, 7]
+    List.len(filled(270, 4)) => 270
+
+fn filling(count: Int, value: Int, acc: List<Int>) -> List<Int>
+    ? "One at a time until the run is as long as it was asked for."
+    match count <= 0
+        true -> acc
+        false -> filling(count - 1, value, List.prepend(value, acc))
+
+verify filling
+    filling(2, 5, []) => [5, 5]
+    filling(0, 5, [9]) => [9]
+
+fn prefixed(body: List<Int>) -> Result<List<Int>, String>
     ? "A field whose length is not known in advance, behind one byte saying it."
       "One byte, so at most 255. Used for a quantity of Chain Work, which is"
       "an arbitrary-precision Int in this program and so has no width a record"
       "could fix: a 256-bit target gives 32 bytes today and the type promises"
       "nothing. A ceiling written into the format would be a ceiling the"
       "arithmetic does not have."
-    List.prepend(List.len(body), body)
+      "It refuses a body it cannot describe rather than lying about it (#218)."
+      "This used to prepend the length whatever the length was, so a body of"
+      "270 bytes produced a first element of 270 -- a List<Int> that is not a"
+      "list of bytes. Nothing looked until Bytes.fromList refused it a layer"
+      "up, naming an offset but not the field, the record or the caller. That"
+      "cost mainnet its Set at Height 243016 and, because the failure reached"
+      "the follow loop, one Peer and then every Candidate in the Book."
+      "A caller whose body is bounded above 255 wants prefixedWide."
+    match List.len(body) > widest()
+        true -> Result.Err("a length-prefixed field holds at most {widest()} bytes, got {List.len(body)}")
+        false -> Result.Ok(List.prepend(List.len(body), body))
 
 verify prefixed
-    prefixed([]) => [0]
-    prefixed([7]) => [1, 7]
-    prefixed([1, 2, 3]) => [3, 1, 2, 3]
+    prefixed([]) => Result.Ok([0])
+    prefixed([7]) => Result.Ok([1, 7])
+    prefixed([1, 2, 3]) => Result.Ok([3, 1, 2, 3])
+    prefixed(filled(255, 0)) => Result.Ok(List.prepend(255, filled(255, 0)))
+    prefixed(filled(256, 0)) => Result.Err("a length-prefixed field holds at most 255 bytes, got 256")
+
+fn widest() -> Int
+    ? "The longest body one length byte can describe."
+    255
+
+verify widest
+    widest() => 255
+
+fn wideWidth() -> Int
+    ? "How many bytes a wide length prefix takes: four, which describes any"
+      "field a Block can contain and several orders more."
+    4
+
+verify wideWidth
+    wideWidth() => 4
+
+fn prefixedWide(body: List<Int>) -> List<Int>
+    ? "The same, for a field with no small bound on its length (#218)."
+      "A spent Output's Set entry is thirteen bytes and then its scriptPubKey,"
+      "and a scriptPubKey has no consensus ceiling worth calling small: the"
+      "2013 chain is full of bare multisig data carriers, and one of 257 bytes"
+      "at Height 243016 is what stopped the Set. Four bytes rather than two"
+      "because a ceiling that a Block could reach is the bug again with a"
+      "bigger number in it."
+    List.concat(number(List.len(body), wideWidth()), body)
+
+verify prefixedWide
+    prefixedWide([]) => [0, 0, 0, 0]
+    prefixedWide([7]) => [0, 0, 0, 1, 7]
+    prefixedWide([1, 2, 3]) => [0, 0, 0, 3, 1, 2, 3]
+    List.len(prefixedWide(filled(270, 0))) => 274
+
+fn prefixedWideIn(bytes: List<Int>) -> List<Int>
+    ? "The field a wide length prefix introduces."
+    List.take(after(bytes, wideWidth()), numberIn(at(bytes, 0, wideWidth())))
+
+verify prefixedWideIn
+    prefixedWideIn([]) => []
+    prefixedWideIn(prefixedWide([1, 2, 3])) => [1, 2, 3]
+    prefixedWideIn(prefixedWide([])) => []
+    prefixedWideIn(List.concat(prefixedWide([9]), [8, 8])) => [9]
+    prefixedWideIn(prefixedWide(filled(270, 4))) => filled(270, 4)
+
+fn afterPrefixedWide(bytes: List<Int>) -> List<Int>
+    ? "Everything past a wide length-prefixed field."
+    List.drop(after(bytes, wideWidth()), numberIn(at(bytes, 0, wideWidth())))
+
+verify afterPrefixedWide
+    afterPrefixedWide([]) => []
+    afterPrefixedWide(prefixedWide([1, 2, 3])) => []
+    afterPrefixedWide(List.concat(prefixedWide([9]), [8, 8])) => [8, 8]
+    afterPrefixedWide(List.concat(prefixedWide(filled(270, 4)), [5])) => [5]
 
 fn prefixedIn(bytes: List<Int>) -> List<Int>
     ? "The field a length byte introduces."
@@ -98,9 +181,9 @@ fn prefixedIn(bytes: List<Int>) -> List<Int>
 
 verify prefixedIn
     prefixedIn([]) => []
-    prefixedIn(prefixed([1, 2, 3])) => [1, 2, 3]
-    prefixedIn(prefixed([])) => []
-    prefixedIn(List.concat(prefixed([9]), [8, 8])) => [9]
+    prefixedIn(Result.withDefault(prefixed([1, 2, 3]), [])) => [1, 2, 3]
+    prefixedIn(Result.withDefault(prefixed([]), [])) => []
+    prefixedIn(List.concat(Result.withDefault(prefixed([9]), []), [8, 8])) => [9]
 
 fn afterPrefixed(bytes: List<Int>) -> List<Int>
     ? "Everything past a length-prefixed field."
@@ -110,5 +193,5 @@ fn afterPrefixed(bytes: List<Int>) -> List<Int>
 
 verify afterPrefixed
     afterPrefixed([]) => []
-    afterPrefixed(prefixed([1, 2, 3])) => []
-    afterPrefixed(List.concat(prefixed([9]), [8, 8])) => [8, 8]
+    afterPrefixed(Result.withDefault(prefixed([1, 2, 3]), [])) => []
+    afterPrefixed(List.concat(Result.withDefault(prefixed([9]), []), [8, 8])) => [8, 8]
