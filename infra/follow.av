@@ -23,7 +23,7 @@ module Follow
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Block, Domain.Address, Domain.AddressBook, Domain.Transaction, Domain.Hash, Domain.HeaderTree, Domain.CompactBlock, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.IndexKeys]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -152,7 +152,7 @@ fn withWatch(state: Following, watch: Watching) -> Following
     ? "The state, with what the loop knows about its watching moved on."
     Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log)
 
-fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool, answering: Option<Int>, logging: Option<String>) -> Result<Unit, String>
+fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: BlockStore, screened: Bool, answering: Option<Int>, logging: Option<String>, noting: Option<String>) -> Result<Unit, String>
     ? "Connect to every Peer given, catch up, then stay caught up."
       "With screened true the listen loop runs as the Screen (#130): raw"
       "mode is entered once the catch-up is done, and however the session"
@@ -174,7 +174,9 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    metricsLog = Infra.Metrics.opened(logOf(logging, Time.unixMs()), Domain.Network.nameOf(network), 0, 0)?
+    opening = logOf(logging, noting, Time.unixMs())
+    noteOpened = Infra.Metrics.noting(opening, "start", "{Domain.Network.nameOf(network)} pid-run, {List.len(addresses)} seed address(es), screen {screened}")?
+    metricsLog = Infra.Metrics.opened(noteOpened, Domain.Network.nameOf(network), 0, 0)?
     book = bootstrapped(network, addresses)?
     ready = listeningIf(Infra.Peers.opened(network), store, answering)?
     pool = joining(ready, addresses, 0)?
@@ -294,16 +296,27 @@ fn withLog(state: Following, log: Log) -> Following
     ? "The state, with the metrics log moved on."
     Following(pool = state.pool, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = log)
 
-fn logOf(logging: Option<String>, nowMs: Int) -> Log
+fn logOf(logging: Option<String>, noting: Option<String>, nowMs: Int) -> Log
     ? "The metrics log this run keeps, which is none unless a path was asked"
-      "for (#180)."
+      "for (#180), carrying the debug note beside it (#218)."
     match logging
         Option.None -> Infra.Metrics.none()
-        Option.Some(path) -> Infra.Metrics.toFile(path, nowMs)
+        Option.Some(path) -> Infra.Metrics.toFile(path, noteOf(noting), nowMs)
 
 verify logOf
-    logOf(Option.None, 5).path => Option.None
-    logOf(Option.Some("m.log"), 5).path => Option.Some("m.log")
+    logOf(Option.None, Option.None, 5).path => Option.None
+    logOf(Option.Some("m.log"), Option.None, 5).path => Option.Some("m.log")
+    logOf(Option.Some("m.log"), Option.Some("d.log"), 5).note.path => Option.Some("d.log")
+
+fn noteOf(noting: Option<String>) -> Infra.Debug.Note
+    ? "The debug note this run keeps, on the same terms as the metrics log."
+    match noting
+        Option.None -> Infra.Debug.none()
+        Option.Some(path) -> Infra.Debug.toFile(path)
+
+verify noteOf
+    noteOf(Option.None).path => Option.None
+    noteOf(Option.Some("d.log")).path => Option.Some("d.log")
 
 fn restoredIf(screened: Bool) -> Unit
     ? "Give the terminal back if the Screen ever had it; restoring a"
@@ -699,6 +712,7 @@ fn onwardWith(state: Following, why: String) -> Result<Following, String>
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
+    _note = Infra.Metrics.noting(state.log, "fault", "catch-up ended: {why}; charging it to a Peer and retrying with {List.len(Infra.Peers.peerKeys(state.pool))} left (#183)")?
     match Infra.Peers.peerKeys(state.pool)
         [] -> nobodyLeft(state, why)
         [head, ..tail] -> caughtUp(state, head)
@@ -713,7 +727,8 @@ fn nobodyLeft(state: Following, why: String) -> Result<Following, String>
       "first Peer seated after none is asked to bring the chain up to date"
       "(firstAfterNone). Only nobody to dial ends the run, and the message"
       "says so rather than blaming the Peers alone."
-    ! [Console.error]
+    ! [Console.error, Disk.appendText, Time.unixMs]
+    _note = Infra.Metrics.noting(state.log, "pool", "empty; {Domain.AddressBook.sizeOf(state.book)} Candidate(s) held, dialling {leftToDial(state.book, Infra.Peers.dialingNow(state.pool))}; last said: {why}")?
     match leftToDial(state.book, Infra.Peers.dialingNow(state.pool))
         false -> Result.Err("no Peer could bring the chain up to date and the Address Book has nobody left to dial; the last said: {why}")
         true -> Result.Ok(saidBetweenPeers(state, why))
@@ -916,6 +931,7 @@ fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Bui
         Time.now, Time.unixMs,
     ]
     chunkTo = Int.min(tipHeight, standing + chunkOf())
+    _note = Infra.Metrics.noting(state.log, "set", "connecting {standing + 1}..{chunkTo} of {tipHeight}, {List.len(Infra.Peers.peerKeys(state.pool))} Peer(s)")?
     next = Infra.ChainState.build(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, eyeIn(sofar, eyeOf(state)))?
     merged = mergedBuilt(sofar, next)
     match Bool.or(next.reached < chunkTo, chunkTo >= tipHeight)
