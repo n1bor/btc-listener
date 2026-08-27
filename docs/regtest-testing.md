@@ -1034,16 +1034,15 @@ ss -tn | grep -c 'SYN-SENT.*:18444'                    # sample this during the 
 Measured across a 150-second run with a dial to a dead Candidate in flight on
 every one of thirty samples:
 
-| | before #201 | after |
-|---|---|---|
-| frames drawn | **3** | **31** |
-| `listen` records | **0** | **2** |
-| `q` answered | no — killed by `timeout` at 90s | yes, exits at 47s |
+| | before #201 | after #201 | after #202 |
+|---|---|---|---|
+| frames drawn in 150s | **3** | **31** | **143** |
+| `listen` records | **0** | **2** | **2** |
+| `q` answered | no — ran to the timeout | yes, within 10s | yes, within 5s |
 
-Thirty-one and not a hundred and fifty because `minding` is looked at once per
-**turn**, and while the Book has dead Candidates in it a turn is five seconds
-long. That is #202 and not this; the fix here is that the Screen gets every
-turn rather than none of them.
+Thirty-one and not a hundred and fifty after #201 because `minding` is looked
+at once per **turn**, and while the Book had dead Candidates in it a turn was
+five seconds long. That was #202, and the third column is it fixed.
 
 **Read the `polledMs` column while you are here.** The dial's poll is counted
 now (`Infra.Peers.settlingOn`), and it is the one poll in the module that used
@@ -1053,16 +1052,29 @@ and `polledMs 60000 workedMs 7` after. The second is the truth — the node was
 asleep on a socket for the whole minute — and it is what makes a starved loop
 legible from `metrics.log` without going near `/proc`.
 
-**Check `q` under the dial, not just under an idle node.** Feed the pty:
+**Check `q` with the traffic running**, and mind two traps that between them
+will tell you the opposite of the truth.
 
 ```bash
-( sleep 25; printf 'q'; sleep 2; printf 'y'; sleep 70 ) \
-  | script -qf -c "timeout 90 $BIN regtest follow 127.0.0.1:18444 $D screen" q.txt
+( sleep 20; printf 'q'; sleep 3; printf 'y'; sleep 600 ) \
+  | script -qf -c "timeout 120 $BIN regtest follow 127.0.0.1:18444 $D screen" q.txt &
 ```
 
-It must exit **before** the timeout. Before #201 it ran the full ninety
-seconds and the capture ends with the SIGTERM path, which prints the same
-`stopped following` line — so read the elapsed time, not the last line.
+- **Hold stdin open far longer than the run.** When the feeding subshell ends
+  the pipe closes, `script` goes, and the node goes with it — which looks
+  exactly like a `q` that worked, at exactly the moment the sleeps add up to.
+  A first pass at this section read a quit at 47 seconds that was `25 + 2 +
+  20`. Give the last sleep ten minutes and let the `timeout` be the only other
+  way out.
+- **Send the Transactions.** With nothing arriving the pool goes quiet every
+  tick and `q` is answered on every build including the broken one — 30
+  seconds for a node before #201 as readily as after it. The starvation is the
+  point, so it has to be present for the test to mean anything.
+
+With both: before #201 the node runs to the `timeout` and never answers; after
+it, it stops about ten seconds after the key; after #202, about five. Read the
+elapsed time, not the last line — the SIGTERM path prints the same
+`stopped following`.
 
 **And check the plain run in the same pass**, for the reason 16b gives. It
 still says `candidate ... did not answer` once per dial. Do not expect a
@@ -1074,6 +1086,79 @@ Screen: over the same 150 seconds and the same Transactions sent, a node with
 **8** Candidates admitted **46** of them and a node with **208** admitted
 **none**. A loop that spends five of every six seconds dialling is not a loop
 that is doing its job. That is the whole of #202 in one line.
+
+### 16d. A dial the loop does not stand in
+
+Same setup as 16c — Core restarted, its addrman seeded with `240.0.0.0/4`, our
+Book filled with ~208 addresses that will never answer. 16c measured what the
+Screen did while that was going on. This measures what the **node** did, which
+is the part that matters.
+
+Before #202, `toppedUp` called `Infra.Peers.joined`, which starts a dial and
+then stands in a poll until it settles: five seconds for an address out of an
+Address Book, against a tick of one. Every Peer was read throughout — that is
+what the non-blocking dial bought — but nothing they said was acted on, so the
+loop got through one Message every five seconds.
+
+The test is throughput, not appearance. Mine a Block first, so the sends spend
+confirmed Outputs rather than chaining onto Core's own unconfirmed Mempool:
+
+```bash
+$C generatetoaddress 1 "$($C getnewaddress)" >/dev/null
+for i in $(seq 1 23); do $C sendtoaddress "$($C getnewaddress)" 0.01 >/dev/null; sleep 3; done &
+timeout 70 $BIN regtest follow 127.0.0.1:18444 $D > plain.log 2>&1
+grep -c 'mempool admitted' plain.log       # how many of the 23 it got to
+grep -c 'did not answer' plain.log         # how many Candidates it tried
+```
+
+**Mine the Block.** Skip it and the node correctly refuses every Transaction
+with `it spends an Output we cannot account for` — Core's Mempool chains each
+new send onto the change of the last one, and our Set holds only what is
+confirmed. That reads as a node that is broken and is a node that is right.
+
+Twenty-three Transactions sent over seventy seconds, two independent pairs:
+
+| | before #202 | after |
+|---|---|---|
+| Transactions judged | **5**, then **8** | **21**, then **22** |
+| Candidates dialled | 14, then 14 | 12, then 13 |
+
+The second row is the one that makes the first mean something: the dial rate
+did not change. The node is not getting through more Transactions because it
+gave up on filling its pool — it is dialling just as often and no longer
+waiting for it.
+
+Two more things the same change should have moved, both visible in
+`metrics.log`:
+
+```
+1787783000613 headers 201      0   0     0    37   30 1   0 0 0
+1787783005614 bodies    1    200   0     0  5000    1 1 208 0 0      <- before
+1787783005648 bodies  200    200 200 49857     1   33 1 208 0 0
+1787783011623 set     200    200   0     0  4999  976 1 208 0 0
+```
+
+```
+1787787728138 headers 205      0   0      0    41   35 1   0 0 0
+1787787728140 bodies    1    204   0      0     0    2 1 208 0 0     <- after
+1787787728169 bodies  204    204 204 184639     0   29 1 208 0 0
+1787787729340 set     204    204   0      0     0 1171 1 208 0 0
+```
+
+The catch-up tops the pool up between phases, and those two calls were five
+seconds each — the `5000` and `4999` in the first block, present in every
+metrics log this project has recorded and easy to read as the phase's own
+cost. They are 0 and 0 after. A whole catch-up at the tip went from about
+eleven seconds to about one and a half.
+
+**What regtest still cannot show.** Every Candidate in the Book is a blackhole
+by construction, so the path where a parked dial *succeeds* —
+`Infra.Peers.advanced` getting `Ok(Some(connection))` back and greeting the
+Peer — is never taken here. It shares `seatedOut` with the startup walk, which
+section 13 does exercise, but the fold back into the pool is its own code.
+Core will not gossip a loopback or an RFC1918 address, so there is no way to
+put a reachable Candidate in the Book on regtest without root. It needs a
+Network with seeds; section 15 says the same thing about its own happy path.
 
 ### 17. The metrics log
 
