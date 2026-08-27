@@ -85,7 +85,8 @@ and `compile`.
   and having a parameter called `payload`, is `E0659` on a pin that carries
   #1043 and #1152 — those fixed match binders and `let` bindings, and a
   parameter is neither. `aver check`, `verify` and `compile` are all quiet.
-  The workaround is a rename: the encoder is `Domain.Addr.offering`.
+  Filed as jasisz/aver#1162, still live on `6afb0ff3`. The workaround is a
+  rename: the encoder is `Domain.Addr.offering`.
 
 ## Commands
 

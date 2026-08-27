@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised]
     depends [Bytes, Domain.Addr, Domain.Address, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -61,6 +61,11 @@ record Outcome
     address: String
     seated: Bool
     why: String
+
+record Advertised
+    pool: Pool
+    address: Option<String>
+    peers: Int
 
 record Waited
     pool: Pool
@@ -240,34 +245,40 @@ fn twiceSeen() -> Pool
 verify twiceSeen
     selfAddress(twiceSeen()) => Option.Some("1.2.3.4:8333")
 
-fn told(pool: Pool, nowMs: Int) -> Result<Pool, String>
+fn told(pool: Pool, nowMs: Int) -> Result<Advertised, String>
     ? "Tell every Peer where this node is, if that has come due (#210)."
       "One addr carrying one address, which is what a node self-advertising"
       "sends: a Peer that wants more asks with getaddr."
+      "What was sent comes back rather than being printed, for the reason"
+      "drawnElsewhere gives: this module does not know whether anybody may"
+      "be spoken to. Nothing came back at all until #214 -- so from outside,"
+      "a node that never reached agreement and a node that advertised and"
+      "has not been dialled yet looked exactly alike, and they need"
+      "different fixes."
     ! [Tcp.writeBytes]
     match tellingDue(pool, nowMs)
-        false -> Result.Ok(pool)
+        false -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
         true -> telling(pool, nowMs, selfAddress(pool))
 
-fn telling(pool: Pool, nowMs: Int, address: Option<String>) -> Result<Pool, String>
+fn telling(pool: Pool, nowMs: Int, address: Option<String>) -> Result<Advertised, String>
     ? "The address agreed, turned back into one and sent to everybody."
     ! [Tcp.writeBytes]
     match address
-        Option.None -> Result.Ok(pool)
-        Option.Some(one) -> sending(pool, nowMs, Domain.Address.fromPeerText(one, pool.port))
+        Option.None -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
+        Option.Some(one) -> sending(pool, nowMs, one, Domain.Address.fromPeerText(one, pool.port))
 
-fn sending(pool: Pool, nowMs: Int, parsed: Result<PeerAddress, String>) -> Result<Pool, String>
+fn sending(pool: Pool, nowMs: Int, text: String, parsed: Result<PeerAddress, String>) -> Result<Advertised, String>
     ? "An address of our own that will not parse is not one to send."
     ! [Tcp.writeBytes]
     match parsed
-        Result.Err(why) -> Result.Ok(pool)
-        Result.Ok(address) -> announcing(pool, nowMs, Domain.Addr.offering([address], Int.div(nowMs, 1000), servicesOf(pool))?)
+        Result.Err(why) -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
+        Result.Ok(address) -> announcing(pool, nowMs, text, Domain.Addr.offering([address], Int.div(nowMs, 1000), servicesOf(pool))?)
 
-fn announcing(pool: Pool, nowMs: Int, body: Bytes) -> Result<Pool, String>
+fn announcing(pool: Pool, nowMs: Int, text: String, body: Bytes) -> Result<Advertised, String>
     ? "The same Message to every Peer, and the clock moved on whether or not"
       "each of them took it."
     ! [Tcp.writeBytes]
-    Result.Ok(toldAt(sendingEach(pool, peerKeys(pool), body)?, nowMs))
+    Result.Ok(Advertised(pool = toldAt(sendingEach(pool, peerKeys(pool), body)?, nowMs), address = Option.Some(text), peers = List.len(peerKeys(pool))))
 
 fn sendingEach(pool: Pool, keys: List<Int>, body: Bytes) -> Result<Pool, String>
     ? "One Peer at a time."
