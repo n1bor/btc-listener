@@ -17,15 +17,15 @@ module UtxoStore
         "The value format is Domain.Index's, unchanged. An Output is an amount"
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
-    exposes [Unspent, Reached, unspentKey, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
+    exposes [Unspent, Reached, unspentKey, keyAt, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
     depends [Bytes, Domain.ByteField, Domain.Index, Domain.IndexKeys]
     effects []
 
 record Unspent
-    txid: String
+    txid: Bytes
     index: Int
     value: Int
-    script: String
+    script: Bytes
     height: Int
     coinbase: Bool
 
@@ -46,11 +46,11 @@ fn encodeCoin(unspent: Unspent) -> Result<Bytes, String>
       "The Transaction Id and the position are the key and are not repeated."
       "The Script goes last because it is the one field whose length the"
       "record does not say."
-    Bytes.fromList(List.concat(Domain.ByteField.number(unspent.value, Domain.Index.amountWidth()), List.concat(Domain.ByteField.number(unspent.height, Domain.Index.heightWidth()), List.concat([flagByte(unspent.coinbase)], Bytes.octets(Bytes.fromHex(unspent.script)?)))))
+    Result.Ok(Bytes.concat(Bytes.fromList(List.concat(Domain.ByteField.number(unspent.value, Domain.Index.amountWidth()), List.concat(Domain.ByteField.number(unspent.height, Domain.Index.heightWidth()), [flagByte(unspent.coinbase)])))?, unspent.script))
 
 verify encodeCoin
-    Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))
-    Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(0, 4), [1]))
+    Bytes.octets(encodeCoin(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))
+    Bytes.octets(encodeCoin(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 0, coinbase = true))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(0, 4), [1]))
 
 fn flagByte(coinbase: Bool) -> Int
     ? "The coinbase flag, as one byte."
@@ -69,31 +69,25 @@ fn coinWidth() -> Int
 verify coinWidth
     coinWidth() => 13
 
-fn decodeCoin(txid: String, index: Int, stored: Bytes) -> Result<Unspent, String>
-    ? "Read one back, given the key that named it."
-    coinIn(txid, index, Bytes.octets(stored))
+fn decodeCoin(txid: Bytes, index: Int, stored: Bytes) -> Result<Unspent, String>
+    ? "An Output back from what the Set holds, under the key that named it."
+      "The Script stays the bytes it was stored as (#234): it used to be"
+      "rendered to hexadecimal here and parsed back at every use."
+    match Bytes.len(stored) < coinWidth()
+        true -> Result.Err("a Set entry is at least {coinWidth()} bytes, got {Bytes.len(stored)}")
+        false -> coinFrom(txid, index, stored)
 
 verify decodeCoin
-    decodeCoin("aa", 0, encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
-    decodeCoin("aa", 0, encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))?) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true))
-    decodeCoin("aa", 0, Domain.Index.emptyBytes()) => Result.Err("a Set entry is at least 13 bytes, got 0")
+    decodeCoin(Bytes.fromList([170]), 0, encodeCoin(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => Result.Ok(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))
+    decodeCoin(Bytes.fromList([170]), 0, Domain.Index.emptyBytes()) => Result.Err("a Set entry is at least 13 bytes, got 0")
 
-fn coinIn(txid: String, index: Int, octets: List<Int>) -> Result<Unspent, String>
-    ? "A record shorter than its fixed part is corruption."
-    match List.len(octets) < coinWidth()
-        true -> Result.Err("a Set entry is at least {coinWidth()} bytes, got {List.len(octets)}")
-        false -> coinFrom(txid, index, octets)
-
-verify coinIn
-    coinIn("aa", 0, []) => Result.Err("a Set entry is at least 13 bytes, got 0")
-
-fn coinFrom(txid: String, index: Int, octets: List<Int>) -> Result<Unspent, String>
+fn coinFrom(txid: Bytes, index: Int, stored: Bytes) -> Result<Unspent, String>
     ? "The four fields, once the record is long enough to hold them."
-    script = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, coinWidth()))?)
-    Result.Ok(Unspent(txid = txid, index = index, value = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.amountWidth())), script = script, height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, Domain.Index.amountWidth(), Domain.Index.heightWidth())), coinbase = Domain.ByteField.numberIn(Domain.ByteField.at(octets, coinWidth() - 1, 1)) == coinbaseFlag()))
+    fixed = Bytes.octets(Bytes.take(stored, coinWidth()))
+    Result.Ok(Unspent(txid = txid, index = index, value = Domain.ByteField.numberIn(Domain.ByteField.at(fixed, 0, Domain.Index.amountWidth())), script = Bytes.drop(stored, coinWidth()), height = Domain.ByteField.numberIn(Domain.ByteField.at(fixed, Domain.Index.amountWidth(), Domain.Index.heightWidth())), coinbase = Domain.ByteField.numberIn(Domain.ByteField.at(fixed, coinWidth() - 1, 1)) == coinbaseFlag()))
 
 verify coinFrom
-    coinFrom("aa", 0, List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
+    coinFrom(Bytes.fromList([170]), 0, Bytes.fromList(List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118])))?) => Result.Ok(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))
 
 fn encodeUndo(removed: List<Unspent>) -> Result<Bytes, String>
     ? "Everything a Block took out of the Set, as one record."
@@ -105,24 +99,25 @@ fn encodeUndo(removed: List<Unspent>) -> Result<Bytes, String>
 
 verify encodeUndo
     Bytes.octets(encodeUndo([])?) => []
-    List.len(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?)) => 25
+    List.len(Bytes.octets(encodeUndo([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false)])?)) => 25
     List.len(Bytes.octets(encodeUndo([longScriptCoin()])?)) => 281
 
 fn longScriptCoin() -> Unspent
     ? "An Output whose scriptPubKey is 257 bytes, which is the case that broke"
       "the Set at Height 243016 (#218): thirteen bytes of entry and then the"
       "script is 270, and 270 does not fit in the byte that used to say so."
-    Unspent(txid = "aa", index = 0, value = 5, script = longScriptHex(), height = 7, coinbase = false)
+    Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = longScript(), height = 7, coinbase = false)
 
 verify longScriptCoin
-    List.len(Bytes.octets(Bytes.fromHex(longScriptCoin().script)?)) => 257
+    Bytes.len(longScriptCoin().script) => 257
 
-fn longScriptHex() -> String
-    ? "257 bytes of script as hexadecimal."
-    Bytes.toHex(Result.withDefault(Bytes.fromList(Domain.ByteField.filled(257, 171)), Domain.Index.emptyBytes()))
+fn longScript() -> Bytes
+    ? "257 bytes of script."
+      "Total: every byte is 171, so the list is octets by construction."
+    Result.withDefault(Bytes.fromList(Domain.ByteField.filled(257, 171)), Domain.Index.emptyBytes())
 
-verify longScriptHex
-    List.len(Bytes.octets(Bytes.fromHex(longScriptHex())?)) => 257
+verify longScript
+    Bytes.len(longScript()) => 257
 
 fn undoInto(removed: List<Unspent>, acc: List<Int>) -> Result<List<Int>, String>
     ? "One Output at a time, in the order they were taken."
@@ -141,12 +136,12 @@ fn oneUndo(unspent: Unspent) -> Result<List<Int>, String>
       "no such bound -- so it takes a wide prefix (#218). Behind one byte, a"
       "257-byte script made a 270-byte entry whose length would not fit, and"
       "the Set stopped at Height 243016 and blamed a Peer for it."
-    key = Domain.ByteField.prefixed(Bytes.octets(unspentKey(unspent.txid, unspent.index)?))?
+    key = Domain.ByteField.prefixed(Bytes.octets(keyAt(unspent.txid, unspent.index)))?
     entry = Domain.ByteField.prefixedWide(Bytes.octets(encodeCoin(unspent)?))
     Result.Ok(List.concat(key, entry))
 
 verify oneUndo
-    List.len(oneUndo(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?) => 25
+    List.len(oneUndo(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => 25
     List.len(oneUndo(longScriptCoin())?) => 281
 
 fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
@@ -156,9 +151,9 @@ fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
 verify decodeUndo
     decodeUndo(Domain.Index.emptyBytes()) => Result.Ok([])
     decodeUndo(encodeUndo([longScriptCoin()])?) => Result.Ok([longScriptCoin()])
-    decodeUndo(encodeUndo([longScriptCoin(), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])?) => Result.Ok([longScriptCoin(), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
-    decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
-    decodeUndo(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])?) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false), Unspent(txid = "bb", index = 2, value = 7, script = "", height = 1, coinbase = true)])
+    decodeUndo(encodeUndo([longScriptCoin(), Unspent(txid = Bytes.fromList([187]), index = 2, value = 7, script = Bytes.empty(), height = 1, coinbase = true)])?) => Result.Ok([longScriptCoin(), Unspent(txid = Bytes.fromList([187]), index = 2, value = 7, script = Bytes.empty(), height = 1, coinbase = true)])
+    decodeUndo(encodeUndo([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false)])?) => Result.Ok([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false)])
+    decodeUndo(encodeUndo([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false), Unspent(txid = Bytes.fromList([187]), index = 2, value = 7, script = Bytes.empty(), height = 1, coinbase = true)])?) => Result.Ok([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false), Unspent(txid = Bytes.fromList([187]), index = 2, value = 7, script = Bytes.empty(), height = 1, coinbase = true)])
 
 fn eachUndo(octets: List<Int>, acc: List<Unspent>) -> Result<List<Unspent>, String>
     ? "One length-prefixed pair at a time, until the record runs out."
@@ -180,7 +175,7 @@ fn undoThen(octets: List<Int>, acc: List<Unspent>) -> Result<List<Unspent>, Stri
     eachUndo(Domain.ByteField.afterPrefixedWide(rest), List.prepend(one, acc))
 
 verify undoThen
-    undoThen(Bytes.octets(encodeUndo([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])?), []) => Result.Ok([Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false)])
+    undoThen(Bytes.octets(encodeUndo([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false)])?), []) => Result.Ok([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false)])
     undoThen(Bytes.octets(encodeUndo([longScriptCoin()])?), []) => Result.Ok([longScriptCoin()])
 
 fn fromUndo(key: List<Int>, entry: List<Int>) -> Result<Unspent, String>
@@ -190,14 +185,15 @@ fn fromUndo(key: List<Int>, entry: List<Int>) -> Result<Unspent, String>
     decodeCoin(txidInKey(key), indexInKey(key), Bytes.fromList(entry)?)
 
 verify fromUndo
-    fromUndo(Bytes.octets(unspentKey("aa", 0)?), Bytes.octets(encodeCoin(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))?)) => Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "76", height = 7, coinbase = false))
+    fromUndo(Bytes.octets(unspentKey("aa", 0)?), Bytes.octets(encodeCoin(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?)) => Result.Ok(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))
 
-fn txidInKey(key: List<Int>) -> String
+fn txidInKey(key: List<Int>) -> Bytes
     ? "The Transaction Id an Undo record's key names."
-    Bytes.toHex(Result.withDefault(Bytes.fromList(Domain.ByteField.at(key, 1, List.len(key) - 1 - Domain.IndexKeys.indexWidth())), Domain.Index.emptyBytes()))
+      "Total: a key is octets by construction, so the slice is too."
+    Result.withDefault(Bytes.fromList(Domain.ByteField.at(key, 1, List.len(key) - 1 - Domain.IndexKeys.indexWidth())), Domain.Index.emptyBytes())
 
 verify txidInKey
-    txidInKey(Bytes.octets(unspentKey("aa", 0)?)) => "aa"
+    txidInKey(Bytes.octets(unspentKey("aa", 0)?)) => Bytes.fromList([170])
 
 fn indexInKey(key: List<Int>) -> Int
     ? "The Output position an Undo record's key names."
@@ -262,19 +258,30 @@ fn unspentKey(txid: String, index: Int) -> Result<Bytes, String>
       "The same shape as Domain.Index.outputKey and a different prefix, so the"
       "two keyspaces answer the same question from the same key material and"
       "cannot be confused for one another."
-    Domain.IndexKeys.tagged(unspentTag(), List.concat(Domain.IndexKeys.idBytes(txid)?, Domain.IndexKeys.scanOrder(index, Domain.IndexKeys.indexWidth())))
+    Result.Ok(keyAt(Bytes.fromHex(txid)?, index))
 
 verify unspentKey
     Bytes.octets(unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 0)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")?), Domain.IndexKeys.scanOrder(0, Domain.IndexKeys.indexWidth())))
     Bytes.octets(unspentKey("aa", 1)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("aa")?), Domain.IndexKeys.scanOrder(1, Domain.IndexKeys.indexWidth())))
     Bytes.octets(unspentKey("aa", 12345)?) => List.concat([unspentTag()], List.concat(Bytes.octets(Bytes.fromHex("aa")?), Domain.IndexKeys.scanOrder(12345, Domain.IndexKeys.indexWidth())))
 
+fn keyAt(txid: Bytes, index: Int) -> Bytes
+    ? "The same key, from the Transaction Id as bytes (#234)."
+      "Total: the tag and the scan-ordered position are octets by"
+      "construction, so neither fromList can refuse."
+    Bytes.concat(Bytes.concat(Result.withDefault(Bytes.fromList([unspentTag()]), Domain.Index.emptyBytes()), txid), Result.withDefault(Bytes.fromList(Domain.IndexKeys.scanOrder(index, Domain.IndexKeys.indexWidth())), Domain.Index.emptyBytes()))
+
+verify keyAt
+    keyAt(Bytes.fromList([170]), 0) => unspentKey("aa", 0)?
+    keyAt(Bytes.fromList([170]), 12345) => unspentKey("aa", 12345)?
+    Bytes.len(keyAt(Bytes.fromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")?, 0)) => 37
+
 fn keyOf(unspent: Unspent) -> Result<Bytes, String>
     ? "Where this Output lives."
-    unspentKey(unspent.txid, unspent.index)
+    Result.Ok(keyAt(unspent.txid, unspent.index))
 
 verify keyOf
-    keyOf(Unspent(txid = "aa", index = 1, value = 5, script = "76", height = 0, coinbase = false)) => unspentKey("aa", 1)
+    keyOf(Unspent(txid = Bytes.fromList([170]), index = 1, value = 5, script = Bytes.fromList([118]), height = 0, coinbase = false)) => unspentKey("aa", 1)
 
 fn undoKey(blockId: String) -> Result<Bytes, String>
     ? "Where a Block's Undo Data lives."
@@ -309,19 +316,20 @@ fn reachedKey() -> Result<Bytes, String>
 verify reachedKey
     reachedKey() => Domain.IndexKeys.metaKey("setTo")
 
-fn unspentAt(txid: String, index: Int, output: SpentOutput, height: Int, coinbase: Bool) -> Unspent
+fn unspentAt(txid: String, index: Int, output: SpentOutput, height: Int, coinbase: Bool) -> Result<Unspent, String>
     ? "An Output of a Transaction, as the Set holds it."
       "The Height and the coinbase flag travel with the Output because a"
       "coinbase Output cannot be spent for a hundred Blocks, and the only way"
       "to know whether a spend is too early is to know when the Output was"
       "made. Bitcoin Core keeps the same two beside every entry, for the same"
       "reason."
-    Unspent(txid = txid, index = index, value = output.value, script = output.script, height = height, coinbase = coinbase)
+    Result.Ok(Unspent(txid = Bytes.fromHex(txid)?, index = index, value = output.value, script = Bytes.fromHex(output.script)?, height = height, coinbase = coinbase))
 
 verify unspentAt
-    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false).value => 5
-    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false).height => 7
-    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, true).coinbase => true
+    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false)?.value => 5
+    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, false)?.height => 7
+    unspentAt("aa", 0, SpentOutput(value = 5, script = "76"), 7, true)?.coinbase => true
+    unspentAt("zz", 0, SpentOutput(value = 5, script = "76"), 7, true) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
 fn neverSpendable(scriptHex: String) -> Bool
     ? "Whether no witness could ever satisfy this Output Script."
@@ -367,8 +375,8 @@ fn matured(unspent: Unspent, spendingAt: Int) -> Bool
         true -> spendingAt - unspent.height >= maturity()
 
 verify matured
-    matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false), 2) => true
-    matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), 2) => false
-    matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), 100) => false
-    matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), 101) => true
-    matured(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = true), 100) => true
+    matured(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false), 2) => true
+    matured(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = true), 2) => false
+    matured(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = true), 100) => false
+    matured(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = true), 101) => true
+    matured(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 0, coinbase = true), 100) => true
