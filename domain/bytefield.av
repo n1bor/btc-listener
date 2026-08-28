@@ -11,8 +11,8 @@ module ByteField
         "if the bytes are most-significant-first. For a value it does not"
         "matter at all, and the same order is used anyway: two spellings of a"
         "number in one program is one more than anybody can keep straight."
-    exposes [number, numberIn, at, after, prefixed, prefixedIn, afterPrefixed, filled, prefixedWide, prefixedWideIn, afterPrefixedWide, widest, wideWidth]
-    depends []
+    exposes [number, numberBytes, numberIn, at, after, prefixed, prefixedBytes, prefixedIn, afterPrefixed, filled, prefixedWide, prefixedWideBytes, prefixedWideIn, afterPrefixedWide, widest, wideWidth]
+    depends [Bytes]
     effects []
 
 fn number(value: Int, width: Int) -> List<Int>
@@ -25,6 +25,20 @@ verify number
     number(256, 4) => [0, 0, 1, 0]
     number(4294967295, 4) => [255, 255, 255, 255]
     number(5000000000, 8) => [0, 0, 0, 1, 42, 5, 242, 0]
+
+fn numberBytes(value: Int, width: Int) -> Bytes
+    ? "The same number, already packed (#243)."
+      "Total: every element number makes is a byte, so fromList cannot"
+      "refuse. Packed here rather than by the caller, so what is concatenated"
+      "downstream is bytes to bytes -- a copy -- and never a rope of boxed"
+      "integers walked and validated at the end."
+    Result.withDefault(Bytes.fromList(number(value, width)), Bytes.empty())
+
+verify numberBytes
+    Bytes.octets(numberBytes(0, 4)) => [0, 0, 0, 0]
+    Bytes.octets(numberBytes(256, 4)) => [0, 0, 1, 0]
+    Bytes.octets(numberBytes(5000000000, 8)) => [0, 0, 0, 1, 42, 5, 242, 0]
+    Bytes.len(numberBytes(7, 1)) => 1
 
 fn numberInto(value: Int, width: Int, acc: List<Int>) -> List<Int>
     ? "Take the low byte, shift down, and build the answer back to front."
@@ -135,6 +149,25 @@ fn wideWidth() -> Int
 
 verify wideWidth
     wideWidth() => 4
+
+fn prefixedBytes(body: Bytes) -> Result<Bytes, String>
+    ? "A packed field behind one byte saying its length (#243)."
+    match Bytes.len(body) > widest()
+        true -> Result.Err("a field of {Bytes.len(body)} bytes is longer than one length byte can say")
+        false -> Result.Ok(Bytes.concat(numberBytes(Bytes.len(body), 1), body))
+
+verify prefixedBytes
+    Bytes.octets(prefixedBytes(Bytes.fromList([7, 8]))?) => [2, 7, 8]
+    Bytes.octets(prefixedBytes(Bytes.empty())?) => [0]
+    prefixedBytes(Result.withDefault(Bytes.fromList(filled(256, 1)), Bytes.empty())) => Result.Err("a field of 256 bytes is longer than one length byte can say")
+
+fn prefixedWideBytes(body: Bytes) -> Bytes
+    ? "A packed field behind four bytes saying its length (#243)."
+    Bytes.concat(numberBytes(Bytes.len(body), wideWidth()), body)
+
+verify prefixedWideBytes
+    Bytes.octets(prefixedWideBytes(Bytes.fromList([7, 8]))) => [0, 0, 0, 2, 7, 8]
+    Bytes.len(prefixedWideBytes(Result.withDefault(Bytes.fromList(filled(300, 1)), Bytes.empty()))) => 304
 
 fn prefixedWide(body: List<Int>) -> List<Int>
     ? "The same, for a field with no small bound on its length (#218)."
