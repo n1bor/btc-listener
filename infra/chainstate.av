@@ -48,9 +48,15 @@ record Walk
     counted: Built
     pace: Pace
     eye: Eye
+    target: Int
 
-fn build(network: Network, store: Store, blocks: BlockStore, to: Int, eye: Eye) -> Result<Built, String>
+fn build(network: Network, store: Store, blocks: BlockStore, to: Int, target: Int, eye: Eye) -> Result<Built, String>
     ? "Connect every Block from where the Set stands up to this Height."
+      "Two Heights, because since #217 they differ: to is where this call"
+      "stops, and target is where the Set is going. A chunked caller walks"
+      "250 Blocks at a time and passes the tip as the target, so the frame"
+      "and the metrics record measure the chain rather than the slice (#224)."
+      "A caller doing the whole range in one go passes the same value twice."
       "Where it stands is asked before anything is connected, because it is a"
       "Block and not merely a Height: a reorganisation since the last walk"
       "leaves the Set holding Outputs of Blocks the chain has left, and those"
@@ -64,17 +70,17 @@ fn build(network: Network, store: Store, blocks: BlockStore, to: Int, eye: Eye) 
         Time.now, Time.unixMs,
     ]
     aligned = Infra.Rewind.realigned(store, blocks, eye)?
-    _said = saidRangeIfPlain(eye, aligned.from, to)
-    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = [], eye = eye, unconfirmed = aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye), aligned.from, to)?
+    _said = saidRangeIfPlain(eye, aligned.from, to, target)
+    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = [], eye = eye, unconfirmed = aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, target = target), aligned.from, to)?
     swept = Infra.Utxo.prunedUndo(walked.counted.store, walked.counted.reached)?
     _told = toldIfPlain(walked.counted.eye, swept, walked.counted.reached)?
     Result.Ok(counting(walked.counted, swept))
 
-fn saidRangeIfPlain(eye: Eye, from: Int, to: Int) -> Unit
+fn saidRangeIfPlain(eye: Eye, from: Int, to: Int, target: Int) -> Unit
     ? "The range line for the plain log; the Screen draws the walk instead."
     ! [Console.print]
     match plainly(eye)
-        true -> saidRange(from, to)
+        true -> saidRange(from, to, target)
         false -> Unit
 
 fn plainly(eye: Eye) -> Bool
@@ -87,16 +93,19 @@ verify plainly
     plainly(Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none())) => true
     plainly(Infra.Screen.watchedBy(Option.Some(Domain.Screen.opened()), Domain.Snapshot.started(0), Infra.Metrics.none(), 0)) => false
 
-fn saidRange(from: Int, to: Int) -> Unit
+fn saidRange(from: Int, to: Int, target: Int) -> Unit
     ? "Say what is about to be connected, when anything is."
       "A node following the tip runs this every time any Peer announces a"
       "Block, and most of those announce a Block it already has -- so the"
       "usual case is a range with nothing in it, and 'connecting 107..106'"
       "is not a sentence. Silence is the honest report of no work."
+      "The target is named as well as the range because since #217 a plain"
+      "catch-up prints one of these per 250-Block chunk, and a reader"
+      "watching them go by has no other way to tell 3,857 of them from four."
     ! [Console.print]
     match from > to
         true -> Unit
-        false -> Console.print("utxo    connecting {from}..{to}")
+        false -> Console.print("utxo    connecting {from}..{to} of {target}")
 
 fn counting(counted: Built, store: Store) -> Built
     ? "The counts, carrying the Store the walk finished with."
@@ -189,11 +198,11 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
         Time.now, Time.unixMs,
     ]
     marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
-    setRecord = Infra.Metrics.marked(state.eye.log, "set", height, to, state.counted.blocks, 0, 0, 0, state.eye.candidates, state.counted.added, state.counted.removed, false)?
-    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, to, view.atMs), applied.confirmed, view.atMs)), setRecord), view.atMs)?
+    setRecord = Infra.Metrics.marked(state.eye.log, "set", height, state.target, state.counted.blocks, 0, 0, 0, state.eye.candidates, state.counted.added, state.counted.removed, false)?
+    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), applied.confirmed, view.atMs)), setRecord), view.atMs)?
     counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
-    walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked), height + 1, to)
+    walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked, target = state.target), height + 1, to)
 
 fn confirmedInto(snapshot: Snapshot, confirmed: List<TxFee>, nowMs: Int) -> Snapshot
     ? "Every Transaction this Block confirmed, into the ring with the fee"
