@@ -15,7 +15,7 @@ module Utxo
         "made, the keys it spent, and the Undo Data that says what those keys"
         "held. A Store that stopped between them would hold a Set that never"
         "existed, so they are one batch."
-    exposes [Applied, connectBlock, disconnectBlock, prunedUndo]
+    exposes [Applied, connectBlock, prepared, written, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
@@ -29,8 +29,17 @@ record Applied
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
+    written(store, blockId, prepared(network, store, height, transactions)?)
+
+fn prepared(network: Network, store: Store, height: Int, transactions: List<Transaction>) -> Result<Connecting, String>
+    ? "What this Block does to the Set: its Inputs resolved and the change"
+      "worked out, nothing written (#233)."
+      "The half of connecting a Block that only reads, kept apart from the"
+      "half that writes so the Set walk can run it beside the next Block's"
+      "fetch and keep every write on the one thread that owns the Store."
+    ! [Infra.Kv.get, Infra.Kv.getAll]
     fromStore = resolved(store, spentKeys(transactions, [])?, Map.fromList([]))?
-    written(store, blockId, Domain.Connect.connected(network, height, transactions, fromStore))
+    Result.Ok(Domain.Connect.connected(network, height, transactions, fromStore))
 
 fn written(store: Store, blockId: String, connection: Connecting) -> Result<Applied, String>
     ? "A refusal is a fact about the Block, not a failure of the Store."

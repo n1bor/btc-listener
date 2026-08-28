@@ -173,13 +173,16 @@ fn unlessStopped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<
         false -> overlapped(network, state, to, this)
 
 fn overlapped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Walk, String>
-    ? "The next Block read and decoded while this one goes into the Set (#233)."
-      "The two are independent: fetching reads the h: and b: keys and a"
-      "Segment, none of which the Set walk writes, and connecting reads and"
-      "writes only u:, d: and the standing record. Decoding was a fifth of a"
-      "Block's wall time on one thread with three cores idle; it is off the"
-      "clock now. A stop asked for during the product is seen before the next"
-      "Block, so the Set is always left at a whole one."
+    ? "The next Block read and decoded while this one is resolved and"
+      "worked out; then this one is written (#233)."
+      "The two branches only read: fetching reads the h: and b: keys and a"
+      "Segment, preparing reads u:. Every write stays on the one thread that"
+      "owns the Store, after the product -- which is also what the wasm-gc"
+      "backend needs, since a product's carrier has to compare, and a Store"
+      "holding a resource cannot. Decoding was a fifth of a Block's wall"
+      "time on one thread with three cores idle; it is off the clock now. A"
+      "stop asked for during the product is seen before the next Block, so"
+      "the Set is always left at a whole one."
       "The Network rides on Ahead rather than being named in the product: a"
       "sum-typed parameter captured into a branch is emitted as `&*network`"
       "on an owned value, which rustc refuses (E0614), where a record field"
@@ -192,9 +195,9 @@ fn overlapped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Wal
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.connectBlock(this.network, state.counted.store, this.height, this.blockId, this.transactions))?!
+    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(this.network, state.counted.store, this.height, this.transactions))?!
     match both
-        (next, applied) -> stepping(network, recorded(network, state, this.height, this.blockId, applied, BlockView(height = this.height, blockId = this.blockId, transactions = List.len(this.transactions), bytes = this.location.length, atMs = Time.unixMs()))?, to, next)
+        (next, connection) -> stepping(network, recorded(network, state, this.height, this.blockId, Infra.Utxo.written(state.counted.store, this.blockId, connection)?, BlockView(height = this.height, blockId = this.blockId, transactions = List.len(this.transactions), bytes = this.location.length, atMs = Time.unixMs()))?, to, next)
 
 fn fetched(network: Network, store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead>, String>
     ? "The Block at a Height, read and decoded, if the Index names one and"
