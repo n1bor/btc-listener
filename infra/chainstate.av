@@ -114,6 +114,13 @@ fn counting(counted: Built, store: Store) -> Built
       "the last round left, exactly as every other phase in this program does."
     Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped, views = counted.views, eye = counted.eye, unconfirmed = counted.unconfirmed)
 
+record Ahead
+    network: Network
+    height: Int
+    blockId: String
+    location: Location
+    transactions: List<Transaction>
+
 fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
     ? "Each Height in turn, stopping at the first one the chain cannot supply."
       "It asks the stop flag as well as the Screen's own (#206). It used to"
@@ -122,6 +129,8 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
       "the Set phase takes. The operator was left with kill -9, which is the"
       "ending that tears a Segment and the one a cooperative stop exists to"
       "avoid."
+      "The first Block is fetched on its own; from then on each step fetches"
+      "the next Block while this one connects (#233)."
     ! [
         Console.print,
         Disk.appendText, Disk.readBytesAt,
@@ -132,10 +141,11 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
     ]
     match Bool.or(height > to, Bool.or(Process.stopRequested(), state.eye.stopped))
         true -> Result.Ok(state)
-        false -> atHeight(network, state, height, to)
+        false -> stepping(network, state, to, fetched(network, state.counted.store, state.blocks, height)?)
 
-fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
-    ? "A Height the Index does not name ends the walk."
+fn stepping(network: Network, state: Walk, to: Int, ahead: Option<Ahead>) -> Result<Walk, String>
+    ? "Nothing fetched ends the walk: a Height the Index does not name, or a"
+      "Block whose body is not held."
     ! [
         Console.print,
         Disk.appendText, Disk.readBytesAt,
@@ -144,46 +154,79 @@ fn atHeight(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    named = Domain.Index.blockIdIn(Infra.Store.get(state.counted.store, Domain.IndexKeys.heightKey(height)?)?)
+    match ahead
+        Option.None -> Result.Ok(state)
+        Option.Some(this) -> unlessStopped(network, state, to, this)
+
+fn unlessStopped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Walk, String>
+    ? "The stop flag and the Screen's q, asked before every Block."
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match Bool.or(this.height > to, Bool.or(Process.stopRequested(), state.eye.stopped))
+        true -> Result.Ok(state)
+        false -> overlapped(network, state, to, this)
+
+fn overlapped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Walk, String>
+    ? "The next Block read and decoded while this one is resolved and"
+      "worked out; then this one is written (#233)."
+      "The two branches only read: fetching reads the h: and b: keys and a"
+      "Segment, preparing reads u:. Every write stays on the one thread that"
+      "owns the Store, after the product -- which is also what the wasm-gc"
+      "backend needs, since a product's carrier has to compare, and a Store"
+      "holding a resource cannot. Decoding was a fifth of a Block's wall"
+      "time on one thread with three cores idle; it is off the clock now. A"
+      "stop asked for during the product is seen before the next Block, so"
+      "the Set is always left at a whole one."
+      "The Network rides on Ahead rather than being named in the product: a"
+      "sum-typed parameter captured into a branch is emitted as `&*network`"
+      "on an owned value, which rustc refuses (E0614), where a record field"
+      "is not. jasisz/aver#1191."
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(this.network, state.counted.store, this.height, this.transactions))?!
+    match both
+        (next, connection) -> stepping(network, recorded(network, state, this.height, this.blockId, Infra.Utxo.written(state.counted.store, this.blockId, connection)?, BlockView(height = this.height, blockId = this.blockId, transactions = List.len(this.transactions), bytes = this.location.length, atMs = Time.unixMs()))?, to, next)
+
+fn fetched(network: Network, store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead>, String>
+    ? "The Block at a Height, read and decoded, if the Index names one and"
+      "its body is held."
+    ! [Disk.readBytesAt, Infra.Kv.get]
+    fetchedNamed(network, store, blocks, height, Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?))
+
+fn fetchedNamed(network: Network, store: Store, blocks: BlockStore, height: Int, named: Option<String>) -> Result<Option<Ahead>, String>
+    ? "A Height the Index does not name is nothing to fetch."
+    ! [Disk.readBytesAt, Infra.Kv.get]
     match named
-        Option.None -> Result.Ok(state)
-        Option.Some(blockId) -> atBlock(network, state, height, to, blockId)
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(blockId) -> fetchedLocated(network, blocks, height, blockId, Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?)
 
-fn atBlock(network: Network, state: Walk, height: Int, to: Int, blockId: String) -> Result<Walk, String>
-    ? "A Block whose body is not held ends the walk too."
-      "Stepping over it would connect the next Block against a Set that never"
-      "existed. The outputs phase can step over a gap; this cannot."
-    ! [
-        Console.print,
-        Disk.appendText, Disk.readBytesAt,
-        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
-        Process.stopRequested,
-        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
-        Time.now, Time.unixMs,
-    ]
-    located = Infra.Store.get(state.counted.store, Domain.IndexKeys.blockKey(blockId)?)?
+fn fetchedLocated(network: Network, blocks: BlockStore, height: Int, blockId: String, located: Option<Bytes>) -> Result<Option<Ahead>, String>
+    ? "A Block whose body is not held is nothing to fetch either."
+    ! [Disk.readBytesAt]
     match located
-        Option.None -> Result.Ok(state)
-        Option.Some(text) -> connecting(network, state, height, to, blockId, text)
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(stored) -> fetchedAt(network, blocks, height, blockId, Domain.Index.decodeLocation(stored)?)
 
-fn connecting(network: Network, state: Walk, height: Int, to: Int, blockId: String, stored: Bytes) -> Result<Walk, String>
-    ? "Read the Block and put it into the Set."
-    ! [
-        Console.print,
-        Disk.appendText, Disk.readBytesAt,
-        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
-        Process.stopRequested,
-        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
-        Time.now, Time.unixMs,
-    ]
-    location = Domain.Index.decodeLocation(stored)?
-    payload = Infra.Blocks.read(state.blocks, location)?
-    transactions = Domain.Block.transactionsOf(payload)?
-    applied = Infra.Utxo.connectBlock(network, state.counted.store, height, blockId, transactions)?
-    recorded(network, state, height, to, blockId, applied, BlockView(height = height, blockId = blockId, transactions = List.len(transactions), bytes = location.length, atMs = Time.unixMs()))
+fn fetchedAt(network: Network, blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Option<Ahead>, String>
+    ? "Read the Block and decode its Transactions."
+    ! [Disk.readBytesAt]
+    payload = Infra.Blocks.read(blocks, location)?
+    Result.Ok(Option.Some(Ahead(network = network, height = height, blockId = blockId, location = location, transactions = Domain.Block.transactionsOf(payload)?)))
 
-fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String, applied: Applied, view: BlockView) -> Result<Walk, String>
-    ? "Count it, write where the Set now stands, and go on."
+fn recorded(network: Network, state: Walk, height: Int, blockId: String, applied: Applied, view: BlockView) -> Result<Walk, String>
+    ? "Count it, and write where the Set now stands."
       "Written every Block rather than at the end, because a walk that stopped"
       "would otherwise leave a Set whose contents and whose recorded standing"
       "disagree -- and the standing is the only thing that says what the Set"
@@ -202,7 +245,7 @@ fn recorded(network: Network, state: Walk, height: Int, to: Int, blockId: String
     looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, Domain.Snapshot.withCandidates(confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), applied.confirmed, view.atMs), state.eye.candidates)), setRecord), view.atMs)?
     counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
-    walk(network, Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked, target = state.target), height + 1, to)
+    Result.Ok(Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked, target = state.target))
 
 fn confirmedInto(snapshot: Snapshot, confirmed: List<TxFee>, nowMs: Int) -> Snapshot
     ? "Every Transaction this Block confirmed, into the ring with the fee"
