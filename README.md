@@ -1100,7 +1100,7 @@ arithmetic rather than measurements, are in
 The Index is a keyed store — Block Ids to Locations, Heights to Block Ids,
 Transaction Ids to sites — and `infra/store.av` offers it over two backends
 behind one API. Callers cannot tell them apart: `Store` is opaque, so the same
-`get`, `getAll`, `putAll` and `deleteAll` reach whichever is there.
+`get`, `getAll`, `putAll`, `applyAll` and `deleteAll` reach whichever is there.
 
 | backend | what it is | where it comes from |
 |---|---|---|
