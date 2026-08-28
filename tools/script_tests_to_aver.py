@@ -440,7 +440,7 @@ def main():
     ap.add_argument("--emit", action="store_true")
     ap.add_argument("--probe")
     ap.add_argument("--answers")
-    ap.add_argument("--out", default=os.path.abspath(os.path.join(HERE, "..", "domain")))
+    ap.add_argument("--out", default=os.path.abspath(os.path.join(HERE, "..", "corpus")))
     a = ap.parse_args()
     if a.fetch:
         fetch()

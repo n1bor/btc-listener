@@ -27,7 +27,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 RAW = os.path.join(DATA, "siphash_vectors.h")
-OUT = os.path.join(HERE, "..", "domain", "siphashcases.av")
+OUT = os.path.join(HERE, "..", "corpus", "siphashcases.av")
 URL = "https://raw.githubusercontent.com/veorq/SipHash/master/vectors.h"
 
 KEY = bytes(range(16))

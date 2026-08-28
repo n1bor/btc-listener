@@ -109,7 +109,14 @@ jobs:
         run: cargo test --manifest-path providers/kv/Cargo.toml
 
   verify:
-    name: aver verify (full suite)
+    name: aver verify (hand-written cases)
+    # The program graph from main.av: every module the node reaches, and
+    # every hand-written case. The Core corpus (corpus/*.av, 6,050 generated
+    # cases with 200 M-step budgets) is not reachable from main and runs
+    # beside this job rather than inside it (#219, option 4). Verifying the
+    # entry rather than the directory is also what makes this take seconds:
+    # `aver verify .` walks the tree and costs an order of magnitude more for
+    # the same cases.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -143,11 +150,94 @@ jobs:
         with:
           path: ~/.cache/aver
           key: aver-hosts-${{ hashFiles('.aver-version', 'providers/**', 'infra/kv.av', 'domain/primitives.av', 'aver.toml') }}-${{ runner.os }}
-      - name: Verify, all cases (providers auto-built)
+      - name: Verify the program graph
         run: |
-          aver verify . --module-root . | tee verify.log
+          aver verify main.av --module-root . | tee verify.log
           tail -1 verify.log | grep -E "\| 0 failed" \
             || { echo "verify reported failures"; exit 1; }
+
+  verify-corpus:
+    name: aver verify (Core corpus, ${{ matrix.shard }})
+    # The corpus in four shards of about equal cost, so its wall time is one
+    # shard's rather than the sum (#219). script_assets_test.json is nearly
+    # all of it: measured locally, assetcases8 80 s, assetcases9 68 s,
+    # assetcases1 + 4 71 s, and the other 25 files together 80 s. A shard is
+    # a list of files verified one at a time, in place under corpus/, so the
+    # [[verify.costly]] budgets in aver.toml (matched by path under the
+    # module root) apply and the largest Core rows are executed rather than
+    # declined. Each run's last line is the count that has to say "0 failed";
+    # a run that aborts before a summary fails the grep too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: assets-8
+            files: corpus/assetcases8.av
+          - shard: assets-9
+            files: corpus/assetcases9.av
+          - shard: assets-1-4
+            files: corpus/assetcases1.av corpus/assetcases4.av
+          - shard: the-rest
+            files: >-
+              corpus/assetcases2.av corpus/assetcases3.av corpus/assetcases5.av
+              corpus/assetcases6.av corpus/assetcases7.av
+              corpus/scriptcases1.av corpus/scriptcases2.av corpus/scriptcases3.av
+              corpus/scriptcases4.av corpus/scriptcases5.av
+              corpus/witnesscases1.av corpus/witnesscases2.av corpus/witnesscases3.av
+              corpus/txcases1.av corpus/txcases2.av corpus/txcases3.av corpus/txcases4.av
+              corpus/sighashcases1.av corpus/sighashcases2.av
+              corpus/bip341cases.av corpus/keyiocases.av corpus/keyioinvalidcases.av
+              corpus/base58cases.av corpus/compactblockcases.av corpus/siphashcases.av
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: libclang, for the RocksDB bindings (ADR 0009)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver/aver
+          sudo chown -R "$USER" /home/owensr/aver
+          git -C /home/owensr/aver/aver init --quiet
+          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
+          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            providers/primitives
+            providers/kv
+      - name: Cache the provider host, which is a pure function of these inputs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aver
+          key: aver-hosts-${{ hashFiles('.aver-version', 'providers/**', 'infra/kv.av', 'domain/primitives.av', 'aver.toml') }}-${{ runner.os }}
+      # Every corpus file has to be in exactly one shard: a file added by
+      # tools/refresh_corpora.sh and not listed here would be verified by
+      # nobody, and this is the check that says so.
+      - name: Every corpus file is in a shard
+        run: |
+          listed=$(grep -oE 'corpus/[a-z0-9]+\.av' .github/workflows/ci.yml | sort -u)
+          present=$(ls corpus/*.av | sort -u)
+          diff <(echo "$listed") <(echo "$present") \
+            || { echo "corpus/ and the shards in ci.yml disagree"; exit 1; }
+      - name: Verify this shard of the Core corpus
+        run: |
+          for f in ${{ matrix.files }}; do
+            echo "== $f"
+            aver verify "$f" --module-root . | tee verify.log
+            tail -1 verify.log | grep -E "\| 0 failed" \
+              || { echo "verify reported failures in $f"; exit 1; }
+          done
 
   compile:
     name: compile to Rust and build
@@ -259,7 +349,7 @@ jobs:
     # this is where that binary comes from (issue #138). Only on main, and only
     # behind every gate: a binary that failed verify is worse than none.
     if: github.ref == 'refs/heads/main'
-    needs: [format, check, verify, provider-tests, compile, wasm-node]
+    needs: [format, check, verify, verify-corpus, provider-tests, compile, wasm-node]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

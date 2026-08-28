@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetch every Core corpus this project tests against, and regenerate the
-# generated domain/*.av case files for any corpus that changed upstream.
+# generated corpus/*.av case files for any corpus that changed upstream.
 #
 #     tools/refresh_corpora.sh           # fetch, compare, regenerate what moved
 #     tools/refresh_corpora.sh --all     # regenerate everything regardless

@@ -94,8 +94,10 @@ and `compile`.
 ```bash
 aver audit  .                                       # check + verify + format, the CI gate
 aver check  . --module-root .                        # contracts, coverage, lints
-aver verify . --module-root .                        # all ~6,000 cases, parallel, ~seconds once the host is cached
+aver verify main.av --module-root .                  # every hand-written case, the program graph, seconds
+aver verify . --module-root .                        # everything, corpus included: what audit runs
 aver verify domain/script.av --module-root .         # one file's cases
+aver verify corpus --module-root .                   # the Core corpus only
 aver format . --check
 ```
 
@@ -113,6 +115,18 @@ aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release
 ./target/release/main [args...]
 ```
+
+**The Core corpus is verified apart from everything else.** `corpus/*.av`
+(29 generated files, 6,050 cases, 200 M-step budgets) is the Core test data
+compiled to verify blocks; it changes only when `tools/refresh_corpora.sh`
+or the engine does, and nothing `depends` on those modules, so it lives in
+its own directory and CI runs it as its own job (#219). `aver verify main.av`
+is the program graph -- every hand-written case, in seconds -- and
+`aver verify corpus` is the corpus; `aver verify .` is both and is what
+`aver audit` runs. Locally, `aver verify <file>` on what you changed, then
+`aver verify main.av`; run the corpus before committing anything under
+`domain/script*`, `sighash`, `bip143`, `bip341`, `taproot`, `ecdsa` or the
+interpreter, and let CI carry it otherwise.
 
 Three flags are load-bearing and easy to drop:
 
@@ -255,7 +269,7 @@ make the compiler name every caller that must change.
 **Test corpus**: Bitcoin Core's published test data — `script_tests.json`,
 `sighash.json`, `tx_valid`/`tx_invalid`, `key_io`, `base58`, the BIP341
 vectors, and `script_assets_test.json` (3,737 tapscript tests) — is compiled
-into generated `domain/*cases*.av` files by the `tools/*_to_aver.py`
+into generated `corpus/*.av` files by the `tools/*_to_aver.py`
 generators. Python assembles, the engine answers — a generator never decides
 expected values. **`tools/refresh_corpora.sh` fetches every corpus and
 regenerates whatever changed upstream** (docs/core-corpora.md has the

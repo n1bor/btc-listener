@@ -46,7 +46,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
-OUT = os.path.abspath(os.path.join(HERE, "..", "domain"))
+OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 
 sys.path.insert(0, HERE)
 from script_tests_to_aver import opcode_names, parse_script  # noqa: E402

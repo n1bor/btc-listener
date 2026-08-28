@@ -16,7 +16,7 @@ now.  n1bor/btc-listener#101.
 
 Usage:
     python3 tools/script_assets_to_aver.py --fetch   # the file, to /tmp
-    python3 tools/script_assets_to_aver.py --emit    # domain/assetcases*.av
+    python3 tools/script_assets_to_aver.py --emit    # corpus/assetcases*.av
 
 The JSON is 9 MB and is not committed; the generated cases are.
 """
@@ -29,7 +29,7 @@ import urllib.request
 
 URL = "https://raw.githubusercontent.com/bitcoin-core/qa-assets/main/unit_test_data/script_assets_test.json"
 CACHE = "/tmp/btc-listener-script-assets.json"
-OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "domain")
+OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "corpus")
 PER_FILE = 250
 
 

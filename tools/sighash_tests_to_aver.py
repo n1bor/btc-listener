@@ -32,7 +32,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
-OUT = os.path.abspath(os.path.join(HERE, "..", "domain"))
+OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 
 CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/sighash.json"
 
