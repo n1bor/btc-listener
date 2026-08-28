@@ -1009,11 +1009,10 @@ fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Bui
     chunkTo = Int.min(tipHeight, standing + blocks)
     _note = Infra.Metrics.noting(state.log, "set", "connecting {standing + 1}..{chunkTo} of {tipHeight}, {List.len(Infra.Peers.peerKeys(state.pool))} Peer(s)")?
     startedMs = Time.unixMs()
-    next = Infra.ChainState.build(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, tipHeight, Infra.Screen.counting(eyeIn(sofar, eyeOf(state)), Domain.AddressBook.sizeOf(state.book)))?
-    merged = mergedBuilt(sofar, next)
+    next = Infra.ChainState.buildFrom(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, tipHeight, Infra.Screen.counting(eyeIn(sofar, eyeOf(state)), Domain.AddressBook.sizeOf(state.book)), sofar)?
     match Bool.or(next.reached < chunkTo, chunkTo >= tipHeight)
-        true -> Result.Ok(Chunked(state = state, built = merged))
-        false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(merged), sized(next.reached - standing, Time.unixMs() - startedMs)?)
+        true -> Result.Ok(Chunked(state = state, built = next))
+        false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(next), sized(next.reached - standing, Time.unixMs() - startedMs)?)
 
 fn storeIn(sofar: Option<Built>, before: Store) -> Store
     ? "The Store the next chunk continues from: the walk's own once it has one."
@@ -1035,23 +1034,6 @@ fn eyeIn(sofar: Option<Built>, before: Eye) -> Eye
 verify eyeIn
     eyeIn(Option.None, sampleBuilt(1, 1).eye).candidates => 0
     eyeIn(Option.Some(sampleBuilt(1, 1)), sampleBuilt(1, 1).eye).stopped => false
-
-fn mergedBuilt(sofar: Option<Built>, next: Built) -> Built
-    ? "Two chunks of one walk, counted as one."
-      "Views are newest first, so the later chunk's go in front; the"
-      "unconfirmed come back out in the order they were disconnected."
-    match sofar
-        Option.None -> next
-        Option.Some(acc) -> Built(store = next.store, blocks = acc.blocks + next.blocks, added = acc.added + next.added, removed = acc.removed + next.removed, fees = acc.fees + next.fees, reached = next.reached, dropped = acc.dropped + next.dropped, views = List.take(List.concat(next.views, acc.views), Domain.Snapshot.blockLimit()), eye = next.eye, unconfirmed = List.concat(acc.unconfirmed, next.unconfirmed))
-
-verify mergedBuilt
-    mergedBuilt(Option.None, sampleBuilt(3, 10)).blocks => 3
-    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).blocks => 7
-    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).reached => 14
-    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).added => 14
-    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).dropped => 0
-    List.len(mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).views) => 2
-    mergedBuilt(Option.Some(sampleBuilt(3, 10)), sampleBuilt(4, 14)).views => [sampleView(14), sampleView(10)]
 
 fn sampleBuilt(blocks: Int, upTo: Int) -> Built
     ? "A chunk that connected this many Blocks and got this far, for the cases."
