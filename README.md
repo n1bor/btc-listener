@@ -1022,8 +1022,10 @@ libstdc++.so.6   libgcc_s.so.1   libm.so.6   libc.so.6
 RocksDB and libsecp256k1 are C and C++ compiled *into* it rather than linked at
 run time; `libstdc++` appears at all only because RocksDB is C++.
 
-The floor is glibc, and the release job builds on `ubuntu-22.04` rather than on
-`ubuntu-latest` precisely so that floor stays low: a 24.04 runner would raise
+The floor is glibc, and the compile job builds on `ubuntu-22.04` rather than on
+`ubuntu-latest` precisely so that floor stays low -- the release publishes the
+binary that job built, on the same runner image, after running its `help` on
+it (#219) -- because a 24.04 runner would raise
 it above 22.04 servers without anything saying so. **Ubuntu 22.04 or newer**,
 therefore — glibc is backward compatible, so newer is always safe, and the CI
 log prints the required version on every publish rather than leaving it to be

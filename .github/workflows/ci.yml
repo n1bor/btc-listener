@@ -151,7 +151,13 @@ jobs:
 
   compile:
     name: compile to Rust and build
-    runs-on: ubuntu-latest
+    # Built on 22.04 rather than on ubuntu-latest on purpose (#219). The
+    # binary's floor is whatever glibc it was built against, and a 24.04
+    # runner would quietly raise that floor above the servers this is for.
+    # 22.04 runs on 22.04 and on everything newer. This is the build the
+    # release publishes -- the binary job below downloads it rather than
+    # building the same thing again on the same runner image.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -165,12 +171,17 @@ jobs:
           git -C /home/owensr/aver/aver init --quiet
           git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
           git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
+      # This job's caches are keyed by the runner image as well, and
+      # deliberately not shared with the jobs above. Those run on
+      # ubuntu-latest; a cached `aver` or a cached target/ built against a
+      # newer glibc than this runner's would not run here, and the failure
+      # would be a linker error rather than anything that names the cause.
       - name: Cache the aver toolchain
         id: aver-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/aver
-          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+          key: aver-path-${{ hashFiles('.aver-version') }}-ubuntu-22.04
       - name: Install aver from that source
         if: steps.aver-cache.outputs.cache-hit != 'true'
         run: cargo install --path /home/owensr/aver/aver aver-lang --locked
@@ -178,11 +189,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/target
-          key: aver-buildtarget-${{ hashFiles('.aver-version', 'providers/**', 'aver.toml') }}-${{ runner.os }}
+          key: aver-buildtarget-${{ hashFiles('.aver-version', 'providers/**', 'aver.toml') }}-ubuntu-22.04
       - name: Compile Aver to Rust
         run: aver compile main.av --module-root . -o build
       - name: Build the release binary
         run: cargo build --release --manifest-path build/Cargo.toml
+      - name: What it will and will not run on
+        run: |
+          ldd --version | head -1
+          objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+      # Kept so the release publishes the exact binary this job built and
+      # this runner image ran, rather than a second build of it (#219).
+      - name: Keep the built binary for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-binary
+          path: build/target/release/main
+          if-no-files-found: error
+          retention-days: 1
 
   wasm-node:
     name: wasm-gc graph and Node host
@@ -242,52 +266,28 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: libclang, for the RocksDB bindings (ADR 0009)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
-      - name: Check out the Aver source at the pinned revision, at the dev path
-        run: |
-          sudo mkdir -p /home/owensr/aver/aver
-          sudo chown -R "$USER" /home/owensr/aver
-          git -C /home/owensr/aver/aver init --quiet
-          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
-          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
-      # This job's caches are keyed by the runner as well, and deliberately not
-      # shared with the jobs above. Those run on ubuntu-latest; a cached `aver`
-      # or a cached target/ built against a newer glibc than this runner's
-      # would not run here, and the failure would be a linker error rather than
-      # anything that names the cause.
-      - name: Cache the aver toolchain
-        id: aver-cache
-        uses: actions/cache@v4
+      # Nothing is built here (#219). The compile job built the binary on this
+      # same runner image and the wasm-node job proved the module; this job
+      # collects both, shows the binary runs at its own floor, and publishes.
+      - name: Collect the binary the compile job built
+        uses: actions/download-artifact@v4
         with:
-          path: ~/.cargo/bin/aver
-          key: aver-path-${{ hashFiles('.aver-version') }}-ubuntu-22.04
-      - name: Install aver from that source
-        if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
-      - name: Cache the generated project's target
-        uses: actions/cache@v4
-        with:
-          path: build/target
-          key: aver-buildtarget-${{ hashFiles('.aver-version', 'providers/**', 'aver.toml') }}-ubuntu-22.04
-      - name: Compile Aver to Rust, and build it
-        run: |
-          aver compile main.av --module-root . -o build
-          cargo build --release --manifest-path build/Cargo.toml
+          name: main-binary
+          path: build/target/release
       - name: Collect the wasm-gc module the Node host proved
         uses: actions/download-artifact@v4
         with:
           name: main-wasm
           path: build/target/release
-      # Built on 22.04 rather than on ubuntu-latest on purpose. The binary's
-      # floor is whatever glibc it was built against, and a 24.04 runner would
-      # quietly raise that floor above the servers this is for. 22.04 runs on
-      # 22.04 and on everything newer.
+      # Artifacts do not keep the execute bit. Running `help` here is the proof
+      # that what ships starts on a 22.04 box, which is the floor it claims.
       - name: What it will and will not run on
         run: |
+          set -o pipefail
+          chmod +x build/target/release/main
           ldd --version | head -1
           objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+          build/target/release/main help | head -3
       - name: Replace the rolling build with this one
         env:
           GH_TOKEN: ${{ github.token }}
