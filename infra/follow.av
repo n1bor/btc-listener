@@ -350,10 +350,10 @@ fn tellingCompact(pool: Pool, keys: List<Int>) -> Result<Pool, String>
       "having only once the asking path has been proven against a real one."
       "Version 2, because version 1 names Transactions by their Transaction"
       "Id and cannot name a SegWit spend at all."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match keys
         [] -> Result.Ok(pool)
-        [head, ..tail] -> tellingCompact(Infra.Peers.send(pool, head, "sendcmpct", Domain.CompactBlock.sendCompactPayload(false, Domain.CompactBlock.protocolVersion())?)?, tail)
+        [head, ..tail] -> tellingCompact(Infra.Peers.tell(pool, head, "sendcmpct", Domain.CompactBlock.sendCompactPayload(false, Domain.CompactBlock.protocolVersion())?)?, tail)
 
 fn askingAll(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "Ask every Peer for the Peers it knows."
@@ -361,10 +361,10 @@ fn askingAll(pool: Pool, keys: List<Int>) -> Result<Pool, String>
       "-- Bitcoin Core ignores the second -- so asking again would be noise,"
       "and the unsolicited addr Messages that follow are where the rest comes"
       "from."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match keys
         [] -> Result.Ok(pool)
-        [head, ..tail] -> askingAll(Infra.Peers.send(pool, head, "getaddr", Bytes.fromList([]))?, tail)
+        [head, ..tail] -> askingAll(Infra.Peers.tell(pool, head, "getaddr", Bytes.fromList([]))?, tail)
 
 fn saidBook(before: Int, after: Int) -> Unit
     ? "Say how the Address Book grew, when it grew."
@@ -492,12 +492,12 @@ fn drainSettled(state: Following) -> Result<Following, String>
       "Kept on the pool rather than returned, the same as the spare"
       "Messages, so a dial that settles during a walk is still said out loud"
       "when the walk ends rather than being lost with the walk's pool."
-    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
     saying(withPool(state, Infra.Peers.withoutSettled(state.pool)), Infra.Peers.settledOf(state.pool))
 
 fn saying(state: Following, outcomes: List<Outcome>) -> Result<Following, String>
     ? "One at a time, oldest first."
-    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
     match outcomes
         [] -> Result.Ok(state)
         [head, ..tail] -> saying(said(state, head)?, tail)
@@ -505,7 +505,7 @@ fn saying(state: Following, outcomes: List<Outcome>) -> Result<Following, String
 fn said(state: Following, one: Outcome) -> Result<Following, String>
     ? "A Candidate that answered is a Peer to greet; one that did not is a"
       "line and nothing more."
-    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
     match one.seated
         false -> unreachable(state, one.address, one.why)
         true -> reached(state, one.address, one.key)
@@ -522,10 +522,10 @@ fn unreachable(state: Following, address: String, why: String) -> Result<Followi
 
 fn reached(state: Following, address: String, key: Int) -> Result<Following, String>
     ? "A Candidate has become a Peer, so ask it who it knows."
-    ! [Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
     _said = saidLineIfPlain(state.watch, "peer {key} is {address}, from the Address Book")
     noted = Infra.Metrics.noting(state.log, "peer", "seated {key} at {address} from the Book, {List.len(Infra.Peers.peerKeys(state.pool))} held")?
-    asked = Infra.Peers.send(state.pool, key, "getaddr", Bytes.fromList([]))?
+    asked = Infra.Peers.tell(state.pool, key, "getaddr", Bytes.fromList([]))?
     Result.Ok(withPool(withLog(state, noted), asked))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
@@ -1123,7 +1123,7 @@ fn tendedWith(pool: Pool, one: Spare, budget: Int, heard: Int) -> Result<Tended,
     ? "A ping is answered; anything else is the loop's, later."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match one.frame.command
-        "ping" -> tendedPool(Infra.Peers.send(pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1, heard + 1)
+        "ping" -> tendedPool(Infra.Peers.tell(pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1, heard + 1)
         _ -> tendedPool(Infra.Peers.spared(pool, one.key, one.frame), budget - 1, heard + 1)
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
@@ -1888,7 +1888,7 @@ fn onAskedAddresses(state: Following, key: Int) -> Result<Unit, String>
         Time.now, Time.unixMs,
     ]
     offered = parsedAll(List.take(Map.keys(state.book), servedAddressCap()), Domain.Network.portOf(state.pool.network), [])
-    answered = Infra.Peers.send(state.pool, key, "addr", Domain.Addr.payload(offered, Int.div(Time.unixMs(), 1000), 0)?)?
+    answered = Infra.Peers.tell(state.pool, key, "addr", Domain.Addr.payload(offered, Int.div(Time.unixMs(), 1000), 0)?)?
     listen(saidOffered(withPool(state, answered), List.len(offered), key))
 
 fn parsedAll(addresses: List<String>, port: Int, acc: List<PeerAddress>) -> List<PeerAddress>
@@ -2009,7 +2009,7 @@ fn onPing(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
         Time.now, Time.unixMs,
     ]
     payload = Bytes.fromList(body)?
-    sent = Infra.Peers.send(state.pool, key, "pong", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "pong", payload)?
     listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn onOffered(state: Following, key: Int, offered: List<List<Int>>) -> Result<Unit, String>
@@ -2072,7 +2072,7 @@ fn asking(state: Following, key: Int, hashes: List<List<Int>>) -> Result<Unit, S
         Time.now, Time.unixMs,
     ]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessTxType(), hashes)?
-    sent = Infra.Peers.send(state.pool, key, "getdata", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "getdata", payload)?
     listen(Following(pool = sent, store = state.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log))
 
 fn onTransaction(state: Following, key: Int, body: List<Int>) -> Result<Unit, String>
@@ -2164,17 +2164,17 @@ fn arrivedOnRing(state: Following, held: Domain.Mempool.Held, nowMs: Int) -> Fol
 
 fn toldOthers(pool: Pool, keys: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
     ? "The Announcement, to every Peer but the one that told us."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match keys
         [] -> Result.Ok(pool)
         [head, ..tail] -> toldOne(pool, head, tail, sender, payload)
 
 fn toldOne(pool: Pool, key: Int, rest: List<Int>, sender: Int, payload: Bytes) -> Result<Pool, String>
     ? "One Peer, unless it is the one that sent it."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match key == sender
         true -> toldOthers(pool, rest, sender, payload)
-        false -> toldOthers(Infra.Peers.send(pool, key, "inv", payload)?, rest, sender, payload)
+        false -> toldOthers(Infra.Peers.tell(pool, key, "inv", payload)?, rest, sender, payload)
 
 fn hashOf(txid: String) -> List<Int>
     ? "A Transaction Id back into the bytes an Announcement carries."
@@ -2287,20 +2287,20 @@ fn sendingBlock(state: Following, key: Int, rest: List<List<Int>>, location: Loc
         Time.now, Time.unixMs,
     ]
     payload = Infra.Blocks.read(state.blocks, location)?
-    sent = Infra.Peers.send(state.pool, key, "block", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "block", payload)?
     _said = saidLineIfPlain(state.watch, "served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
     servingBlocks(withPool(state, sent), key, rest)
 
 fn serving(pool: Pool, mempool: Mempool, key: Int, asked: List<List<Int>>) -> Result<Pool, String>
     ? "Each identifier asked for, answered from what we hold."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match asked
         [] -> Result.Ok(pool)
         [head, ..tail] -> servingOne(pool, mempool, key, head, tail)
 
 fn servingOne(pool: Pool, mempool: Mempool, key: Int, hash: List<Int>, rest: List<List<Int>>) -> Result<Pool, String>
     ? "One of them, if it is still held."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match Domain.Mempool.heldFor(mempool, Domain.Hash.reversedHex(hash))
         Option.None -> serving(pool, mempool, key, rest)
         Option.Some(held) -> served(pool, mempool, key, held, rest)
@@ -2310,8 +2310,8 @@ fn served(pool: Pool, mempool: Mempool, key: Int, held: Domain.Mempool.Held, res
       "Unchanged matters: a SegWit Transaction re-serialised from its decoded"
       "shape is a different string of bytes, and a Peer checking what it asked"
       "for against what it got would find a Transaction it did not ask for."
-    ! [Tcp.writeBytes]
-    serving(Infra.Peers.send(pool, key, "tx", Bytes.fromHex(held.raw)?)?, mempool, key, rest)
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
+    serving(Infra.Peers.tell(pool, key, "tx", Bytes.fromHex(held.raw)?)?, mempool, key, rest)
 
 fn onAnnouncedBlocks(state: Following, key: Int, announced: List<List<Int>>, first: List<Int>) -> Result<Unit, String>
     ? "A Block was announced. Ask for it as a compact Block if nothing else"
@@ -2351,7 +2351,7 @@ fn askingCompact(state: Following, key: Int, announced: List<List<Int>>, first: 
         Time.now, Time.unixMs,
     ]
     payload = Domain.Inventory.getDataPayload(compactBlockType(), [first])?
-    sent = Infra.Peers.send(state.pool, key, "getdata", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "getdata", payload)?
     listen(waitingFor(withPool(state, sent), key, first, Time.unixMs()))
 
 fn compactBlockType() -> Int
@@ -2453,7 +2453,7 @@ fn askingFor(state: Following, key: Int, compact: Compact, indexes: List<Int>) -
     ]
     _said = saidAsking(state, List.len(indexes), Domain.CompactBlock.totalOf(compact))
     payload = Domain.CompactBlock.getBlockTxnPayload(hashOfRebuild(state.rebuilding), indexes)?
-    sent = Infra.Peers.send(state.pool, key, "getblocktxn", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "getblocktxn", payload)?
     listen(awaiting(withPool(state, sent), compact, indexes))
 
 fn saidAsking(state: Following, missing: Int, total: Int) -> Unit
@@ -2666,9 +2666,9 @@ fn sendingHeaders(state: Following, key: Int, headers: List<String>) -> Result<F
     ? "The Headers we hold above what they know, up to the cap."
       "An empty answer is still an answer: it tells a Peer it is level with"
       "us, which is what it asked."
-    ! [Console.print, Tcp.writeBytes]
+    ! [Console.error, Console.print, Tcp.close, Tcp.writeBytes]
     payload = Domain.Block.headersPayload(headers)?
-    sent = Infra.Peers.send(state.pool, key, "headers", payload)?
+    sent = Infra.Peers.tell(state.pool, key, "headers", payload)?
     _said = saidServed(state.watch, List.len(headers), key)
     Result.Ok(withPool(state, sent))
 
