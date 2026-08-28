@@ -1474,7 +1474,7 @@ cd ../aver && git fetch upstream && git log --oneline $(cat ../btc-listener/.ave
 git merge --ff-only upstream/main && cargo install --path . aver-lang --locked
 cd ../btc-listener && git -C ../aver rev-parse HEAD > .aver-version
 aver check . --module-root . && aver verify . --module-root . && aver compile main.av --module-root . -o ../btc-listener-build
-cargo build --release --manifest-path ../btc-listener-build/Cargo.toml   # compile exits 0 on Rust that does not build
+cargo build --release --manifest-path ../btc-listener-build/Cargo.toml   # compile exits 0 on Rust that does not build (jasisz/aver#1172)
 ```
 
 Then, before opening the PR, **look for workarounds the move retires**:
