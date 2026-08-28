@@ -184,8 +184,25 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     bound = tellingCompact(asked, Infra.Peers.peerKeys(asked))?
     started = firstSeated(Following(pool = bound, store = store, blocks = blocks, book = book, nextKey = List.len(addresses), watch = freshWatch(Time.unixMs()), mempool = Domain.Mempool.empty(mempoolCap()), rebuilding = Option.None, log = metricsLog), Domain.AddressBook.sizeOf(book))?
     outcome = session(started, screened)
+    _ended = Result.withDefault(notedEnd(metricsLog, outcome), metricsLog)
     _given = restoredIf(screened)
     closeAfter(bound, outcome)
+
+fn notedEnd(log: Log, outcome: Result<Unit, String>) -> Result<Log, String>
+    ? "The last line a run writes, which is the most useful line it has"
+      "(#227)."
+      "debug.log recorded what a run was doing and never how it stopped, so"
+      "the one question asked of it most often -- why is this down -- was"
+      "the one question it could not answer. Signet ended on a Tcp.accept"
+      "ceiling and the reason survived only as a screenshot of a Screen"
+      "nobody was watching."
+      "Written from the log opened at the start rather than the one the run"
+      "carried, because a run that ended in an Err has no state left to ask;"
+      "only the path is wanted here and the path does not change."
+    ! [Disk.appendText, Time.unixMs]
+    match outcome
+        Result.Err(why) -> Infra.Metrics.noting(log, "end", "stopped with an error: {why}")
+        Result.Ok(done) -> Infra.Metrics.noting(log, "end", "stopped cleanly")
 
 fn firstSeated(state: Following, left: Int) -> Result<Following, String>
     ? "A session that named no Peer starts with an empty pool, so it dials"
@@ -446,6 +463,7 @@ fn dialsAsked(state: Following) -> Result<Following, String>
       "waiting, which is the whole point of #202."
     ! [
         Console.error, Console.print,
+        Disk.appendText,
         Random.int,
         Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
@@ -474,12 +492,12 @@ fn drainSettled(state: Following) -> Result<Following, String>
       "Kept on the pool rather than returned, the same as the spare"
       "Messages, so a dial that settles during a walk is still said out loud"
       "when the walk ends rather than being lost with the walk's pool."
-    ! [Console.error, Console.print, Tcp.writeBytes]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
     saying(withPool(state, Infra.Peers.withoutSettled(state.pool)), Infra.Peers.settledOf(state.pool))
 
 fn saying(state: Following, outcomes: List<Outcome>) -> Result<Following, String>
     ? "One at a time, oldest first."
-    ! [Console.error, Console.print, Tcp.writeBytes]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
     match outcomes
         [] -> Result.Ok(state)
         [head, ..tail] -> saying(said(state, head)?, tail)
@@ -487,23 +505,28 @@ fn saying(state: Following, outcomes: List<Outcome>) -> Result<Following, String
 fn said(state: Following, one: Outcome) -> Result<Following, String>
     ? "A Candidate that answered is a Peer to greet; one that did not is a"
       "line and nothing more."
-    ! [Console.error, Console.print, Tcp.writeBytes]
+    ! [Console.error, Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
     match one.seated
         false -> unreachable(state, one.address, one.why)
         true -> reached(state, one.address, one.key)
 
 fn unreachable(state: Following, address: String, why: String) -> Result<Following, String>
     ? "Say who would not have us, and leave it marked as tried."
-    ! [Console.error]
+      "Noted as well as said, because a pool that will not refill is read"
+      "from the Candidates that refused it (#222) and the Screen keeps none"
+      "of them."
+    ! [Console.error, Disk.appendText, Time.unixMs]
     _said = saidErrorIfPlain(state.watch, "candidate {address} did not answer: {why}")
-    Result.Ok(state)
+    noted = Infra.Metrics.noting(state.log, "peer", "candidate {address} did not answer: {why}")?
+    Result.Ok(withLog(state, noted))
 
 fn reached(state: Following, address: String, key: Int) -> Result<Following, String>
     ? "A Candidate has become a Peer, so ask it who it knows."
-    ! [Console.print, Tcp.writeBytes]
+    ! [Console.print, Disk.appendText, Tcp.writeBytes, Time.unixMs]
     _said = saidLineIfPlain(state.watch, "peer {key} is {address}, from the Address Book")
+    noted = Infra.Metrics.noting(state.log, "peer", "seated {key} at {address} from the Book, {List.len(Infra.Peers.peerKeys(state.pool))} held")?
     asked = Infra.Peers.send(state.pool, key, "getaddr", Bytes.fromList([]))?
-    Result.Ok(withPool(state, asked))
+    Result.Ok(withPool(withLog(state, noted), asked))
 
 fn joining(pool: Pool, addresses: List<PeerAddress>, key: Int) -> Result<Pool, String>
     ? "Every Peer given, each handshaked before the next is dialled."
@@ -860,7 +883,7 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None)?
+    chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None, mostChunk())?
     built = chunked.built
     after = chunked.state
     backOut = List.concat(unconfirmed, built.unconfirmed)
@@ -876,18 +899,71 @@ record Chunked
     state: Following
     built: Built
 
-fn chunkOf() -> Int
-    ? "How many Blocks the Set connects between two looks at the pool (#217)."
-      "Bitcoin Core drops a Peer that has not answered a ping in twenty"
-      "minutes. A mainnet Set walk ran for hours without answering one --"
-      "476 minute-long windows with nothing spent in Tcp.poll -- and when"
-      "it returned every Peer had gone. 250 is under a minute at the five"
-      "Blocks a second the 2013 chain connects at, and well inside twenty"
-      "at the half a Block a second of a modern one."
+fn chunkMs() -> Int
+    ? "How long a chunk of the Set should take between two looks at the"
+      "pool: ten seconds (#222)."
+      "#217 made this a count of Blocks -- 250 -- chosen against Bitcoin"
+      "Core's twenty-minute ping timeout, which it met. What it also set,"
+      "and was not chosen against, was the rate at which the pool can be"
+      "refilled: toppedUp starts at most one dial per tending, so one per"
+      "chunk, and a chunk turned out to be 53 seconds on mainnet. The listen"
+      "loop dials once a tick. So the phase that lasts forty hours refilled"
+      "its pool at a fiftieth of the rate the phase that lasts seconds does,"
+      "and mainnet held one Peer for 71 of its 73 chunks with 602 Candidates"
+      "it could not get to."
+      "A count of Blocks was always a proxy for a length of time, and a bad"
+      "one: a Block in 2013 and a Block at the tip differ by orders of"
+      "magnitude. Ten seconds is six dials a minute -- eight Peers inside two"
+      "minutes -- and stays far inside twenty however heavy the Blocks get,"
+      "which the fixed count did not promise."
+    10000
+
+verify chunkMs
+    chunkMs() => 10000
+
+fn mostChunk() -> Int
+    ? "The most Blocks one chunk may take, whatever the clock says."
+      "#217's number, kept as the ceiling: it is the count that was measured"
+      "against the ping timeout, and nothing here should quietly exceed it."
     250
 
-verify chunkOf
-    chunkOf() => 250
+verify mostChunk
+    mostChunk() => 250
+
+fn leastChunk() -> Int
+    ? "The fewest, so heavy Blocks cannot make a chunk long by making it"
+      "small. Five Blocks that each take a minute is still five minutes,"
+      "which is inside the timeout with room to spare."
+    5
+
+verify leastChunk
+    leastChunk() => 5
+
+fn sized(done: Int, tookMs: Int) -> Result<Int, String>
+    ? "The next chunk, from what the last one actually cost."
+      "Aims at chunkMs and clamps to the pair above. A chunk that took no"
+      "measurable time says nothing about the rate, so it asks for the"
+      "ceiling and finds out."
+    match Bool.or(tookMs <= 0, done <= 0)
+        true -> Result.Ok(mostChunk())
+        false -> Result.Ok(clamped(Int.div(done * chunkMs(), tookMs)?))
+
+verify sized
+    sized(0, 0) => Result.Ok(250)
+    sized(250, 0) => Result.Ok(250)
+    sized(250, 1000) => Result.Ok(250)
+    sized(250, 53000) => Result.Ok(47)
+    sized(10, 10000) => Result.Ok(10)
+    sized(1, 60000) => Result.Ok(5)
+
+fn clamped(blocks: Int) -> Int
+    ? "Between the fewest and the most."
+    Int.min(mostChunk(), Int.max(leastChunk(), blocks))
+
+verify clamped
+    clamped(0) => 5
+    clamped(7) => 7
+    clamped(9000) => 250
 
 fn standingOf(store: Store) -> Result<Int, String>
     ? "The Height the Set has been built up to, or zero before it has one."
@@ -908,7 +984,7 @@ verify heightIn
     heightIn(Option.Some(Bytes.fromList([1, 2, 3]))) => Result.Err("a Set standing is at least 4 bytes, got 3")
     heightIn(Option.Some(Domain.UtxoStore.encodeReached(Domain.UtxoStore.Reached(height = 7, blockId = "ab"))?)) => Result.Ok(7)
 
-fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Built>) -> Result<Chunked, String>
+fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Built>, blocks: Int) -> Result<Chunked, String>
     ? "One chunk of the Set, then the pool, then the next chunk (#217)."
       "The walk is the same walk: Infra.ChainState.build realigns, connects"
       "and prunes exactly as it did for the whole range. It is simply asked"
@@ -930,13 +1006,14 @@ fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Bui
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    chunkTo = Int.min(tipHeight, standing + chunkOf())
+    chunkTo = Int.min(tipHeight, standing + blocks)
     _note = Infra.Metrics.noting(state.log, "set", "connecting {standing + 1}..{chunkTo} of {tipHeight}, {List.len(Infra.Peers.peerKeys(state.pool))} Peer(s)")?
+    startedMs = Time.unixMs()
     next = Infra.ChainState.build(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, tipHeight, eyeIn(sofar, eyeOf(state)))?
     merged = mergedBuilt(sofar, next)
     match Bool.or(next.reached < chunkTo, chunkTo >= tipHeight)
         true -> Result.Ok(Chunked(state = state, built = merged))
-        false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(merged))
+        false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(merged), sized(next.reached - standing, Time.unixMs() - startedMs)?)
 
 fn storeIn(sofar: Option<Built>, before: Store) -> Store
     ? "The Store the next chunk continues from: the walk's own once it has one."
@@ -995,11 +1072,38 @@ fn tendedBetween(state: Following) -> Result<Following, String>
     ? "What the loop owes the pool between two chunks of the Set (#217)."
     ! [
         Console.error, Console.print,
+        Disk.appendText,
         Random.int,
         Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    toppedUp(dialsAsked(withPool(state, tendedPool(state.pool, spareLimit())?))?)
+    tendedInto(state, tendedPool(state.pool, spareLimit(), 0)?)
+
+fn tendedInto(state: Following, tending: Tended) -> Result<Following, String>
+    ? "What the tending heard, folded back before the dial and the top-up."
+      "A Peer that spoke to a tending has spoken, and until #222 that did"
+      "not move the silence clock: anyHeardMs is stamped by a handled spare"
+      "Message in the loop and by firstAfterNone, and a Set phase reaches"
+      "neither for hours. So a node coming out of a long Set phase with an"
+      "empty pool failed stillHeard on its first quiet turn -- hours of"
+      "silence judged against a 150-second rule -- and nobodyLeft's dialling"
+      "on never got its chance. The Peers were talking the whole time; only"
+      "the clock did not know."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    toppedUp(dialsAsked(withPool(heardIfAny(state, tending.heard), tending.pool))?)
+
+fn heardIfAny(state: Following, heard: Int) -> Following
+    ? "The silence clock, moved on only if somebody actually spoke."
+    ! [Time.unixMs]
+    match heard > 0
+        false -> state
+        true -> withWatch(state, heardAt(state.watch, Infra.Peers.listenerKey(), Time.unixMs()))
 
 fn spareLimit() -> Int
     ? "How many Messages one tending reads before going back to the Set."
@@ -1010,29 +1114,35 @@ fn spareLimit() -> Int
 verify spareLimit
     spareLimit() => 64
 
-fn tendedPool(pool: Pool, budget: Int) -> Result<Pool, String>
+record Tended
+    pool: Pool
+    heard: Int
+
+fn tendedPool(pool: Pool, budget: Int, heard: Int) -> Result<Tended, String>
     ? "Read what every Peer has already sent, without waiting for more."
       "A poll of zero milliseconds is the question 'is anything there'; a"
       "ping is answered and everything else kept as spare for the loop,"
       "exactly as the body walk does mid-phase."
+      "The count comes back because somebody having spoken is a fact the"
+      "silence clock wants and had no other way to learn (#222)."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match budget <= 0
-        true -> Result.Ok(pool)
-        false -> tendedOnce(Infra.Peers.awaitTick(pool, 0)?, budget)
+        true -> Result.Ok(Tended(pool = pool, heard = heard))
+        false -> tendedOnce(Infra.Peers.awaitTick(pool, 0)?, budget, heard)
 
-fn tendedOnce(ticked: Tick, budget: Int) -> Result<Pool, String>
+fn tendedOnce(ticked: Tick, budget: Int, heard: Int) -> Result<Tended, String>
     ? "Nothing there, or one Message to sort."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match ticked.arrived
-        Option.None -> Result.Ok(ticked.pool)
-        Option.Some(one) -> tendedWith(ticked.pool, one, budget)
+        Option.None -> Result.Ok(Tended(pool = ticked.pool, heard = heard))
+        Option.Some(one) -> tendedWith(ticked.pool, one, budget, heard)
 
-fn tendedWith(pool: Pool, one: Spare, budget: Int) -> Result<Pool, String>
+fn tendedWith(pool: Pool, one: Spare, budget: Int, heard: Int) -> Result<Tended, String>
     ? "A ping is answered; anything else is the loop's, later."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match one.frame.command
-        "ping" -> tendedPool(Infra.Peers.send(pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1)
-        _ -> tendedPool(Infra.Peers.spared(pool, one.key, one.frame), budget - 1)
+        "ping" -> tendedPool(Infra.Peers.send(pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1, heard + 1)
+        _ -> tendedPool(Infra.Peers.spared(pool, one.key, one.frame), budget - 1, heard + 1)
 
 fn sweptOf(store: Store, pool: Mempool, connectedCount: Int, disconnectedCount: Int) -> Result<Mempool, String>
     ? "The Mempool, after the chain moved under it."
