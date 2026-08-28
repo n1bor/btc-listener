@@ -46,7 +46,7 @@ fn encodeCoin(unspent: Unspent) -> Result<Bytes, String>
       "The Transaction Id and the position are the key and are not repeated."
       "The Script goes last because it is the one field whose length the"
       "record does not say."
-    Result.Ok(Bytes.concat(Bytes.fromList(List.concat(Domain.ByteField.number(unspent.value, Domain.Index.amountWidth()), List.concat(Domain.ByteField.number(unspent.height, Domain.Index.heightWidth()), [flagByte(unspent.coinbase)])))?, unspent.script))
+    Result.Ok(Bytes.concat(Bytes.concat(Domain.ByteField.numberBytes(unspent.value, Domain.Index.amountWidth()), Domain.ByteField.numberBytes(unspent.height, Domain.Index.heightWidth())), Bytes.concat(Domain.ByteField.numberBytes(flagByte(unspent.coinbase), 1), unspent.script)))
 
 verify encodeCoin
     Bytes.octets(encodeCoin(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => List.concat(Domain.ByteField.number(5, 8), List.concat(Domain.ByteField.number(7, 4), [0, 118]))
@@ -95,7 +95,7 @@ fn encodeUndo(removed: List<Unspent>) -> Result<Bytes, String>
       "length-prefixed so the walk back out needs no separator. It was"
       "semicolon-joined text, which worked only because every field was"
       "hexadecimal and so could not contain one."
-    Bytes.fromList(undoInto(removed, [])?)
+    undoInto(removed, Bytes.empty())
 
 verify encodeUndo
     Bytes.octets(encodeUndo([])?) => []
@@ -119,16 +119,18 @@ fn longScript() -> Bytes
 verify longScript
     Bytes.len(longScript()) => 257
 
-fn undoInto(removed: List<Unspent>, acc: List<Int>) -> Result<List<Int>, String>
-    ? "One Output at a time, in the order they were taken."
+fn undoInto(removed: List<Unspent>, acc: Bytes) -> Result<Bytes, String>
+    ? "One Output at a time, in the order they were taken, packed as it goes"
+      "(#243): each is a copy onto the end, never a rope walked at the end."
     match removed
         [] -> Result.Ok(acc)
-        [head, ..tail] -> undoInto(tail, List.concat(acc, oneUndo(head)?))
+        [head, ..tail] -> undoInto(tail, Bytes.concat(acc, oneUndo(head)?))
 
 verify undoInto
-    undoInto([], []) => Result.Ok([])
+    undoInto([], Bytes.empty()) => Result.Ok(Bytes.empty())
+    Bytes.len(undoInto([longScriptCoin()], Bytes.empty())?) => 281
 
-fn oneUndo(unspent: Unspent) -> Result<List<Int>, String>
+fn oneUndo(unspent: Unspent) -> Result<Bytes, String>
     ? "One removed Output: where it was, then what the Set held about it."
       "The key is a Transaction Id and an Output position, so it is thirty-six"
       "bytes whatever the Output was, and one length byte describes it for"
@@ -136,13 +138,12 @@ fn oneUndo(unspent: Unspent) -> Result<List<Int>, String>
       "no such bound -- so it takes a wide prefix (#218). Behind one byte, a"
       "257-byte script made a 270-byte entry whose length would not fit, and"
       "the Set stopped at Height 243016 and blamed a Peer for it."
-    key = Domain.ByteField.prefixed(Bytes.octets(keyAt(unspent.txid, unspent.index)))?
-    entry = Domain.ByteField.prefixedWide(Bytes.octets(encodeCoin(unspent)?))
-    Result.Ok(List.concat(key, entry))
+    key = Domain.ByteField.prefixedBytes(keyAt(unspent.txid, unspent.index))?
+    Result.Ok(Bytes.concat(key, Domain.ByteField.prefixedWideBytes(encodeCoin(unspent)?)))
 
 verify oneUndo
-    List.len(oneUndo(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => 25
-    List.len(oneUndo(longScriptCoin())?) => 281
+    Bytes.len(oneUndo(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.fromList([118]), height = 7, coinbase = false))?) => 25
+    Bytes.len(oneUndo(longScriptCoin())?) => 281
 
 fn decodeUndo(stored: Bytes) -> Result<List<Unspent>, String>
     ? "Read a Block's Undo Data back."
@@ -269,7 +270,7 @@ fn keyAt(txid: Bytes, index: Int) -> Bytes
     ? "The same key, from the Transaction Id as bytes (#234)."
       "Total: the tag and the scan-ordered position are octets by"
       "construction, so neither fromList can refuse."
-    Bytes.concat(Bytes.concat(Result.withDefault(Bytes.fromList([unspentTag()]), Domain.Index.emptyBytes()), txid), Result.withDefault(Bytes.fromList(Domain.IndexKeys.scanOrder(index, Domain.IndexKeys.indexWidth())), Domain.Index.emptyBytes()))
+    Bytes.concat(Bytes.concat(Domain.ByteField.numberBytes(unspentTag(), 1), txid), Domain.ByteField.numberBytes(index, Domain.IndexKeys.indexWidth()))
 
 verify keyAt
     keyAt(Bytes.fromList([170]), 0) => unspentKey("aa", 0)?
