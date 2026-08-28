@@ -33,7 +33,7 @@ use rocksdb::{
 /// that reaches a Store declined to run until this line agreed again.
 /// n1bor/btc-listener#43.
 pub const CONTRACT_HASH: &str =
-    "sha256:b502cc65850614dfd4e4950b3493eb857d456d7cfbad23279512ada5fdfdfc32";
+    "sha256:7585e0c4c77ca0b94cd86d9ab74bfbfd8d2c0b1925423ad0b03ec2f81961a57f";
 
 /// The open database. RocksDB takes `&self` for every operation and is
 /// `Sync`, so the resource needs no lock of its own.
@@ -184,6 +184,22 @@ impl CapabilityProvider for Kv {
                     Ok(Some(bytes)) => ok(ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes)))),
                 })
             }
+            "Infra.Kv.getAll" => {
+                let [handle, keys] = args else {
+                    return Err(ProviderFault::new("bad_arity", "getAll takes a Handle and a List"));
+                };
+                let keys = keys_in(keys, "keys")?;
+                let open = open_in(handle, "handle")?;
+                let mut found = Vec::with_capacity(keys.len());
+                for (key, answer) in keys.iter().zip(open.0.multi_get(&keys)) {
+                    found.push(match answer {
+                        Err(why) => return Ok(failed(&format!("cannot read '{}'", shown(key)), why)),
+                        Ok(None) => ProviderValue::OptionNone,
+                        Ok(Some(bytes)) => ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes))),
+                    });
+                }
+                Ok(ok(ProviderValue::List(found)))
+            }
             "Infra.Kv.putAll" => {
                 let [handle, entries] = args else {
                     return Err(ProviderFault::new("bad_arity", "putAll takes a Handle and a List"));
@@ -267,6 +283,7 @@ pub fn kv_binding() -> ProviderBinding {
             "Infra.Kv.count",
             "Infra.Kv.deleteAll",
             "Infra.Kv.get",
+            "Infra.Kv.getAll",
             "Infra.Kv.open",
             "Infra.Kv.prefixed",
             "Infra.Kv.putAll",
@@ -362,6 +379,25 @@ mod tests {
                 other => panic!("expected Bytes, got {other:?}"),
             },
             other => panic!("expected an Option, got {other:?}"),
+        }
+    }
+
+    /// Every key at once, in the order asked, None where absent.
+    fn gotAll(handle: &ProviderValue, keys: &[&str]) -> Vec<Option<String>> {
+        let asked = ProviderValue::List(keys.iter().map(|k| raw(k)).collect());
+        match okayed(call("getAll", &[handle.clone(), asked])) {
+            ProviderValue::List(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    ProviderValue::OptionNone => None,
+                    ProviderValue::OptionSome(inner) => match *inner {
+                        ProviderValue::Bytes(value) => Some(String::from_utf8(value).expect("this test stores text")),
+                        other => panic!("expected Bytes, got {other:?}"),
+                    },
+                    other => panic!("expected an Option, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected a List, got {other:?}"),
         }
     }
 
@@ -692,6 +728,34 @@ mod tests {
         let binding = kv_binding();
         assert_eq!(binding.capability(), "Infra.Kv");
         assert_eq!(binding.contract_hash(), CONTRACT_HASH);
-        assert_eq!(binding.operations().len(), 6);
+        assert_eq!(binding.operations().len(), 7);
+    }
+
+    #[test]
+    fn get_all_of_five_thousand_keys_is_quick() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let handle = opened(dir.path());
+        let keys: Vec<String> = (0..5000).map(|i| format!("u:{i:08}")).collect();
+        let pairs: Vec<(&str, &str)> = keys.iter().map(|k| (k.as_str(), "v")).collect();
+        put(&handle, &pairs);
+        let asked: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+        let started = std::time::Instant::now();
+        let answers = gotAll(&handle, &asked);
+        let took = started.elapsed();
+        assert_eq!(answers.len(), 5000);
+        eprintln!("getAll of 5000 keys took {took:?}");
+        assert!(took.as_millis() < 500, "getAll of 5000 keys took {took:?}");
+    }
+
+    #[test]
+    fn get_all_answers_every_key_in_the_order_asked() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let handle = opened(dir.path());
+        put(&handle, &[("u:aa", "1"), ("u:cc", "3")]);
+        assert_eq!(
+            gotAll(&handle, &["u:cc", "u:bb", "u:aa"]),
+            vec![Some("3".to_string()), None, Some("1".to_string())]
+        );
+        assert_eq!(gotAll(&handle, &[]), Vec::<Option<String>>::new());
     }
 }

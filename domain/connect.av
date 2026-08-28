@@ -131,11 +131,21 @@ verify connected
 
 fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Connecting
     ? "The rest of the Block first, then what the coinbase is owed."
-    settled(network, height, coinbase, walked(rest, height, fromStore, seeded(coinbase, height)))
+    settled(network, height, coinbase, walkedFrom(seeded(coinbase, height), rest, height, fromStore))
 
 verify withCoinbase
     withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = "cb", index = 0, value = 5000000000, script = "", height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
     withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connecting.Refused("coinbase claims 6000000000 with 5000000000 allowed")
+
+fn walkedFrom(start: Result<Building, String>, rest: List<Transaction>, height: Int, fromStore: Map<Bytes, Unspent>) -> Result<Building, String>
+    ? "The walk, from the coinbase's Outputs, unless those had no key."
+    match start
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(begun) -> walked(rest, height, fromStore, begun.created, begun.spent, begun.removed, begun.fees, begun.confirmed)
+
+verify walkedFrom
+    walkedFrom(Result.Err("no"), [], 1, holding()?) => Result.Err("no")
+    walkedFrom(seeded(minting(50), 1), [paying("a1", "aa", 0, 90)], 1, holding()?)?.fees => 10
 
 fn seeded(coinbase: Transaction, height: Int) -> Result<Building, String>
     ? "The Block's own Outputs, before any of it has been spent."
@@ -162,174 +172,148 @@ verify intoMap
     Map.len(intoMap([Unspent(txid = "aa", index = 0, value = 5, script = "", height = 0, coinbase = false)], Map.fromList([]))?) => 1
     intoMap([Unspent(txid = "zz", index = 0, value = 5, script = "", height = 0, coinbase = false)], Map.fromList([])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn walked(transactions: List<Transaction>, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
+record Walking
+    transaction: Transaction
+    rest: List<Transaction>
+    height: Int
+    fromStore: Map<Bytes, Unspent>
+
+fn walked(transactions: List<Transaction>, height: Int, fromStore: Map<Bytes, Unspent>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>) -> Result<Building, String>
     ? "Every Transaction after the coinbase, in the order the Block holds them."
+      "The five things the walk accumulates are parameters rather than fields"
+      "of a record passed along (#227): a Map.set on a field of a record the"
+      "caller still holds copies the whole Map, so the walk was quadratic in"
+      "a Block's Inputs -- 122 microseconds an Input on a 4,700-Input Block"
+      "against 54 on an average one. A Map in argument position of a tail"
+      "call is the shape the runtime updates in place. Building is assembled"
+      "once, at the end."
     match transactions
-        [] -> building
-        [head, ..tail] -> walked(tail, height, fromStore, oneTransaction(head, height, fromStore, building))
+        [] -> Result.Ok(Building(created = created, spent = spent, removed = removed, fees = fees, confirmed = confirmed))
+        [head, ..tail] -> spentBy(head.inputs, Walking(transaction = head, rest = tail, height = height, fromStore = fromStore), created, spent, removed, fees, confirmed, 0)
 
 verify walked
-    walked([], 0, Map.fromList([]), Result.Ok(seeded(minting(50), 1)?))?.fees => 0
-    walked([], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
-    walked([Transaction(version = 1, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)], 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
+    walked([], 1, holding()?, Map.fromList([]), Map.fromList([]), [], 0, [])?.fees => 0
+    walked([paying("a1", "aa", 0, 90)], 1, holding()?, Map.fromList([]), Map.fromList([]), [], 0, [])?.fees => 10
+    List.len(walked([paying("a1", "aa", 0, 90), paying("a2", "a1", 0, 80)], 1, holding()?, Map.fromList([]), Map.fromList([]), [], 0, [])?.removed) => 1
+    Map.len(walked([paying("a1", "aa", 0, 90), paying("a2", "a1", 0, 80)], 1, holding()?, Map.fromList([]), Map.fromList([]), [], 0, [])?.created) => 1
+    walked([paying("a1", "aa", 0, 90), paying("a2", "aa", 0, 80)], 1, holding()?, Map.fromList([]), Map.fromList([]), [], 0, []) => Result.Err("Input names Output 0 of aa, which this Block has already spent")
 
-fn oneTransaction(transaction: Transaction, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
-    ? "One Transaction's Inputs taken, its Outputs offered, and what it"
-      "paid remembered (#133)."
-    match building
-        Result.Err(why) -> Result.Err(why)
-        Result.Ok(state) -> confirmedAfter(transaction, state.fees, taking(transaction, height, fromStore, state))
-
-verify oneTransaction
-    oneTransaction(minting(50), 0, Map.fromList([]), Result.Err("no")) => Result.Err("no")
-    oneTransaction(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), Result.Ok(seeded(minting(50), 1)?))?.fees => 10
-
-fn confirmedAfter(transaction: Transaction, feesBefore: Int, built: Result<Building, String>) -> Result<Building, String>
-    ? "The fee this Transaction alone left behind: what the Block's running"
-      "total grew by across its step."
-    match built
-        Result.Err(why) -> Result.Err(why)
-        Result.Ok(after) -> Result.Ok(Building(created = after.created, spent = after.spent, removed = after.removed, fees = after.fees, confirmed = List.prepend(TxFee(txid = transaction.txid, fee = after.fees - feesBefore, coinbase = false), after.confirmed)))
-
-verify confirmedAfter
-    confirmedAfter(spending("aa", 0, 40), 50, Result.Err("no")) => Result.Err("no")
-    confirmedAfter(spending("aa", 0, 40), 0, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 10, confirmed = [])))?.confirmed => [TxFee(txid = "bb", fee = 10, coinbase = false)]
-
-fn taking(transaction: Transaction, height: Int, fromStore: Map<Bytes, Unspent>, state: Building) -> Result<Building, String>
-    ? "Resolve every Input, then check the arithmetic."
-    afterInputs(transaction, height, spentBy(transaction.inputs, height, fromStore, Result.Ok(state), 0))
-
-verify taking
-    taking(spending("aa", 0, 40), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 10
-    taking(spending("aa", 0, 60), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?) => Result.Err("Transaction bb pays out 60 against 50 taken in")
-
-fn spentBy(inputs: List<Input>, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>, taken: Int) -> Result<Building, String>
+fn spentBy(inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int) -> Result<Building, String>
     ? "Every Input of one Transaction, and what they add up to."
-      "The running total travels in the Building's fees field, which is what"
-      "afterInputs then turns into a fee once the Outputs are known."
     match inputs
-        [] -> building
-        [head, ..tail] -> spentBy(tail, height, fromStore, oneInput(head, height, fromStore, building), taken)
+        [] -> conserving(walking, created, spent, removed, fees, confirmed, taken)
+        [head, ..tail] -> resolving(head, tail, walking, created, spent, removed, fees, confirmed, taken)
 
 verify spentBy
-    spentBy([], 0, Map.fromList([]), Result.Err("no"), 0) => Result.Err("no")
-    spentBy([], 0, Map.fromList([]), Result.Ok(seeded(minting(50), 1)?), 0)?.fees => 0
-    spentBy([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], 0, Map.fromList([]), Result.Err("no"), 0) => Result.Err("no")
+    spentBy([], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 50)?.fees => 10
+    spentBy(spending("aa", 0, 40).inputs, sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0)?.fees => 60
 
-fn oneInput(input: Input, height: Int, fromStore: Map<Bytes, Unspent>, building: Result<Building, String>) -> Result<Building, String>
-    ? "One Input, taken out of whatever holds the Output it names."
-    match building
-        Result.Err(why) -> Result.Err(why)
-        Result.Ok(state) -> resolving(input, height, fromStore, state)
+fn sampleWalking(transaction: Transaction, height: Int) -> Walking
+    ? "One Transaction alone at a Height, over what the cases hold, for the cases."
+    Walking(transaction = transaction, rest = [], height = height, fromStore = Result.withDefault(holding(), Map.fromList([])))
 
-verify oneInput
-    oneInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), Result.Err("no")) => Result.Err("no")
-    oneInput(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), Result.Ok(seeded(minting(50), 1)?)) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
+verify sampleWalking
+    sampleWalking(minting(50), 7).height => 7
+    Map.len(sampleWalking(minting(50), 7).fromStore) => 2
 
 fn naming(txid: String, index: Int) -> String
     ? "How an Output is named to a reader who has to fix something."
-      "The key became bytes with n1bor/btc-listener#45 and a key rendered as"
-      "hexadecimal tells nobody anything. An Input names its parent by"
-      "Transaction Id and position, so a message about one says it the same"
-      "way the Input did."
+      "The index first, because it is the part a reader of a Transaction"
+      "listing has to find; the Transaction Id they will have already."
     "Output {index} of {txid}"
 
 verify naming
     naming("aa", 0) => "Output 0 of aa"
-    naming("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 12) => "Output 12 of f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
+    naming("aa", 3) => "Output 3 of aa"
 
-fn resolving(input: Input, height: Int, fromStore: Map<Bytes, Unspent>, state: Building) -> Result<Building, String>
+fn resolving(input: Input, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int) -> Result<Building, String>
     ? "Already spent, made in this Block, or resolved from the Store."
-      "Spent is checked first, and it is what stops a Block spending the same"
-      "Output twice -- once from the Store's answer and once again, because"
-      "the Store still says it is there."
     key = outpointKey(input.previousTxid, input.previousIndex)?
-    found(key, naming(input.previousTxid, input.previousIndex), height, state, Map.has(state.spent, key), Map.get(state.created, key), Map.get(fromStore, key))
+    found(key, naming(input.previousTxid, input.previousIndex), inputs, walking, created, spent, removed, fees, confirmed, taken, Map.has(spent, key), Map.get(created, key), Map.get(walking.fromStore, key))
 
 verify resolving
-    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([]), seeded(minting(50), 1)?) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
-    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), 1, Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false))]), seeded(minting(50), 1)?)?.fees => 50
+    resolving(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = []), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0)?.fees => 60
+    resolving(Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 0, witness = []), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn found(key: Bytes, named: String, height: Int, state: Building, already: Bool, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
+fn found(key: Bytes, named: String, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int, already: Bool, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
     ? "Which of the three answers applies, in the order they have to be asked."
     match already
         true -> Result.Err("Input names {named}, which this Block has already spent")
-        false -> notYetSpent(key, named, height, state, inBlock, inStore)
+        false -> notYetSpent(key, named, inputs, walking, created, spent, removed, fees, confirmed, taken, inBlock, inStore)
 
 verify found
-    found(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, true, Option.None, Option.None) => Result.Err("Input names Output 0 of aa, which this Block has already spent")
-    found(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, false, Option.None, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
+    found(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, true, Option.None, Option.None) => Result.Err("Input names Output 0 of aa, which this Block has already spent")
+    found(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, false, Option.None, Option.Some(Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)))?.fees => 60
 
-fn notYetSpent(key: Bytes, named: String, height: Int, state: Building, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
+fn notYetSpent(key: Bytes, named: String, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int, inBlock: Option<Unspent>, inStore: Option<Unspent>) -> Result<Building, String>
     ? "An Output made earlier in this Block, before one the Store holds."
-      "It leaves no Undo Data: it did not exist before this Block, so putting"
-      "it back on a disconnect would invent it."
     match inBlock
-        Option.Some(unspent) -> takenFromBlock(key, named, height, state, unspent)
-        Option.None -> fromTheStore(key, named, height, state, inStore)
+        Option.Some(unspent) -> takenFromBlock(key, named, inputs, walking, created, spent, removed, fees, confirmed, taken, unspent)
+        Option.None -> fromTheStore(key, named, inputs, walking, created, spent, removed, fees, confirmed, taken, inStore)
 
 verify notYetSpent
-    notYetSpent(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.None, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
-    List.len(notYetSpent(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Map.get(seeded(minting(50), 1)?.created, Domain.UtxoStore.unspentKey("cb", 0)?), Option.None)?.removed) => 0
-    notYetSpent(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Option.Some(Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = false)), Option.None)?.fees => 50
+    List.len(notYetSpent(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Option.None, Option.Some(Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)))?.removed) => 1
+    List.len(notYetSpent(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Option.Some(Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)), Option.None)?.removed) => 0
 
-fn takenFromBlock(key: Bytes, named: String, height: Int, state: Building, unspent: Unspent) -> Result<Building, String>
+fn takenFromBlock(key: Bytes, named: String, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int, unspent: Unspent) -> Result<Building, String>
     ? "Spent where it was made, so it never reaches the Set at all."
-    matureEnough(key, named, height, unspent, Building(created = Map.remove(state.created, key), spent = Map.set(state.spent, key, true), removed = state.removed, fees = state.fees + unspent.value, confirmed = state.confirmed))
+    _mature = matureEnough(named, walking.height, unspent)?
+    spentBy(inputs, walking, Map.remove(created, key), Map.set(spent, key, true), removed, fees, confirmed, taken + unspent.value)
 
 verify takenFromBlock
-    takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.fees => 50
-    Map.len(takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), 101, seeded(minting(50), 1)?, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.created) => 0
+    takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), [], sampleWalking(spending("cb", 0, 40), 101), seeded(minting(50), 1)?.created, Map.fromList([]), [], 0, [], 0, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.fees => 10
+    Map.len(takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), [], sampleWalking(spending("cb", 0, 40), 101), seeded(minting(50), 1)?.created, Map.fromList([]), [], 0, [], 0, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true))?.created) => 1
+    takenFromBlock(Domain.UtxoStore.unspentKey("cb", 0)?, naming("cb", 0), [], sampleWalking(spending("cb", 0, 40), 5), seeded(minting(50), 1)?.created, Map.fromList([]), [], 0, [], 0, Unspent(txid = "cb", index = 0, value = 50, script = "", height = 1, coinbase = true)) => Result.Err("Input names Output 0 of cb, a coinbase Output from Height 1 that is not spendable until 101")
 
-fn fromTheStore(key: Bytes, named: String, height: Int, state: Building, inStore: Option<Unspent>) -> Result<Building, String>
+fn fromTheStore(key: Bytes, named: String, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int, inStore: Option<Unspent>) -> Result<Building, String>
     ? "An Output the Set already held, which does leave Undo Data."
     match inStore
         Option.None -> Result.Err("Input names {named}, which is not an unspent Output")
-        Option.Some(unspent) -> matureEnough(key, named, height, unspent, Building(created = state.created, spent = Map.set(state.spent, key, true), removed = List.prepend(unspent, state.removed), fees = state.fees + unspent.value, confirmed = state.confirmed))
+        Option.Some(unspent) -> takenFromStore(key, inputs, walking, created, spent, removed, fees, confirmed, taken, matureEnough(named, walking.height, unspent), unspent)
 
 verify fromTheStore
-    fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
-    List.len(fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 1, seeded(minting(50), 1)?, Option.Some(Unspent(txid = "aa", index = 0, value = 50, script = "", height = 0, coinbase = false)))?.removed) => 1
+    fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Option.None) => Result.Err("Input names Output 0 of aa, which is not an unspent Output")
+    List.len(fromTheStore(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Option.Some(Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)))?.removed) => 1
 
-fn matureEnough(key: Bytes, named: String, height: Int, unspent: Unspent, state: Building) -> Result<Building, String>
+fn takenFromStore(key: Bytes, inputs: List<Input>, walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int, mature: Result<Unit, String>, unspent: Unspent) -> Result<Building, String>
+    ? "Out of the Set and into the Undo Data, once it is old enough."
+    match mature
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(unit) -> spentBy(inputs, walking, created, Map.set(spent, key, true), List.prepend(unspent, removed), fees, confirmed, taken + unspent.value)
+
+verify takenFromStore
+    takenFromStore(Domain.UtxoStore.unspentKey("aa", 0)?, [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Result.Err("no"), Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false)) => Result.Err("no")
+    takenFromStore(Domain.UtxoStore.unspentKey("aa", 0)?, [], sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 0, Result.Ok(Unit), Unspent(txid = "aa", index = 0, value = 100, script = "", height = 0, coinbase = false))?.fees => 60
+
+fn matureEnough(named: String, height: Int, unspent: Unspent) -> Result<Unit, String>
     ? "A coinbase Output cannot be spent for a hundred Blocks."
     match Domain.UtxoStore.matured(unspent, height)
-        true -> Result.Ok(state)
+        true -> Result.Ok(Unit)
         false -> Result.Err("Input names {named}, a coinbase Output from Height {unspent.height} that is not spendable until {unspent.height + Domain.UtxoStore.maturity()}")
 
 verify matureEnough
-    matureEnough(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false), seeded(minting(50), 1)?)?.fees => 0
-    matureEnough(Domain.UtxoStore.unspentKey("aa", 0)?, naming("aa", 0), 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true), seeded(minting(50), 1)?) => Result.Err("Input names Output 0 of aa, a coinbase Output from Height 1 that is not spendable until 101")
+    matureEnough(naming("aa", 0), 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)) => Result.Ok(Unit)
+    matureEnough(naming("aa", 0), 5, Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = true)) => Result.Err("Input names Output 0 of aa, a coinbase Output from Height 1 that is not spendable until 101")
 
-fn afterInputs(transaction: Transaction, height: Int, building: Result<Building, String>) -> Result<Building, String>
-    ? "What came in against what goes out."
-    match building
-        Result.Err(why) -> Result.Err(why)
-        Result.Ok(state) -> conserving(transaction, height, state)
-
-verify afterInputs
-    afterInputs(minting(50), 0, Result.Err("no")) => Result.Err("no")
-    afterInputs(spending("aa", 0, 40), 1, Result.Ok(Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = [])))?.fees => 10
-
-fn conserving(transaction: Transaction, height: Int, state: Building) -> Result<Building, String>
+fn conserving(walking: Walking, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, removed: List<Unspent>, fees: Int, confirmed: List<TxFee>, taken: Int) -> Result<Building, String>
     ? "A Transaction may not pay out more than it took in."
-      "The difference is the fee, and it belongs to whoever mined the Block."
-    paid = paidBy(transaction)
-    weighed(transaction, height, state, paid, state.fees - paid)
+      "Judged on this Transaction's own Inputs (#227). It used to be judged"
+      "on the Block's running total of fees, which let a Transaction pay out"
+      "more than it took in as long as the Transactions before it in the"
+      "Block had left enough fee behind to cover the difference -- a Block"
+      "Core refuses. The difference is the fee, and it belongs to whoever"
+      "mined the Block."
+    paid = paidBy(walking.transaction)
+    match taken < paid
+        true -> Result.Err("Transaction {walking.transaction.txid} pays out {paid} against {taken} taken in")
+        false -> walked(walking.rest, walking.height, walking.fromStore, intoMap(createdBy(walking.transaction, walking.height, false), created)?, spent, removed, fees + (taken - paid), List.prepend(TxFee(txid = walking.transaction.txid, fee = taken - paid, coinbase = false), confirmed))
 
 verify conserving
-    conserving(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []))?.fees => 10
-    conserving(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = [])) => Result.Err("Transaction bb pays out 60 against 50 taken in")
-
-fn weighed(transaction: Transaction, height: Int, state: Building, paid: Int, left: Int) -> Result<Building, String>
-    ? "Refuse value that was not taken in; otherwise keep the Outputs."
-    match left < 0
-        true -> Result.Err("Transaction {transaction.txid} pays out {paid} against {state.fees} taken in")
-        false -> Result.Ok(Building(created = intoMap(createdBy(transaction, height, false), state.created)?, spent = state.spent, removed = state.removed, fees = left, confirmed = state.confirmed))
-
-verify weighed
-    weighed(spending("aa", 0, 40), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []), 40, 10)?.fees => 10
-    weighed(spending("aa", 0, 60), 1, Building(created = Map.fromList([]), spent = Map.fromList([]), removed = [], fees = 50, confirmed = []), 60, 0 - 10) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+    conserving(sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 50)?.fees => 10
+    conserving(sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 7, [], 50)?.fees => 17
+    Map.len(conserving(sampleWalking(spending("aa", 0, 40), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 50)?.created) => 1
+    conserving(sampleWalking(spending("aa", 0, 60), 1), Map.fromList([]), Map.fromList([]), [], 0, [], 50) => Result.Err("Transaction bb pays out 60 against 50 taken in")
+    conserving(sampleWalking(spending("aa", 0, 60), 1), Map.fromList([]), Map.fromList([]), [], 20, [], 50) => Result.Err("Transaction bb pays out 60 against 50 taken in")
 
 fn settled(network: Network, height: Int, coinbase: Transaction, building: Result<Building, String>) -> Connecting
     ? "The coinbase's claim, judged against the subsidy and the fees."
