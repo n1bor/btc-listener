@@ -36,12 +36,12 @@ module Store
         "Write in batches. One putAll is one LevelDB write batch, so the cost"
         "of a write is round trips rather than copying, and a loop over put"
         "hands back a Store per call where putAll hands back one."
-    exposes [Entry, open, get, has, size, put, putAll, delete, deleteAll, fixture]
+    exposes [Entry, open, get, getAll, has, size, put, putAll, delete, deleteAll, fixture]
     exposes opaque [Store]
     depends [Bytes, Infra.Kv]
     effects [
         Disk.exists, Disk.makeDir,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
     ]
 
 type Store
@@ -150,6 +150,51 @@ fn looked(store: Store, key: Bytes) -> Result<Option<Bytes>, String>
 verify looked
     looked(Store.Memory(Map.fromList([(keyed("a"), valued("b"))])), keyed("a")) => Result.Ok(Option.Some(valued("b")))
     looked(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(Option.None)
+
+fn getAll(store: Store, keys: List<Bytes>) -> Result<List<Option<Bytes>>, String>
+    ? "What is stored under each key, in the order asked, in one round trip."
+      "Every key is checked before any is looked up, so a key the rules"
+      "refuse is refused as get would refuse it, and never reaches a backend."
+    ! [Infra.Kv.getAll]
+    match allUsable(keys)
+        false -> Result.Err(keyRefused())
+        true -> lookedAll(store, keys)
+
+verify getAll
+    getAll(fixture([(keyed("a"), valued("b"))]), [keyed("a"), keyed("c")]) => Result.Ok([Option.Some(valued("b")), Option.None])
+    getAll(fixture([]), []) => Result.Ok([])
+    getAll(fixture([]), [keyed("a"), keyed("")]) => Result.Err("Store key must not be empty")
+
+fn allUsable(keys: List<Bytes>) -> Bool
+    ? "Whether every key could have been stored."
+    match keys
+        [] -> true
+        [head, ..tail] -> Bool.and(usableKey(head), allUsable(tail))
+
+verify allUsable
+    allUsable([]) => true
+    allUsable([keyed("a"), keyed("b")]) => true
+    allUsable([keyed("a"), keyed("")]) => false
+
+fn lookedAll(store: Store, keys: List<Bytes>) -> Result<List<Option<Bytes>>, String>
+    ? "The keys are usable, so whichever backend holds the entries answers."
+    ! [Infra.Kv.getAll]
+    match store
+        Store.Memory(held) -> Result.Ok(eachHeld(held, keys, []))
+        Store.Database(handle) -> Infra.Kv.getAll(handle, keys)
+
+verify lookedAll
+    lookedAll(Store.Memory(Map.fromList([(keyed("a"), valued("b"))])), [keyed("c"), keyed("a")]) => Result.Ok([Option.None, Option.Some(valued("b"))])
+
+fn eachHeld(held: Map<Bytes, Bytes>, keys: List<Bytes>, acc: List<Option<Bytes>>) -> List<Option<Bytes>>
+    ? "One answer per key, from the Map, in the order asked."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> eachHeld(held, tail, List.prepend(Map.get(held, head), acc))
+
+verify eachHeld
+    eachHeld(Map.fromList([]), [], []) => []
+    eachHeld(Map.fromList([(keyed("a"), valued("b"))]), [keyed("a"), keyed("c")], []) => [Option.Some(valued("b")), Option.None]
 
 fn has(store: Store, key: Bytes) -> Result<Bool, String>
     ? "Whether a key is present, refusing one that could never have been stored."

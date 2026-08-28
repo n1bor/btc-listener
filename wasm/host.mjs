@@ -564,6 +564,16 @@ function providerImports() {
         : helper("Option<Bytes>", "some")(jsBytesToAver(found));
       return resultOk("Option<Bytes>", option);
     },
+    [operation("getAll")]: (handleRef, keysRef, _caller) => {
+      const handle = kvHandle(handleRef);
+      const answers = listToArray("Bytes", keysRef, averBytesToJs).map((key) => {
+        const found = handle.values.get(Buffer.from(key).toString("hex"));
+        return found === undefined
+          ? helper("Option<Bytes>", "none")()
+          : helper("Option<Bytes>", "some")(jsBytesToAver(found));
+      });
+      return resultOk("List<Option<Bytes>>", arrayToList("Option<Bytes>", answers, (option) => option));
+    },
     [operation("putAll")]: (handleRef, entriesRef, _caller) => {
       const handle = kvHandle(handleRef);
       for (const [key, value] of decodePairs(entriesRef)) {

@@ -17,7 +17,7 @@ module Utxo
         "existed, so they are one batch."
     exposes [Applied, connectBlock, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
-    effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
 record Applied
     store: Store
@@ -28,7 +28,7 @@ record Applied
 
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
-    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
     fromStore = resolved(store, spentKeys(transactions, [])?, Map.fromList([]))?
     written(store, blockId, Domain.Connect.connected(network, height, transactions, fromStore))
 
@@ -116,45 +116,61 @@ verify keptUnlessCoinbase
     keptUnlessCoinbase(Input(previousTxid = Domain.Spend.coinbaseTxid(), previousIndex = 0, script = "", sequence = 0, witness = []), []) => Result.Ok([])
 
 fn resolved(store: Store, keys: List<Bytes>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
-    ? "Everything the Set holds for these keys."
-      "A key the Set does not hold is left out rather than recorded as absent."
-      "Domain.Connect looks in its own Map first and treats a miss in both as"
-      "an Input naming nothing, which is the same answer either way."
-    ! [Infra.Kv.get]
+    ? "Everything the Set holds for these keys, in one round trip (#227)."
+      "It used to ask the Store once per Input, and at forty microseconds a"
+      "crossing that was a quarter of the Set walk. Every Block's Inputs are"
+      "asked for together now; a key the Set does not hold is simply absent"
+      "from the Map, which is the answer Domain.Connect wants."
+    ! [Infra.Kv.getAll]
+    folded(keys, Infra.Store.getAll(store, keys)?, acc)
+
+fn folded(keys: List<Bytes>, answers: List<Option<Bytes>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+    ? "The answers zipped back against the keys that asked for them."
+      "The Map grows in argument position of a tail call (#227): built any"
+      "other way -- returned through a helper, set on a field -- every entry"
+      "copies the Map so far, and a Block of five thousand Inputs paid half a"
+      "second for its own lookups after the database had answered in four"
+      "milliseconds."
     match keys
         [] -> Result.Ok(acc)
-        [head, ..tail] -> oneResolved(store, head, tail, acc)
+        [key, ..rest] -> foldedOne(key, rest, answers, acc)
 
-fn oneResolved(store: Store, key: Bytes, rest: List<Bytes>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
-    ? "Look this one up, then carry on with the rest."
-    ! [Infra.Kv.get]
-    text = Infra.Store.get(store, key)?
-    carried = keptIfFound(key, text, acc)?
-    resolved(store, rest, carried)
+verify folded
+    Map.len(folded([], [], Map.fromList([]))?) => 0
+    Map.len(folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.None], Map.fromList([]))?) => 0
+    Map.len(folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?)], Map.fromList([]))?) => 1
+    folded([Domain.UtxoStore.unspentKey("aa", 0)?], [], Map.fromList([])) => Result.Err("the Store answered fewer keys than were asked")
+    folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.Index.emptyBytes())], Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
 
-fn keptIfFound(key: Bytes, stored: Option<Bytes>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+fn foldedOne(key: Bytes, rest: List<Bytes>, answers: List<Option<Bytes>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+    ? "One key's answer, then the rest."
+    match answers
+        [] -> Result.Err("the Store answered fewer keys than were asked")
+        [answer, ..more] -> foldedWith(key, rest, more, acc, answer)
+
+verify foldedOne
+    foldedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([])) => Result.Err("the Store answered fewer keys than were asked")
+    Map.len(foldedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [Option.None], Map.fromList([]))?) => 0
+
+fn foldedWith(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: Map<Bytes, Unspent>, answer: Option<Bytes>) -> Result<Map<Bytes, Unspent>, String>
+    ? "Absent is simply not in the Map; present is decoded and put in."
+    match answer
+        Option.None -> folded(rest, more, acc)
+        Option.Some(value) -> foldedDecoded(key, rest, more, acc, Domain.UtxoStore.decodeCoin(txidIn(key), indexIn(key), value))
+
+verify foldedWith
+    Map.len(foldedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Option.None)?) => 0
+    Map.len(foldedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?))?) => 1
+
+fn foldedDecoded(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: Map<Bytes, Unspent>, decoded: Result<Unspent, String>) -> Result<Map<Bytes, Unspent>, String>
     ? "A Set entry that will not decode is corruption and stops the walk."
-    match stored
-        Option.None -> Result.Ok(acc)
-        Option.Some(value) -> decodedInto(key, value, acc)
-
-verify keptIfFound
-    Map.len(keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.None, Map.fromList([]))?) => 0
-    Map.len(keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?), Map.fromList([]))?) => 1
-    keptIfFound(Domain.UtxoStore.unspentKey("aa", 0)?, Option.Some(Domain.Index.emptyBytes()), Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
-
-fn decodedInto(key: Bytes, value: Bytes, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
-    ? "The entry, keyed as the caller will ask for it."
-      "The Transaction Id and position are read back out of the key, because"
-      "the Set does not repeat them in the value."
-    match Domain.UtxoStore.decodeCoin(txidIn(key), indexIn(key), value)
+    match decoded
         Result.Err(why) -> Result.Err(why)
-        Result.Ok(unspent) -> Result.Ok(Map.set(acc, key, unspent))
+        Result.Ok(unspent) -> folded(rest, more, Map.set(acc, key, unspent))
 
-verify decodedInto
-    Map.len(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?, Map.fromList([]))?) => 1
-    Map.get(decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))?, Map.fromList([]))?, Domain.UtxoStore.unspentKey("aa", 0)?) => Option.Some(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))
-    decodedInto(Domain.UtxoStore.unspentKey("aa", 0)?, Domain.Index.emptyBytes(), Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
+verify foldedDecoded
+    foldedDecoded(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Result.Err("bad")) => Result.Err("bad")
+    Map.get(foldedDecoded(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Result.Ok(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false)))?, Domain.UtxoStore.unspentKey("aa", 0)?) => Option.Some(Unspent(txid = "aa", index = 0, value = 5, script = "", height = 1, coinbase = false))
 
 fn txidIn(key: Bytes) -> String
     ? "The Transaction Id a Set key names."
