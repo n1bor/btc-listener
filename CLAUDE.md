@@ -80,13 +80,14 @@ and `compile`.
   pairs. It **used** to become `E0659` the moment a parameter or binding took
   that name (`Infra.Rewind.standing` against `Domain.AssumeValid.standing`
   through `Infra.ChainState`, #26); the entry above is why it no longer does.
-  **A function parameter is the form still live.** `Domain.Addr` exposing a
-  `payload` beside `Domain.Version`'s, with `Infra.Follow` depending on both
-  and having a parameter called `payload`, is `E0659` on a pin that carries
-  #1043 and #1152 — those fixed match binders and `let` bindings, and a
-  parameter is neither. `aver check`, `verify` and `compile` are all quiet.
-  Filed as jasisz/aver#1162, still live on `6afb0ff3`. The workaround is a
-  rename: the encoder is `Domain.Addr.offering`.
+  ~~**A function parameter is the form still live.**~~ The parameter form was
+  the last one, filed as jasisz/aver#1162 and fixed on `b63214d6`. Retired by
+  renaming `Domain.Addr.offering` back to `payload` and confirming the build:
+  `Infra.Follow` still has three parameters called `payload`, still depends on
+  both `Domain.Addr` and `Domain.Version`, and `cargo build --release` is
+  clean. **No form of E0659 is live.** `cargo build` is still the only thing
+  that would catch a new one — `check`, `verify` and `compile` were all quiet
+  for every one of them.
 
 ## Commands
 

@@ -10,12 +10,12 @@ module Addr
         "carries sixteen -- IPv4 arrives as an IPv4-mapped IPv6 address, ten"
         "zero bytes then two 0xFF then the four that matter, and anything"
         "that is not that shape is a Network this program cannot dial. It is"
-        "skipped rather than refused: a Peer offering an IPv6 address is"
+        "skipped rather than refused: a Peer payload an IPv6 address is"
         "being helpful, not wrong."
         "Nothing here is trusted. An addr entry is a claim by a Peer under no"
         "obligation to be honest, which is why what comes out is Candidates"
         "and not Peers -- the Handshake is what turns one into the other."
-    exposes [entrySize, maxEntries, addressesOf, offering]
+    exposes [entrySize, maxEntries, addressesOf, payload]
     depends [Bytes, Domain.Address, Domain.CompactSize, Domain.Message]
     effects []
 
@@ -48,7 +48,7 @@ verify addressesOf
     List.len(addressesOf(twoEntries())) => 2
     addressesOf(ipv6Entry()) => []
 
-fn offering(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> Result<Bytes, String>
+fn payload(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> Result<Bytes, String>
     ? "An addr Message offering these Peer Addresses."
       "The half of address gossip this program has never had (#210): it has"
       "read addr Messages since the Address Book was written and has never"
@@ -58,25 +58,17 @@ fn offering(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> Resu
       "One timestamp and one services word for the whole Message rather than"
       "per entry, because every address in one of these is being offered on"
       "the same terms by the same node at the same moment."
-      "Named offering rather than payload, which is what every other Message"
-      "builder here is called, because Domain.Version already exposes a"
-      "payload and Infra.Follow depends on both. Two glob-imported modules"
-      "exposing one name is harmless until something takes that name, and"
-      "Infra.Follow has a parameter called payload -- which makes the"
-      "emitted Rust E0659 and is caught by cargo build alone. CLAUDE.md"
-      "records match binders and let bindings as fixed upstream; a function"
-      "parameter is the form still live, filed as jasisz/aver#1162."
     Bytes.fromList(bodyOf(List.take(addresses, maxEntries()), timestamp, services))
 
-verify offering
-    Bytes.toHex(offering([sampleAddress()?], 100000000, 1)?) => "0100e1f505010000000000000000000000000000000000ffff01020304208d"
-    Bytes.toHex(offering([], 0, 0)?) => "00"
-    List.len(Bytes.octets(offering([sampleAddress()?], 0, 0)?)) => 31
-    List.len(Bytes.octets(offering([sampleAddress()?, sampleAddress()?], 0, 0)?)) => 61
-    addressesOf(Bytes.octets(offering([sampleAddress()?], 7, 0)?)) => [sampleAddress()?]
-    addressesOf(Bytes.octets(offering([sampleAddress()?, otherAddress()?], 7, 0)?)) => [sampleAddress()?, otherAddress()?]
-    addressesOf(Bytes.octets(offering([], 7, 0)?)) => []
-    List.take(Bytes.octets(offering(manyAddresses(maxEntries() + 5, sampleAddress()?, []), 7, 0)?), 3) => [253, 232, 3]
+verify payload
+    Bytes.toHex(payload([sampleAddress()?], 100000000, 1)?) => "0100e1f505010000000000000000000000000000000000ffff01020304208d"
+    Bytes.toHex(payload([], 0, 0)?) => "00"
+    List.len(Bytes.octets(payload([sampleAddress()?], 0, 0)?)) => 31
+    List.len(Bytes.octets(payload([sampleAddress()?, sampleAddress()?], 0, 0)?)) => 61
+    addressesOf(Bytes.octets(payload([sampleAddress()?], 7, 0)?)) => [sampleAddress()?]
+    addressesOf(Bytes.octets(payload([sampleAddress()?, otherAddress()?], 7, 0)?)) => [sampleAddress()?, otherAddress()?]
+    addressesOf(Bytes.octets(payload([], 7, 0)?)) => []
+    List.take(Bytes.octets(payload(manyAddresses(maxEntries() + 5, sampleAddress()?, []), 7, 0)?), 3) => [253, 232, 3]
 
 fn bodyOf(addresses: List<PeerAddress>, timestamp: Int, services: Int) -> List<Int>
     ? "The count that precedes the entries, then one entry each."

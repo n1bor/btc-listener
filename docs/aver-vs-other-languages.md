@@ -215,8 +215,8 @@ verifiable seam. Ergonomically Python wins; architecturally Aver wins.
 
 **Here.** CLAUDE.md carries a standing section of things that pass `check`,
 `verify` and `compile` and fail `cargo build`: E0659 glob-import ambiguity in
-three forms (the parameter form, jasisz/aver#1162, still open — "four
-renames in a day"), `R#await` keyword trampolines (#899), Result
+three forms (all three now fixed upstream, the parameter form last, as
+jasisz/aver#1162 — but "four renames in a day" while they were not), `R#await` keyword trampolines (#899), Result
 pass-through E0308 (#901), packed-bytes equality (#1065), an opaque resource
 in a record (#994), E0505 borrow moves (#1130). `aver compile` exits 0 on
 Rust that does not build. Performance cliffs: a `Map` returned from a helper

@@ -218,25 +218,37 @@ The result is a split, and the split is the useful part.
 Not 2,150× any more. Not measurable: the three are indistinguishable across
 repeated runs (11–16 ms), and the obvious helper is as fast as anything else.
 
-**A helper returning a record that holds a `Map` is not fixed.** Same machine,
-same size, compiled, 40,000 entries:
+**A helper returning a record that holds a `Map` was not fixed, and now is.**
+Same machine, same size, compiled, 40,000 entries:
 
-| shape | time |
-|---|---|
-| helper returns a bare `Map` | 7 ms |
-| helper returns a record holding a `Map` — what `put` does | **15,660 ms** |
+| shape | 26 August | 28 August, `b63214d6` |
+|---|---|---|
+| helper returns a bare `Map` | 7 ms | 8 ms |
+| helper returns a record holding a `Map` — what `put` does | **15,660 ms** | **6 ms** |
 
-That is still about 2,200×, and the only difference between the two is the
-record wrapper. So the Store's own table stands, with smaller numbers:
-**8 ms** through one `putAll` against **15,660 ms** one `put` at a time, where
-it was 52 ms against 24,404 ms.
+Filed as [jasisz/aver#1160](https://github.com/jasisz/aver/issues/1160), the
+sibling of #890, and closed by
+[#1163](https://github.com/jasisz/aver/pull/1163) — "Fix record-owned map
+updates and Rust parameter binders". The record wrapper costs nothing now; the
+two shapes are indistinguishable, and the one that was 2,200× slower is if
+anything the faster of the pair.
 
-**Which means the batching keeps its original reason.** It was tempting, on
-seeing #890 close, to say the batches now survive only on
-[ADR 0006](0006-a-leveldb-under-the-index.md)'s atomicity argument — one
-`Kv.putAll` is one RocksDB `WriteBatch`. They survive on speed as well:
-`Infra.Store.put` hands back a `Store`, and a `Store` is a record holding a
-`Map`. Filed upstream as [jasisz/aver#1160](https://github.com/jasisz/aver/issues/1160), the sibling of #890.
+**Which means the batching has lost one of its two reasons and keeps the
+other.** For two days it had both: `Infra.Store.put` hands back a `Store`, a
+`Store` is a record holding a `Map`, and so writing one key at a time paid the
+copy every time. That is gone.
+
+What is not gone is [ADR 0006](0006-a-leveldb-under-the-index.md)'s argument:
+one `Kv.putAll` is one RocksDB `WriteBatch`, and a batch is what makes a set
+of changes land together or not at all. A Block's Locations, its Index entries
+and its Undo record are one such set — a crash between them leaves an Index
+naming a Block the Segment does not hold.
+
+**So the batching stays, and this is not a workaround left behind.** It is
+worth writing down which reason a thing rests on, because the temptation on
+seeing a cliff close is to retire everything that was ever shaped by it. Half
+of what shaped the batches was a performance bug and half was correctness, and
+only the first half has an expiry date.
 
 Curiously the three folds are now *equal* under `aver run` — 6,423 / 6,666 /
 6,055 ms at 40,000 — because all three are equally slowed by something else. See
