@@ -21,7 +21,7 @@ import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 const PRIMITIVES_MODULE =
   "aver:user/cap-n446f6d61696e2e5072696d697469766573-c3354d53ba72a2929c13c737ebe90ec182fed1f7fa4db4a50a99910f10c82678b";
 const KV_MODULE =
-  "aver:user/cap-n496e6672612e4b76-c7585e0c4c77ca0b94cd86d9ab74bfbfd8d2c0b1925423ad0b03ec2f81961a57f";
+  "aver:user/cap-n496e6672612e4b76-c82f1f0a28f3a09ebb5c6406c3ba87a131051934e0a953b7434e14f10d797e5f9";
 const REGTEST_MAGIC = Buffer.from([0xfa, 0xbf, 0xb5, 0xda]);
 const TCP_BODY_LIMIT = 10 * 1024 * 1024;
 const FAKE_FRAME_BYTES = Number(process.env.BTC_LISTENER_FAKE_FRAME_BYTES ?? 8);
@@ -578,6 +578,16 @@ function providerImports() {
       const handle = kvHandle(handleRef);
       for (const [key, value] of decodePairs(entriesRef)) {
         handle.values.set(Buffer.from(key).toString("hex"), Uint8Array.from(value));
+      }
+      return resultOk("Unit");
+    },
+    [operation("applyAll")]: (handleRef, putsRef, deletesRef, _caller) => {
+      const handle = kvHandle(handleRef);
+      for (const [key, value] of decodePairs(putsRef)) {
+        handle.values.set(Buffer.from(key).toString("hex"), Uint8Array.from(value));
+      }
+      for (const key of listToArray("Bytes", deletesRef, averBytesToJs)) {
+        handle.values.delete(Buffer.from(key).toString("hex"));
       }
       return resultOk("Unit");
     },

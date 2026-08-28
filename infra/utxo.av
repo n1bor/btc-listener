@@ -17,7 +17,7 @@ module Utxo
         "existed, so they are one batch."
     exposes [Applied, connectBlock, prepared, written, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
-    effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
+    effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
 record Applied
     store: Store
@@ -28,7 +28,7 @@ record Applied
 
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
-    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
+    ! [Infra.Kv.applyAll, Infra.Kv.getAll]
     written(store, blockId, prepared(network, store, height, transactions)?)
 
 fn prepared(network: Network, store: Store, height: Int, transactions: List<Transaction>) -> Result<Connecting, String>
@@ -37,7 +37,7 @@ fn prepared(network: Network, store: Store, height: Int, transactions: List<Tran
       "The half of connecting a Block that only reads, kept apart from the"
       "half that writes so the Set walk can run it beside the next Block's"
       "fetch and keep every write on the one thread that owns the Store."
-    ! [Infra.Kv.get, Infra.Kv.getAll]
+    ! [Infra.Kv.getAll]
     fromStore = resolved(store, spentKeys(transactions, [])?, Map.fromList([]))?
     Result.Ok(Domain.Connect.connected(network, height, transactions, fromStore))
 
@@ -46,17 +46,19 @@ fn written(store: Store, blockId: String, connection: Connecting) -> Result<Appl
       "It still comes back as an Err: the caller asked for a Block to be"
       "connected and it was not, and a node that carried on would be"
       "following a chain it had not checked."
-    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    ! [Infra.Kv.applyAll]
     match connection
         Connecting.Refused(why) -> Result.Err("Block {blockId} cannot connect: {why}")
         Connecting.Applied(change) -> applying(store, blockId, change)
 
 fn applying(store: Store, blockId: String, change: Change) -> Result<Applied, String>
-    ? "The Outputs, the spends and the Undo Data, in that order."
-    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
-    grown = Infra.Store.putAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed)?)])?)?
-    shrunk = Infra.Store.deleteAll(grown, keysOf(change.removed, [])?)?
-    Result.Ok(Applied(store = shrunk, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees, confirmed = change.confirmed))
+    ? "The Outputs, the Undo Data and the spends, as one change (#235)."
+      "One batch rather than a put and then a delete: one crossing, one"
+      "fsync, and no moment at which the Set holds both an Output and the"
+      "Outputs it spent."
+    ! [Infra.Kv.applyAll]
+    changed = Infra.Store.applyAll(store, entriesFor(change.added, [Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed)?)])?, keysOf(change.removed, [])?)?
+    Result.Ok(Applied(store = changed, added = List.len(change.added), removed = List.len(change.removed), fees = change.fees, confirmed = change.confirmed))
 
 fn entriesFor(added: List<Unspent>, acc: List<Entry>) -> Result<List<Entry>, String>
     ? "One Set entry per Output the Block leaves unspent."

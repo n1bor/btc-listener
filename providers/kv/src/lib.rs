@@ -33,7 +33,7 @@ use rocksdb::{
 /// that reaches a Store declined to run until this line agreed again.
 /// n1bor/btc-listener#43.
 pub const CONTRACT_HASH: &str =
-    "sha256:7585e0c4c77ca0b94cd86d9ab74bfbfd8d2c0b1925423ad0b03ec2f81961a57f";
+    "sha256:82f1f0a28f3a09ebb5c6406c3ba87a131051934e0a953b7434e14f10d797e5f9";
 
 /// The open database. RocksDB takes `&self` for every operation and is
 /// `Sync`, so the resource needs no lock of its own.
@@ -215,6 +215,25 @@ impl CapabilityProvider for Kv {
                     Err(why) => failed("cannot write the batch", why),
                 })
             }
+            "Infra.Kv.applyAll" => {
+                let [handle, puts, deletes] = args else {
+                    return Err(ProviderFault::new("bad_arity", "applyAll takes a Handle and two Lists"));
+                };
+                let puts = pairs_in(puts, "puts")?;
+                let deletes = keys_in(deletes, "deletes")?;
+                let open = open_in(handle, "handle")?;
+                let mut batch = WriteBatch::default();
+                for (key, value) in &puts {
+                    batch.put(key, value);
+                }
+                for key in &deletes {
+                    batch.delete(key);
+                }
+                Ok(match open.0.write_opt(batch, &durable()) {
+                    Ok(()) => ok(ProviderValue::Unit),
+                    Err(why) => failed("cannot write the batch", why),
+                })
+            }
             "Infra.Kv.deleteAll" => {
                 let [handle, keys] = args else {
                     return Err(ProviderFault::new("bad_arity", "deleteAll takes a Handle and a List"));
@@ -283,6 +302,7 @@ pub fn kv_binding() -> ProviderBinding {
             "Infra.Kv.count",
             "Infra.Kv.deleteAll",
             "Infra.Kv.get",
+            "Infra.Kv.applyAll",
             "Infra.Kv.getAll",
             "Infra.Kv.open",
             "Infra.Kv.prefixed",
@@ -728,7 +748,7 @@ mod tests {
         let binding = kv_binding();
         assert_eq!(binding.capability(), "Infra.Kv");
         assert_eq!(binding.contract_hash(), CONTRACT_HASH);
-        assert_eq!(binding.operations().len(), 7);
+        assert_eq!(binding.operations().len(), 8);
     }
 
     #[test]
@@ -745,6 +765,17 @@ mod tests {
         assert_eq!(answers.len(), 5000);
         eprintln!("getAll of 5000 keys took {took:?}");
         assert!(took.as_millis() < 500, "getAll of 5000 keys took {took:?}");
+    }
+
+    #[test]
+    fn apply_all_puts_and_deletes_in_one_batch() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let handle = opened(dir.path());
+        put(&handle, &[("u:aa", "1"), ("u:bb", "2")]);
+        let puts = ProviderValue::List(vec![ProviderValue::Tuple(vec![raw("u:cc"), raw("3")])]);
+        let deletes = ProviderValue::List(vec![raw("u:aa"), raw("u:zz")]);
+        did(call("applyAll", &[handle.clone(), puts, deletes]));
+        assert_eq!(gotAll(&handle, &["u:aa", "u:bb", "u:cc"]), vec![None, Some("2".to_string()), Some("3".to_string())]);
     }
 
     #[test]

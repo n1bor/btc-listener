@@ -36,12 +36,12 @@ module Store
         "Write in batches. One putAll is one LevelDB write batch, so the cost"
         "of a write is round trips rather than copying, and a loop over put"
         "hands back a Store per call where putAll hands back one."
-    exposes [Entry, open, get, getAll, has, size, put, putAll, delete, deleteAll, fixture]
+    exposes [Entry, open, get, getAll, has, size, put, putAll, applyAll, delete, deleteAll, fixture]
     exposes opaque [Store]
     depends [Bytes, Infra.Kv]
     effects [
         Disk.exists, Disk.makeDir,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
     ]
 
 type Store
@@ -150,6 +150,61 @@ fn looked(store: Store, key: Bytes) -> Result<Option<Bytes>, String>
 verify looked
     looked(Store.Memory(Map.fromList([(keyed("a"), valued("b"))])), keyed("a")) => Result.Ok(Option.Some(valued("b")))
     looked(Store.Memory(Map.fromList([])), keyed("a")) => Result.Ok(Option.None)
+
+fn applyAll(store: Store, puts: List<Entry>, deletes: List<Bytes>) -> Result<Store, String>
+    ? "Write these entries and remove these keys as one change (#235)."
+      "Every key on both sides is checked before anything is written, so a"
+      "key the rules refuse is refused whole and nothing is half-applied."
+    ! [Infra.Kv.applyAll]
+    match Bool.and(allUsable(keysIn(puts, [])), allUsable(deletes))
+        false -> Result.Err(keyRefused())
+        true -> appliedAll(store, puts, deletes)
+
+verify applyAll
+    applyAll(fixture([(keyed("a"), valued("b"))]), [Entry(key = keyed("c"), value = valued("d"))], [keyed("a")]) => Result.Ok(fixture([(keyed("c"), valued("d"))]))
+    applyAll(fixture([(keyed("a"), valued("b"))]), [], []) => Result.Ok(fixture([(keyed("a"), valued("b"))]))
+    applyAll(fixture([]), [Entry(key = keyed(""), value = valued("d"))], []) => Result.Err("Store key must not be empty")
+    applyAll(fixture([]), [], [keyed("")]) => Result.Err("Store key must not be empty")
+
+fn keysIn(entries: List<Entry>, acc: List<Bytes>) -> List<Bytes>
+    ? "The keys of these entries."
+    match entries
+        [] -> acc
+        [head, ..tail] -> keysIn(tail, List.prepend(head.key, acc))
+
+verify keysIn
+    keysIn([], []) => []
+    keysIn([Entry(key = keyed("a"), value = valued("b"))], []) => [keyed("a")]
+
+fn appliedAll(store: Store, puts: List<Entry>, deletes: List<Bytes>) -> Result<Store, String>
+    ? "The keys are usable, so whichever backend holds the entries takes the change."
+    ! [Infra.Kv.applyAll]
+    match store
+        Store.Memory(held) -> Result.Ok(Store.Memory(removedFrom(Map.fromList(List.concat(Map.entries(held), asPairs(puts, []))), deletes)))
+        Store.Database(handle) -> appliedTo(store, Infra.Kv.applyAll(handle, asPairs(puts, []), deletes))
+
+verify appliedAll
+    appliedAll(Store.Memory(Map.fromList([])), [Entry(key = keyed("a"), value = valued("b"))], []) => Result.Ok(fixture([(keyed("a"), valued("b"))]))
+
+fn appliedTo(store: Store, outcome: Result<Unit, String>) -> Result<Store, String>
+    ? "The database took the batch, or said why not."
+    match outcome
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(unit) -> Result.Ok(store)
+
+verify appliedTo
+    appliedTo(fixture([]), Result.Err("no")) => Result.Err("no")
+    appliedTo(fixture([]), Result.Ok(Unit)) => Result.Ok(fixture([]))
+
+fn removedFrom(held: Map<Bytes, Bytes>, deletes: List<Bytes>) -> Map<Bytes, Bytes>
+    ? "The Map without these keys."
+    match deletes
+        [] -> held
+        [head, ..tail] -> removedFrom(Map.remove(held, head), tail)
+
+verify removedFrom
+    Map.len(removedFrom(Map.fromList([(keyed("a"), valued("b"))]), [keyed("a")])) => 0
+    Map.len(removedFrom(Map.fromList([(keyed("a"), valued("b"))]), [keyed("z")])) => 1
 
 fn getAll(store: Store, keys: List<Bytes>) -> Result<List<Option<Bytes>>, String>
     ? "What is stored under each key, in the order asked, in one round trip."
