@@ -344,14 +344,14 @@ verify samplePlan
 
 fn assigned(flight: Flight, live: List<Int>) -> Result<Flight, String>
     ? "Each Peer given as much as it has room for."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     match live
         [] -> Result.Ok(flight)
         [head, ..tail] -> assignedOn(flight, head, tail)
 
 fn assignedOn(flight: Flight, key: Int, rest: List<Int>) -> Result<Flight, String>
     ? "One Peer topped up, then the others."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     toppedUp = batching(flight, key, perPeer() - owedBy(flight.plan, Map.keys(flight.plan.owed), key, 0), [])?
     assigned(toppedUp, rest)
 
@@ -379,21 +379,21 @@ verify countedFor
 
 fn batching(flight: Flight, key: Int, room: Int, taken: List<Claim>) -> Result<Flight, String>
     ? "Take Heights off the wanted list until this Peer is full."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     match Bool.or(room <= 0, List.len(flight.plan.wanted) == 0)
         true -> requesting(flight, key, taken)
         false -> nextWanted(flight, key, room, taken)
 
 fn nextWanted(flight: Flight, key: Int, room: Int, taken: List<Claim>) -> Result<Flight, String>
     ? "The next Height, or nothing left to want."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     match flight.plan.wanted
         [] -> requesting(flight, key, taken)
         [head, ..tail] -> claiming(withPlan(flight, withWanted(flight.plan, tail)), key, room, taken, head)
 
 fn claiming(flight: Flight, key: Int, room: Int, taken: List<Claim>, height: Int) -> Result<Flight, String>
     ? "A Height the Index does not name cannot be fetched, and ends the walk."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     named = Domain.Index.blockIdIn(Infra.Store.get(flight.progress.store, Domain.IndexKeys.heightKey(height)?)?)
     match named
         Option.None -> Result.Err("no header for height {height}; run the header phase first")
@@ -403,7 +403,7 @@ fn claimingHeld(flight: Flight, key: Int, room: Int, taken: List<Claim>, height:
     ? "A Block already held is skipped, which is what makes the phase"
       "resumable. A skipped Height costs no room, so a walk over a range"
       "mostly held still fills every Peer."
-    ! [Infra.Kv.get, Tcp.writeBytes]
+    ! [Console.error, Infra.Kv.get, Tcp.close, Tcp.writeBytes]
     held = Infra.Store.has(flight.progress.store, Domain.IndexKeys.blockKey(blockId)?)?
     match held
         true -> batching(flight, key, room, taken)
@@ -411,7 +411,7 @@ fn claimingHeld(flight: Flight, key: Int, room: Int, taken: List<Claim>, height:
 
 fn requesting(flight: Flight, key: Int, taken: List<Claim>) -> Result<Flight, String>
     ? "Nothing to ask for is the ordinary end of a top-up."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     match taken
         [] -> Result.Ok(flight)
         [head, ..tail] -> requested(flight, key, List.prepend(head, tail))
@@ -421,9 +421,9 @@ fn requested(flight: Flight, key: Int, taken: List<Claim>) -> Result<Flight, Str
       "A getdata carries a list, so a batch is one Message rather than one"
       "each: the Peer sees the whole of what it owes at once and can answer"
       "in whatever order suits it."
-    ! [Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeBytes]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), hashesOf(taken, [])?)?
-    sent = Infra.Peers.send(flight.progress.pool, key, "getdata", payload)?
+    sent = Infra.Peers.tell(flight.progress.pool, key, "getdata", payload)?
     Result.Ok(Flight(progress = withPool(flight.progress, sent), plan = owedWith(flight.plan, taken, key), heardMs = flight.heardMs))
 
 fn owedWith(plan: Plan, taken: List<Claim>, key: Int) -> Plan
@@ -508,7 +508,7 @@ fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Fetched, St
         Time.unixMs,
     ]
     payload = Bytes.fromList(frame.body)?
-    sent = Infra.Peers.send(flight.progress.pool, key, "pong", payload)?
+    sent = Infra.Peers.tell(flight.progress.pool, key, "pong", payload)?
     flying(withPool2(flight, sent), to)
 
 fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Fetched, String>
