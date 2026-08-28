@@ -127,61 +127,119 @@ verify keptUnlessCoinbase
     keptUnlessCoinbase(Input(previousTxid = Domain.Spend.coinbaseTxid(), previousIndex = 0, script = "", sequence = 0, witness = []), []) => Result.Ok([])
 
 fn resolved(store: Store, keys: List<Bytes>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
-    ? "Everything the Set holds for these keys, in one round trip (#227)."
-      "It used to ask the Store once per Input, and at forty microseconds a"
-      "crossing that was a quarter of the Set walk. Every Block's Inputs are"
-      "asked for together now; a key the Set does not hold is simply absent"
-      "from the Map, which is the answer Domain.Connect wants."
+    ? "Everything the Set holds for these keys, in one round trip (#227) --"
+      "or four at once when there are enough of them (#236)."
+      "A big Block names thousands of Outputs. Below the threshold one"
+      "getAll and one fold; above it the keys are quartered and each quarter"
+      "is fetched and decoded on its own branch, and only the Map is built"
+      "here, because a Map cannot cross a product's carrier and building"
+      "one is the cheap part."
     ! [Infra.Kv.getAll]
-    folded(keys, Infra.Store.getAll(store, keys)?, acc)
+    match List.len(keys) < apartAbove()
+        true -> pairsInto(decodedAll(store, keys)?, acc)
+        false -> apart(store, keys, acc)
 
-fn folded(keys: List<Bytes>, answers: List<Option<Bytes>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
-    ? "The answers zipped back against the keys that asked for them."
-      "The Map grows in argument position of a tail call (#227): built any"
-      "other way -- returned through a helper, set on a field -- every entry"
-      "copies the Map so far, and a Block of five thousand Inputs paid half a"
-      "second for its own lookups after the database had answered in four"
-      "milliseconds."
+fn apartAbove() -> Int
+    ? "How many keys make quartering worth its threads."
+    512
+
+verify apartAbove
+    apartAbove() => 512
+
+fn apart(store: Store, keys: List<Bytes>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+    ? "Four quarters, each fetched and decoded independently (#236)."
+      "Reads only, of keys the Set will not change until the Block is"
+      "written, so the four cannot disagree; the answers are folded in key"
+      "order so the Map is the one a single round trip would have built."
+    ! [Infra.Kv.getAll]
+    half = Int.div(List.len(keys), 2)
+    left = List.take(keys, half)
+    right = List.drop(keys, half)
+    both = (halved(store, left), halved(store, right))?!
+    match both
+        (l, r) -> pairsInto(r, pairsInto(l, acc)?)
+
+fn halved(store: Store, keys: List<Bytes>) -> Result<List<Tuple<Bytes, Unspent>>, String>
+    ? "One half, as two quarters on their own branches."
+    ! [Infra.Kv.getAll]
+    half = Int.div(List.len(keys), 2)
+    both = (decodedAll(store, List.take(keys, half)), decodedAll(store, List.drop(keys, half)))?!
+    match both
+        (l, r) -> Result.Ok(List.concat(l, r))
+
+fn decodedAll(store: Store, keys: List<Bytes>) -> Result<List<Tuple<Bytes, Unspent>>, String>
+    ? "These keys asked for together, and every answer the Set had decoded."
+    ! [Infra.Kv.getAll]
+    decodedPairs(keys, Infra.Store.getAll(store, keys)?, [])
+
+fn decodedPairs(keys: List<Bytes>, answers: List<Option<Bytes>>, acc: List<Tuple<Bytes, Unspent>>) -> Result<List<Tuple<Bytes, Unspent>>, String>
+    ? "The answers zipped back against the keys that asked for them; an"
+      "absent one is simply not in the list."
     match keys
-        [] -> Result.Ok(acc)
-        [key, ..rest] -> foldedOne(key, rest, answers, acc)
+        [] -> Result.Ok(List.reverse(acc))
+        [key, ..rest] -> decodedOne(key, rest, answers, acc)
 
-verify folded
-    Map.len(folded([], [], Map.fromList([]))?) => 0
-    Map.len(folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.None], Map.fromList([]))?) => 0
-    Map.len(folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))?)], Map.fromList([]))?) => 1
-    folded([Domain.UtxoStore.unspentKey("aa", 0)?], [], Map.fromList([])) => Result.Err("the Store answered fewer keys than were asked")
-    folded([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.Index.emptyBytes())], Map.fromList([])) => Result.Err("a Set entry is at least 13 bytes, got 0")
+verify decodedPairs
+    decodedPairs([], [], []) => Result.Ok([])
+    decodedPairs([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.None], []) => Result.Ok([])
+    List.len(decodedPairs([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))?)], [])?) => 1
+    decodedPairs([Domain.UtxoStore.unspentKey("aa", 0)?], [], []) => Result.Err("the Store answered fewer keys than were asked")
+    decodedPairs([Domain.UtxoStore.unspentKey("aa", 0)?], [Option.Some(Domain.Index.emptyBytes())], []) => Result.Err("a Set entry is at least 13 bytes, got 0")
 
-fn foldedOne(key: Bytes, rest: List<Bytes>, answers: List<Option<Bytes>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+fn decodedOne(key: Bytes, rest: List<Bytes>, answers: List<Option<Bytes>>, acc: List<Tuple<Bytes, Unspent>>) -> Result<List<Tuple<Bytes, Unspent>>, String>
     ? "One key's answer, then the rest."
     match answers
         [] -> Result.Err("the Store answered fewer keys than were asked")
-        [answer, ..more] -> foldedWith(key, rest, more, acc, answer)
+        [answer, ..more] -> decodedWith(key, rest, more, acc, answer)
 
-verify foldedOne
-    foldedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([])) => Result.Err("the Store answered fewer keys than were asked")
-    Map.len(foldedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [Option.None], Map.fromList([]))?) => 0
+verify decodedOne
+    decodedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], []) => Result.Err("the Store answered fewer keys than were asked")
+    decodedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], [Option.None], []) => Result.Ok([])
 
-fn foldedWith(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: Map<Bytes, Unspent>, answer: Option<Bytes>) -> Result<Map<Bytes, Unspent>, String>
-    ? "Absent is simply not in the Map; present is decoded and put in."
+fn decodedWith(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: List<Tuple<Bytes, Unspent>>, answer: Option<Bytes>) -> Result<List<Tuple<Bytes, Unspent>>, String>
+    ? "Absent is left out; present is decoded and kept."
     match answer
-        Option.None -> folded(rest, more, acc)
-        Option.Some(value) -> foldedDecoded(key, rest, more, acc, Domain.UtxoStore.decodeCoin(txidIn(key), indexIn(key), value))
+        Option.None -> decodedPairs(rest, more, acc)
+        Option.Some(value) -> decodedKept(key, rest, more, acc, Domain.UtxoStore.decodeCoin(txidIn(key), indexIn(key), value))
 
-verify foldedWith
-    Map.len(foldedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Option.None)?) => 0
-    Map.len(foldedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))?))?) => 1
+verify decodedWith
+    decodedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], [], Option.None) => Result.Ok([])
+    List.len(decodedWith(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], [], Option.Some(Domain.UtxoStore.encodeCoin(Domain.UtxoStore.Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))?))?) => 1
 
-fn foldedDecoded(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: Map<Bytes, Unspent>, decoded: Result<Unspent, String>) -> Result<Map<Bytes, Unspent>, String>
+fn decodedKept(key: Bytes, rest: List<Bytes>, more: List<Option<Bytes>>, acc: List<Tuple<Bytes, Unspent>>, decoded: Result<Unspent, String>) -> Result<List<Tuple<Bytes, Unspent>>, String>
     ? "A Set entry that will not decode is corruption and stops the walk."
     match decoded
         Result.Err(why) -> Result.Err(why)
-        Result.Ok(unspent) -> folded(rest, more, Map.set(acc, key, unspent))
+        Result.Ok(unspent) -> decodedPairs(rest, more, List.prepend((key, unspent), acc))
 
-verify foldedDecoded
-    foldedDecoded(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Result.Err("bad")) => Result.Err("bad")
-    Map.get(foldedDecoded(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], Map.fromList([]), Result.Ok(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)))?, Domain.UtxoStore.unspentKey("aa", 0)?) => Option.Some(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))
+verify decodedKept
+    decodedKept(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], [], Result.Err("bad")) => Result.Err("bad")
+    List.len(decodedKept(Domain.UtxoStore.unspentKey("aa", 0)?, [], [], [], Result.Ok(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)))?) => 1
+
+fn pairsInto(pairs: List<Tuple<Bytes, Unspent>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+    ? "The decoded answers into the Map, in argument position of the tail call."
+    match pairs
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> pairInto(head, tail, acc)
+
+verify pairsInto
+    Map.len(pairsInto([], noCoins())?) => 0
+    Map.len(pairsInto([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))], noCoins())?) => 1
+
+fn noCoins() -> Map<Bytes, Unspent>
+    ? "An empty Map of the resolved kind, for the cases here."
+    Map.fromList([])
+
+verify noCoins
+    Map.len(noCoins()) => 0
+
+fn pairInto(pair: Tuple<Bytes, Unspent>, tail: List<Tuple<Bytes, Unspent>>, acc: Map<Bytes, Unspent>) -> Result<Map<Bytes, Unspent>, String>
+    ? "One pair in, then the rest."
+    match pair
+        (key, unspent) -> pairsInto(tail, Map.set(acc, key, unspent))
+
+verify pairInto
+    Map.len(pairInto((Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)), [], noCoins())?) => 1
 
 fn txidIn(key: Bytes) -> Bytes
     ? "The Transaction Id a Set key names."
