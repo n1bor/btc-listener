@@ -20,7 +20,7 @@ module ChainState
         "A Block that will not connect stops the walk with the reason. That is"
         "a consensus failure, not a fault to be counted and walked past: the"
         "chain the Index is following is not one this program can follow."
-    exposes [Built, build]
+    exposes [Built, build, buildFrom]
     depends [Bytes, Domain.AssumeValid, Infra.Metrics, Domain.Connect, Domain.Transaction, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.print,
@@ -52,11 +52,6 @@ record Walk
 
 fn build(network: Network, store: Store, blocks: BlockStore, to: Int, target: Int, eye: Eye) -> Result<Built, String>
     ? "Connect every Block from where the Set stands up to this Height."
-      "Two Heights, because since #217 they differ: to is where this call"
-      "stops, and target is where the Set is going. A chunked caller walks"
-      "250 Blocks at a time and passes the tip as the target, so the frame"
-      "and the metrics record measure the chain rather than the slice (#224)."
-      "A caller doing the whole range in one go passes the same value twice."
       "Where it stands is asked before anything is connected, because it is a"
       "Block and not merely a Height: a reorganisation since the last walk"
       "leaves the Set holding Outputs of Blocks the chain has left, and those"
@@ -69,9 +64,26 @@ fn build(network: Network, store: Store, blocks: BlockStore, to: Int, target: In
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
+    buildFrom(network, store, blocks, to, target, eye, Option.None)
+
+fn buildFrom(network: Network, store: Store, blocks: BlockStore, to: Int, target: Int, eye: Eye, sofar: Option<Built>) -> Result<Built, String>
+    ? "The same walk, continuing the counts of an earlier chunk (#238)."
+      "A walk built in chunks used to start each one at zero, so the metrics"
+      "log's window took a fresh chunk's few Blocks for the whole window's."
+      "Everything the earlier chunk counted -- Blocks, Outputs, fees, the"
+      "Blocks dropped realigning, the views and the unconfirmed -- is the"
+      "starting point here, and the Store and the Eye are the caller's."
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
     aligned = Infra.Rewind.realigned(store, blocks, eye)?
     _said = saidRangeIfPlain(eye, aligned.from, to, target)
-    walked = walk(network, Walk(blocks = blocks, counted = Built(store = aligned.store, blocks = 0, added = 0, removed = 0, fees = 0, reached = aligned.from - 1, dropped = aligned.dropped, views = [], eye = eye, unconfirmed = aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, target = target), aligned.from, to)?
+    walked = walk(network, Walk(blocks = blocks, counted = continuing(sofar, aligned.store, aligned.from - 1, aligned.dropped, eye, aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, target = target), aligned.from, to)?
     swept = Infra.Utxo.prunedUndo(walked.counted.store, walked.counted.reached)?
     _told = toldIfPlain(walked.counted.eye, swept, walked.counted.reached)?
     Result.Ok(counting(walked.counted, swept))
@@ -106,6 +118,18 @@ fn saidRange(from: Int, to: Int, target: Int) -> Unit
     match from > to
         true -> Unit
         false -> Console.print("utxo    connecting {from}..{to} of {target}")
+
+fn continuing(sofar: Option<Built>, store: Store, reached: Int, dropped: Int, eye: Eye, unconfirmed: List<Carried>) -> Built
+    ? "Where a chunk starts counting: at zero, or where the last one left off."
+    match sofar
+        Option.None -> Built(store = store, blocks = 0, added = 0, removed = 0, fees = 0, reached = reached, dropped = dropped, views = [], eye = eye, unconfirmed = unconfirmed)
+        Option.Some(before) -> Built(store = store, blocks = before.blocks, added = before.added, removed = before.removed, fees = before.fees, reached = reached, dropped = before.dropped + dropped, views = before.views, eye = eye, unconfirmed = List.concat(before.unconfirmed, unconfirmed))
+
+verify continuing
+    continuing(Option.None, Infra.Store.fixture([]), 4, 1, Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), []).blocks => 0
+    continuing(Option.None, Infra.Store.fixture([]), 4, 1, Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), []).reached => 4
+    continuing(Option.Some(Built(store = Infra.Store.fixture([]), blocks = 9, added = 20, removed = 7, fees = 3, reached = 12, dropped = 2, views = [], eye = Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), unconfirmed = [])), Infra.Store.fixture([]), 12, 1, Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), []).blocks => 9
+    continuing(Option.Some(Built(store = Infra.Store.fixture([]), blocks = 9, added = 20, removed = 7, fees = 3, reached = 12, dropped = 2, views = [], eye = Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), unconfirmed = [])), Infra.Store.fixture([]), 12, 1, Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), []).dropped => 3
 
 fn counting(counted: Built, store: Store) -> Built
     ? "The counts, carrying the Store the walk finished with."
