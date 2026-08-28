@@ -10,15 +10,15 @@ blocks each one.
 
 | Core file | ours | cases | tool |
 |---|---|---|---|
-| `script_tests.json` | `domain/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` |
-| `sighash.json` | `domain/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
-| `tx_valid.json`, `tx_invalid.json` | `domain/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
-| `script_tests.json`, the Witness rows | `domain/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
-| BIP341 `wallet-test-vectors.json` | `domain/bip341cases.av` | 39 | `tools/bip341_vectors_to_aver.py` |
-| `key_io_valid.json` | `domain/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
-| `key_io_invalid.json` | `domain/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
-| `base58_encode_decode.json` | `domain/base58cases.av` | 42 | `tools/base58_to_aver.py` |
-| `script_assets_test.json` | `domain/assetcases1..9.av` | 3737 | `tools/script_assets_to_aver.py` |
+| `script_tests.json` | `corpus/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` |
+| `sighash.json` | `corpus/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
+| `tx_valid.json`, `tx_invalid.json` | `corpus/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
+| `script_tests.json`, the Witness rows | `corpus/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
+| BIP341 `wallet-test-vectors.json` | `corpus/bip341cases.av` | 39 | `tools/bip341_vectors_to_aver.py` |
+| `key_io_valid.json` | `corpus/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
+| `key_io_invalid.json` | `corpus/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
+| `base58_encode_decode.json` | `corpus/base58cases.av` | 42 | `tools/base58_to_aver.py` |
+| `script_assets_test.json` | `corpus/assetcases1..9.av` | 3737 | `tools/script_assets_to_aver.py` |
 
 Between them **5,938 verify cases**, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
@@ -254,7 +254,7 @@ Two shapes in Core's Transaction data need care and the tool handles both:
 ## `key_io_valid.json` is the second conformance corpus
 
 `tools/key_io_to_aver.py` writes the 54 address entries into
-`domain/keyiocases.av`. Like `sighash.json` and unlike the other three, **Core
+`corpus/keyiocases.av`. Like `sighash.json` and unlike the other three, **Core
 supplies the answer** — each entry is an address, the Output Script hex it
 stands for, and metadata naming the chain — so this is a conformance test, and
 a case that fails means this engine and Bitcoin Core disagree about an address.
@@ -306,7 +306,7 @@ answers against 1118 cases and printed a cheerful agreement report about the 94.
 ## `sighash.json` is the one conformance corpus
 
 `tools/sighash_tests_to_aver.py` writes the 500 cases in
-`domain/sighashcases1..2.av`.
+`corpus/sighashcases1..2.av`.
 
 It is the only one of the three that needs no middle step, because Core
 supplies the expected value: each row is a Transaction, the Script being

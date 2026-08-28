@@ -28,7 +28,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
-OUT = os.path.abspath(os.path.join(HERE, "..", "domain"))
+OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 URL = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/key_io_valid.json"
 
 # Core's chain names against this project's Network.  testnet4 shares testnet3's

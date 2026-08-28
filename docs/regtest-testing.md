@@ -310,7 +310,7 @@ Mempool. Then turn the capture into cases and run them:
 
 ```bash
 python3 tools/cmpct_oracle_to_aver.py cap.json
-aver verify domain/compactblockcases.av --module-root .
+aver verify corpus/compactblockcases.av --module-root .
 ```
 
 The cases pin four things against Core: the key derived from the Header and
