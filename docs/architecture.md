@@ -320,7 +320,7 @@ flowchart TB
             prep["prepared(store, split)<br/>getAll(misses) → Domain.Connect.connected"]
         end
         prod --> absorb["absorbed(window, connection)<br/>created/spent Maps grow in tail position"]
-        absorb --> due{"flushDue(held)?<br/>20,000 entries"}
+        absorb --> due{"flushDue(held)?<br/>200,000 entries"}
         due -- no --> next["stepping(next)"]
         due -- yes --> flush["flushed(store, window)<br/>one applyAll: u: puts, u: deletes, d: undo, meta:setTo"] --> next
     end
@@ -350,9 +350,10 @@ few thousand Blocks, so the walk holds recently created and spent entries in
 two `Map`s — [`Window`](../infra/utxo.av) — and asks the Store only for what
 the window cannot answer ([`partitioned`](../infra/utxo.av#L53)); a flush
 writes the survivors in one batch ([`flushed`](../infra/utxo.av#L270)). The
-window is bounded at 20,000 entries because a `Map` passed across a call is
-deep-copied once per call in the emitted Rust (jasisz/aver#1196) and the
-copy grows with the window. Every `Map.set` on it sits in argument position
+window is bounded at 200,000 entries (#253). It was 20,000 while a `Map`
+passed across a call was deep-copied once per call in the emitted Rust
+(jasisz/aver#1196, fixed on pin `4a5a097d`) and the copy grew with the
+window. Every `Map.set` on it sits in argument position
 of a tail call on a parameter (#227) — the one shape under which Aver's
 `Rc<HashMap>` copy-on-write does not copy.
 
@@ -577,11 +578,10 @@ compiler and improved the prose.
 
 **What the language cost, and where the workarounds live.** Some shapes are
 here because Aver is young: quartering a resolve across nested products
-because a `List<Int>` is boxed (jasisz/aver#1195); the window capped at
-20,000 because cross-function `Map` parameters deep-copy (jasisz/aver#1196);
-a `Bytes` accumulator where a `List<Int>` would read more naturally. Each is
+because a `List<Int>` is boxed (jasisz/aver#1195); a `Bytes` accumulator where a `List<Int>` would read more naturally. Each is
 cited at the line with the upstream issue, and the README's "Moving the Aver
 pin" routine is the discipline of retiring them as the issues close — the
+20,000-entry window cap (jasisz/aver#1196), the
 `Ahead.network` field, the E0659 renames and the `?!` enum capture (#1191)
 have all gone that way.
 
