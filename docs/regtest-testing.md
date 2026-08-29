@@ -1591,6 +1591,65 @@ rm -rf $F2; mkdir -p $F2
 sleep 4; time curl -s -m 5 localhost:18331/ | grep -A3 '<h2>Overview'   # answers in about a second, mid-walk
 ```
 
+### 16k. The Set runs inside the download
+
+Until #185 a catch-up did the whole download and then the whole Set, one
+after the other, over the same range. The download is mostly waiting on
+Peers and the Set is entirely computing, so on one thread they fill each
+other's gaps: a slice of download, then a chunk of Set over what has landed,
+round again.
+
+**The check that matters is that the Set is identical, not that it is
+faster.** Same chain, same Peer, one build each:
+
+```bash
+timeout 600 $BIN_BEFORE regtest follow 127.0.0.1:19444 $D_SEQ log
+timeout 600 $BIN_AFTER  regtest follow 127.0.0.1:19444 $D_PAR log
+$BIN_AFTER regtest audit $D_SEQ 1 49538
+$BIN_AFTER regtest audit $D_PAR 1 49538
+```
+
+```
+blocks 49538  transactions 49543  spends resolved 0  coinbase 49538
+unresolved 5  scripts 0 passed / 0 failed / 0 undecided  CLEAN (faults 0, script failures 0)
+```
+
+Byte for byte the same line from both, and both end with the Set standing at
+49538 of 49538.
+
+**Read the `connected` count to see that the alternation actually ran**, since
+a correct result alone does not prove it did:
+
+```
+sequential   following at Height 49538: 49538 connected
+parallel     following at Height 49538:  7538 connected
+```
+
+The final Set walk had 42,000 fewer Blocks to do, because they were connected
+during the download. Do not look for this in `metrics.log` — a `set` record is
+due once a minute and the regtest chunks are far quicker than that, so both
+runs write two of them and the log shows nothing.
+
+Catch-up wall clock, first record to the Set reaching the tip: **146.0 s
+before, 108.2 s after**. That is a LAN Peer and tiny Blocks, which is the
+*least* favourable case for this change — see #185 for what it is worth
+against random Peers.
+
+#### The trap this section exists for
+
+The first parallel build came back **1,538 Blocks short of 49,538** and the
+audit agreed with it, reporting a clean chain of 48,000. Nothing was corrupt:
+Locations are held back `locationBatch()` = 2000 at a time, and the driver
+handed its `Fetched` back without the final `settled`, so one part-full batch
+of `b:` keys was never written. The bodies were on disk and the Index did not
+name them.
+
+`bodiesOn` did that settle for the sequential path and the driver has to do it
+too. **A short range and a CLEAN audit together are the signature** — the audit
+only reads what the Index names, so it cannot see Blocks the Index forgot.
+Always compare the Block count against the chain's own height, not just the
+audit's verdict.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

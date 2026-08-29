@@ -14,7 +14,7 @@ module Bodies
         "A Height whose Block is already held is skipped, which is what makes"
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
-    exposes [Fetched, bodies, bodiesOn]
+    exposes [Fetched, Flight, bodies, bodiesOn, takingOff, flying, reachedAt, settled, stillFlying, sliceUntil, poolOf, eyeOf, bookOf, nextKeyOf, storeOf, blocksOf, opening, withStore, withBook, withPool2, flyingWithEye]
     depends [Bytes, Domain.Address, Domain.AddressBook, Infra.Metrics, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
     effects [
         Console.error, Console.print,
@@ -57,6 +57,7 @@ record Flight
     progress: Fetched
     plan: Plan
     heardMs: Int
+    deadlineMs: Int
 
 fn locationBatch() -> Int
     ? "How many Locations to hold before writing them."
@@ -121,8 +122,31 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
         Time.unixMs,
     ]
     started = Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, reached = from, book = book, nextKey = nextKey)
-    flown = flying(Flight(progress = started, plan = Plan(wanted = heightsFrom(from, to, []), owed = Map.fromList([])), heardMs = Time.unixMs()), to)?
-    settled(flown)
+    settled(reachedAt(wholly(takingOff(started, from, to), to)?, to))
+
+fn takingOff(started: Fetched, from: Int, to: Int) -> Flight
+    ? "A Flight over a range, with no deadline on it."
+    ! [Time.unixMs]
+    Flight(progress = started, plan = Plan(wanted = heightsFrom(from, to, []), owed = Map.fromList([])), heardMs = Time.unixMs(), deadlineMs = 0)
+
+fn wholly(flight: Flight, to: Int) -> Result<Flight, String>
+    ? "The range flown to its end, which is what a caller with nothing else"
+      "to do wants (#185)."
+      "A Flight with no deadline never stops early, so this is one call. It"
+      "is here rather than inlined because the driver that alternates the"
+      "download with the Set calls flying directly, a slice at a time, and"
+      "the two want to be visibly the same walk."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    flying(flight, to)
 
 fn heightsFrom(from: Int, to: Int, acc: List<Int>) -> List<Int>
     ? "The Heights in a range, lowest first, which is the order they are"
@@ -176,7 +200,7 @@ fn settled(progress: Fetched) -> Result<Fetched, String>
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
     Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey))
 
-fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
+fn flying(flight: Flight, to: Int) -> Result<Flight, String>
     ? "One turn: hand out what can be handed out, then take whatever comes"
       "back from whoever has it."
       "Each turn asks the stop flag first, so a Ctrl-C during a long fetch"
@@ -193,10 +217,46 @@ fn flying(flight: Flight, to: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     match Bool.or(Process.stopRequested(), flight.progress.eye.stopped)
-        true -> Result.Ok(reachedAt(flight, to))
+        true -> Result.Ok(flight)
+        false -> flyingWhile(flight, to)
+
+fn flyingWhile(flight: Flight, to: Int) -> Result<Flight, String>
+    ? "A slice of the download ends when its deadline passes (#185)."
+      "The Flight is handed back whole -- the pool, the plan of what is"
+      "wanted and what is owed, the Locations not yet written -- so the"
+      "caller can put it down, connect some Blocks, and pick it up again."
+      "A deadline of zero is no deadline, which is what the bodies command"
+      "and any caller with nothing else to do passes."
+      "Blocks already in flight stay in flight across the pause: they are"
+      "owed by a Peer and the Peer keeps sending. What the pause costs is"
+      "the reading of them, and the sockets hold that until we come back."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match spent(flight.deadlineMs, Time.unixMs())
+        true -> Result.Ok(flight)
         false -> flyingOn(flight, to)
 
-fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
+fn spent(deadlineMs: Int, nowMs: Int) -> Bool
+    ? "Whether this slice is over. Zero is no deadline at all."
+    match deadlineMs <= 0
+        true -> false
+        false -> nowMs >= deadlineMs
+
+verify spent
+    spent(0, 500) => false
+    spent(1000, 500) => false
+    spent(1000, 1000) => true
+    spent(1000, 1500) => true
+
+fn flyingOn(flight: Flight, to: Int) -> Result<Flight, String>
     ? "Nothing wanted and nothing owed is a range that is on disk."
     ! [
         Console.error, Console.print,
@@ -209,10 +269,10 @@ fn flyingOn(flight: Flight, to: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     match Bool.and(List.len(flight.plan.wanted) == 0, Map.len(flight.plan.owed) == 0)
-        true -> Result.Ok(reachedAt(flight, to))
+        true -> Result.Ok(flight)
         false -> tended(flight, to)
 
-fn tended(flight: Flight, to: Int) -> Result<Fetched, String>
+fn tended(flight: Flight, to: Int) -> Result<Flight, String>
     ? "The walk takes its turn at dialling (#199)."
       "A body phase is hours long and it holds the pool for all of them, so"
       "everything the follow loop does once a turn has to be done here as"
@@ -240,7 +300,7 @@ fn tended(flight: Flight, to: Int) -> Result<Fetched, String>
     polled = withPool2(flight, Infra.Peers.advanced(flight.progress.pool)?)
     dialStarted(polled, Infra.Peers.toppedUp(polled.progress.pool, polled.progress.book, polled.progress.nextKey)?, to)
 
-fn dialStarted(flight: Flight, done: Infra.Peers.Topped, to: Int) -> Result<Fetched, String>
+fn dialStarted(flight: Flight, done: Infra.Peers.Topped, to: Int) -> Result<Flight, String>
     ? "What the top-up did, folded back, and on with the turn."
       "The Outcomes stay on the pool rather than being said here: the walk"
       "does not own the plain log or the Panel, and Infra.Peers.reported"
@@ -261,7 +321,7 @@ fn withBook(flight: Flight, pool: Pool, book: Map<String, Candidate>, nextKey: I
     ? "The flight, carrying what a turn at dialling left behind."
     withProgress(flight, Fetched(pool = pool, store = flight.progress.store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = book, nextKey = nextKey))
 
-fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
+fn turning(flight: Flight, to: Int) -> Result<Flight, String>
     ? "A turn needs somebody to ask. The pool emptying is the one way this"
       "walk fails outright: every other fault costs one Peer and is carried"
       "by the others."
@@ -279,7 +339,7 @@ fn turning(flight: Flight, to: Int) -> Result<Fetched, String>
         [] -> Result.Err("no Peer is left to fetch Blocks from")
         [head, ..tail] -> asking(requeued(flight, List.prepend(head, tail)), List.prepend(head, tail), to)
 
-fn asking(flight: Flight, live: List<Int>, to: Int) -> Result<Fetched, String>
+fn asking(flight: Flight, live: List<Int>, to: Int) -> Result<Flight, String>
     ? "Every Peer topped up to what it may hold, then one wait."
     ! [
         Console.error, Console.print,
@@ -424,7 +484,7 @@ fn requested(flight: Flight, key: Int, taken: List<Claim>) -> Result<Flight, Str
     ! [Console.error, Tcp.close, Tcp.writeBytes]
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.witnessBlockType(), hashesOf(taken, [])?)?
     sent = Infra.Peers.tell(flight.progress.pool, key, "getdata", payload)?
-    Result.Ok(Flight(progress = withPool(flight.progress, sent), plan = owedWith(flight.plan, taken, key), heardMs = flight.heardMs))
+    Result.Ok(Flight(progress = withPool(flight.progress, sent), plan = owedWith(flight.plan, taken, key), heardMs = flight.heardMs, deadlineMs = flight.deadlineMs))
 
 fn owedWith(plan: Plan, taken: List<Claim>, key: Int) -> Plan
     ? "Every claimed Block recorded against the Peer that was asked for it."
@@ -437,7 +497,7 @@ verify owedWith
     Map.len(owedWith(samplePlan(), [Claim(blockId = "bb", height = 7)], 1).owed) => 2
     owedWith(samplePlan(), [Claim(blockId = "bb", height = 7)], 1).wanted => [3, 7]
 
-fn waitingFor(flight: Flight, to: Int) -> Result<Fetched, String>
+fn waitingFor(flight: Flight, to: Int) -> Result<Flight, String>
     ? "One bounded wait on the whole pool."
       "Where the single-Peer walk waited on one identifier, this waits on"
       "everybody and takes whichever answers first -- which is the whole of"
@@ -456,7 +516,7 @@ fn waitingFor(flight: Flight, to: Int) -> Result<Fetched, String>
     ticked = Infra.Peers.awaitTick(flight.progress.pool, tickMs())?
     landed(withPool2(flight, ticked.pool), ticked.arrived, to)
 
-fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Fetched, String>
+fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Flight, String>
     ? "Something said, or a tick of silence."
     ! [
         Console.error, Console.print,
@@ -472,7 +532,7 @@ fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Fetched, St
         Option.None -> quiet(flight, to)
         Option.Some(one) -> sorted(flight, one, to)
 
-fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Fetched, String>
+fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Flight, String>
     ? "A Block is the walk's business, a ping has to be answered, and"
       "anything else is kept for the loop that will want it (#168)."
       "The walk hears everything every Peer says while it runs -- an inv, an"
@@ -494,7 +554,7 @@ fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Fetched, String>
         "ping" -> ponged(flight, one.key, one.frame, to)
         _ -> flying(withPool2(flight, Infra.Peers.spared(flight.progress.pool, one.key, one.frame)), to)
 
-fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Fetched, String>
+fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Flight, String>
     ? "A ping answered mid-walk, because a Peer that is not ponged drops us"
       "-- and over a body phase of hours it will."
     ! [
@@ -511,7 +571,7 @@ fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Fetched, St
     sent = Infra.Peers.tell(flight.progress.pool, key, "pong", payload)?
     flying(withPool2(flight, sent), to)
 
-fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Fetched, String>
+fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Flight, String>
     ? "Which Block this is, decided by hashing it rather than by who sent"
       "it or when."
       "A getdata names a Block Id and a Peer answers with bytes; nothing on"
@@ -536,7 +596,7 @@ fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Fetched, String>
     arrived = Domain.Block.idOfWholeBlock(payload)
     matched(flight, payload, arrived, Map.get(flight.plan.owed, arrived), List.len(frame.body), to)
 
-fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, size: Int, to: Int) -> Result<Fetched, String>
+fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, size: Int, to: Int) -> Result<Flight, String>
     ? "A Block nobody is owed is passed over rather than treated as a fault."
       "It is the ordinary outcome of a requeue: a Peer that went quiet long"
       "enough to have its work reassigned may still answer, and by then the"
@@ -556,7 +616,7 @@ fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, 
         Option.None -> flying(flight, to)
         Option.Some(one) -> kept(flight, payload, blockId, one, size, to)
 
-fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, to: Int) -> Result<Fetched, String>
+fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, to: Int) -> Result<Flight, String>
     ? "Write the Block to a Segment, then record where it went."
       "The bytes are on disk before the Index names them, so a crash between"
       "the two costs a Block that is fetched again rather than an entry"
@@ -578,9 +638,9 @@ fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, 
     appended = Infra.Blocks.append(flight.progress.blocks, payload)?
     held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = flight.progress.book, nextKey = flight.progress.nextKey)
     written = maybeWrite(held)?
-    reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs()), to)
+    reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs(), deadlineMs = flight.deadlineMs), to)
 
-fn quiet(flight: Flight, to: Int) -> Result<Fetched, String>
+fn quiet(flight: Flight, to: Int) -> Result<Flight, String>
     ? "A tick with no Block in it. Usually there is simply nothing to say"
       "yet; past the stall deadline it means the Peers owing Blocks are not"
       "going to send them."
@@ -598,7 +658,7 @@ fn quiet(flight: Flight, to: Int) -> Result<Fetched, String>
         true -> stalled(flight, to)
         false -> reporting(flight, to)
 
-fn stalled(flight: Flight, to: Int) -> Result<Fetched, String>
+fn stalled(flight: Flight, to: Int) -> Result<Flight, String>
     ? "Drop every Peer that owes a Block and has not sent one, and want"
       "again what they were owing."
       "A Peer that accepts a getdata and then says nothing holds part of the"
@@ -618,7 +678,7 @@ fn stalled(flight: Flight, to: Int) -> Result<Fetched, String>
         Time.unixMs,
     ]
     shed = dropping(flight.progress.pool, owingKeys(flight.plan, Map.keys(flight.plan.owed), []))?
-    flying(Flight(progress = withPool(flight.progress, shed), plan = Plan(wanted = List.concat(owedHeights(flight.plan, Map.keys(flight.plan.owed), []), flight.plan.wanted), owed = Map.fromList([])), heardMs = Time.unixMs()), to)
+    flying(Flight(progress = withPool(flight.progress, shed), plan = Plan(wanted = List.concat(owedHeights(flight.plan, Map.keys(flight.plan.owed), []), flight.plan.wanted), owed = Map.fromList([])), heardMs = Time.unixMs(), deadlineMs = flight.deadlineMs), to)
 
 fn dropping(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "Each silent Peer closed and forgotten."
@@ -664,7 +724,7 @@ verify owedHeights
     owedHeights(samplePlan(), Map.keys(samplePlan().owed), []) => [5]
     owedHeights(samplePlan(), [], []) => []
 
-fn reporting(flight: Flight, to: Int) -> Result<Fetched, String>
+fn reporting(flight: Flight, to: Int) -> Result<Flight, String>
     ? "A progress line each minute, rather than a line for every Block."
       "The walk fetches thousands of Blocks a minute at the start of the"
       "chain, and a reader watching it wants where it is, how fast it is"
@@ -682,7 +742,7 @@ fn reporting(flight: Flight, to: Int) -> Result<Fetched, String>
     ]
     saying(flight, to, Time.unixMs())
 
-fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Fetched, String>
+fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Flight, String>
     ? "Say where the walk is when a line is due, and stay quiet otherwise."
     ! [
         Console.error, Console.print,
@@ -702,7 +762,7 @@ fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Fetched, String>
         false -> flying(withProgress(flight, seen), to)
         true -> said(flight, seen, at, to, nowMs)
 
-fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Result<Fetched, String>
+fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Result<Flight, String>
     ? "The line, and the Pace the next one measures from."
     ! [
         Console.error, Console.print,
@@ -815,11 +875,11 @@ verify withWanted
 
 fn withPlan(flight: Flight, plan: Plan) -> Flight
     ? "The flight, with its bookkeeping moved on."
-    Flight(progress = flight.progress, plan = plan, heardMs = flight.heardMs)
+    Flight(progress = flight.progress, plan = plan, heardMs = flight.heardMs, deadlineMs = flight.deadlineMs)
 
 fn withProgress(flight: Flight, progress: Fetched) -> Flight
     ? "The flight, with the walk's own state moved on."
-    Flight(progress = progress, plan = flight.plan, heardMs = flight.heardMs)
+    Flight(progress = progress, plan = flight.plan, heardMs = flight.heardMs, deadlineMs = flight.deadlineMs)
 
 fn withPool2(flight: Flight, pool: Pool) -> Flight
     ? "The flight, carrying the pool a wait or a send left behind."
@@ -947,3 +1007,65 @@ verify etaText
     etaText(0, 240, 60000) => "0s"
     etaText(700, 0, 60000) => "?"
     etaText(700, 1, 0) => "?"
+
+fn stillFlying(flight: Flight) -> Bool
+    ? "Whether the download has anything left to do (#185)."
+      "Nothing wanted and nothing owed is a range that is on disk, which is"
+      "the same question flyingOn asks to decide it has finished."
+    outstanding(flight.plan)
+
+fn outstanding(plan: Plan) -> Bool
+    ? "Whether a plan still holds work: something wanted, or something owed."
+    match Bool.and(List.len(plan.wanted) == 0, Map.len(plan.owed) == 0)
+        true -> false
+        false -> true
+
+verify outstanding
+    outstanding(Plan(wanted = [], owed = Map.fromList([]))) => false
+    outstanding(Plan(wanted = [7], owed = Map.fromList([]))) => true
+    outstanding(Plan(wanted = [], owed = Map.fromList([("a", Owed(key = 1, height = 2))]))) => true
+
+fn sliceUntil(flight: Flight, deadlineMs: Int) -> Flight
+    ? "The same Flight, with a deadline on the next slice of it."
+    Flight(progress = flight.progress, plan = flight.plan, heardMs = flight.heardMs, deadlineMs = deadlineMs)
+
+fn poolOf(flight: Flight) -> Pool
+    ? "The pool the Flight is holding, for the caller that tends it."
+    flight.progress.pool
+
+fn eyeOf(flight: Flight) -> Eye
+    ? "The Eye the Flight is carrying."
+    flight.progress.eye
+
+fn bookOf(flight: Flight) -> Map<String, Candidate>
+    ? "The Address Book the Flight is carrying."
+    flight.progress.book
+
+fn nextKeyOf(flight: Flight) -> Int
+    ? "The next Peer identifier the Flight would hand out."
+    flight.progress.nextKey
+
+fn storeOf(flight: Flight) -> Store
+    ? "The Store the download has been writing Locations into (#185)."
+      "The one thing the two walks share. The Set reads bodies through the"
+      "b: keys the download writes, so the Store passes between them -- and"
+      "strictly one at a time, a slice then a chunk, never both at once."
+    flight.progress.store
+
+fn withStore(flight: Flight, store: Store) -> Flight
+    ? "The Flight, carrying the Store a Set chunk moved on."
+    withProgress(flight, Fetched(pool = flight.progress.pool, store = store, blocks = flight.progress.blocks, pending = flight.progress.pending, waiting = flight.progress.waiting, count = flight.progress.count, bytes = flight.progress.bytes, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = flight.progress.book, nextKey = flight.progress.nextKey))
+
+fn flyingWithEye(flight: Flight, eye: Eye) -> Flight
+    ? "The Flight, carrying the Eye a Set chunk drew and logged with."
+    withProgress(flight, withEye(flight.progress, eye))
+
+fn blocksOf(flight: Flight) -> BlockStore
+    ? "The Segment store the download is appending bodies to."
+    flight.progress.blocks
+
+fn opening(pool: Pool, store: Store, blocks: BlockStore, from: Int, eye: Eye, book: Map<String, Candidate>, nextKey: Int) -> Fetched
+    ? "The walk state a download starts from, which bodiesOn builds inline"
+      "and the alternating driver needs by name (#185)."
+    ! [Time.unixMs]
+    Fetched(pool = pool, store = store, blocks = blocks, pending = [], waiting = 0, count = 0, bytes = 0, pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, reached = from, book = book, nextKey = nextKey)
