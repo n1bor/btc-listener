@@ -708,7 +708,8 @@ after the product on the one thread that owns the Store
 made and spent Outputs are held in a write-back window and asked of the Store
 only when the window cannot answer — most Outputs are spent within a few
 thousand Blocks — and the window is written through in one batch every
-20,000 entries ([#247](https://github.com/n1bor/btc-listener/issues/247)).
+200,000 entries ([#247](https://github.com/n1bor/btc-listener/issues/247),
+[#253](https://github.com/n1bor/btc-listener/issues/253)).
 Each of those is a measured multiple on a mainnet snapshot; two later ideas
 that measured as losses are closed with their numbers
 ([#251](https://github.com/n1bor/btc-listener/issues/251),
