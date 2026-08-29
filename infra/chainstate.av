@@ -140,7 +140,6 @@ fn counting(counted: Built, store: Store) -> Built
     Built(store = store, blocks = counted.blocks, added = counted.added, removed = counted.removed, fees = counted.fees, reached = counted.reached, dropped = counted.dropped, views = counted.views, eye = counted.eye, unconfirmed = counted.unconfirmed)
 
 record Ahead
-    network: Network
     height: Int
     blockId: String
     location: Location
@@ -174,7 +173,7 @@ fn walk(network: Network, state: Walk, height: Int, to: Int, created: Map<Bytes,
     ]
     match Bool.or(height > to, Bool.or(Process.stopRequested(), state.eye.stopped))
         true -> ended(state, created, spent, undos, held, standing)
-        false -> stepping(network, state, to, fetched(network, state.counted.store, state.blocks, height)?, created, spent, undos, held, standing)
+        false -> stepping(network, state, to, fetched(state.counted.store, state.blocks, height)?, created, spent, undos, held, standing)
 
 fn ended(state: Walk, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "The walk as it stands and the window it still holds, for the caller"
@@ -220,10 +219,6 @@ fn overlapped(network: Network, state: Walk, to: Int, this: Ahead, created: Map<
       "a Store holding a resource cannot. A stop asked for during the"
       "product is seen before the next Block, so the Set is always left at"
       "a whole one."
-      "The Network rides on Ahead rather than being named in the product: a"
-      "sum-typed parameter captured into a branch is emitted as `&*network`"
-      "on an owned value, which rustc refuses (E0614), where a record field"
-      "is not. jasisz/aver#1191."
     ! [
         Console.print,
         Disk.appendText, Disk.readBytesAt,
@@ -233,7 +228,7 @@ fn overlapped(network: Network, state: Walk, to: Int, this: Ahead, created: Map<
         Time.now, Time.unixMs,
     ]
     split = Infra.Utxo.partitioned(this.transactions, created, spent)?
-    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(this.network, state.counted.store, split, this.height, this.transactions))?!
+    both = (fetched(state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(network, state.counted.store, split, this.height, this.transactions))?!
     match both
         (next, connection) -> absorbing(network, state, to, next, this, connection, created, spent, undos, held)
 
@@ -277,31 +272,31 @@ fn withStore(state: Walk, store: Store) -> Walk
     ? "The walk, its Store moved on by a flush."
     Walk(blocks = state.blocks, counted = counting(state.counted, store), pace = state.pace, eye = state.eye, target = state.target)
 
-fn fetched(network: Network, store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead>, String>
+fn fetched(store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead>, String>
     ? "The Block at a Height, read and decoded, if the Index names one and"
       "its body is held."
     ! [Disk.readBytesAt, Infra.Kv.get]
-    fetchedNamed(network, store, blocks, height, Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?))
+    fetchedNamed(store, blocks, height, Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?))
 
-fn fetchedNamed(network: Network, store: Store, blocks: BlockStore, height: Int, named: Option<String>) -> Result<Option<Ahead>, String>
+fn fetchedNamed(store: Store, blocks: BlockStore, height: Int, named: Option<String>) -> Result<Option<Ahead>, String>
     ? "A Height the Index does not name is nothing to fetch."
     ! [Disk.readBytesAt, Infra.Kv.get]
     match named
         Option.None -> Result.Ok(Option.None)
-        Option.Some(blockId) -> fetchedLocated(network, blocks, height, blockId, Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?)
+        Option.Some(blockId) -> fetchedLocated(blocks, height, blockId, Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?)
 
-fn fetchedLocated(network: Network, blocks: BlockStore, height: Int, blockId: String, located: Option<Bytes>) -> Result<Option<Ahead>, String>
+fn fetchedLocated(blocks: BlockStore, height: Int, blockId: String, located: Option<Bytes>) -> Result<Option<Ahead>, String>
     ? "A Block whose body is not held is nothing to fetch either."
     ! [Disk.readBytesAt]
     match located
         Option.None -> Result.Ok(Option.None)
-        Option.Some(stored) -> fetchedAt(network, blocks, height, blockId, Domain.Index.decodeLocation(stored)?)
+        Option.Some(stored) -> fetchedAt(blocks, height, blockId, Domain.Index.decodeLocation(stored)?)
 
-fn fetchedAt(network: Network, blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Option<Ahead>, String>
+fn fetchedAt(blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Option<Ahead>, String>
     ? "Read the Block and decode its Transactions."
     ! [Disk.readBytesAt]
     payload = Infra.Blocks.read(blocks, location)?
-    Result.Ok(Option.Some(Ahead(network = network, height = height, blockId = blockId, location = location, transactions = Domain.Block.transactionsOf(payload)?)))
+    Result.Ok(Option.Some(Ahead(height = height, blockId = blockId, location = location, transactions = Domain.Block.transactionsOf(payload)?)))
 
 fn recorded(network: Network, state: Walk, height: Int, blockId: String, added: Int, removed: Int, fees: Int, confirmed: List<TxFee>, view: BlockView) -> Result<Walk, String>
     ? "Count it. Where the Set stands is written with the window (#247)."
