@@ -1,13 +1,16 @@
 # Bitcoin Peer Listener, Chain Downloader and Auditor
 
-Connects to a single Bitcoin node over the peer-to-peer protocol, listens for
-transaction announcements, and prints each transaction's decoded structure.
+A Bitcoin node that speaks the peer-to-peer protocol directly. It started as
+a listener that printed each announced Transaction decoded, and it still does
+that; it now also downloads the chain from several Peers at once, builds the
+UTXO Set, runs every Script, holds a Mempool, takes compact Blocks, follows
+the tip through reorganisations, and serves the chain to Peers that dial it —
+a Bitcoin Core node with no other Peer has synced its whole chain from this
+one. Every check it makes is against its own Index and Segments, and every
+answer it gives keeps *cannot tell* apart from pass and fail.
 
-It also downloads the chain from that node and checks what it holds: Blocks
-against their Headers, Transactions against the Outputs they claim to spend, and
-Scripts as far as they can be run without a curve to verify signatures against.
-
-Written in [Aver](https://averlang.dev).
+Written in [Aver](https://averlang.dev). [docs/architecture.md](docs/architecture.md)
+is how it is put together and why; this file is how to use it.
 
 ```
 listening to peer 172.26.224.1:8333
@@ -21,8 +24,9 @@ tx d2408438d0d7032c09aea47e1284dd5843ad769f2512757440c15e43ba696dfa
 
 ## Commands
 
-Fifteen of them. Only the four marked below need a Peer; everything else reads
-what those wrote and works offline.
+Fifteen of them. Only the ones marked below need a Peer; everything else reads
+what those wrote and works offline. Put `signet` or `regtest` in front of any
+of them to speak that Network instead of mainnet ([Signet](#signet)).
 
 | command | what it does | Peer |
 |---|---|---|
@@ -37,7 +41,8 @@ what those wrote and works offline.
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
 | `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
-| `follow <peers> <dir>` | [stay](#following-the-tip) on the tip, and never stop | yes |
+| `follow <peers> <dir> [screen] [serve[:port]] [log[:path]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
+| `follow <dir> [screen] [serve[:port]] [log[:path]]` | the same, finding its Peers through the DNS seeds | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -53,9 +58,10 @@ headers ─→ bodies ─→ txindex
 `audit` need `txindex` as well — without it every Input reads as unresolved,
 which is an answer rather than an error.
 
-`follow` is the first two plus `utxo`, run again every time the Peer says a
+`follow` is the first two plus `utxo`, run again every time a Peer says a
 Block arrived, so it both catches an empty directory up and keeps a caught-up
-one current.
+one current — and, once caught up, holds a Mempool, relays Transactions and
+answers Peers that dial it.
 
 Everything but the listener takes a `<dir>`, where the Index and the Segments
 live. Point them all at the same one.
@@ -133,8 +139,11 @@ a timeout abandons nothing
 an otherwise-quiet connection every two minutes, so a Peer that has said
 nothing for two and a half is gone, and the session ends with `Peer said
 nothing for 150 seconds` instead of blocking while looking like it is
-working. A Peer that stalls *mid-frame* still blocks, deliberately; that
-residue waits for the event loop of #26.
+working. Nothing blocks mid-frame any more either: since #27 every socket,
+the listener included, is read as bytes arrive (`Tcp.readSome`) and Messages
+are cut off the front of a per-Peer buffer, so a Peer that stalls part way
+through a frame costs only itself. The listener is a pool of one on the same
+machinery `follow` runs eight Peers on.
 
 `aver compile` used to print one warning per dependency module — 45 lines
 saying the module's verify blocks were not sampled — and the README carried a
@@ -159,13 +168,21 @@ port (38333), the DNS seeds asked, and the genesis Block the Locator starts
 from. The offline commands — `show`, `audit`, `tx`, `spend` and the rest —
 take no `signet`: a directory answers from what it holds.
 
-Two honesty notes. The signet challenge — the block signature signet carries
+One honesty note. The signet challenge — the block signature signet carries
 in its coinbase witness commitment — is not checked, the same way every rule
 this engine does not carry is not checked: the absence of a check is never
-reported as a pass. And addresses in a signet directory still render with
-mainnet prefixes (`bc1…` where signet spells `tb1…`), because the offline
-commands do not yet ask which Network filled the directory —
-[#34](https://github.com/n1bor/btc-listener/issues/34).
+reported as a pass. A directory does record which Network filled it, so its
+addresses render with that Network's prefixes (`tb1…` on signet) whichever
+command reads them ([#34](https://github.com/n1bor/btc-listener/issues/34)).
+
+### Regtest
+
+`regtest` works the same way — magic, port 18444 and genesis follow, every
+consensus rule is in force from Height 1, and the subsidy halves every 150
+Blocks — and it is the Network the end-to-end test runs on, because a
+reorganisation on regtest can be summoned with `invalidateblock` rather than
+waited for. See [Reorganisations, on demand](#reorganisations-on-demand) and
+[docs/regtest-testing.md](docs/regtest-testing.md).
 
 ### Running under WSL
 
@@ -354,10 +371,9 @@ The entry names a **Block**, not a Height, so a reorganisation that moves a
 Height leaves it true.
 
 **Index a range, not the chain.** Bitcoin holds well over a billion
-Transactions. On the file backends the Store keeps every entry in memory, so a
-whole-chain Transaction index is exactly what `infra/store.av` says it cannot
-back. On the database backend the ceiling is the disk instead, and the keyspace
-was always the one a database would be given.
+Transactions. The Store that came before the database kept every entry in
+memory, which is why the command takes a range; on RocksDB the ceiling is the
+disk instead, and the keyspace was always the one a database would be given.
 
 ## Resolving a spend in one lookup
 
@@ -390,7 +406,7 @@ same 105 Blocks, with and without it:
 | with | 4809 | **0** | 11201 |
 
 Two and a half times as many Scripts actually run, and nothing is left
-unresolved. That is the point of the whole LevelDB move.
+unresolved. That is the point of putting the Index on a database.
 
 It also made a defect visible that had been there all along: about 1% of those
 Scripts **failed**, on real mainnet spends that must be valid. The engine could
@@ -428,8 +444,8 @@ to the Script engine, so `check` decides by the rules of the day rather than by
 today's.
 
 ```aver
-check(input, output, Domain.Rules.at(170060), context) => Decided(Passed)
-check(input, output, Domain.Rules.at(173805), context) => Decided(Failed(…))
+check(input, output, Domain.Rules.at(Network.Mainnet, 170060), context) => Decided(Passed)
+check(input, output, Domain.Rules.at(Network.Mainnet, 173805), context) => Decided(Failed(…))
 ```
 
 Both of those are real: the same spend, from Block 170060, on either side of the
@@ -438,10 +454,15 @@ the top item, compare, leave true — and the redeem Script is data that never
 runs. That is exactly the hole BIP16 closed, and those coins really were
 spendable by anyone who knew the preimage.
 
-Only P2SH is carried today, because it is the only rule this engine both
-implements and can check against Blocks it holds. `Domain.Ecdsa.isValidEncoding`
-is already written for BIP66 at Height 363,725, but the chain here stops below
-that, so wiring it in would ship consensus code no measurement could reach.
+`Domain.Rules.at` carries every soft fork the engine implements, each at its
+activation Height per Network: P2SH (BIP16, mainnet 173,805), strict DER
+(BIP66, 363,725), `OP_CHECKLOCKTIMEVERIFY` (BIP65, 388,381),
+`OP_CHECKSEQUENCEVERIFY` (BIP112, 419,328), SegWit and NULLDUMMY (BIP141/147,
+481,824) and Taproot (BIP341, 709,632). Signet and regtest have had all of
+them since Height 1, which is why `audit` needs the Network word too: auditing
+a signet directory as mainnet judges the whole chain by a timetable it never
+followed. Policy — what this node will *relay* — is a separate thing
+([Domain.Standard](domain/standard.av)) and is never applied to a mined Block.
 
 ## Checking a spend
 
@@ -490,9 +511,11 @@ script 0 passed, 0 failed, 1 undecided
 scripts this project can reach: over Blocks 1–4000, **247 passed, 0 failed, 0
 undecided**, where before the curve arrived it was 0 / 0 / 247.
 
-What remains undecided is `OP_SHA1`, for want of SHA-1, and every witness or
-Taproot Script, which is refused before it runs rather than after. On a modern
-Block that is still most Inputs.
+What remains undecided is small: a Script pair whose answer needs a
+Transaction the case does not carry. SHA-1 arrived with the providers, so
+`OP_SHA1` runs; version 0 witness programs run under BIP141 and BIP143, and
+Taproot key-path and tapscript spends under BIP341 and BIP342 — the signet
+audit below reaches zero undecided over 2.1 million Scripts.
 
 Counting it apart from **failed** is the whole discipline. An engine that called
 "cannot tell" invalid would be worthless over a chain held in part — and one that
@@ -501,12 +524,16 @@ three Blocks from 2023 produced **6,363 passes from an engine that has never
 verified a signature**, and every one was wrong. Segwit was deployed as a soft
 fork, which *required* a witness program to look valid to nodes that could not
 read it — a version byte and a push of a hash leaves the hash on the stack and
-comes out true. Witness programs are refused before they are run now, and those
-Blocks read `0 passed / 0 failed / 6493 undecided`.
+comes out true. The fix, before the witness evaluator existed, was to refuse a
+witness program rather than run it, and those Blocks read
+`0 passed / 0 failed / 6493 undecided`; now that the evaluator exists the rule
+survives as the seam it guards — anything the engine cannot read is undecided,
+never passed.
 
 Bitcoin Core's own test data is the adversarial test, and nothing written here
-would be half as unkind. Nine files are read, 5,938 cases between them, and
-every Script case carries the verification flags Core ran it under:
+would be half as unkind. Eleven files are read into `corpus/`, 6,050 cases
+between them, and every Script case carries the verification flags Core ran it
+under:
 
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
@@ -519,6 +546,8 @@ every Script case carries the verification flags Core ran it under:
 | `base58_encode_decode.json`, both directions | 42 | 42 | 0 | 0 |
 | BIP341 `wallet-test-vectors.json` | 39 | 39 | 0 | 0 |
 | `script_assets_test.json`, tapscript spends | 3737 | 3737 | 0 | 0 |
+| SipHash-2-4 reference vectors | 64 | 64 | 0 | 0 |
+| one compact Block, captured from Core | 31 | 31 | 0 | 0 |
 
 **Nothing disagrees, in either direction.** The seventy undecided are Script
 pairs whose answer needs a Transaction the row does not carry, which is the
@@ -671,6 +700,20 @@ so the removal can be reversed if that Block leaves the chain. That is kept for
 reorganisation reaching below the window cannot be undone, and the node says so
 and stops rather than guessing.
 
+How fast it goes is a matter of shape, and the shape is measured before it is
+kept. The next Block is read and decoded while this one's Inputs are resolved
+against the Store, as two branches of one product, and every write happens
+after the product on the one thread that owns the Store
+([ADR 0008](docs/adr/0008-independence-and-a-single-writer-loop.md)). Recently
+made and spent Outputs are held in a write-back window and asked of the Store
+only when the window cannot answer — most Outputs are spent within a few
+thousand Blocks — and the window is written through in one batch every
+20,000 entries ([#247](https://github.com/n1bor/btc-listener/issues/247)).
+Each of those is a measured multiple on a mainnet snapshot; two later ideas
+that measured as losses are closed with their numbers
+([#251](https://github.com/n1bor/btc-listener/issues/251),
+[#252](https://github.com/n1bor/btc-listener/issues/252)).
+
 Genesis is not connected. It is the base the chain is measured from: no Peer
 sends its body and its Output cannot be spent, which is why the fifty coins of
 Block 0 are missing from the supply that can ever move. Bitcoin Core leaves it
@@ -727,12 +770,14 @@ current:
 
 ```bash
 ./target/release/main signet follow 192.0.2.1,192.0.2.2:38333 ~/chain
+./target/release/main signet follow ~/chain                     # Peers from the DNS seeds
 ```
 
 One Peer Address or several separated by commas, each with an optional
-`:port`. It handshakes with all of them, catches the directory up — Headers, then bodies,
-then the UTXO Set — and then waits. When the Peer announces a Block it does the
-same three phases again, and the run says where that left it:
+`:port` — or none, and the seeds are asked. It handshakes with all of them,
+catches the directory up — Headers, then bodies, then the UTXO Set — and then
+waits. When a Peer announces a Block it does the same three phases again, and
+the run says where that left it:
 
 ```
 peer 0 is 192.0.2.1:38333
@@ -754,9 +799,8 @@ body first buys nothing and loses the ordering. The `getdata` still happens; it
 is what the body phase is, one Header later. Bitcoin Core answers an unexpected
 `inv` the same way, for the same reason.
 
-A Transaction announced down the same `inv` is not asked for. There is nowhere
-to put one until the Mempool arrives, and asking for what cannot be kept would
-be a lie about what this program does.
+A Transaction announced down the same `inv` is asked for, checked and, if it
+passes, held and announced onward — see [The Mempool, and relay](#the-mempool-and-relay).
 
 ### When the chain changes its mind
 
@@ -905,8 +949,71 @@ what it did before this, and what the hostile-Peer test found.
 There is no misbehaviour score. Bitcoin Core keeps one because it has graded
 offences; every fault this program can currently detect is one Core disconnects
 on outright, so a counter with a threshold would be a counter that only ever
-reaches one. When a graded offence appears — Stage 6's Mempool has several —
-the score can appear with it.
+reaches one. The Mempool's refusals are not offences either: a Transaction that
+fails Policy is simply not held, because a Peer relaying what its own Policy
+admits is doing nothing wrong.
+
+### The Mempool, and relay
+
+Once caught up, a Transaction a Peer announces is asked for and put through the
+same questions in a fixed order, cheapest first: its shape against Policy
+([Domain.Standard](domain/standard.av), which refuses most of what should be
+refused for free), the Outputs it spends looked up in the **UTXO Set** — not
+the `o:` keyspace, which would resolve an Output spent years ago and admit a
+double spend — then value, then the fee floor, then its Scripts. What passes
+is held and announced to every other Peer; what fails is dropped with the
+reason. The Mempool is capped at 300 MB of Transactions, Core's default, and
+what leaves first when it fills is what pays least, so filling it costs the
+sender more than it costs us. Conflicts are first-seen-wins; BIP125
+replacement, the orphan pool and package relay are deferred by
+[#28](https://github.com/n1bor/btc-listener/issues/28), so a Transaction
+spending an unconfirmed parent is refused rather than admitted on a guess. A
+Block confirms what it contains out of the Mempool; a disconnected Block's
+Transactions go back through admission rather than straight back in, because
+what was valid on an abandoned Branch may be a double spend on the one that
+replaced it.
+
+### Compact Blocks
+
+A Block at the tip is one to two megabytes, almost all of it Transactions the
+Mempool already holds. With `sendcmpct` agreed, a Peer sends the Header, a
+six-byte short Id per Transaction and the few it guesses we lack;
+[Domain.CompactBlock](domain/compactblock.av) rebuilds the Block from the
+Mempool, names the positions still missing, and the loop asks for those with
+`getblocktxn`. The short Ids are SipHash-2-4 under a key derived from the
+Header and a nonce the sender chose, pinned against the reference vectors. A
+Block that cannot be rebuilt is fetched whole, as before.
+
+### Peers that dial us
+
+`serve` binds the Network's own port (`serve:PORT` another) and accepts
+inbound Peers, up to **eight** — a bound on the slots anybody at all can take,
+kept separate from the eight outbound ones we choose. They are handshaken and
+served: `getheaders`, `getdata` for Blocks out of the Segments and for
+Transactions out of the Mempool, `getaddr` from the Address Book. A Bitcoin
+Core node with this as its only Peer synced its whole regtest chain from it,
+validated it and left initial block download — the sentence the full-node
+plan was written to earn — and [docs/regtest-testing.md](docs/regtest-testing.md)
+§11–12 is how to repeat that.
+
+### Watching it: `screen` and `log`
+
+`screen` puts a live terminal Screen up once the node is caught up: an
+Overview, and `p` `b` `t` `m` switch to the Peers, Blocks, Transactions and
+Mempool Panels, `o` back, `q` quits after confirming. Every character of it
+is computed in pure [Domain.Screen](domain/screen.av) from a
+[Snapshot](domain/snapshot.av) the loop folds up each tick; only the drawing
+touches a terminal.
+
+A Screen run leaves nothing behind, so `log` writes what it would have said
+where it survives: `<dir>/metrics.log` (`log:PATH` puts it elsewhere) gets one
+line a minute and one at every phase boundary — timestamp, phase, Height,
+target, Blocks, bytes, milliseconds inside `Tcp.poll` and outside it, Peers,
+Candidates — in a fixed order that `awk` reads without a parser. The same word
+turns on `<dir>/debug.log`, one line per *decision* — a phase started, a Peer
+seated or dropped and why, a fault and what it was charged to — so a run that
+ends under the Screen can be read afterwards rather than re-run in plain mode
+to see what stopped it ([#218](https://github.com/n1bor/btc-listener/issues/218)).
 
 ## Reclaiming space
 
@@ -956,8 +1063,9 @@ does not need a toolchain. It needs one executable and a peer.
 
 ### The binary
 
-Every push to `main` that gets past `format`, `check`, `verify`, the provider
-tests and the build publishes what it just proved to the
+Every push to `main` that gets past `format`, `check`, both `verify` jobs, the
+provider tests, the wasm-gc host and the build publishes what it just proved to
+the
 [`main-build`](https://github.com/n1bor/btc-listener/releases/tag/main-build)
 release, replacing what was there. The repository is public, so this needs no
 credentials:
@@ -1153,20 +1261,35 @@ from 4.5 s and 667 MB to 0.04 s and 19.8 MB, because opening stopped costing
 anything. The second audit range is 11% slower, which is what a lookup costs
 once it stops being free. What this buys is a ceiling set by the disk rather
 than by RAM, which is what an output keyspace at two hundred million entries
-needs. The full table, and why the log is being kept anyway, are in
-[ADR 0006](docs/adr/0006-a-leveldb-under-the-index.md).
+needs. The full table is in
+[ADR 0006](docs/adr/0006-a-leveldb-under-the-index.md); the log that ADR kept
+alongside has since gone (#44), and the LevelDB it chose became RocksDB
+([ADR 0009](docs/adr/0009-rocksdb-under-the-index.md)).
 
 ## Checking the code
 
 ```bash
-aver audit   .                     # all three of the below, in one pass
-aver check   . --module-root .     # contracts, coverage, lints
-aver verify  . --module-root .     # every verify block, in parallel
-aver format  . --check             # formatting
+aver audit   .                          # check + verify + format, the CI gate
+aver check   . --module-root .          # contracts, coverage, lints
+aver verify  main.av --module-root .    # the program graph: every hand-written case, in seconds
+aver verify  corpus --module-root .     # the Core corpus, on its own
+aver verify  . --module-root .          # both, which is what audit runs
+aver format  . --check                  # formatting
+aver compile main.av --module-root . -o ../btc-listener-build --check   # and cargo check what it emitted
 ```
 
-0 check errors, 0 format issues, and about **6,000 verify cases**. Everything
-except the socket is pure and covered.
+0 check errors, 0 format issues, about **5,500 hand-written verify cases** on
+the program graph and **6,050** more in the Core corpus. Everything except the
+socket is pure and covered.
+
+The corpus lives in its own directory and CI runs it as its own job, in four
+shards, because it is 6,050 cases with 200 M-step budgets that change only
+when Core's data does ([#219](https://github.com/n1bor/btc-listener/issues/219));
+`aver verify main.av` is what to run after every change and takes seconds.
+`aver compile --check` is the gate that sees what `check`, `verify` and a
+plain `compile` cannot — a program that verifies and will not build
+([jasisz/aver#1172](https://github.com/jasisz/aver/issues/1172)); it runs
+`cargo check` on the emitted Rust, seconds once the target is warm.
 
 The provider host is built and installed automatically: the verify cases that
 reach RIPEMD-160, a signature check or the database run the real
@@ -1194,14 +1317,26 @@ the same hand, agree with each other whether or not they agree with Bitcoin.
 
 ## Layout
 
-123 Aver modules. Grouped by what they are for rather than listed:
+141 Aver modules — 79 in `domain/`, 26 in `infra/`, 6 in `app/`, 29 generated
+in `corpus/`, and `main.av`. Grouped by what they are for rather than listed;
+[docs/architecture.md](docs/architecture.md) walks the same ground with
+diagrams.
 
 ```
 CONTEXT.md          glossary — the vocabulary this project commits to
+CLAUDE.md           how to write Aver here, the gates, what only Cargo finds
 aver.toml           the provider bindings — see Providers
-docs/adr/           architecture decisions
-docs/full-node-plan.md  the stages, and what each asks of Aver
-tools/              the generator that turns Core's test vectors into cases
+.aver-version       the Aver commit CI builds — see Moving the Aver pin
+docs/architecture.md          how it is put together, and why
+docs/aver-vs-other-languages.md  what the language cost and bought
+docs/adr/           architecture decisions, nine of them
+docs/full-node-plan.md  the stages, all shipped, and what each asked of Aver
+docs/regtest-testing.md the end-to-end test against a real Core node
+docs/core-corpora.md    which of Core's test files are read, and how
+tools/              the generators that turn Core's test vectors into corpus/,
+                    refresh_corpora.sh, and regtest/ (liar.py, the Peer that lies)
+providers/          kv (RocksDB) and primitives (libsecp256k1, RIPEMD-160, SHA-1)
+wasm/               host.mjs, the Node wasm-gc host CI runs a handshake through
 main.av             argv entrypoint, deliberately thin
 
 app/                cli.av argument handling, usage.av the help text,
@@ -1212,6 +1347,10 @@ domain/  the wire
   address.av network.av message.av version.av inventory.av dns.av
   transaction.av    the SegWit-aware decoder
   inbox.av          what a Peer has said that has not been read yet
+  addr.av           addr and getaddr, and what an entry is worth
+  addressbook.av    Candidates: Peer Addresses heard about, not yet Peers
+  compactblock.av   BIP152, rebuilt from the Mempool
+  siphash.av        the short Ids' hash
   compactsize.av hash.av text.av json.av
 
 domain/  addresses
@@ -1222,7 +1361,7 @@ domain/  the chain
   block.av          Block Headers: reading, naming, asking for more
   headertree.av     every Header seen, and which Branch has the most work
   chainwork.av blockwork.av reorg.av rewind.av
-  headerbytes.av treestore.av index.av segment.av
+  headerbytes.av treestore.av index.av indexkeys.av segment.av
   checks.av rules.av locktime.av spend.av txcheck.av
 
 domain/  the UTXO Set
@@ -1230,35 +1369,57 @@ domain/  the UTXO Set
   disconnect.av     a Block back out of it, from its Undo Data
   utxostore.av subsidy.av assumevalid.av
 
+domain/  the Mempool
+  mempool.av        what is held, what conflicts, what leaves when
+  standard.av       Policy: what this node will hold and relay
+  policy.av
+
 domain/  Script
   opcode.av scriptparse.av stackitem.av scriptstate.av scriptmath.av
   scriptnumops.av scriptstep.av scriptops.av scriptwork.av
   interp.av         the walk: one recursion over a Script, and only one
   spendscript.av    the Input's Script then the Output's, in that order
-  witness.av witnessuse.av taproot.av tapsig.av tagged.av policy.av
+  spendcontext.av   what a signature commits to, carried to the opcode
+  witness.av witnessuse.av taproot.av tapsig.av tagged.av
   sighash.av bip143.av bip341.av  what a signature is actually over
   ecdsa.av schnorr.av checksig.av multisig.av checkwork.av
-  primitives.av     the seam the curve and RIPEMD-160 plug into
-  scriptcases*.av assetcases*.av sighashcases*.av txcases*.av and the
-                   rest: Core's own vectors, thousands of them
+  primitives.av     the seam the curve, RIPEMD-160 and SHA-1 plug into
+  scriptassets.av assetsweep.av txcase.av  readers for the generated corpus
+
+domain/  the Screen
+  snapshot.av       one picture of the node, folded up each tick
+  screen.av         every character and key of the Screen, no terminal
+  screenlines.av
+
+corpus/  Core's own vectors, generated
+  scriptcases1-5 witnesscases1-3 txcases1-4 sighashcases1-2 assetcases1-9
+  keyiocases keyioinvalidcases base58cases bip341cases siphashcases
+  compactblockcases
 
 infra/  the network
-  peers.av          several Peers on one loop: sockets, Handshakes, readiness
+  peers.av          several Peers on one loop: sockets, Handshakes, readiness,
+                    dials, the listener and inbound Peers
   peer.av           the listen command: one Peer, its Transactions printed
   download.av       the Header phase
   bodies.av         the body phase
   follow.av         the node that stays on the tip
-  resolver.av
+  mempool.av        admission: the questions, in cost order
+  resolver.av       the DNS seeds
 
 infra/  the disk
   store.av          keyed store over two backends, one opaque API
-  reindex.av        every Block's Location, rebuilt from the Segments
   kv.av             the key-value database capability contract
+  reindex.av        every Block's Location, rebuilt from the Segments
   headers.av        the Header tree, written down
   chainstate.av     the UTXO Set, built forward
   rewind.av         the UTXO Set, taken back to a fork
   utxo.av blocks.av chain.av txindex.av outputs.av lock.av prune.av
   spends.av audit.av pace.av
+
+infra/  the terminal and the record
+  screen.av         the one piece of the Screen that touches a terminal
+  metrics.av        metrics.log, one line a minute
+  debug.av          debug.log, one line per decision
 ```
 
 The split is deliberate: only `infra/` touches the network or the disk, and
@@ -1306,27 +1467,24 @@ Deriving an address needs no hashing at all: a script already contains the hash,
 so the work is pattern-matching plus an encoding, not hashing a public key. That
 was true before this project had RIPEMD-160 and is still true now.
 
-Fees are deliberately not reported. A Transaction states its output amounts but
-not its input amounts, and a peer will not serve the confirmed transactions
-those inputs spend — measured on mainnet, 29 of 29 such requests came back
-`notfound`, and across 441 inputs none had its parent in the same stream.
-Getting fees means asking the node over RPC instead, which is a different
-program; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md).
+The listener reports no fees. A Transaction states its output amounts but not
+its input amounts, and a peer will not serve the confirmed transactions those
+inputs spend — measured on mainnet, 29 of 29 such requests came back
+`notfound`; see [ADR 0002](docs/adr/0002-no-fees-over-p2p.md). A directory
+that holds the UTXO Set can answer the question the wire cannot, which is why
+`spend`, `utxo` and `follow` do report fees and the listener still does not.
 
-RIPEMD-160 and secp256k1 used to head this list. Both are supplied now by a
-**capability provider** — see [Providers](#providers) below. What is left is:
-
-| | needs | what it would unlock |
-|---|---|---|
-| `OP_SHA1` | SHA-1 | one opcode nothing in practice uses |
-| witness and Taproot Scripts | Schnorr, and a witness evaluator | 90% of a modern Block |
-| most modern spends | an output index, so parents resolve | see the `unresolved` count |
-
-The signing messages both Scripts would need are already written and checked
-against Core's vectors, legacy and BIP143 alike. What is missing is the
-arithmetic, and the seam it plugs into — `domain/ecdsa.av` — deliberately has no
-`Valid` constructor, so the day a curve arrives the compiler names every caller
-that has to change.
+What this engine once lacked — RIPEMD-160, SHA-1, the curve, Schnorr, a
+witness evaluator, an output index — has all arrived: the first four as a
+**capability provider** ([Providers](#providers)), the evaluator as
+`domain/witness.av` and `domain/taproot.av`, the index as `outputs` and the
+Set. What is deliberately not here is listed where it is deferred: BIP125
+replacement, the orphan pool and package relay
+([#28](https://github.com/n1bor/btc-listener/issues/28)), Address Book
+bucketing against eclipse ([#118](https://github.com/n1bor/btc-listener/issues/118)),
+IPv6, and the signet challenge. The seam that keeps the list honest is
+`domain/ecdsa.av`, which has no `Valid` constructor for anything it cannot
+decide, so the compiler names every caller when a capability arrives.
 
 ## Licence
 
@@ -1403,9 +1561,9 @@ false audit rather than a slow one. The provider hands the question to
 `libsecp256k1`, which is what Bitcoin Core itself runs. RIPEMD-160 then followed
 the curve behind the same contract, so there is one boundary rather than two.
 
-`Infra.Kv` is the second contract and the newer one. The file backends keep the
-whole index in a Map, which cannot be stretched to the two hundred million
-entries an output keyspace would need. That is a database, and Aver has not got
+`Infra.Kv` is the second contract and the newer one. The Store that came
+before it kept the whole index in a Map, which cannot be stretched to the two
+hundred million entries an output keyspace would need. That is a database, and Aver has not got
 one. Unlike the primitives it is **effectful**, so every operation declares an
 Oracle dimension and what a replay does with it. The provider is RocksDB,
 through the `rocksdb` crate, and every batch is written with `sync = true` so
@@ -1500,4 +1658,4 @@ saying what was once worked around and why the shape survived on merit) or a
 live workaround — a filter, a flag, a module kept whole, a cache oversized.
 Check each issue's state; a closed one with a live workaround means code or
 documentation to simplify, and that belongs in the same PR as the pin. The PR
-is what proves the pin: all six CI jobs build the named commit from source.
+is what proves the pin: every CI job builds the named commit from source.
