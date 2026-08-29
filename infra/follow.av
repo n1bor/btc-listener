@@ -929,14 +929,14 @@ fn alternating(state: Following, key: Int, aligned: Realigned, tipHeight: Int) -
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    flying(Infra.Bodies.takingOff(startedFetch(state, aligned, tipHeight), aligned.from, tipHeight), tipHeight, aligned.from)
+    flying(Infra.Bodies.takingOff(startedFetch(state, aligned, tipHeight), aligned.from, tipHeight), tipHeight, aligned.from, mostChunk())
 
 fn startedFetch(state: Following, aligned: Realigned, tipHeight: Int) -> Fetched
     ? "The download's opening state, as bodiesOn would have built it."
     ! [Time.unixMs]
     Infra.Bodies.opening(state.pool, aligned.store, state.blocks, aligned.from, eyeOf(state), state.book, state.nextKey)
 
-fn flying(flight: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+fn flying(flight: Flight, tipHeight: Int, standing: Int, blocks: Int) -> Result<Fetched, String>
     ? "One slice of the download, then the Set as far as the download has"
       "got, then round again."
     ! [
@@ -950,9 +950,9 @@ fn flying(flight: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, Stri
         Time.now, Time.unixMs,
     ]
     flown = Infra.Bodies.flying(Infra.Bodies.sliceUntil(flight, Time.unixMs() + sliceMs()), tipHeight)?
-    connecting(flown, tipHeight, standing)
+    connecting(flown, tipHeight, standing, blocks)
 
-fn connecting(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+fn connecting(flown: Flight, tipHeight: Int, standing: Int, blocks: Int) -> Result<Fetched, String>
     ? "A chunk of the Set over what has landed, unless the download is done"
       "-- in which case the caller's own Set walk finishes the range."
       "Settled before it is handed back, and that is not a detail: Locations"
@@ -974,10 +974,18 @@ fn connecting(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, S
     ]
     match Infra.Bodies.stillFlying(flown)
         false -> Infra.Bodies.settled(Infra.Bodies.reachedAt(flown, tipHeight))
-        true -> connectedSome(flown, tipHeight, standing)
+        true -> connectedSome(flown, tipHeight, standing, blocks)
 
-fn connectedSome(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+fn connectedSome(flown: Flight, tipHeight: Int, standing: Int, blocks: Int) -> Result<Fetched, String>
     ? "One Set chunk over the Blocks the download has landed."
+      "Bounded at mostChunk Blocks, and that bound is the whole point. Asked"
+      "for tipHeight this walks the entire remaining range in one call, so"
+      "the alternation happens once and never again: mainnet spent 94"
+      "minutes inside a single chunk, wrote not one set note, tended no"
+      "Peer and answered no ping. The plan starts full -- every Height from"
+      "the Set's standing to the tip, whether or not the body is already on"
+      "disk -- so stillFlying is true on the first turn even for a node with"
+      "nothing left to fetch, and that is the path it took."
       "A refusal is not answered here: the Set is walked again by connected"
       "when the download finishes, and that is where a chain fault is"
       "reported (#183). Here a chunk that will not go is simply a chunk that"
@@ -992,10 +1000,16 @@ fn connectedSome(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    chunkLanded(flown, Infra.ChainState.buildFrom(Infra.Bodies.poolOf(flown).network, Infra.Bodies.storeOf(flown), Infra.Bodies.blocksOf(flown), tipHeight, tipHeight, Infra.Bodies.eyeOf(flown), Option.None), tipHeight, standing)
+    chunkLanded(flown, Infra.ChainState.buildFrom(Infra.Bodies.poolOf(flown).network, Infra.Bodies.storeOf(flown), Infra.Bodies.blocksOf(flown), Int.min(tipHeight, standing + blocks), tipHeight, Infra.Bodies.eyeOf(flown), Option.None), tipHeight, standing, blocks, Time.unixMs())
 
-fn chunkLanded(flown: Flight, chunk: Result<Built, String>, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+fn chunkLanded(flown: Flight, chunk: Result<Built, String>, tipHeight: Int, standing: Int, blocks: Int, startedMs: Int) -> Result<Fetched, String>
     ? "What the chunk left behind, back into the Flight, and round again."
+      "The next chunk is sized from what this one cost, the same way"
+      "buildingTo sizes its own (#222): a Block count is a poor proxy for a"
+      "length of time, and the two sides only alternate evenly if each gets"
+      "comparable wall clock. Fixed at 250 Blocks the Set is a second a turn"
+      "on regtest against a ten-second download slice, and the overlap"
+      "collapses to almost nothing."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -1007,8 +1021,8 @@ fn chunkLanded(flown: Flight, chunk: Result<Built, String>, tipHeight: Int, stan
         Time.now, Time.unixMs,
     ]
     match chunk
-        Result.Err(why) -> flying(flown, tipHeight, standing)
-        Result.Ok(built) -> flying(Infra.Bodies.flyingWithEye(Infra.Bodies.withStore(flown, built.store), built.eye), tipHeight, built.reached)
+        Result.Err(why) -> flying(flown, tipHeight, standing, blocks)
+        Result.Ok(built) -> flying(Infra.Bodies.flyingWithEye(Infra.Bodies.withStore(flown, built.store), built.eye), tipHeight, built.reached, sized(built.reached - standing, Time.unixMs() - startedMs)?)
 
 fn afterSet(onward: Settled) -> Result<Caught, String>
     ? "A Set that refused ends the catch-up on its own terms (#183)."
