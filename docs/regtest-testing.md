@@ -1448,6 +1448,64 @@ Left for its own issue: a seated Peer that closes on us is forgotten
 without `Tcp.close`, so `ss -tn` shows its socket in `CLOSE-WAIT` for the
 life of the process.
 
+### 16i. A Block that cannot connect costs no Peer
+
+Until #183 every failure of a catch-up was charged to the Peer being asked.
+That is right for a Peer fault — a bad checksum, the wrong Network, a Block
+that is not the one asked for, no answer before the deadline — and wrong for
+the three things `connected` carries underneath it: a consensus refusal from
+`Infra.Utxo.written`, the D8 stop when a reorganisation reaches below the Undo
+window, and a Store or Disk error under either. All three came back as the
+same `Result.Err`, so the node dropped a Peer, retried on the next one, failed
+at exactly the same Height, and terminated having lost every Peer while
+reporting the consensus reason as though a Peer had said it.
+
+**Force a chain-side refusal without touching the Peer.** Sync until bodies
+are on disk but the Set is still behind, then take a body out from under it:
+
+```bash
+timeout 75 $BIN regtest follow 127.0.0.1:19444 $D log      # Set reaches ~9,367 of 49,538
+truncate -s $(( $(stat -c%s $D/blocks/blk000000.dat) * 60 / 100 )) $D/blocks/blk000000.dat
+rm -f $D/.writing
+timeout 100 $BIN regtest follow 127.0.0.1:19444 $D log
+```
+
+**Truncate rather than delete.** Segments are append-only in *arrival* order
+and never in Height order (§16), so cutting the file removes an arbitrary set
+of Heights above the Set's standing — which is the point: the Set walks into
+one of them. Deleting the whole segment fails much earlier and tests the open
+path instead.
+
+Same directory, same Peer, two binaries:
+
+| | Peers dropped | last line |
+|---|---|---|
+| before #183 | **1** | `no Peer could bring the chain up to date and the Address Book has nobody left to dial; the last said: Segment 0 holds 0 of the 250 bytes at offset 7560983` |
+| after | **0** | `the chain cannot be followed past here, and no Peer is at fault: Segment 0 holds 0 of the 250 bytes at offset 7560983` |
+
+The reason is identical and it is the wording either side of it that changed:
+the node now stops where it stands with its Peers still connected, and the
+last line says which of the two kinds of stop it was.
+
+**And check the other half in the same pass** — a genuine Peer fault must
+still cost that Peer and no more, which is what #168's own section demands:
+
+```bash
+$BIN regtest follow 127.0.0.1:19444,127.0.0.1:19454 $D log &
+sleep 40
+bitcoin-cli -datadir=$PWD/pb ... stop
+```
+
+```
+peer 1 closed the connection
+...
+stopped following
+```
+
+One Peer gone, the walk finished on the other. A run that reported
+`the chain cannot be followed past here` for a Peer that merely hung up would
+be this change overshooting, and it is the case worth watching for.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

@@ -693,6 +693,12 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
       "misbehaviour test found it doing."
       "So the Peer is dropped and the catch-up tried again on whoever is"
       "left. Each attempt removes a Peer, so the retrying stops."
+      "A refusal that is a fact about the chain is not one of those (#183)."
+      "It arrives as Caught.ChainStopped and ends the run where it stands,"
+      "with every Peer still connected. Before, it came back as an ordinary"
+      "Err and cost a Peer, then the same catch-up on the next Peer failed at"
+      "the same Height for the same reason, until the pool was empty and the"
+      "consensus reason was reported as though a Peer had said it."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -704,8 +710,24 @@ fn caughtUp(state: Following, key: Int) -> Result<Following, String>
         Time.now, Time.unixMs,
     ]
     match catchingUp(state, key)
-        Result.Ok(moved) -> Result.Ok(moved)
         Result.Err(why) -> withoutPeer(state, key, why)
+        Result.Ok(caught) -> settledUp(state, caught)
+
+fn settledUp(state: Following, caught: Caught) -> Result<Following, String>
+    ? "The catch-up moved on, or the chain would not let it."
+    ! [Console.error]
+    match caught
+        Caught.Moved(moved) -> Result.Ok(moved)
+        Caught.ChainStopped(why) -> chainStopped(state, why)
+
+fn chainStopped(state: Following, why: String) -> Result<Following, String>
+    ? "Stop, and say it was the chain and not the company."
+      "Named apart from the Peer message so a reader of the last line knows"
+      "at once which of the two it is looking at, and knows the Peers are"
+      "still there."
+    ! [Console.error]
+    _said = saidErrorIfPlain(state.watch, "the chain cannot be followed past here: {why}")
+    Result.Err("the chain cannot be followed past here, and no Peer is at fault: {why}")
 
 fn withoutPeer(state: Following, key: Int, why: String) -> Result<Following, String>
     ? "Drop the Peer that would not do it, then look for another."
@@ -785,7 +807,11 @@ verify someUntried
     someUntried(Option.None) => Option.None
     someUntried(Option.Some("1.2.3.4:8333")) => Option.Some(true)
 
-fn catchingUp(state: Following, key: Int) -> Result<Following, String>
+type Caught
+    Moved(Following)
+    ChainStopped(String)
+
+fn catchingUp(state: Following, key: Int) -> Result<Caught, String>
     ? "The three phases in the one order they can go in, asking one Peer."
       "Headers first, because nothing below can act on a Block it cannot"
       "place. Then the Set is taken back off any branch the Headers have just"
@@ -829,9 +855,51 @@ fn catchingUp(state: Following, key: Int) -> Result<Following, String>
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
     fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)), afterHeaders.book, afterHeaders.nextKey)?
     bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
-    upToTip = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
+    onward = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog), tipHeight, aligned.unconfirmed)?
+    afterSet(onward)
+
+fn afterSet(onward: Settled) -> Result<Caught, String>
+    ? "A Set that refused ends the catch-up on its own terms (#183)."
+      "It is not a Peer\'s fault and no Peer is dropped for it: since #168 the"
+      "body that arrived was hashed and matched against what was owed, so it"
+      "is provably the Block that was asked for, and the Block Id came from a"
+      "Header the tree placed behind proof of work. The body is right. Either"
+      "the chain is one this program will not follow or this program is wrong"
+      "about it, and asking a different Peer cannot change which."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.Kv.get,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match onward
+        Settled.Refused(why) -> Result.Ok(Caught.ChainStopped(why))
+        Settled.Done(upToTip) -> movedOn(upToTip)
+
+fn movedOn(upToTip: Following) -> Result<Caught, String>
+    ? "The Set is forward; drain and top up as every phase boundary does."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.Kv.get,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
     standing = toppedUp(dialsAsked(drainSpare(upToTip))?)?
-    backAtTip(standing)
+    caughtInto(backAtTip(standing))
+
+fn caughtInto(done: Result<Following, String>) -> Result<Caught, String>
+    ? "A catch-up that finished, as the answer catchingUp hands back."
+    match done
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(moved) -> Result.Ok(Caught.Moved(moved))
+
+verify caughtInto
+    caughtInto(Result.Err("no")) => Result.Err("no")
+    caughtInto(Result.Err("a Peer went")) => Result.Err("a Peer went")
 
 fn backAtTip(state: Following) -> Result<Following, String>
     ? "The catch-up has returned, so the Snapshot says so."
@@ -867,7 +935,11 @@ fn saidBookIfPlain(watch: Watching, before: Int, after: Int) -> Unit
         Option.None -> saidBook(before, after)
         Option.Some(view) -> Unit
 
-fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Following, String>
+type Settled
+    Done(Following)
+    Refused(String)
+
+fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Settled, String>
     ? "The Set forward to the tip, and one line saying where that leaves it."
       "When only a few Blocks moved -- a node at the tip, hearing one Block"
       "every ten minutes -- each one gets its own line, because those are the"
@@ -875,7 +947,7 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
       "the walk's own minute lines instead."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -884,7 +956,27 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
         Time.now, Time.unixMs,
     ]
     chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None, mostChunk())?
-    built = chunked.built
+    settledOn(state, chunked, tipHeight, unconfirmed)
+
+fn settledOn(state: Following, chunked: Chunked, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Settled, String>
+    ? "A chunk that refused stops the Set and says so; otherwise finish."
+    ! [Console.print, Disk.appendText, Infra.Kv.get, Time.unixMs]
+    match chunked.refused
+        Option.Some(why) -> Result.Ok(Settled.Refused(why))
+        Option.None -> settledWith(state, chunked, chunked.built, tipHeight, unconfirmed)
+
+fn settledWith(state: Following, chunked: Chunked, holding: Option<Built>, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Settled, String>
+    ? "A Set that neither refused nor built anything is not a shape the chunk"
+      "loop can produce, and saying so is cheaper than pretending it cannot"
+      "be asked."
+    ! [Console.print, Disk.appendText, Infra.Kv.get, Time.unixMs]
+    match holding
+        Option.None -> Result.Err("the Set neither connected anything nor said why")
+        Option.Some(built) -> finished(state, chunked, built, tipHeight, unconfirmed)
+
+fn finished(state: Following, chunked: Chunked, built: Built, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Settled, String>
+    ? "The Set forward to the tip, and one line saying where that leaves it."
+    ! [Console.print, Disk.appendText, Infra.Kv.get, Time.unixMs]
     after = chunked.state
     backOut = List.concat(unconfirmed, built.unconfirmed)
     seen = watchSeen(after.watch, built.eye)
@@ -893,11 +985,12 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
     setLog = Infra.Metrics.marked(built.eye.log, "set", built.reached, tipHeight, built.blocks, 0, Infra.Peers.polledMsOf(after.pool), List.len(Infra.Peers.peerKeys(after.pool)), Domain.AddressBook.sizeOf(after.book), built.added, built.removed, true)?
     swept = sweptOf(built.store, after.mempool, built.blocks, built.dropped)?
     restored = restoring(after.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
-    Result.Ok(withWatch(Following(pool = after.pool, store = built.store, blocks = after.blocks, book = after.book, nextKey = after.nextKey, watch = seen, mempool = restored, rebuilding = after.rebuilding, log = setLog), watchAfterBuild(seen, built.views)))
+    Result.Ok(Settled.Done(withWatch(Following(pool = after.pool, store = built.store, blocks = after.blocks, book = after.book, nextKey = after.nextKey, watch = seen, mempool = restored, rebuilding = after.rebuilding, log = setLog), watchAfterBuild(seen, built.views))))
 
 record Chunked
     state: Following
-    built: Built
+    built: Option<Built>
+    refused: Option<String>
 
 fn chunkMs() -> Int
     ? "How long a chunk of the Set should take between two looks at the"
@@ -998,7 +1091,7 @@ fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Bui
       "handed back as it stands rather than asked again."
     ! [
         Console.error, Console.print,
-        Disk.appendText, Disk.readBytesAt,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -1009,9 +1102,51 @@ fn buildingTo(state: Following, tipHeight: Int, standing: Int, sofar: Option<Bui
     chunkTo = Int.min(tipHeight, standing + blocks)
     _note = Infra.Metrics.noting(state.log, "set", "connecting {standing + 1}..{chunkTo} of {tipHeight}, {List.len(Infra.Peers.peerKeys(state.pool))} Peer(s)")?
     startedMs = Time.unixMs()
-    next = Infra.ChainState.buildFrom(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, tipHeight, Infra.Screen.counting(eyeIn(sofar, eyeOf(state)), Domain.AddressBook.sizeOf(state.book)), sofar)?
+    chunkOn(state, Infra.ChainState.buildFrom(state.pool.network, storeIn(sofar, state.store), state.blocks, chunkTo, tipHeight, Infra.Screen.counting(eyeIn(sofar, eyeOf(state)), Domain.AddressBook.sizeOf(state.book)), sofar), tipHeight, standing, chunkTo, startedMs)
+
+fn chunkOn(state: Following, chunk: Result<Built, String>, tipHeight: Int, standing: Int, chunkTo: Int, startedMs: Int) -> Result<Chunked, String>
+    ? "A chunk that refused is a fact about the chain, handed back rather"
+      "than raised (#183)."
+      "Raised, it reached caughtUp, which drops the Peer it asked and tries"
+      "the next one -- and the next one fails at the same Height, because"
+      "none of it was ever about the Peer. It terminated by losing every Peer"
+      "and then reporting the consensus reason as though a Peer had said it."
+      "The Store, the Disk and the Undo window are underneath this too, and"
+      "none of those is a Peer\'s fault either."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match chunk
+        Result.Err(why) -> refusedBy(state, why)
+        Result.Ok(next) -> chunkedOn(state, next, tipHeight, standing, chunkTo, startedMs)
+
+fn refusedBy(state: Following, why: String) -> Result<Chunked, String>
+    ? "Say which Height would not connect, and stop the Set there."
+    ! [Disk.appendText, Time.unixMs]
+    noted = Infra.Metrics.noting(state.log, "chain", "the Set stopped: {why}")?
+    Result.Ok(Chunked(state = withLog(state, noted), built = Option.None, refused = Option.Some(why)))
+
+fn chunkedOn(state: Following, next: Built, tipHeight: Int, standing: Int, chunkTo: Int, startedMs: Int) -> Result<Chunked, String>
+    ? "The chunk connected: the range is done, or there is another chunk."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
     match Bool.or(next.reached < chunkTo, chunkTo >= tipHeight)
-        true -> Result.Ok(Chunked(state = state, built = next))
+        true -> Result.Ok(Chunked(state = state, built = Option.Some(next), refused = Option.None))
         false -> buildingTo(tendedBetween(state)?, tipHeight, next.reached, Option.Some(next), sized(next.reached - standing, Time.unixMs() - startedMs)?)
 
 fn storeIn(sofar: Option<Built>, before: Store) -> Store
