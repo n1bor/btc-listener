@@ -10,6 +10,7 @@ module Page
         "and the Reader presses refresh to ask again. Everything else is a"
         "400 or a 404 in three lines, and every answer closes the connection."
         "Pure, all of it: the bytes on the socket are Infra.Board's."
+    depends [Domain.Text]
     exposes [Request, requestOf, answerTo, html, response, escaped, sectionText]
 
 type Request
@@ -136,11 +137,51 @@ verify linesText
     linesText(["a&b"], "") => "a&amp;b\n"
 
 fn escaped(text: String) -> String
-    ? "The three characters HTML reads as markup, made literal. A Peer's"
-      "user agent is the only text here that a Peer chose."
-    String.replace(String.replace(String.replace(text, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+    ? "The three characters HTML reads as markup made literal, and every"
+      "character beyond ASCII written as a numeric entity. The second is"
+      "not politeness: the page goes out as ASCII code points, and the"
+      "Screen's lines carry an em dash for an ETA nobody can give, and a"
+      "Peer's user agent carries whatever the Peer chose. The first"
+      "mainnet page asked for mid-walk was refused by Bytes.fromList on"
+      "that dash and answered with nothing."
+    escapedInto(String.chars(text), "")
 
 verify escaped
     escaped("plain") => "plain"
     escaped("<a & b>") => "&lt;a &amp; b&gt;"
     escaped("") => ""
+    escaped("eta —") => "eta &#8212;"
+    escaped("/Satoshi:27.0/ café") => "/Satoshi:27.0/ caf&#233;"
+
+fn escapedInto(chars: List<String>, acc: String) -> String
+    ? "One character at a time, in tail position."
+    match chars
+        [] -> acc
+        [head, ..tail] -> escapedInto(tail, acc + escapedOne(head, Domain.Text.codePointOf(head)))
+
+verify escapedInto
+    escapedInto([], "x") => "x"
+    escapedInto(["a", "&"], "") => "a&amp;"
+
+fn escapedOne(character: String, codePoint: Int) -> String
+    ? "Markup made literal; ASCII kept; anything else as &#N;."
+    match character
+        "&" -> "&amp;"
+        "<" -> "&lt;"
+        ">" -> "&gt;"
+        _ -> asciiOr(character, codePoint)
+
+verify escapedOne
+    escapedOne("&", 38) => "&amp;"
+    escapedOne("a", 97) => "a"
+    escapedOne("—", 8212) => "&#8212;"
+
+fn asciiOr(character: String, codePoint: Int) -> String
+    ? "Printable ASCII as itself, the rest by number."
+    match codePoint < 127
+        true -> character
+        false -> "&#{codePoint};"
+
+verify asciiOr
+    asciiOr("a", 97) => "a"
+    asciiOr("é", 233) => "&#233;"
