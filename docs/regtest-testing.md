@@ -1579,6 +1579,18 @@ curl -s localhost:18330/ | grep -c '<h2>'          # still 5
 A Reader that hangs up costs the loop a tenth of a second once; the node's
 own metrics line shows the turn went on.
 
+The page must also answer *during* a catch-up, from inside the Set walk,
+not only at chunk boundaries (a mainnet chunk is 250 Blocks, minutes at
+2 Blocks/s). Mine enough Blocks that the walk takes a while, follow a fresh
+directory, and ask while it is walking:
+
+```bash
+$C generatetoaddress 3000 "$($C getnewaddress)" > /dev/null
+rm -rf $F2; mkdir -p $F2
+./target/release/main regtest follow 127.0.0.1:18444 $F2 log http:18331 &
+sleep 4; time curl -s -m 5 localhost:18331/ | grep -A3 '<h2>Overview'   # answers in about a second, mid-walk
+```
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
