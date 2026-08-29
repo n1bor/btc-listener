@@ -1,0 +1,94 @@
+module Watchdog
+    intent =
+        "When something the node is doing has taken longer than it should,"
+        "and what the line saying so says (#268)."
+        "#266 hid for two hours as a missing line: a walk that had become one"
+        "whole-range chunk wrote no chunk notes, and only showed itself when"
+        "a stop would not land. Nothing the node wrote about itself said"
+        "'this is taking too long', so the diagnosis came from /proc and the"
+        "database's own log. These are the budgets and the words; the clocks"
+        "are Infra.Screen's Eye and the loop's, and the line goes to"
+        "debug.log beside the decisions it records. Reporting only: what to"
+        "do about a slow Block is a different decision."
+    exposes [overrun, blockBudgetMs, chunkBudgetOf, stopBudgetMs, slowChunk, slowChunkDone, slowBlock, slowStop, seconds]
+
+fn overrun(startedMs: Int, nowMs: Int, budgetMs: Int) -> Bool
+    ? "Whether more than the budget has passed since something started."
+      "A budget of zero is no budget: nothing is ever late against it, which"
+      "is how a walk with no chunk (the utxo command) glances for free."
+    match budgetMs > 0
+        false -> false
+        true -> nowMs - startedMs > budgetMs
+
+verify overrun
+    overrun(0, 1000, 500) => true
+    overrun(0, 500, 500) => false
+    overrun(0, 1000, 0) => false
+    overrun(5000, 4000, 100) => false
+
+fn blockBudgetMs() -> Int
+    ? "How long one Block of the Set walk may take before it is said:"
+      "thirty seconds, where the slowest mainnet Block takes a few."
+    30000
+
+verify blockBudgetMs
+    blockBudgetMs() => 30000
+
+fn chunkBudgetOf(chunkMs: Int) -> Int
+    ? "How long one chunk may run before it is said: five times what the"
+      "driver aims a chunk at (#217), so an honest slow chunk is not"
+      "reported and a chunk that has become the whole range is, in its"
+      "first minute."
+    chunkMs * 5
+
+verify chunkBudgetOf
+    chunkBudgetOf(10000) => 50000
+    chunkBudgetOf(0) => 0
+
+fn stopBudgetMs() -> Int
+    ? "How long a stop may take to land before it is said: ten seconds,"
+      "where a stop lands at the next Block."
+    10000
+
+verify stopBudgetMs
+    stopBudgetMs() => 10000
+
+fn seconds(ms: Int) -> String
+    ? "Milliseconds as whole seconds, for a line a person reads."
+    "{Int.div(ms, 1000)}s"
+
+verify seconds
+    seconds(0) => "0s"
+    seconds(12345) => "12s"
+
+fn slowChunk(from: Int, to: Int, height: Int, ranMs: Int, budgetMs: Int) -> String
+    ? "The line for a chunk that has run past its budget and is still going."
+    "slow chunk: connecting {from}..{to} has run {seconds(ranMs)} against a budget of {seconds(budgetMs)}, at Height {height}"
+
+verify slowChunk
+    slowChunk(100, 350, 210, 61000, 50000) => "slow chunk: connecting 100..350 has run 61s against a budget of 50s, at Height 210"
+
+fn slowChunkDone(from: Int, to: Int, reached: Int, ranMs: Int) -> String
+    ? "The line when a chunk that was said to be slow finishes."
+    "slow chunk done: connecting {from}..{to} reached {reached} after {seconds(ranMs)}"
+
+verify slowChunkDone
+    slowChunkDone(100, 350, 350, 75000) => "slow chunk done: connecting 100..350 reached 350 after 75s"
+
+fn slowBlock(height: Int, blockId: String, transactions: Int, bytes: Int, tookMs: Int) -> String
+    ? "The line for a Block that took longer than its budget to connect."
+      "Written after the Block, because a Block is one call and nothing"
+      "looks at a clock inside it."
+    "slow block: Height {height} {blockId} took {seconds(tookMs)}, {transactions} Transaction(s), {bytes} bytes"
+
+verify slowBlock
+    slowBlock(615203, "00ab", 2500, 1200000, 45000) => "slow block: Height 615203 00ab took 45s, 2500 Transaction(s), 1200000 bytes"
+
+fn slowStop(tookMs: Int) -> String
+    ? "The line for a stop that took longer than its budget to land."
+      "Written when it lands, so a stop that never lands writes nothing --"
+      "which is why the chunk line above is the one that matters."
+    "slow stop: {seconds(tookMs)} from the stop being asked to the loop leaving"
+
+verify slowStop
+    slowStop(480000) => "slow stop: 480s from the stop being asked to the loop leaving"

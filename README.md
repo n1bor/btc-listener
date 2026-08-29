@@ -997,6 +997,25 @@ validated it and left initial block download — the sentence the full-node
 plan was written to earn — and [docs/regtest-testing.md](docs/regtest-testing.md)
 §11–12 is how to repeat that.
 
+### When something takes too long: the watchdog lines
+
+`debug.log` also says when the node has overrun itself (#268), because the
+one fault that hid for hours (#266) hid as a *missing* line. Three lines,
+each written once, under the kind `watchdog`:
+
+- `slow chunk: connecting a..b has run 61s against a budget of 50s, at
+  Height h` — a chunk of the Set walk past five times the driver's chunk
+  budget, said from inside the walk while it is still running; and `slow
+  chunk done: … reached r after 75s` when it ends.
+- `slow block: Height h <id> took 45s, n Transaction(s), b bytes` — one
+  Block over thirty seconds, said after it, because a Block is one call.
+- `slow stop: 480s from the stop being asked to the loop leaving` — a `q`
+  or a SIGINT that took more than ten seconds to land, said when it does.
+
+Reporting only: nothing is killed or dropped on an overrun. A healthy run
+writes none of them. The budgets are [Domain.Watchdog](domain/watchdog.av);
+the clocks ride on the walk's Eye.
+
 ### Reading it from a browser: `http`
 
 `http` binds port 8330 (`http:PORT` another) and answers `GET /` with the
