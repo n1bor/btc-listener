@@ -1,0 +1,123 @@
+module Board
+    intent =
+        "The status Board: one port on which anyone with a browser can"
+        "read what the Screen shows (#261)."
+        "A server run in tmux is read by attaching to it, and a phone"
+        "cannot. So follow can bind a second port beside the one it serves"
+        "Peers on, and answer GET / with the five Panels as a page. The"
+        "page is Domain.Page's and the lines are Domain.Screen's; this is"
+        "the socket work, and the rule it keeps is the loop's rule: nothing"
+        "here waits on anyone. The listener is asked, with no timeout,"
+        "whether a Reader is queued; a Reader taken off it is given a"
+        "tenth of a second to have said what it wants -- a browser has"
+        "before the accept returns -- and is closed unanswered if it has"
+        "not, so a caller that connects and says nothing costs one turn a"
+        "tenth of a second and nothing more. At most four Readers a turn."
+        "Nothing a Reader does reaches the ? -- an accept, a read or a"
+        "write that fails costs that Reader, never the node, the same rule"
+        "Infra.Peers keeps for a Peer (#227)."
+    depends [Bytes, Domain.Message, Domain.Page, Domain.Screen, Domain.Snapshot]
+    exposes [Board, opened, served, closed, readersATurn, patienceMs, requestBytes]
+    effects [
+        Tcp.accept, Tcp.close, Tcp.closeListener, Tcp.listen, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+    ]
+
+record Board
+    listener: Tcp.Listener
+    port: Int
+
+fn opened(port: Int) -> Result<Board, String>
+    ? "Bind the port. A backlog of sixteen, as the Peer listener has:"
+      "a page is read by one person at a time."
+    ! [Tcp.listen]
+    Result.Ok(Board(listener = Tcp.listen(port, 16)?, port = port))
+
+fn closed(board: Board) -> Unit
+    ? "The port given back. The result is ignored on purpose: this runs on"
+      "the way out and a close that fails has nowhere to complain to."
+    ! [Tcp.closeListener]
+    _closed = Tcp.closeListener(board.listener)
+    Unit
+
+fn readersATurn() -> Int
+    ? "How many Readers one turn will answer. Four: a household, not a"
+      "crowd, and a crowd is what the bound is for."
+    4
+
+verify readersATurn
+    readersATurn() => 4
+
+fn patienceMs() -> Int
+    ? "How long a Reader is given to have sent its request line: a tenth"
+      "of a second, which is a browser's request already in the socket"
+      "buffer and a hang-up's whole cost."
+    100
+
+verify patienceMs
+    patienceMs() => 100
+
+fn requestBytes() -> Int
+    ? "How much of a request is read: enough for the line and the headers"
+      "a browser sends; more than this is not a request for a page."
+    4096
+
+verify requestBytes
+    requestBytes() => 4096
+
+fn served(board: Board, snapshot: Snapshot, nowMs: Int) -> Result<Unit, String>
+    ? "Everyone queued on the Board, answered or closed, and never waited"
+      "for. Asked once a turn by the follow loop."
+    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    match Tcp.poll(Map.fromList([(0, Tcp.Socket.Listening(board.listener))]), 0)
+        Result.Err(why) -> Result.Ok(Unit)
+        Result.Ok(ready) -> match ready
+            [] -> Result.Ok(Unit)
+            [key, ..rest] -> answering(board, snapshot, nowMs, readersATurn())
+
+fn answering(board: Board, snapshot: Snapshot, nowMs: Int, left: Int) -> Result<Unit, String>
+    ? "Readers off the listener one at a time until it is empty or the"
+      "turn's allowance is spent."
+    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    match left > 0
+        false -> Result.Ok(Unit)
+        true -> answeringOne(board, snapshot, nowMs, left, Tcp.accept(board.listener))
+
+fn answeringOne(board: Board, snapshot: Snapshot, nowMs: Int, left: Int, taken: Result<Option<Tcp.Connection>, String>) -> Result<Unit, String>
+    ? "An empty backlog or a failed accept ends the turn's answering;"
+      "a Reader is answered and the next asked for."
+    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    match taken
+        Result.Err(why) -> Result.Ok(Unit)
+        Result.Ok(queued) -> match queued
+            Option.None -> Result.Ok(Unit)
+            Option.Some(connection) -> answeringNext(board, snapshot, nowMs, left, answered(connection, snapshot, nowMs))
+
+fn answeringNext(board: Board, snapshot: Snapshot, nowMs: Int, left: Int, done: Unit) -> Result<Unit, String>
+    ? "One fewer to answer this turn."
+    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    answering(board, snapshot, nowMs, left - 1)
+
+fn answered(connection: Tcp.Connection, snapshot: Snapshot, nowMs: Int) -> Unit
+    ? "One Reader: its request read if it has sent one within patience,"
+      "the page written, and the connection closed whatever happened."
+    ! [Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    _sent = respondedIf(connection, snapshot, nowMs, Tcp.poll(Map.fromList([(0, Tcp.Socket.Connected(connection))]), patienceMs()))
+    _closed = Tcp.close(connection)
+    Unit
+
+fn respondedIf(connection: Tcp.Connection, snapshot: Snapshot, nowMs: Int, ready: Result<List<Int>, String>) -> Result<Unit, String>
+    ? "A Reader that has said nothing within patience is closed unanswered."
+    ! [Tcp.readSome, Tcp.writeBytes]
+    match ready
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(keys) -> match keys
+            [] -> Result.Ok(Unit)
+            [key, ..rest] -> responded(connection, snapshot, nowMs, Tcp.readSome(connection, requestBytes()))
+
+fn responded(connection: Tcp.Connection, snapshot: Snapshot, nowMs: Int, read: Result<Bytes, String>) -> Result<Unit, String>
+    ? "What the Reader sent, answered by Domain.Page; the answer is ASCII"
+      "and HTML, so it goes out as the code points it is made of."
+    ! [Tcp.writeBytes]
+    match read
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(request) -> Tcp.writeBytes(connection, Bytes.fromList(Domain.Message.asciiBytes(Domain.Page.answerTo(Domain.Message.asciiText(Bytes.octets(request)), Domain.Screen.pageSections(snapshot, nowMs))))?)

@@ -1557,6 +1557,28 @@ second roll. **Those addresses were read off a probe rather than reasoned out**
 — which one lands on which roll depends on the order the Book holds them, and
 the share is the thing being asserted.
 
+### 16k. The status Board answers a browser and never holds the loop
+
+`http` (#261) puts the five Panels on a port as one page. Three things to
+prove: the page shows what the Screen would, a bad request costs nothing,
+and a caller that says nothing does not stop a Block from connecting.
+
+```bash
+./target/release/main regtest follow 127.0.0.1:18444 $F serve:18470 log http:18330 &
+sleep 5
+curl -s localhost:18330/ | grep -c '<h2>'          # 5: one heading per Panel
+curl -s localhost:18330/ | grep -A3 'Overview'      # the tip line the Screen shows
+curl -s -o /dev/null -w '%{http_code}\n' localhost:18330/x   # 404
+printf 'junk\r\n\r\n' | nc -q1 localhost 18330 | head -1      # HTTP/1.1 400 Bad Request
+for i in 1 2 3 4 5; do nc localhost 18330 < /dev/null & done  # five callers that say nothing
+$C generatetoaddress 1 "$($C getnewaddress)"; sleep 3
+tail -2 $F/metrics.log                              # the Block connected
+curl -s localhost:18330/ | grep -c '<h2>'          # still 5
+```
+
+A Reader that hangs up costs the loop a tenth of a second once; the node's
+own metrics line shows the turn went on.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
