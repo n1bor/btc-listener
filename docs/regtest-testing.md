@@ -1506,6 +1506,57 @@ One Peer gone, the walk finished on the other. A run that reported
 `the chain cannot be followed past here` for a Peer that merely hung up would
 be this change overshooting, and it is the case worth watching for.
 
+### 16j. Selection a hostile Peer cannot steer
+
+`nextUntried` walked the Book in whatever order it happened to hold and took
+the first Candidate not yet tried. That made the gossip useful and it made a
+Peer answering our `getaddr` with a thousand addresses it controls the Peer
+that decides who we dial next, which is the shape of an eclipse (#118).
+
+Since the fix a **source** is chosen uniformly among those holding anything
+worth dialling, then an **address** uniformly within it. `heardFrom` is the
+source and was already recorded against every Candidate.
+
+**Regtest shows the randomness, not the defence.** Every Candidate in a
+regtest Book comes from the one Core we are talking to, so there is a single
+source and the multi-source property cannot appear. What is visible is the
+second half of the choice, and it is visible plainly — build the Book the way
+16c does (`240.0.0.0/4` into the addrman, restart Core) and read the order the
+Candidates are dialled in:
+
+```bash
+timeout 110 $BIN regtest follow 127.0.0.1:19444 $D log > run.log 2>&1
+grep -o "candidate 240\.[0-9.]*" run.log | head -6
+```
+
+```
+before   240.0.1.2  240.0.1.8  240.0.10.2  240.0.13.2  240.0.15.6  240.0.5.5
+after a  240.8.1.2  240.2.2.7  240.11.6.2  240.10.0.6  240.15.15.3 240.0.1.2
+after b  240.6.3.1  240.2.4.6  240.14.3.2  240.2.7.4   240.9.11.8  240.4.5.3
+```
+
+The first row is the Book's own order, ascending and identical on every run.
+The second and third are two runs of the same build: scattered, and different
+from each other. Twenty dials in each of the three, so the rate is unchanged —
+which matters, because #222 is about that rate and this must not undo it.
+
+**The multi-source property is carried by the verify cases**, in
+`domain/addressbook.av`, because regtest cannot produce a second gossip source
+without a second Core that our node also treats as a Peer. A Book with three
+addresses from source 7 and one from source 8 gives:
+
+```
+roll 0 -> 1.1.1.1    roll 1 -> 9.9.9.9
+roll 2 -> 2.2.2.2    roll 3 -> 9.9.9.9
+roll 4 -> 3.3.3.3    roll 5 -> 9.9.9.9
+```
+
+Source 8 owns a quarter of the Book and wins half the rolls; source 7's three
+rotate between them. A source that had named a thousand would still win every
+second roll. **Those addresses were read off a probe rather than reasoned out**
+— which one lands on which roll depends on the order the Book holds them, and
+the share is the thing being asserted.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye

@@ -867,10 +867,21 @@ fn toppedUp(pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Result<To
       "between. It costs an identifier per Candidate that will not answer,"
       "which is a number and not a Peer -- the startup walk still hands keys"
       "out only to Peers that seat, and regtest section 13 still reads key 0."
-    ! [Tcp.beginConnect, Time.unixMs]
+    ! [Random.int, Tcp.beginConnect, Time.unixMs]
     match Bool.or(List.len(peerKeys(pool)) >= targetPeers(), dialingNow(pool))
         true -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
-        false -> topChosen(pool, book, nextKey, Domain.AddressBook.nextUntried(book, Domain.Inbox.addressesHeld(pool.standing)))
+        false -> topChosen(pool, book, nextKey, Domain.AddressBook.nextUntried(book, Domain.Inbox.addressesHeld(pool.standing), Result.withDefault(Random.int(0, rollSpread()), 0)))
+
+fn rollSpread() -> Int
+    ? "How wide the roll that picks a Candidate is (#118)."
+      "One roll makes two choices -- the source from its remainder and the"
+      "address from its quotient -- so it wants to be comfortably larger"
+      "than the product of the two counts it is divided by. A Book of a few"
+      "thousand Candidates across a handful of sources is nowhere near this."
+    1000000
+
+verify rollSpread
+    rollSpread() => 1000000
 
 fn topChosen(pool: Pool, book: Map<String, Candidate>, nextKey: Int, chosen: Option<String>) -> Result<Topped, String>
     ? "Nothing worth dialling is the usual answer, and not a problem."

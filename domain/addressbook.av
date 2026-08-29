@@ -9,14 +9,23 @@ module AddressBook
         "of scope until a stage forces it in, and nothing here forces it: a"
         "node that restarts asks its Peers again, which costs one round trip"
         "and is how it would find out about changes anyway."
-        "Selection is first-untried, and that is a known weakness rather than"
-        "a design. Bitcoin Core buckets addresses by the network they came"
-        "from and picks randomly within a bucket, precisely so that a Peer"
-        "feeding us a thousand addresses it controls cannot decide who we"
-        "connect to. Doing that needs randomness and a shape this does not"
-        "have yet; until then the Address Book is a convenience and not a"
-        "defence, and it says so out loud rather than being quietly relied on."
-    exposes [Candidate, noBook, heard, heardAll, marked, forgotten, nextUntried, untriedIn, sizeOf, fromSeed]
+        "Selection is by source, uniformly, and that is the defence (#118)."
+        "It was first-untried, which made the gossip useful and made a Peer"
+        "feeding us a thousand addresses it controls the Peer that decides"
+        "who we connect to next -- the shape of an eclipse. Bitcoin Core"
+        "buckets addresses by the network they came from and picks randomly"
+        "within a bucket for exactly this reason."
+        "What is done here is smaller than Core's new and tried tables and"
+        "has the property those tables are for: a source is chosen uniformly"
+        "among the sources holding anything worth dialling, then an address"
+        "uniformly within it. A source that named a thousand gets the share"
+        "of one that named one, so the bound on how much of the Book any"
+        "source may occupy needs no number of its own. Core's tables also"
+        "serve a persisted address database, which this program does not have"
+        "and has no plans for; that half is not copied."
+        "The roll is handed in rather than taken, so selection stays pure and"
+        "every case here stays decidable."
+    exposes [Candidate, noBook, heard, heardAll, marked, forgotten, nextUntried, anyUntried, untriedIn, sizeOf, fromSeed, fromCommandLine]
     depends []
     effects []
 
@@ -103,18 +112,236 @@ verify forgotten
     sizeOf(forgotten(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333")) => 0
     sizeOf(forgotten(noBook(), "1.2.3.4:8333")) => 0
 
-fn nextUntried(book: Map<String, Candidate>, connected: List<String>) -> Option<String>
-    ? "A Candidate worth dialling: not tried, and not one we are already on."
+fn nextUntried(book: Map<String, Candidate>, connected: List<String>, roll: Int) -> Option<String>
+    ? "A Candidate worth dialling, chosen so that no one source decides"
+      "which (#118)."
       "The already-connected check is needed because the gossip will hand us"
       "back the Peers we are talking to -- they are, after all, the addresses"
       "our Peers know best."
-    firstUntried(book, Map.keys(book), connected)
+      "This used to be first-untried: the Candidates in whatever order the"
+      "Book held them, take the first not yet tried. That made the gossip"
+      "useful and it made a Peer answering our getaddr with a thousand"
+      "addresses it controls the Peer that decides who we talk to next --"
+      "which is the shape of an eclipse. Everything else in this program"
+      "refuses to let one Peer decide anything alone: the Header tree follows"
+      "the most work rather than the first answer, and a Block is checked"
+      "rather than believed. This was the one place where one Peer could."
+      "So the choice is made twice: a source uniformly among the sources that"
+      "have anything worth dialling, then an address uniformly within it."
+      "A source that supplied a thousand addresses gets the same share of the"
+      "dials as one that supplied one, and the bound on how much of the Book"
+      "any one source may occupy falls out of that rather than needing a"
+      "number of its own."
+      "The source is heardFrom, which is already recorded against every"
+      "Candidate and already distinguishes a person at a command line and a"
+      "DNS seed from a Peer. Grouping was the missing half, not the data."
+      "The roll is handed in rather than taken. Selection stays pure and its"
+      "cases stay decidable; Infra.Peers does the rolling."
+    pickedFrom(book, connected, sourcesIn(book, usableIn(book, Map.keys(book), connected, []), []), roll)
 
 verify nextUntried
-    nextUntried(noBook(), []) => Option.None
-    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), []) => Option.Some("1.2.3.4:8333")
-    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), ["1.2.3.4:8333"]) => Option.None
-    nextUntried(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), []) => Option.None
+    nextUntried(noBook(), [], 0) => Option.None
+    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), [], 0) => Option.Some("1.2.3.4:8333")
+    nextUntried(heard(noBook(), "1.2.3.4:8333", 0), ["1.2.3.4:8333"], 0) => Option.None
+    nextUntried(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), [], 0) => Option.None
+    nextUntried(twoSources(), [], 0) => Option.Some("1.1.1.1:8333")
+    nextUntried(twoSources(), [], 1) => Option.Some("9.9.9.9:8333")
+    nextUntried(twoSources(), [], 2) => Option.Some("2.2.2.2:8333")
+    nextUntried(twoSources(), [], 3) => Option.Some("9.9.9.9:8333")
+    nextUntried(twoSources(), [], 4) => Option.Some("3.3.3.3:8333")
+    nextUntried(twoSources(), [], 5) => Option.Some("9.9.9.9:8333")
+
+fn twoSources() -> Map<String, Candidate>
+    ? "A Book where one source named three addresses and another named one:"
+      "the shape first-untried got wrong."
+      "The cases above are the whole point in miniature. Source 8 owns one"
+      "Candidate of the four and wins every second roll; source 7 owns three"
+      "and its turn rotates between them. A source that had named a thousand"
+      "would still win every second roll. Under first-untried every roll"
+      "returned the same address, and which one was whichever the Book"
+      "happened to hold first."
+      "The addresses these rolls name depend on the order the Book holds"
+      "them, so they were taken from the code rather than reasoned out; what"
+      "is being asserted is the share, and the share is what an attacker"
+      "cannot move."
+    heard(heard(heard(heard(noBook(), "1.1.1.1:8333", 7), "2.2.2.2:8333", 7), "3.3.3.3:8333", 7), "9.9.9.9:8333", 8)
+
+verify twoSources
+    sizeOf(twoSources()) => 4
+    List.len(sourcesIn(twoSources(), usableIn(twoSources(), Map.keys(twoSources()), [], []), [])) => 2
+
+fn usableIn(book: Map<String, Candidate>, keys: List<String>, connected: List<String>, acc: List<String>) -> List<String>
+    ? "Every Candidate worth dialling, in the order the Book holds them."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> usableIn(book, tail, connected, keptIfUsable(book, head, connected, acc))
+
+verify usableIn
+    usableIn(noBook(), [], [], []) => []
+    List.len(usableIn(twoSources(), Map.keys(twoSources()), [], [])) => 4
+    List.len(usableIn(twoSources(), Map.keys(twoSources()), ["9.9.9.9:8333"], [])) => 3
+
+fn keptIfUsable(book: Map<String, Candidate>, address: String, connected: List<String>, acc: List<String>) -> List<String>
+    ? "This one, if it is worth dialling."
+    match usable(Map.get(book, address), connected)
+        true -> List.prepend(address, acc)
+        false -> acc
+
+verify keptIfUsable
+    keptIfUsable(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", [], []) => ["1.2.3.4:8333"]
+    keptIfUsable(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", ["1.2.3.4:8333"], []) => []
+
+fn sourcesIn(book: Map<String, Candidate>, addresses: List<String>, acc: List<Int>) -> List<Int>
+    ? "The distinct sources among these Candidates, first named first."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> sourcesIn(book, tail, addedSource(sourceOf(book, head), acc))
+
+verify sourcesIn
+    sourcesIn(noBook(), [], []) => []
+    sourcesIn(twoSources(), ["1.1.1.1:8333", "2.2.2.2:8333"], []) => [7]
+
+fn addedSource(source: Int, acc: List<Int>) -> List<Int>
+    ? "A source not seen before, kept once."
+    match List.contains(acc, source)
+        true -> acc
+        false -> List.prepend(source, acc)
+
+verify addedSource
+    addedSource(7, []) => [7]
+    addedSource(7, [7]) => [7]
+    addedSource(8, [7]) => [8, 7]
+
+fn sourceOf(book: Map<String, Candidate>, address: String) -> Int
+    ? "Which source named this Candidate; the command line if it is not held,"
+      "which cannot happen for an address taken out of the Book."
+    match Map.get(book, address)
+        Option.None -> fromCommandLine()
+        Option.Some(candidate) -> candidate.heardFrom
+
+verify sourceOf
+    sourceOf(twoSources(), "9.9.9.9:8333") => 8
+    sourceOf(noBook(), "1.2.3.4:8333") => 0 - 1
+
+fn pickedFrom(book: Map<String, Candidate>, connected: List<String>, sources: List<Int>, roll: Int) -> Option<String>
+    ? "One source at random, then one of its Candidates at random."
+    match List.len(sources) == 0
+        true -> Option.None
+        false -> pickedIn(book, connected, sources, roll, List.len(sources))
+
+verify pickedFrom
+    pickedFrom(noBook(), [], [], 0) => Option.None
+    pickedFrom(twoSources(), [], [7], 0) => Option.Some("1.1.1.1:8333")
+
+fn pickedIn(book: Map<String, Candidate>, connected: List<String>, sources: List<Int>, roll: Int, count: Int) -> Option<String>
+    ? "The source the roll names, and then the roll again for its address."
+      "The same roll twice, divided down between the two: one call to"
+      "Random.int is enough for both choices, and the quotient is"
+      "independent of the remainder."
+    nthIn(ofSource(book, connected, usableIn(book, Map.keys(book), connected, []), nthSource(sources, wrapped(roll, count)), []), Result.withDefault(Int.div(absolute(roll), count), 0))
+
+verify pickedIn
+    pickedIn(noBook(), [], [0 - 1], 0, 1) => Option.None
+    pickedIn(twoSources(), [], [7, 8], 1, 2) => Option.Some("9.9.9.9:8333")
+
+fn wrapped(roll: Int, count: Int) -> Int
+    ? "A roll brought inside a range, and zero when there is no range."
+      "Int.div is handed a variable here, so it answers a Result; a count of"
+      "nothing is answered with nothing rather than with an error nobody can"
+      "act on."
+    Result.withDefault(Int.mod(absolute(roll), count), 0)
+
+verify wrapped
+    wrapped(0, 3) => 0
+    wrapped(4, 3) => 1
+    wrapped(3, 0) => 0
+    wrapped(0 - 4, 3) => 1
+
+fn absolute(value: Int) -> Int
+    ? "Distance from zero, so a negative roll still names a position."
+    match value < 0
+        true -> 0 - value
+        false -> value
+
+verify absolute
+    absolute(3) => 3
+    absolute(0 - 3) => 3
+    absolute(0) => 0
+
+fn nthSource(sources: List<Int>, index: Int) -> Int
+    ? "The source at this position, or the first when the list is shorter"
+      "than the position asks for."
+    match List.drop(sources, index)
+        [] -> firstSource(sources)
+        [head, ..tail] -> head
+
+verify nthSource
+    nthSource([7, 8], 0) => 7
+    nthSource([7, 8], 1) => 8
+    nthSource([7, 8], 9) => 7
+
+fn firstSource(sources: List<Int>) -> Int
+    ? "The first source, or the command line when there are none."
+    match sources
+        [] -> fromCommandLine()
+        [head, ..tail] -> head
+
+verify firstSource
+    firstSource([]) => 0 - 1
+    firstSource([7, 8]) => 7
+
+fn ofSource(book: Map<String, Candidate>, connected: List<String>, addresses: List<String>, source: Int, acc: List<String>) -> List<String>
+    ? "The Candidates this one source named."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> ofSource(book, connected, tail, source, keptIfSource(book, head, source, acc))
+
+verify ofSource
+    ofSource(noBook(), [], [], 7, []) => []
+    ofSource(twoSources(), [], ["1.1.1.1:8333", "9.9.9.9:8333"], 8, []) => ["9.9.9.9:8333"]
+
+fn keptIfSource(book: Map<String, Candidate>, address: String, source: Int, acc: List<String>) -> List<String>
+    ? "This one, if this source named it."
+    match sourceOf(book, address) == source
+        true -> List.prepend(address, acc)
+        false -> acc
+
+verify keptIfSource
+    keptIfSource(twoSources(), "9.9.9.9:8333", 8, []) => ["9.9.9.9:8333"]
+    keptIfSource(twoSources(), "9.9.9.9:8333", 7, []) => []
+
+fn nthIn(addresses: List<String>, index: Int) -> Option<String>
+    ? "The address at this position, wrapped into what is there."
+    match addresses
+        [] -> Option.None
+        [head, ..tail] -> Option.Some(nthOr(addresses, wrapped(index, List.len(addresses)), head))
+
+verify nthIn
+    nthIn([], 0) => Option.None
+    nthIn(["a", "b"], 1) => Option.Some("b")
+    nthIn(["a", "b"], 4) => Option.Some("a")
+
+fn nthOr(addresses: List<String>, index: Int, fallback: String) -> String
+    ? "The address at this position, or the one offered."
+    match List.drop(addresses, index)
+        [] -> fallback
+        [head, ..tail] -> head
+
+verify nthOr
+    nthOr(["a", "b"], 1, "z") => "b"
+    nthOr(["a", "b"], 5, "z") => "z"
+
+fn anyUntried(book: Map<String, Candidate>, connected: List<String>) -> Bool
+    ? "Whether anything in the Book is worth dialling at all."
+      "Asked by the caller that only needs to know whether an empty pool can"
+      "still become one (#217), which wants no roll and should not have to"
+      "invent one."
+    List.len(usableIn(book, Map.keys(book), connected, [])) > 0
+
+verify anyUntried
+    anyUntried(noBook(), []) => false
+    anyUntried(heard(noBook(), "1.2.3.4:8333", 0), []) => true
+    anyUntried(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), []) => false
 
 fn firstUntried(book: Map<String, Candidate>, keys: List<String>, connected: List<String>) -> Option<String>
     ? "Walk the Candidates in the order the Book holds them."
