@@ -885,14 +885,134 @@ fn catchingUp(state: Following, key: Int) -> Result<Caught, String>
     tipHeight = tipHeightOf(afterHeaders.store)?
     aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
     startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
-    fetched = Infra.Bodies.bodiesOn(afterHeaders.pool, key, aligned.store, state.blocks, aligned.from, tipHeight, eyeOf(withLog(afterHeaders, startLog)), afterHeaders.book, afterHeaders.nextKey)?
+    fetched = alternating(withLog(afterHeaders, startLog), key, aligned, tipHeight)?
     bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
     onward = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog, board = state.board), tipHeight, aligned.unconfirmed)?
     afterSet(onward)
 
+fn sliceMs() -> Int
+    ? "How long one slice of the download runs before the Set gets a turn"
+      "(#185)."
+      "Every deadline the pool enforces is wall clock -- awaitFrom fails a"
+      "Peer at 60 s, pumped errors the pool at 150 s of silence, and #168's"
+      "stallMs is 30 s against the Flight's own heardMs. A Set chunk between"
+      "two slices must be short against all three or it fails Peers that"
+      "were never slow. Ten seconds each way leaves the tightest of them"
+      "three times the room it needs."
+    10000
+
+verify sliceMs
+    sliceMs() => 10000
+
+fn alternating(state: Following, key: Int, aligned: Realigned, tipHeight: Int) -> Result<Fetched, String>
+    ? "The download and the Set, a slice of each in turn (#185)."
+      "The download is mostly waiting on Peers and the Set is entirely"
+      "computing, so run on one thread they fill each other's gaps: measured"
+      "on random Peers the download is 88% idle, and that idle is what this"
+      "reclaims. What it cannot do is make a catch-up shorter than the Set"
+      "alone, which is the long pole under every arrangement."
+      "The two share exactly one thing, the Store: the Set reads bodies"
+      "through the b: keys the download writes. It passes between them a"
+      "slice then a chunk, never both at once, so there is no concurrency in"
+      "it -- only alternation."
+      "The Set stopping short is the signal to go back to fetching. A chunk"
+      "walks until the first Height the chain cannot supply, which during a"
+      "catch-up is the first Block the download has not landed yet, so the"
+      "hand-back needs no separate accounting of who has what."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    flying(Infra.Bodies.takingOff(startedFetch(state, aligned, tipHeight), aligned.from, tipHeight), tipHeight, aligned.from)
+
+fn startedFetch(state: Following, aligned: Realigned, tipHeight: Int) -> Fetched
+    ? "The download's opening state, as bodiesOn would have built it."
+    ! [Time.unixMs]
+    Infra.Bodies.opening(state.pool, aligned.store, state.blocks, aligned.from, eyeOf(state), state.book, state.nextKey)
+
+fn flying(flight: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+    ? "One slice of the download, then the Set as far as the download has"
+      "got, then round again."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    flown = Infra.Bodies.flying(Infra.Bodies.sliceUntil(flight, Time.unixMs() + sliceMs()), tipHeight)?
+    connecting(flown, tipHeight, standing)
+
+fn connecting(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+    ? "A chunk of the Set over what has landed, unless the download is done"
+      "-- in which case the caller's own Set walk finishes the range."
+      "Settled before it is handed back, and that is not a detail: Locations"
+      "are held back locationBatch at a time, so a download that ends with a"
+      "part-full batch has that many Blocks on disk whose b: keys were never"
+      "written. Sequentially bodiesOn did this settle; the driver has to do"
+      "it too. Skipping it cost 1,538 Blocks of a 49,538 regtest chain --"
+      "the range came back one batch short and the audit agreed with it,"
+      "because the Index genuinely did not name them."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match Infra.Bodies.stillFlying(flown)
+        false -> Infra.Bodies.settled(Infra.Bodies.reachedAt(flown, tipHeight))
+        true -> connectedSome(flown, tipHeight, standing)
+
+fn connectedSome(flown: Flight, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+    ? "One Set chunk over the Blocks the download has landed."
+      "A refusal is not answered here: the Set is walked again by connected"
+      "when the download finishes, and that is where a chain fault is"
+      "reported (#183). Here a chunk that will not go is simply a chunk that"
+      "connected nothing, and the download carries on."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    chunkLanded(flown, Infra.ChainState.buildFrom(Infra.Bodies.poolOf(flown).network, Infra.Bodies.storeOf(flown), Infra.Bodies.blocksOf(flown), tipHeight, tipHeight, Infra.Bodies.eyeOf(flown), Option.None), tipHeight, standing)
+
+fn chunkLanded(flown: Flight, chunk: Result<Built, String>, tipHeight: Int, standing: Int) -> Result<Fetched, String>
+    ? "What the chunk left behind, back into the Flight, and round again."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match chunk
+        Result.Err(why) -> flying(flown, tipHeight, standing)
+        Result.Ok(built) -> flying(Infra.Bodies.flyingWithEye(Infra.Bodies.withStore(flown, built.store), built.eye), tipHeight, built.reached)
+
 fn afterSet(onward: Settled) -> Result<Caught, String>
     ? "A Set that refused ends the catch-up on its own terms (#183)."
-      "It is not a Peer\'s fault and no Peer is dropped for it: since #168 the"
+      "It is not a Peer's fault and no Peer is dropped for it: since #168 the"
       "body that arrived was hashed and matched against what was owed, so it"
       "is provably the Block that was asked for, and the Block Id came from a"
       "Header the tree placed behind proof of work. The body is right. Either"
@@ -1144,7 +1264,7 @@ fn chunkOn(state: Following, chunk: Result<Built, String>, tipHeight: Int, stand
       "none of it was ever about the Peer. It terminated by losing every Peer"
       "and then reporting the consensus reason as though a Peer had said it."
       "The Store, the Disk and the Undo window are underneath this too, and"
-      "none of those is a Peer\'s fault either."
+      "none of those is a Peer's fault either."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
