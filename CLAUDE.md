@@ -56,8 +56,10 @@ that passes every gate. **When you test something that document does not cover,
 add it there** — the coverage only grows if each person leaves behind what they
 had to work out.
 
-**Failures that only `cargo build` finds.** All survive `check`, `verify`
-and `compile`.
+**Failures that only Cargo finds.** All survive `check`, `verify` and a plain
+`compile`; since jasisz/aver#1172 closed, `aver compile --check` runs
+`cargo check` on what it emitted and sees them in seconds, where `cargo
+build` took five minutes to say the same.
 
 - ~~**A binding whose name two depended-on modules both expose** is ambiguous
   in the emitted Rust (`E0659`)~~ — **fixed upstream, both forms.** Match
@@ -66,7 +68,7 @@ and `compile`.
   `f6d7992c` carries it, and the reproducer that failed on `794f4af3` now
   builds clean. It cost this project four renames in a day, so it is left here
   struck through rather than deleted: if a binding ever goes ambiguous again,
-  this is what it was and `cargo build` is still the only gate that sees it.
+  this is what it was and Cargo is still the only gate that sees it.
 - A type named after a builtin is silently resolved to the builtin
   (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
   not proof a module compiles** — only reachability from `main.av` is, so
@@ -111,7 +113,7 @@ aver run main.av --module-root . -- [args...]
 Compile (what the long-running commands should use — several times faster):
 
 ```bash
-aver compile main.av --module-root . -o ../btc-listener-build
+aver compile main.av --module-root . -o ../btc-listener-build --check   # --check runs cargo check on what it emitted (jasisz/aver#1172): seconds once its dev-profile target is warm, minutes the first time
 cd ../btc-listener-build && cargo build --release
 ./target/release/main [args...]
 ```
