@@ -41,8 +41,8 @@ of them to speak that Network instead of mainnet ([Signet](#signet)).
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
 | `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
-| `follow <peers> <dir> [screen] [serve[:port]] [log[:path]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
-| `follow <dir> [screen] [serve[:port]] [log[:path]]` | the same, finding its Peers through the DNS seeds | yes |
+| `follow <peers> <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
+| `follow <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | the same, finding its Peers through the DNS seeds | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -996,6 +996,31 @@ Core node with this as its only Peer synced its whole regtest chain from it,
 validated it and left initial block download — the sentence the full-node
 plan was written to earn — and [docs/regtest-testing.md](docs/regtest-testing.md)
 §11–12 is how to repeat that.
+
+### Reading it from a browser: `http`
+
+`http` binds port 8330 (`http:PORT` another) and answers `GET /` with the
+five Panels — Overview, Peers, Blocks, Transactions, Mempool — as one plain
+HTML page, each Panel a heading over the same lines the Screen would draw,
+so a phone can read what a tmux pane shows. Nothing on it moves: the page is
+the Snapshot as it stood when the request arrived, and you press refresh to
+ask again. Any other path is a 404, anything that is not a GET a 400, and
+every answer closes the connection. It is the loop's own turn that answers,
+once a second and between chunks of a catch-up, and it never waits: the
+listener is asked with no timeout, a Reader is given a tenth of a second to
+have sent its request line and is closed unanswered if it has not, and at
+most four are answered a turn. Two nodes on one machine name different
+ports — the server runs mainnet on 8330 and signet on 8331.
+
+```bash
+./target/release/main follow ~/chain serve log http          # page on :8330
+./target/release/main signet follow ~/signet serve log http:8331
+curl -s localhost:8330/
+```
+
+The request line is read and the page is built in pure
+[Domain.Page](domain/page.av); [Infra.Board](infra/board.av) is the socket
+work (#261).
 
 ### Watching it: `screen` and `log`
 

@@ -9,7 +9,7 @@ module Snapshot
         "The rings are bounded on purpose: a Snapshot is what the node would"
         "want to say about now, not a log, so the newest few of everything is"
         "the whole point and forgetting the rest is correct."
-    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, notedArrival, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, withServing, rateOf, etaSecsOf, percentOf, quietestSecsOf, inboundOf, outboundOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
+    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, notedArrival, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, withServing, rateOf, rateTenthsOf, etaSecsOf, percentOf, quietestSecsOf, inboundOf, outboundOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
     depends []
     effects []
 
@@ -231,6 +231,32 @@ verify rateOf
     rateOf(advanced(freshProgress(), 10, 100, 1000)) => 0
     rateOf(advanced(advanced(freshProgress(), 1000, 9999, 1000), 4000, 9999, 61000)) => 50
     rateOf(advanced(advanced(freshProgress(), 0, 9, 0), 4, 9, 2000)) => 2
+
+fn rateTenthsOf(progress: Progress) -> Int
+    ? "Tenths of an item a second, read across the same window (#260)."
+      "The Screen shows this one: at two or three Blocks a second a whole"
+      "number hides a fifth of the walk's speed, and a fifth is the size"
+      "of change worth seeing."
+    match progress.samples
+        [] -> 0
+        [newest, ..older] -> slopeTenthsOf(newest, lastOf(older, newest))
+
+verify rateTenthsOf
+    rateTenthsOf(freshProgress()) => 0
+    rateTenthsOf(advanced(freshProgress(), 10, 100, 1000)) => 0
+    rateTenthsOf(advanced(advanced(freshProgress(), 1000, 9999, 1000), 4000, 9999, 61000)) => 500
+    rateTenthsOf(advanced(advanced(freshProgress(), 0, 9, 0), 7, 9, 3000)) => 23
+
+fn slopeTenthsOf(newest: Sample, oldest: Sample) -> Int
+    ? "Tenths of an item a second between two Samples; zero when no time"
+      "separates them."
+    match newest.atMs - oldest.atMs > 0
+        true -> Result.withDefault(Int.div((newest.done - oldest.done) * 10000, newest.atMs - oldest.atMs), 0)
+        false -> 0
+
+verify slopeTenthsOf
+    slopeTenthsOf(Sample(atMs = 3000, done = 7), Sample(atMs = 0, done = 0)) => 23
+    slopeTenthsOf(Sample(atMs = 1000, done = 4), Sample(atMs = 1000, done = 0)) => 0
 
 fn slopeOf(newest: Sample, oldest: Sample) -> Int
     ? "Items a second between two Samples; zero when no time separates them."

@@ -216,6 +216,19 @@ Transactions. Everything shown — Panel or log line — is a rendering of it,
 and it is never a log: the rings forget on purpose.
 _Avoid_: state, status, metrics, telemetry, model
 
+**Board**:
+The port `follow` can bind beside the one it serves Peers on, where anyone
+with a browser reads the five Panels as one page (`http`, #261). The page is
+the Snapshot as it stood when the request arrived; nothing on it moves, and
+the reader presses refresh to ask again.
+_Avoid_: dashboard, API, endpoint, web server
+
+**Reader**:
+Whoever connects to the Board. Not a Peer: no Handshake, no Inbox, no place
+in the Address Book; a Reader is given a tenth of a second to have asked,
+is answered once, and is closed.
+_Avoid_: client, user, visitor, request
+
 ### What we store
 
 **Store**:

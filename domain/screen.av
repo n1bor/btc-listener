@@ -10,7 +10,7 @@ module Screen
         "until each did its screen said which issue it was waiting for,"
         "because a blank Panel and a Panel not yet built should not look"
         "alike; placeholderLines is that sentence, kept for the next one."
-    exposes [DrawOp, Panel, View, Pressed, Answer, opened, pressed, pressedAll, frameOf, overviewLines, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
+    exposes [DrawOp, Panel, View, Pressed, Answer, opened, pressed, pressedAll, frameOf, overviewLines, pageSections, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
     depends [Domain.Screenlines, Domain.Snapshot]
     effects []
 
@@ -375,21 +375,59 @@ fn overviewLines(snapshot: Snapshot, nowMs: Int) -> List<String>
         Phase.Listening -> tipLines(snapshot, nowMs)
 
 verify overviewLines
-    overviewLines(Domain.Snapshot.started(0), 0) => ["", "catching up", "headers 0 held, 0/s", "blocks 0/0 (0%) 0/s eta —", "set 0/0 (0%) 0/s eta —"]
+    overviewLines(Domain.Snapshot.started(0), 0) => ["", "catching up", "headers 0 held, 0.0/s", "blocks 0/0 (0%) 0.0/s eta —", "set 0/0 (0%) 0.0/s eta —"]
     List.len(overviewLines(Domain.Snapshot.tipAt(Domain.Snapshot.started(0), 7, "aa", 0), 5000)) => 8
+
+fn tenths(n: Int) -> String
+    ? "A count of tenths as a number with one decimal place (#260): 23 is"
+      "2.3 and 0 is 0.0."
+    "{Int.div(n, 10)}.{Int.mod(n, 10)}"
+
+verify tenths
+    tenths(0) => "0.0"
+    tenths(23) => "2.3"
+    tenths(500) => "50.0"
+    tenths(7) => "0.7"
+
+fn pageSections(snapshot: Snapshot, nowMs: Int) -> List<Tuple<String, List<String>>>
+    ? "The five Panels as the status page shows them (#261): the same"
+      "lines a frame would draw, each under the Panel's name, so the page"
+      "and the Screen cannot disagree."
+    [
+        ("Overview", overviewLines(snapshot, nowMs)),
+        ("Peers", peersPanelLines(snapshot.company, nowMs)),
+        ("Blocks", blocksPanelLines(snapshot, nowMs)),
+        ("Transactions", transactionsPanelLines(snapshot, nowMs)),
+        ("Mempool", mempoolPanelLines(snapshot.mempool)),
+    ]
+
+verify pageSections
+    List.len(pageSections(Domain.Snapshot.started(0), 0)) => 5
+    sectionNames(pageSections(Domain.Snapshot.started(0), 0), []) => ["Overview", "Peers", "Blocks", "Transactions", "Mempool"]
+
+fn sectionNames(sections: List<Tuple<String, List<String>>>, acc: List<String>) -> List<String>
+    ? "The headings in order, for the cases here."
+    match sections
+        [] -> List.reverse(acc)
+        [head, ..tail] -> match head
+            (name, lines) -> sectionNames(tail, List.prepend(name, acc))
+
+verify sectionNames
+    sectionNames([], []) => []
+    sectionNames([("A", []), ("B", ["b"])], []) => ["A", "B"]
 
 fn ibdLines(snapshot: Snapshot) -> List<String>
     ? "The catch-up form: the Header walk, then the body walk."
     [
         "",
         "catching up",
-        "headers {snapshot.headers.done} held, {Domain.Snapshot.rateOf(snapshot.headers)}/s",
-        "blocks {snapshot.bodies.done}/{snapshot.bodies.target} ({Domain.Snapshot.percentOf(snapshot.bodies)}%) {Domain.Snapshot.rateOf(snapshot.bodies)}/s eta {etaClock(Domain.Snapshot.etaSecsOf(snapshot.bodies))}",
-        "set {snapshot.sets.done}/{snapshot.sets.target} ({Domain.Snapshot.percentOf(snapshot.sets)}%) {Domain.Snapshot.rateOf(snapshot.sets)}/s eta {etaClock(Domain.Snapshot.etaSecsOf(snapshot.sets))}",
+        "headers {snapshot.headers.done} held, {tenths(Domain.Snapshot.rateTenthsOf(snapshot.headers))}/s",
+        "blocks {snapshot.bodies.done}/{snapshot.bodies.target} ({Domain.Snapshot.percentOf(snapshot.bodies)}%) {tenths(Domain.Snapshot.rateTenthsOf(snapshot.bodies))}/s eta {etaClock(Domain.Snapshot.etaSecsOf(snapshot.bodies))}",
+        "set {snapshot.sets.done}/{snapshot.sets.target} ({Domain.Snapshot.percentOf(snapshot.sets)}%) {tenths(Domain.Snapshot.rateTenthsOf(snapshot.sets))}/s eta {etaClock(Domain.Snapshot.etaSecsOf(snapshot.sets))}",
     ]
 
 verify ibdLines
-    ibdLines(Domain.Snapshot.started(0)) => ["", "catching up", "headers 0 held, 0/s", "blocks 0/0 (0%) 0/s eta —", "set 0/0 (0%) 0/s eta —"]
+    ibdLines(Domain.Snapshot.started(0)) => ["", "catching up", "headers 0 held, 0.0/s", "blocks 0/0 (0%) 0.0/s eta —", "set 0/0 (0%) 0.0/s eta —"]
     List.len(ibdLines(Domain.Snapshot.headersAt(Domain.Snapshot.started(0), 5, 9, 100))) => 5
 
 fn tipLines(snapshot: Snapshot, nowMs: Int) -> List<String>

@@ -1,0 +1,146 @@
+module Page
+    intent =
+        "The status page a Reader is handed over HTTP (#261): the one"
+        "request line this node understands, and the one document it"
+        "answers with."
+        "Deliberately not a web server. A Reader asks GET / and gets the"
+        "five Panels as plain text under headings, exactly the lines the"
+        "Screen would draw, in one HTML document with no script and no"
+        "refresh -- the page is what the node knew when the request arrived,"
+        "and the Reader presses refresh to ask again. Everything else is a"
+        "400 or a 404 in three lines, and every answer closes the connection."
+        "Pure, all of it: the bytes on the socket are Infra.Board's."
+    exposes [Request, requestOf, answerTo, html, response, escaped, sectionText]
+
+type Request
+    Get(String)
+    Refused
+
+fn requestOf(text: String) -> Request
+    ? "The request line, read off whatever the Reader has sent so far."
+      "GET and a path, separated by spaces, is a Get of the path; any"
+      "other method, a line with fewer than two words, or no line at all"
+      "is Refused. Headers are not read: nothing here depends on one."
+    match String.split(firstLineOf(text), " ")
+        [] -> Request.Refused
+        [method, ..rest] -> getOr(method, rest)
+
+verify requestOf
+    requestOf("GET / HTTP/1.1\r\nHost: x\r\n\r\n") => Request.Get("/")
+    requestOf("GET /x HTTP/1.0\r\n") => Request.Get("/x")
+    requestOf("POST / HTTP/1.1\r\n") => Request.Refused
+    requestOf("junk\r\n") => Request.Refused
+    requestOf("") => Request.Refused
+
+fn getOr(method: String, rest: List<String>) -> Request
+    ? "Only GET is a request, and only with a path after it."
+    match method == "GET"
+        true -> pathOf(rest)
+        false -> Request.Refused
+
+verify getOr
+    getOr("GET", ["/", "HTTP/1.1"]) => Request.Get("/")
+    getOr("GET", []) => Request.Refused
+    getOr("HEAD", ["/"]) => Request.Refused
+
+fn pathOf(rest: List<String>) -> Request
+    ? "The word after GET; the protocol version after that is not read."
+    match rest
+        [] -> Request.Refused
+        [path, ..more] -> Request.Get(path)
+
+verify pathOf
+    pathOf(["/x"]) => Request.Get("/x")
+    pathOf([]) => Request.Refused
+
+fn firstLineOf(text: String) -> String
+    ? "Up to the first line end, whichever kind the Reader sent."
+    match String.split(text, "\n")
+        [] -> ""
+        [head, ..rest] -> String.trim(head)
+
+verify firstLineOf
+    firstLineOf("GET / HTTP/1.1\r\nHost: x") => "GET / HTTP/1.1"
+    firstLineOf("one\ntwo") => "one"
+    firstLineOf("") => ""
+
+fn answerTo(text: String, sections: List<Tuple<String, List<String>>>) -> String
+    ? "The whole response to what a Reader sent: the page for GET /, a"
+      "404 for any other path, a 400 for anything that is not a GET."
+    match requestOf(text)
+        Request.Refused -> response(400, "Bad Request", "only GET is understood\n")
+        Request.Get(path) -> pageOr(path, sections)
+
+verify answerTo
+    String.startsWith(answerTo("GET / HTTP/1.1\r\n\r\n", []), "HTTP/1.1 200 OK\r\n") => true
+    String.startsWith(answerTo("GET /x HTTP/1.1\r\n\r\n", []), "HTTP/1.1 404 Not Found\r\n") => true
+    String.startsWith(answerTo("PUT / HTTP/1.1\r\n\r\n", []), "HTTP/1.1 400 Bad Request\r\n") => true
+
+fn pageOr(path: String, sections: List<Tuple<String, List<String>>>) -> String
+    ? "The one path there is, or not found."
+    match path == "/"
+        true -> response(200, "OK", html(sections))
+        false -> response(404, "Not Found", "there is only /\n")
+
+verify pageOr
+    String.startsWith(pageOr("/", []), "HTTP/1.1 200 OK\r\n") => true
+    String.startsWith(pageOr("/favicon.ico", []), "HTTP/1.1 404 Not Found\r\n") => true
+
+fn response(status: Int, reason: String, body: String) -> String
+    ? "One HTTP/1.1 response, complete: status, the two headers a client"
+      "needs to read the body and know the connection is ending, then the"
+      "body. Content-Length is bytes, not characters, because the page"
+      "may carry a Peer's user agent."
+    "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {String.byteLength(body)}\r\nConnection: close\r\n\r\n{body}"
+
+verify response
+    response(200, "OK", "hi") => "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"
+    response(404, "Not Found", "") => "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+fn html(sections: List<Tuple<String, List<String>>>) -> String
+    ? "The document: a heading and a preformatted block per Panel, and"
+      "nothing that moves."
+    "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>btc-listener</title></head>\n<body style=\"font-family: monospace\">\n{sectionsText(sections, "")}</body></html>\n"
+
+verify html
+    String.contains(html([]), "<title>btc-listener</title>") => true
+    String.contains(html([("Overview", ["set 1/2"])]), "<h2>Overview</h2>\n<pre>set 1/2\n</pre>\n") => true
+
+fn sectionsText(sections: List<Tuple<String, List<String>>>, acc: String) -> String
+    ? "Every section in order."
+    match sections
+        [] -> acc
+        [head, ..tail] -> match head
+            (name, lines) -> sectionsText(tail, acc + sectionText(name, lines))
+
+verify sectionsText
+    sectionsText([], "x") => "x"
+    sectionsText([("A", []), ("B", ["b"])], "") => "<h2>A</h2>\n<pre></pre>\n<h2>B</h2>\n<pre>b\n</pre>\n"
+
+fn sectionText(name: String, lines: List<String>) -> String
+    ? "One Panel: its name as a heading, its lines escaped inside a pre."
+    "<h2>{escaped(name)}</h2>\n<pre>{linesText(lines, "")}</pre>\n"
+
+verify sectionText
+    sectionText("Peers", ["a", "b"]) => "<h2>Peers</h2>\n<pre>a\nb\n</pre>\n"
+    sectionText("<x>", []) => "<h2>&lt;x&gt;</h2>\n<pre></pre>\n"
+
+fn linesText(lines: List<String>, acc: String) -> String
+    ? "Each line escaped and ended."
+    match lines
+        [] -> acc
+        [head, ..tail] -> linesText(tail, acc + escaped(head) + "\n")
+
+verify linesText
+    linesText([], "") => ""
+    linesText(["a&b"], "") => "a&amp;b\n"
+
+fn escaped(text: String) -> String
+    ? "The three characters HTML reads as markup, made literal. A Peer's"
+      "user agent is the only text here that a Peer chose."
+    String.replace(String.replace(String.replace(text, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+
+verify escaped
+    escaped("plain") => "plain"
+    escaped("<a & b>") => "&lt;a &amp; b&gt;"
+    escaped("") => ""

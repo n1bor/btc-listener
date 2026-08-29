@@ -48,7 +48,7 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
         Time.now, Time.unixMs,
     ]
     match keywordOnly(more)
-        true -> parsed(network, Result.Ok([]), address, screenAsked(more), servePort(more, network), logPath(more, address))
+        true -> parsed(network, Result.Ok([]), address, screenAsked(more), servePort(more, network), logPath(more, address), boardPort(more))
         false -> namedPeers(network, address, more)
 
 fn namedPeers(network: Network, address: String, more: List<String>) -> Result<Unit, String>
@@ -66,7 +66,7 @@ fn namedPeers(network: Network, address: String, more: List<String>) -> Result<U
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
-        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network), logPath(extra, dir))
+        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network), logPath(extra, dir), boardPort(extra))
 
 fn keywordOnly(more: List<String>) -> Bool
     ? "Whether what follows the first argument is only words, which is how"
@@ -101,7 +101,7 @@ verify keywordThenRest
 fn isKeyword(word: String) -> Bool
     ? "The words that are not a directory: screen, serve, serve:PORT, log"
       "and log:PATH."
-    Bool.or(word == "screen", Bool.or(word == "log", Bool.or(String.startsWith(word, "log:"), Bool.or(word == "serve", String.startsWith(word, "serve:")))))
+    Bool.or(word == "screen", Bool.or(word == "log", Bool.or(String.startsWith(word, "log:"), Bool.or(word == "serve", Bool.or(String.startsWith(word, "serve:"), Bool.or(word == "http", String.startsWith(word, "http:")))))))
 
 verify isKeyword
     isKeyword("screen") => true
@@ -110,6 +110,8 @@ verify isKeyword
     isKeyword("log") => true
     isKeyword("log:/tmp/m.log") => true
     isKeyword("/tmp/chain") => false
+    isKeyword("http") => true
+    isKeyword("http:8331") => true
     isKeyword("served") => false
     isKeyword("logs") => false
 
@@ -228,6 +230,56 @@ verify servePortAfter
     servePortAfter("serve:18455", [], 18444) => Option.Some(18455)
     servePortAfter("screen", [], 18444) => Option.None
 
+fn boardPort(extra: List<String>) -> Option<Int>
+    ? "Which port to put the status Board on, if the word http was given"
+      "(#261): 8330 unless http:PORT names another."
+    boardPortIn(extra)
+
+verify boardPort
+    boardPort([]) => Option.None
+    boardPort(["http"]) => Option.Some(8330)
+    boardPort(["http:8331"]) => Option.Some(8331)
+    boardPort(["screen", "serve", "http:8331", "log"]) => Option.Some(8331)
+    boardPort(["http:x"]) => Option.None
+
+fn boardPortIn(extra: List<String>) -> Option<Int>
+    ? "The first word that asks for the Board, and what it asks for."
+    match extra
+        [] -> Option.None
+        [head, ..tail] -> boardWordOr(head, tail)
+
+verify boardPortIn
+    boardPortIn([]) => Option.None
+    boardPortIn(["log", "http"]) => Option.Some(8330)
+
+fn boardWordOr(word: String, rest: List<String>) -> Option<Int>
+    ? "This word, or keep looking through the rest."
+    match word == "http"
+        true -> Option.Some(boardDefaultPort())
+        false -> boardPortAfter(word, rest)
+
+verify boardWordOr
+    boardWordOr("http", []) => Option.Some(8330)
+    boardWordOr("screen", ["http"]) => Option.Some(8330)
+
+fn boardPortAfter(word: String, rest: List<String>) -> Option<Int>
+    ? "http:PORT names its own port; anything else is not ours."
+    match String.startsWith(word, "http:")
+        false -> boardPortIn(rest)
+        true -> portAfterColon(String.split(word, ":"), rest, boardDefaultPort())
+
+verify boardPortAfter
+    boardPortAfter("http:8331", []) => Option.Some(8331)
+    boardPortAfter("screen", []) => Option.None
+
+fn boardDefaultPort() -> Int
+    ? "8330: beside Bitcoin's 8332 and 8333, and the same on every"
+      "Network, so a signet and a mainnet on one machine name theirs."
+    8330
+
+verify boardDefaultPort
+    boardDefaultPort() => 8330
+
 fn portAfterColon(parts: List<String>, rest: List<String>, fallback: Int) -> Option<Int>
     ? "The half after the colon, which the word being serve: guarantees."
     match parts
@@ -269,7 +321,7 @@ verify screenAsked
     screenAsked(["screen"]) => true
     screenAsked(["something"]) => false
 
-fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>) -> Result<Unit, String>
+fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<Unit, String>
     ? "Follow the tip, or say why the address was rejected."
     ! [
         Console.error, Console.print,
@@ -283,9 +335,9 @@ fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: S
     ]
     match addresses
         Result.Err(message) -> Result.Err("error: {message}")
-        Result.Ok(peers) -> said(claimed(network, peers, dir, screened, answering, logging))
+        Result.Ok(peers) -> said(claimed(network, peers, dir, screened, answering, logging, boarding))
 
-fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>) -> Result<String, String>
+fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<String, String>
     ? "Take the directory for the life of the process."
       "A follower holds the claim until it stops, which is the point: the"
       "Index, the Segments and the UTXO Set are all being written as Blocks"
@@ -307,9 +359,9 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened
     ]
     _claimed = Infra.Lock.claim(dir, "follow")?
     _armed = Process.stopRequested()
-    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened, answering, logging))
+    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened, answering, logging, boarding))
 
-fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>) -> Result<String, String>
+fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<String, String>
     ? "Open everything the three phases write to, then hand over to the loop."
       "This returns only when the loop stops, and the loop stops only on a"
       "read that failed, a Peer that went silent, or a Block that would not"
@@ -327,7 +379,7 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String, screen
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened, answering, logging, notePath(logging, dir))?
+    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened, answering, logging, notePath(logging, dir), boarding)?
     Result.Ok("stopped following")
 
 fn addressesIn(network: Network, texts: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>
