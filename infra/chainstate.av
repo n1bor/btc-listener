@@ -185,7 +185,19 @@ fn walk(network: Network, state: Walk, height: Int, to: Int, created: Map<Bytes,
 fn ended(state: Walk, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "The walk as it stands and the window it still holds, for the caller"
       "to flush."
-    Result.Ok(Walked(walk = state, window = Window(created = created, spent = spent, undos = undos, held = held, standing = standing)))
+    ! [Process.stopRequested, Time.unixMs]
+    Result.Ok(Walked(walk = Walk(blocks = state.blocks, counted = state.counted, pace = state.pace, eye = stopNoted(state.eye, Process.stopRequested(), Time.unixMs()), target = state.target), window = Window(created = created, spent = spent, undos = undos, held = held, standing = standing)))
+
+fn stopNoted(eye: Eye, asked: Bool, nowMs: Int) -> Eye
+    ? "If the walk is ending because a stop was asked for, the Eye keeps"
+      "when (#268)."
+    match asked
+        false -> eye
+        true -> Infra.Screen.stopAskedAt(eye, nowMs)
+
+verify stopNoted
+    stopNoted(Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), false, 5).stopAskedMs => 0
+    stopNoted(Infra.Screen.unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), true, 5).stopAskedMs => 5
 
 fn stepping(network: Network, state: Walk, to: Int, ahead: Option<Ahead>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "Nothing fetched ends the walk: a Height the Index does not name, or a"
@@ -324,8 +336,9 @@ fn recorded(network: Network, state: Walk, height: Int, blockId: String, added: 
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    setRecord = Infra.Metrics.marked(state.eye.log, "set", height, state.target, state.counted.blocks, 0, 0, 0, state.eye.candidates, state.counted.added, state.counted.removed, false)?
-    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, Domain.Snapshot.withCandidates(confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), confirmed, view.atMs), state.eye.candidates)), setRecord), view.atMs)?
+    watched = Infra.Screen.blockWatched(state.eye, view)?
+    setRecord = Infra.Metrics.marked(watched.log, "set", height, state.target, state.counted.blocks, 0, 0, 0, watched.candidates, state.counted.added, state.counted.removed, false)?
+    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(watched, Domain.Snapshot.withCandidates(confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), confirmed, view.atMs), state.eye.candidates)), setRecord), view.atMs)?
     counted = Built(store = state.counted.store, blocks = state.counted.blocks + 1, added = state.counted.added + added, removed = state.counted.removed + removed, fees = state.counted.fees + fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
     Result.Ok(Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked, target = state.target))

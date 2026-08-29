@@ -1650,6 +1650,31 @@ only reads what the Index names, so it cannot see Blocks the Index forgot.
 Always compare the Block count against the chain's own height, not just the
 audit's verdict.
 
+### 16l. The watchdog lines say when the node overran itself
+
+No knob is needed to provoke them: freeze the process with a signal. A
+`SIGSTOP` inside the Set walk stops its clocks mid-chunk; on `SIGCONT` the
+next Block's clock spans the pause (over thirty seconds → `slow block`) and
+so does the chunk's (over five times `chunkMs()` → `slow chunk`, said from
+inside the walk, then `slow chunk done` when the chunk ends). Then ask it
+to stop: a stop that lands at the next Block writes no `slow stop`, which
+is the point of that line — only a stop that really overran writes it.
+
+```bash
+$C generatetoaddress 3000 "$($C getnewaddress)" > /dev/null
+rm -rf $F2; mkdir -p $F2
+./target/release/main regtest follow 127.0.0.1:18444 $F2 log &
+P=$!; until grep -q 'set connecting' $F2/debug.log 2>/dev/null; do sleep 0.05; done
+kill -STOP $P; sleep 65; kill -CONT $P; sleep 5; kill -INT $P; wait $P
+grep watchdog $F2/debug.log
+```
+
+The freeze has to land inside the Set walk once a Block has been recorded
+-- the first `set connecting` note is that moment; a freeze during the
+download spans no Block clock, because its chunks had nothing landed yet.
+Expect `slow chunk`, `slow block` and `slow chunk done`, then `end stopped
+cleanly` a moment after the SIGINT. A run left alone writes none.
+
 ### 17. The metrics log
 
 A run with a Screen open leaves no record of itself: every walk asks the Eye
