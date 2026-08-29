@@ -930,7 +930,7 @@ fn alternating(state: Following, key: Int, aligned: Realigned, tipHeight: Int) -
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    flying(Infra.Bodies.takingOff(startedFetch(state, aligned, tipHeight), aligned.from, tipHeight), tipHeight, aligned.from, mostChunk())
+    flying(Infra.Bodies.takingOff(startedFetch(state, aligned, tipHeight), aligned.from, tipHeight), tipHeight, aligned.from, leastChunk())
 
 fn startedFetch(state: Following, aligned: Realigned, tipHeight: Int) -> Fetched
     ? "The download's opening state, as bodiesOn would have built it."
@@ -1129,7 +1129,7 @@ fn connected(state: Following, tipHeight: Int, unconfirmed: List<Carried>) -> Re
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None, mostChunk())?
+    chunked = buildingTo(state, tipHeight, standingOf(state.store)?, Option.None, leastChunk())?
     settledOn(state, chunked, tipHeight, unconfirmed)
 
 fn settledOn(state: Following, chunked: Chunked, tipHeight: Int, unconfirmed: List<Carried>) -> Result<Settled, String>
@@ -1207,17 +1207,21 @@ verify leastChunk
     leastChunk() => 5
 
 fn sized(done: Int, tookMs: Int) -> Result<Int, String>
-    ? "The next chunk, from what the last one actually cost."
+    ? "The next chunk, from what the last one actually cost. With nothing"
+      "to go on -- the first chunk of a catch-up, or one that connected"
+      "nothing -- the smallest: it is over in seconds and the next is"
+      "sized from it, where a chunk of the most took a hundred seconds on"
+      "mainnet and tripped the watchdog's budget on every restart (#268)."
       "Aims at chunkMs and clamps to the pair above. A chunk that took no"
       "measurable time says nothing about the rate, so it asks for the"
       "ceiling and finds out."
     match Bool.or(tookMs <= 0, done <= 0)
-        true -> Result.Ok(mostChunk())
+        true -> Result.Ok(leastChunk())
         false -> Result.Ok(clamped(Int.div(done * chunkMs(), tookMs)?))
 
 verify sized
-    sized(0, 0) => Result.Ok(250)
-    sized(250, 0) => Result.Ok(250)
+    sized(0, 0) => Result.Ok(5)
+    sized(250, 0) => Result.Ok(5)
     sized(250, 1000) => Result.Ok(250)
     sized(250, 53000) => Result.Ok(47)
     sized(10, 10000) => Result.Ok(10)
