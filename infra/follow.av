@@ -245,6 +245,7 @@ fn firstSeated(state: Following, left: Int) -> Result<Following, String>
       "that named its Peers is already seated and passes straight through."
     ! [
         Console.error, Console.print,
+        Disk.appendText,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
@@ -259,13 +260,66 @@ fn seatingMore(state: Following, left: Int) -> Result<Following, String>
       "the Book once rather than circling it."
     ! [
         Console.error, Console.print,
+        Disk.appendText,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     match left <= 0
         true -> Result.Err("no Candidate answered; none of the addresses the DNS seeds gave could be reached")
-        false -> firstSeated(toppedUp(state)?, left - 1)
+        false -> seatingOne(state, left)
+
+fn seatingOne(state: Following, left: Int) -> Result<Following, String>
+    ? "Start a dial if none is in flight, then wait on it and ask what it"
+      "became (#267)."
+      "This counted turns of a loop, and since #202 made the dial"
+      "non-blocking that counted nothing. toppedUp starts a dial and returns"
+      "at once, and dialingNow makes the next twenty-three turns no-ops, so"
+      "a node given no address burned its whole Address Book in microseconds"
+      "and reported that none of the DNS seeds could be reached -- without"
+      "having waited for even one of them. The instant error was the tell:"
+      "twenty-four Candidates at five seconds each is two minutes, and it"
+      "came back before the listening line had scrolled."
+      "So the wait is here, and what is counted is Candidates that settled"
+      "rather than turns taken. awaitTick is the wait because it is the one"
+      "the pool already uses: it polls every socket, which is what lets an"
+      "inbound caller arrive while we are still looking for an outbound."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    started = toppedUp(state)?
+    waited = Infra.Peers.awaitTick(started.pool, seatingTickMs())?
+    asked = dialsAsked(withPool(started, waited.pool))?
+    seatingNext(asked, left, Infra.Peers.dialingNow(asked.pool))
+
+fn seatingNext(state: Following, left: Int, dialing: Bool) -> Result<Following, String>
+    ? "A dial still in flight costs no Candidate; one that has settled does."
+      "Without that distinction the count runs out while the first dial is"
+      "still in its five seconds."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match dialing
+        true -> firstSeated(state, left)
+        false -> firstSeated(state, left - 1)
+
+fn seatingTickMs() -> Int
+    ? "How long each look at a starting dial waits. A quarter second: short"
+      "enough that a Candidate answering is noticed at once, long enough"
+      "that waiting out a dead one costs a handful of turns and not"
+      "thousands."
+    250
+
+verify seatingTickMs
+    seatingTickMs() => 250
 
 fn bootstrapped(network: Network, addresses: List<PeerAddress>) -> Result<Map<String, Candidate>, String>
     ? "The Address Book a session starts with (#166)."
