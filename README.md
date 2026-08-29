@@ -1006,7 +1006,9 @@ so a phone can read what a tmux pane shows. Nothing on it moves: the page is
 the Snapshot as it stood when the request arrived, and you press refresh to
 ask again. Any other path is a 404, anything that is not a GET a 400, and
 every answer closes the connection. It is the loop's own turn that answers,
-once a second and between chunks of a catch-up, and it never waits: the
+once a second -- from inside the Set walk too, through the Eye every walk
+carries, so a page asked for during a catch-up is a second away rather than
+a chunk away -- and it never waits: the
 listener is asked with no timeout, a Reader is given a tenth of a second to
 have sent its request line and is closed unanswered if it has not, and at
 most four are answered a turn. Two nodes on one machine name different
