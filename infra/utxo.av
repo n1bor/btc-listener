@@ -7,7 +7,7 @@ module Utxo
         "answer down."
         "Every Input the Block spends is looked up once, before anything is"
         "decided. Some of those lookups come back empty and are not faults --"
-        "an Input may be spending an Output made earlier in the same Block,"
+        "an Input may be swindow an Output made earlier in the same Block,"
         "which the Set does not hold and will not until the Block connects."
         "Domain.Connect knows the difference; this only has to hand it"
         "everything the Store could find."
@@ -15,7 +15,7 @@ module Utxo
         "made, the keys it spent, and the Undo Data that says what those keys"
         "held. A Store that stopped between them would hold a Set that never"
         "existed, so they are one batch."
-    exposes [Applied, connectBlock, prepared, written, disconnectBlock, prunedUndo]
+    exposes [Applied, Window, Absorbed, Split, connectBlock, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
     effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
@@ -29,17 +29,252 @@ record Applied
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
     ! [Infra.Kv.applyAll, Infra.Kv.getAll]
-    written(store, blockId, prepared(network, store, height, transactions)?)
+    written(store, blockId, prepared(network, store, partitioned(transactions, Map.fromList([]), Map.fromList([]))?, height, transactions)?)
 
-fn prepared(network: Network, store: Store, height: Int, transactions: List<Transaction>) -> Result<Connecting, String>
+fn prepared(network: Network, store: Store, split: Split, height: Int, transactions: List<Transaction>) -> Result<Connecting, String>
     ? "What this Block does to the Set: its Inputs resolved and the change"
       "worked out, nothing written (#233)."
       "The half of connecting a Block that only reads, kept apart from the"
       "half that writes so the Set walk can run it beside the next Block's"
       "fetch and keep every write on the one thread that owns the Store."
+      "Resolved against what the window already answered (#247): the caller"
+      "asks the window first, on its own thread, and hands over only the"
+      "hits and the keys the Store still has to answer -- the window's Maps"
+      "never enter the product, so nothing else owns them when the Block is"
+      "absorbed and every Map.set stays in place."
     ! [Infra.Kv.getAll]
-    fromStore = resolved(store, spentKeys(transactions, [])?, Map.fromList([]))?
+    fromStore = resolved(store, List.reverse(split.misses), split.hits)?
     Result.Ok(Domain.Connect.connected(network, height, transactions, fromStore))
+
+record Split
+    hits: Map<Bytes, Unspent>
+    misses: List<Bytes>
+
+fn partitioned(transactions: List<Transaction>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>) -> Result<Split, String>
+    ? "A Block's Inputs answered by the window where it can, the rest left"
+      "for the Store (#247). An Output made in this window is in created and"
+      "nowhere else; one the window spent is in spent and gone whatever the"
+      "Store still says."
+    Result.Ok(partitionedFrom(spentKeys(transactions, [])?, created, spent, Map.fromList([]), []))
+
+verify partitioned
+    List.len(partitioned([], noCoins(), noSpent())?.misses) => 0
+
+fn partitionedFrom(keys: List<Bytes>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, hits: Map<Bytes, Unspent>, misses: List<Bytes>) -> Split
+    ? "Each key answered by the window if it can be, or left for the Store."
+      "The Map grows in argument position of a tail call, as everywhere the"
+      "walk builds one (#227)."
+    match keys
+        [] -> Split(hits = hits, misses = misses)
+        [key, ..rest] -> partitionedOne(key, rest, created, spent, hits, misses, Map.get(created, key), Map.has(spent, key))
+
+verify partitionedFrom
+    List.len(partitionedFrom([], noCoins(), noSpent(), noCoins(), []).misses) => 0
+    List.len(partitionedFrom([Domain.UtxoStore.unspentKey("aa", 0)?], noCoins(), noSpent(), noCoins(), []).misses) => 1
+    Map.len(partitionedFrom([Domain.UtxoStore.unspentKey("aa", 0)?], sampleWindow()?.created, sampleWindow()?.spent, noCoins(), []).hits) => 1
+    List.len(partitionedFrom([Domain.UtxoStore.unspentKey("aa", 0)?], sampleWindow()?.created, sampleWindow()?.spent, noCoins(), []).misses) => 0
+    List.len(partitionedFrom([Domain.UtxoStore.unspentKey("bb", 0)?], sampleWindow()?.created, sampleWindow()?.spent, noCoins(), []).misses) => 0
+    Map.len(partitionedFrom([Domain.UtxoStore.unspentKey("bb", 0)?], sampleWindow()?.created, sampleWindow()?.spent, noCoins(), []).hits) => 0
+
+fn noSpent() -> Map<Bytes, Bool>
+    ? "An empty Map of the spent kind, for the cases here."
+    Map.fromList([])
+
+verify noSpent
+    Map.len(noSpent()) => 0
+
+fn partitionedOne(key: Bytes, rest: List<Bytes>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, hits: Map<Bytes, Unspent>, misses: List<Bytes>, made: Option<Unspent>, spentHere: Bool) -> Split
+    ? "Made in the window is a hit; spent in the window is absent; else ask."
+    match made
+        Option.Some(unspent) -> partitionedFrom(rest, created, spent, Map.set(hits, key, unspent), misses)
+        Option.None -> partitionedMiss(key, rest, created, spent, hits, misses, spentHere)
+
+verify partitionedOne
+    Map.len(partitionedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], noCoins(), noSpent(), noCoins(), [], Option.Some(Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)), false).hits) => 1
+    List.len(partitionedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], noCoins(), noSpent(), noCoins(), [], Option.None, false).misses) => 1
+    List.len(partitionedOne(Domain.UtxoStore.unspentKey("aa", 0)?, [], noCoins(), noSpent(), noCoins(), [], Option.None, true).misses) => 0
+
+fn partitionedMiss(key: Bytes, rest: List<Bytes>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, hits: Map<Bytes, Unspent>, misses: List<Bytes>, spentHere: Bool) -> Split
+    ? "Spent in the window is not asked of the Store, which still holds it."
+    match spentHere
+        true -> partitionedFrom(rest, created, spent, hits, misses)
+        false -> partitionedFrom(rest, created, spent, hits, List.prepend(key, misses))
+
+verify partitionedMiss
+    List.len(partitionedMiss(Domain.UtxoStore.unspentKey("aa", 0)?, [], noCoins(), noSpent(), noCoins(), [], true).misses) => 0
+    List.len(partitionedMiss(Domain.UtxoStore.unspentKey("aa", 0)?, [], noCoins(), noSpent(), noCoins(), [], false).misses) => 1
+
+fn sampleWindow() -> Result<Window, String>
+    ? "A window that made aa:0 and spent bb:0, for the cases here."
+    Result.Ok(Window(created = Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false))]), spent = Map.fromList([(Domain.UtxoStore.unspentKey("bb", 0)?, true)]), undos = [], held = 2, standing = Option.None))
+
+verify sampleWindow
+    sampleWindow()?.held => 2
+
+record Window
+    created: Map<Bytes, Unspent>
+    spent: Map<Bytes, Bool>
+    undos: List<Entry>
+    held: Int
+    standing: Option<Reached>
+
+record Absorbed
+    added: Int
+    removed: Int
+    fees: Int
+    confirmed: List<TxFee>
+
+fn emptyWindow() -> Window
+    ? "A window with nothing in it yet."
+    Window(created = Map.fromList([]), spent = Map.fromList([]), undos = [], held = 0, standing = Option.None)
+
+verify emptyWindow
+    emptyWindow().held => 0
+    Map.len(emptyWindow().created) => 0
+
+fn absorbed(created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, height: Int, blockId: String, connection: Connecting) -> Result<Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>, String>
+    ? "A Block's change into the window rather than the Store (#247)."
+      "An Output made in this window and spent in it comes straight back out"
+      "of created and is never written; one the Store holds goes into spent"
+      "to be deleted at the flush. The Undo record and the standing ride"
+      "along, so the flush writes exactly what a Block-by-Block write would"
+      "have, and the Store is always the Set at the Height it names."
+      "The window's parts come in as parameters and every Map.set is in"
+      "argument position of a tail call (#227): a Map set on a field of a"
+      "record the caller still holds is copied whole, and with a window of"
+      "a hundred thousand Outputs that was the walk twenty times slower."
+      "The Window is assembled once, here, at the end."
+    match connection
+        Connecting.Refused(why) -> Result.Err("Block {blockId} cannot connect: {why}")
+        Connecting.Applied(change) -> madeInto(change.added, change.removed, change, created, spent, undos, held, height, blockId)
+
+verify absorbed
+    absorbed(noCoins(), noSpent(), [], 0, 1, "aa", Connecting.Refused("no")) => Result.Err("Block aa cannot connect: no")
+    countsOf(absorbed(noCoins(), noSpent(), [], 0, 1, "aa", Connecting.Applied(Change(added = [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], removed = [], fees = 0, confirmed = [])))?).added => 1
+    Map.len(createdOf(absorbed(noCoins(), noSpent(), [], 0, 1, "aa", Connecting.Applied(Change(added = [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], removed = [], fees = 0, confirmed = [])))?)) => 1
+    Map.len(createdOf(absorbed(sampleWindow()?.created, sampleWindow()?.spent, [], 2, 2, "aa", Connecting.Applied(Change(added = [], removed = [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], fees = 5, confirmed = [])))?)) => 0
+    Map.len(spentOfW(absorbed(sampleWindow()?.created, sampleWindow()?.spent, [], 2, 2, "aa", Connecting.Applied(Change(added = [], removed = [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], fees = 5, confirmed = [])))?)) => 1
+    Map.len(spentOfW(absorbed(noCoins(), noSpent(), [], 0, 2, "aa", Connecting.Applied(Change(added = [], removed = [Unspent(txid = Bytes.fromList([204]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], fees = 5, confirmed = [])))?)) => 1
+    standingOf(absorbed(noCoins(), noSpent(), [], 0, 2, "aa", Connecting.Applied(Change(added = [], removed = [], fees = 0, confirmed = [])))?) => Option.Some(Reached(height = 2, blockId = "aa"))
+    heldOf(absorbed(noCoins(), noSpent(), [], 0, 2, "aa", Connecting.Applied(Change(added = [], removed = [], fees = 0, confirmed = [])))?) => 1
+
+fn madeInto(added: List<Unspent>, removed: List<Unspent>, change: Change, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, height: Int, blockId: String) -> Result<Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>, String>
+    ? "The Outputs a Block made, into the window; then what it spent."
+    match added
+        [] -> spentInto(removed, change, created, spent, undos, held, height, blockId)
+        [head, ..tail] -> madeInto(tail, removed, change, Map.set(created, Domain.UtxoStore.keyAt(head.txid, head.index), head), spent, undos, held + 1, height, blockId)
+
+verify madeInto
+    heldOf(madeInto([], [], Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 1, "aa")?) => 1
+    Map.len(createdOf(madeInto([Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], [], Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 1, "aa")?)) => 1
+
+fn spentInto(removed: List<Unspent>, change: Change, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, height: Int, blockId: String) -> Result<Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>, String>
+    ? "The Outputs a Block spent: out of the window if it made them, else"
+      "marked for the Store; then the Undo record and the standing."
+    match removed
+        [] -> sealed(change, created, spent, undos, held, height, blockId)
+        [head, ..tail] -> spentOne(tail, change, created, spent, undos, held, height, blockId, Domain.UtxoStore.keyAt(head.txid, head.index), Map.has(created, Domain.UtxoStore.keyAt(head.txid, head.index)))
+
+verify spentInto
+    Map.len(spentOfW(spentInto([Unspent(txid = Bytes.fromList([204]), index = 0, value = 5, script = Bytes.empty(), height = 1, coinbase = false)], Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 1, "aa")?)) => 1
+    Map.len(spentOfW(spentInto([], Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 1, "aa")?)) => 0
+
+fn spentOne(rest: List<Unspent>, change: Change, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, height: Int, blockId: String, key: Bytes, madeHere: Bool) -> Result<Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>, String>
+    ? "Made here and spent here never reaches the Store at all."
+    match madeHere
+        true -> spentInto(rest, change, Map.remove(created, key), spent, undos, held - 1, height, blockId)
+        false -> spentInto(rest, change, created, Map.set(spent, key, true), undos, held + 1, height, blockId)
+
+verify spentOne
+    Map.len(createdOf(spentOne([], Change(added = [], removed = [], fees = 0, confirmed = []), sampleWindow()?.created, sampleWindow()?.spent, [], 2, 1, "aa", Domain.UtxoStore.unspentKey("aa", 0)?, true)?)) => 0
+    Map.len(spentOfW(spentOne([], Change(added = [], removed = [], fees = 0, confirmed = []), sampleWindow()?.created, sampleWindow()?.spent, [], 2, 1, "aa", Domain.UtxoStore.unspentKey("cc", 0)?, false)?)) => 2
+
+fn sealed(change: Change, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, height: Int, blockId: String) -> Result<Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>, String>
+    ? "The Block's Undo record and the standing it leaves the Set at, and"
+      "the parts handed back as a tuple so a match binder moves each of"
+      "them and nothing else owns the Maps when the next Block is absorbed."
+    Result.Ok((created, spent, List.prepend(Entry(key = Domain.UtxoStore.undoKey(blockId)?, value = Domain.UtxoStore.encodeUndo(change.removed)?), undos), held + 1, Option.Some(Reached(height = height, blockId = blockId)), Absorbed(added = List.len(change.added), removed = List.len(change.removed), fees = change.fees, confirmed = change.confirmed)))
+
+verify sealed
+    List.len(undosOf(sealed(Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 3, "aa")?)) => 1
+    standingOf(sealed(Change(added = [], removed = [], fees = 0, confirmed = []), noCoins(), noSpent(), [], 0, 3, "aa")?) => Option.Some(Reached(height = 3, blockId = "aa"))
+
+fn createdOf(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> Map<Bytes, Unspent>
+    ? "The window's created Outputs, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> created
+
+verify createdOf
+    Map.len(createdOf((noCoins(), noSpent(), [], 0, Option.None, Absorbed(added = 0, removed = 0, fees = 0, confirmed = [])))) => 0
+
+fn spentOfW(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> Map<Bytes, Bool>
+    ? "The window's spent keys, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> spent
+
+verify spentOfW
+    Map.len(spentOfW((noCoins(), noSpent(), [], 0, Option.None, Absorbed(added = 0, removed = 0, fees = 0, confirmed = [])))) => 0
+
+fn undosOf(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> List<Entry>
+    ? "The window's Undo records, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> undos
+
+verify undosOf
+    List.len(undosOf((noCoins(), noSpent(), [], 0, Option.None, Absorbed(added = 0, removed = 0, fees = 0, confirmed = [])))) => 0
+
+fn heldOf(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> Int
+    ? "How much the window holds, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> held
+
+verify heldOf
+    heldOf((noCoins(), noSpent(), [], 3, Option.None, Absorbed(added = 0, removed = 0, fees = 0, confirmed = []))) => 3
+
+fn standingOf(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> Option<Reached>
+    ? "Where the Set stands, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> standing
+
+verify standingOf
+    standingOf((noCoins(), noSpent(), [], 0, Option.None, Absorbed(added = 0, removed = 0, fees = 0, confirmed = []))) => Option.None
+
+fn countsOf(parts: Tuple<Map<Bytes, Unspent>, Map<Bytes, Bool>, List<Entry>, Int, Option<Reached>, Absorbed>) -> Absorbed
+    ? "What a Block counted, out of an absorbed Block, for the cases."
+    match parts
+        (created, spent, undos, held, standing, counts) -> counts
+
+verify countsOf
+    countsOf((noCoins(), noSpent(), [], 0, Option.None, Absorbed(added = 4, removed = 0, fees = 0, confirmed = []))).added => 4
+
+fn flushDue(held: Int) -> Bool
+    ? "Whether the window holds enough to be worth writing now."
+      "Small on purpose: every Block's absorb receives the window by"
+      "reference and copies it once (jasisz/aver#1196), so the bound is"
+      "where the copy stops paying for the writes it saves -- about ten"
+      "Blocks of a 2015 chain, enough to cancel the Outputs spent as soon"
+      "as they are made and to write once where ten fsyncs were."
+    held >= flushAbove()
+
+verify flushDue
+    flushDue(0) => false
+    flushDue(20000) => true
+
+fn flushAbove() -> Int
+    ? "The bound the window is flushed at."
+    20000
+
+verify flushAbove
+    flushAbove() => 200000
+
+fn flushed(store: Store, window: Window) -> Result<Store, String>
+    ? "The window written through as one batch: the Outputs it still holds,"
+      "every Undo record, the standing, and the keys it spent (#247)."
+      "A window that connected nothing leaves the Store as it was."
+    ! [Infra.Kv.applyAll]
+    match window.standing
+        Option.None -> Result.Ok(store)
+        Option.Some(reached) -> Infra.Store.applyAll(store, entriesFor(Map.values(window.created), List.prepend(Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(reached)?), window.undos))?, Map.keys(window.spent))
 
 fn written(store: Store, blockId: String, connection: Connecting) -> Result<Applied, String>
     ? "A refusal is a fact about the Block, not a failure of the Store."
@@ -94,7 +329,7 @@ fn spentKeys(transactions: List<Transaction>, acc: List<Bytes>) -> Result<List<B
 verify spentKeys
     spentKeys([], []) => Result.Ok([])
     spentKeys([coinbaseTx()], []) => Result.Ok([])
-    spentKeys([coinbaseTx(), spendingTx("aa", 0)], []) => Result.Ok([Domain.UtxoStore.unspentKey("aa", 0)?])
+    spentKeys([coinbaseTx(), swindowTx("aa", 0)], []) => Result.Ok([Domain.UtxoStore.unspentKey("aa", 0)?])
 
 fn namedBy(transactions: List<Transaction>, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "The Outputs named by every Transaction after the coinbase."
@@ -104,7 +339,7 @@ fn namedBy(transactions: List<Transaction>, acc: List<Bytes>) -> Result<List<Byt
 
 verify namedBy
     namedBy([], []) => Result.Ok([])
-    namedBy([spendingTx("aa", 0)], []) => Result.Ok([Domain.UtxoStore.unspentKey("aa", 0)?])
+    namedBy([swindowTx("aa", 0)], []) => Result.Ok([Domain.UtxoStore.unspentKey("aa", 0)?])
 
 fn fromInputs(inputs: List<Input>, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "One key per Input, skipping any that names no Transaction."
@@ -376,9 +611,9 @@ fn coinbaseTx() -> Transaction
 verify coinbaseTx
     coinbaseTx().txid => "cb"
 
-fn spendingTx(txid: String, index: Int) -> Transaction
-    ? "A Transaction spending one named Output, for the cases here."
+fn swindowTx(txid: String, index: Int) -> Transaction
+    ? "A Transaction swindow one named Output, for the cases here."
     Transaction(version = 1, inputs = [Input(previousTxid = txid, previousIndex = index, script = "", sequence = 0, witness = [])], outputs = [Output(value = 40, script = "")], lockTime = 0, txid = "t1", size = 0, isSegWit = false)
 
-verify spendingTx
-    spendingTx("aa", 0).txid => "t1"
+verify swindowTx
+    swindowTx("aa", 0).txid => "t1"

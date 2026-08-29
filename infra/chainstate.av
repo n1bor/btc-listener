@@ -83,8 +83,9 @@ fn buildFrom(network: Network, store: Store, blocks: BlockStore, to: Int, target
     ]
     aligned = Infra.Rewind.realigned(store, blocks, eye)?
     _said = saidRangeIfPlain(eye, aligned.from, to, target)
-    walked = walk(network, Walk(blocks = blocks, counted = continuing(sofar, aligned.store, aligned.from - 1, aligned.dropped, eye, aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, target = target), aligned.from, to)?
-    swept = Infra.Utxo.prunedUndo(walked.counted.store, walked.counted.reached)?
+    done = walk(network, Walk(blocks = blocks, counted = continuing(sofar, aligned.store, aligned.from - 1, aligned.dropped, eye, aligned.unconfirmed), pace = Infra.Pace.pacedFrom(Time.unixMs()), eye = eye, target = target), aligned.from, to, Map.fromList([]), Map.fromList([]), [], 0, Option.None)?
+    walked = done.walk
+    swept = Infra.Utxo.prunedUndo(Infra.Utxo.flushed(walked.counted.store, done.window)?, walked.counted.reached)?
     _told = toldIfPlain(walked.counted.eye, swept, walked.counted.reached)?
     Result.Ok(counting(walked.counted, swept))
 
@@ -145,7 +146,11 @@ record Ahead
     location: Location
     transactions: List<Transaction>
 
-fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, String>
+record Walked
+    walk: Walk
+    window: Window
+
+fn walk(network: Network, state: Walk, height: Int, to: Int, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "Each Height in turn, stopping at the first one the chain cannot supply."
       "It asks the stop flag as well as the Screen's own (#206). It used to"
       "ask only eye.stopped, which is q on the Screen -- so a plain-log run"
@@ -155,6 +160,10 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
       "avoid."
       "The first Block is fetched on its own; from then on each step fetches"
       "the next Block while this one connects (#233)."
+      "The window's parts ride as parameters (#247): a Map set on a field"
+      "of a record the caller still holds is copied whole, and a window of"
+      "a hundred thousand Outputs copied every Block made the walk twenty"
+      "times slower. Assembled into a Window only for a flush."
     ! [
         Console.print,
         Disk.appendText, Disk.readBytesAt,
@@ -164,10 +173,15 @@ fn walk(network: Network, state: Walk, height: Int, to: Int) -> Result<Walk, Str
         Time.now, Time.unixMs,
     ]
     match Bool.or(height > to, Bool.or(Process.stopRequested(), state.eye.stopped))
-        true -> Result.Ok(state)
-        false -> stepping(network, state, to, fetched(network, state.counted.store, state.blocks, height)?)
+        true -> ended(state, created, spent, undos, held, standing)
+        false -> stepping(network, state, to, fetched(network, state.counted.store, state.blocks, height)?, created, spent, undos, held, standing)
 
-fn stepping(network: Network, state: Walk, to: Int, ahead: Option<Ahead>) -> Result<Walk, String>
+fn ended(state: Walk, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
+    ? "The walk as it stands and the window it still holds, for the caller"
+      "to flush."
+    Result.Ok(Walked(walk = state, window = Window(created = created, spent = spent, undos = undos, held = held, standing = standing)))
+
+fn stepping(network: Network, state: Walk, to: Int, ahead: Option<Ahead>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "Nothing fetched ends the walk: a Height the Index does not name, or a"
       "Block whose body is not held."
     ! [
@@ -179,10 +193,10 @@ fn stepping(network: Network, state: Walk, to: Int, ahead: Option<Ahead>) -> Res
         Time.now, Time.unixMs,
     ]
     match ahead
-        Option.None -> Result.Ok(state)
-        Option.Some(this) -> unlessStopped(network, state, to, this)
+        Option.None -> ended(state, created, spent, undos, held, standing)
+        Option.Some(this) -> unlessStopped(network, state, to, this, created, spent, undos, held, standing)
 
-fn unlessStopped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Walk, String>
+fn unlessStopped(network: Network, state: Walk, to: Int, this: Ahead, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "The stop flag and the Screen's q, asked before every Block."
     ! [
         Console.print,
@@ -193,20 +207,19 @@ fn unlessStopped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<
         Time.now, Time.unixMs,
     ]
     match Bool.or(this.height > to, Bool.or(Process.stopRequested(), state.eye.stopped))
-        true -> Result.Ok(state)
-        false -> overlapped(network, state, to, this)
+        true -> ended(state, created, spent, undos, held, standing)
+        false -> overlapped(network, state, to, this, created, spent, undos, held, standing)
 
-fn overlapped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Walk, String>
+fn overlapped(network: Network, state: Walk, to: Int, this: Ahead, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
     ? "The next Block read and decoded while this one is resolved and"
-      "worked out; then this one is written (#233)."
+      "worked out; then this one goes into the window (#233, #247)."
       "The two branches only read: fetching reads the h: and b: keys and a"
-      "Segment, preparing reads u:. Every write stays on the one thread that"
-      "owns the Store, after the product -- which is also what the wasm-gc"
-      "backend needs, since a product's carrier has to compare, and a Store"
-      "holding a resource cannot. Decoding was a fifth of a Block's wall"
-      "time on one thread with three cores idle; it is off the clock now. A"
-      "stop asked for during the product is seen before the next Block, so"
-      "the Set is always left at a whole one."
+      "Segment, preparing reads u: and the window. Every write stays on the"
+      "one thread that owns the Store, at a flush -- which is also what the"
+      "wasm-gc backend needs, since a product's carrier has to compare, and"
+      "a Store holding a resource cannot. A stop asked for during the"
+      "product is seen before the next Block, so the Set is always left at"
+      "a whole one."
       "The Network rides on Ahead rather than being named in the product: a"
       "sum-typed parameter captured into a branch is emitted as `&*network`"
       "on an owned value, which rustc refuses (E0614), where a record field"
@@ -219,9 +232,50 @@ fn overlapped(network: Network, state: Walk, to: Int, this: Ahead) -> Result<Wal
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(this.network, state.counted.store, this.height, this.transactions))?!
+    split = Infra.Utxo.partitioned(this.transactions, created, spent)?
+    both = (fetched(this.network, state.counted.store, state.blocks, this.height + 1), Infra.Utxo.prepared(this.network, state.counted.store, split, this.height, this.transactions))?!
     match both
-        (next, connection) -> stepping(network, recorded(network, state, this.height, this.blockId, Infra.Utxo.written(state.counted.store, this.blockId, connection)?, BlockView(height = this.height, blockId = this.blockId, transactions = List.len(this.transactions), bytes = this.location.length, atMs = Time.unixMs()))?, to, next)
+        (next, connection) -> absorbing(network, state, to, next, this, connection, created, spent, undos, held)
+
+fn absorbing(network: Network, state: Walk, to: Int, next: Option<Ahead>, this: Ahead, connection: Connecting, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int) -> Result<Walked, String>
+    ? "The Block into the window, counted, and the walk carried on."
+      "The window's Maps have exactly one use here, the call that absorbs"
+      "the Block, so they are moved into it and nothing else owns them when"
+      "it sets them; and the parts come back through a tuple bound by the"
+      "match, so each is moved on again. Evaluated as an argument of the"
+      "caller's tail call instead, the caller's frame still held them and"
+      "every Block copied the whole window once."
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match Infra.Utxo.absorbed(created, spent, undos, held, this.height, this.blockId, connection)
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(parts) -> match parts
+            (createdNow, spentNow, undosNow, heldNow, standing, counts) -> continued(network, recorded(network, state, this.height, this.blockId, counts.added, counts.removed, counts.fees, counts.confirmed, BlockView(height = this.height, blockId = this.blockId, transactions = List.len(this.transactions), bytes = this.location.length, atMs = Time.unixMs()))?, to, next, createdNow, spentNow, undosNow, heldNow, standing)
+
+fn continued(network: Network, state: Walk, to: Int, next: Option<Ahead>, created: Map<Bytes, Unspent>, spent: Map<Bytes, Bool>, undos: List<Entry>, held: Int, standing: Option<Reached>) -> Result<Walked, String>
+    ? "The window written through when it has grown past its bound (#247);"
+      "otherwise the walk goes on holding it."
+    ! [
+        Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match Infra.Utxo.flushDue(held)
+        false -> stepping(network, state, to, next, created, spent, undos, held, standing)
+        true -> stepping(network, withStore(state, Infra.Utxo.flushed(state.counted.store, Window(created = created, spent = spent, undos = undos, held = held, standing = standing))?), to, next, Map.fromList([]), Map.fromList([]), [], 0, Option.None)
+
+fn withStore(state: Walk, store: Store) -> Walk
+    ? "The walk, its Store moved on by a flush."
+    Walk(blocks = state.blocks, counted = counting(state.counted, store), pace = state.pace, eye = state.eye, target = state.target)
 
 fn fetched(network: Network, store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead>, String>
     ? "The Block at a Height, read and decoded, if the Index names one and"
@@ -249,8 +303,8 @@ fn fetchedAt(network: Network, blocks: BlockStore, height: Int, blockId: String,
     payload = Infra.Blocks.read(blocks, location)?
     Result.Ok(Option.Some(Ahead(network = network, height = height, blockId = blockId, location = location, transactions = Domain.Block.transactionsOf(payload)?)))
 
-fn recorded(network: Network, state: Walk, height: Int, blockId: String, applied: Applied, view: BlockView) -> Result<Walk, String>
-    ? "Count it, and write where the Set now stands."
+fn recorded(network: Network, state: Walk, height: Int, blockId: String, added: Int, removed: Int, fees: Int, confirmed: List<TxFee>, view: BlockView) -> Result<Walk, String>
+    ? "Count it. Where the Set stands is written with the window (#247)."
       "Written every Block rather than at the end, because a walk that stopped"
       "would otherwise leave a Set whose contents and whose recorded standing"
       "disagree -- and the standing is the only thing that says what the Set"
@@ -259,14 +313,12 @@ fn recorded(network: Network, state: Walk, height: Int, blockId: String, applied
     ! [
         Console.print,
         Disk.appendText,
-        Infra.Kv.putAll,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.now, Time.unixMs,
     ]
-    marked = Infra.Store.putAll(applied.store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])?
     setRecord = Infra.Metrics.marked(state.eye.log, "set", height, state.target, state.counted.blocks, 0, 0, 0, state.eye.candidates, state.counted.added, state.counted.removed, false)?
-    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, Domain.Snapshot.withCandidates(confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), applied.confirmed, view.atMs), state.eye.candidates)), setRecord), view.atMs)?
-    counted = Built(store = marked, blocks = state.counted.blocks + 1, added = state.counted.added + applied.added, removed = state.counted.removed + applied.removed, fees = state.counted.fees + applied.fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
+    looked = Infra.Screen.glanced(Infra.Screen.logging(Infra.Screen.eyeing(state.eye, Domain.Snapshot.withCandidates(confirmedInto(Domain.Snapshot.setsAt(state.eye.snapshot, height, state.target, view.atMs), confirmed, view.atMs), state.eye.candidates)), setRecord), view.atMs)?
+    counted = Built(store = state.counted.store, blocks = state.counted.blocks + 1, added = state.counted.added + added, removed = state.counted.removed + removed, fees = state.counted.fees + fees, reached = height, dropped = state.counted.dropped, views = List.take(List.prepend(view, state.counted.views), Domain.Snapshot.blockLimit()), eye = looked, unconfirmed = state.counted.unconfirmed)
     stepped = maybeReportIfPlain(looked, height, counted, state.pace)?
     Result.Ok(Walk(blocks = state.blocks, counted = counted, pace = stepped, eye = looked, target = state.target))
 
