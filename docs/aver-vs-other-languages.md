@@ -307,9 +307,10 @@ the generator" — and it visibly worked here.
 
 **Here.** 68 upstream issues in 18 days, most closed the same or the next
 day, several redesigned "better than what I proposed"
-(`../test/ISSUE-postgres-design.md`, ADR 0008). Two remain open: #1160 (a
-record holding a Map is copied on return) and #1162 (E0659 on a function
-parameter). The pin routine, `.aver-version`, the `git log upstream/main`
+(`../test/ISSUE-postgres-design.md`, ADR 0008). Every one this project has
+cited is now closed, the last two — #1160 (a record holding a Map is copied
+on return) and #1162 (E0659 on a function parameter) — with the `7134af7a`
+pin. The pin routine, `.aver-version`, the `git log upstream/main`
 discipline and the provenance-versus-workaround citation trap
 (`aver.toml:49-56`) exist only because the language moved under the project
 daily.
