@@ -577,8 +577,9 @@ renames in the history (`payload`, `standing`, `Window`) were forced by the
 compiler and improved the prose.
 
 **What the language cost, and where the workarounds live.** Some shapes are
-here because Aver is young: quartering a resolve across nested products
-because a `List<Int>` is boxed (jasisz/aver#1195); a `Bytes` accumulator where a `List<Int>` would read more naturally. Each is
+here because Aver is young: a `Bytes` accumulator where a `List<Int>` would
+read more naturally (the boxed-list cost behind it, jasisz/aver#1195, is
+closed — `Int.toBigEndian` since pin `7134af7a`). Each is
 cited at the line with the upstream issue, and the README's "Moving the Aver
 pin" routine is the discipline of retiring them as the issues close — the
 20,000-entry window cap (jasisz/aver#1196), the

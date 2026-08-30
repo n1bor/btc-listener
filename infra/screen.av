@@ -7,11 +7,13 @@ module Screen
         "purpose: restore is the last thing done on every way out, and a"
         "restore that fails has nowhere better to send its complaint than"
         "the terminal it failed to restore (#130)."
-    exposes [chunking, chunkDone, blockWatched, stopAskedAt, Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing, logging, counting]
-    depends [Infra.Board, Domain.Screen, Domain.Snapshot, Infra.Metrics, Domain.Watchdog]
+    exposes [keeping, chunking, chunkDone, blockWatched, stopAskedAt, Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing, logging, counting]
+    depends [Domain.AddressBook, Domain.Network, Domain.Screen, Domain.Snapshot, Domain.Watchdog, Infra.Board, Infra.Metrics, Infra.Peers, Infra.Tending]
     effects [
+        Console.error, Console.print,
         Disk.appendText,
-        Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.unixMs,
     ]
@@ -32,12 +34,14 @@ record Eye
     chunkSaid: Bool
     blockEndedMs: Int
     stopAskedMs: Int
+    company: Option<Kept>
+    tendedMs: Int
 
 fn unwatched(snapshot: Snapshot, log: Log) -> Eye
     ? "An Eye for a caller with no Screen: every glance is free and blind."
       "Blind to a terminal, not to the metrics log -- a run with no Screen"
       "still records itself (#180)."
-    Eye(view = Option.None, snapshot = snapshot, shownMs = 0, stopped = false, log = log, candidates = 0, board = Option.None, boardMs = 0, chunkFrom = 0, chunkTo = 0, chunkStartedMs = 0, chunkBudgetMs = 0, chunkSaid = false, blockEndedMs = 0, stopAskedMs = 0)
+    Eye(view = Option.None, snapshot = snapshot, shownMs = 0, stopped = false, log = log, candidates = 0, board = Option.None, boardMs = 0, chunkFrom = 0, chunkTo = 0, chunkStartedMs = 0, chunkBudgetMs = 0, chunkSaid = false, blockEndedMs = 0, stopAskedMs = 0, company = Option.None, tendedMs = 0)
 
 fn watchedBy(view: Option<View>, snapshot: Snapshot, log: Log, candidates: Int, board: Option<Board>) -> Eye
     ? "The Eye a screened follow threads through its walks (#130), carrying"
@@ -46,11 +50,11 @@ fn watchedBy(view: Option<View>, snapshot: Snapshot, log: Log, candidates: Int, 
       "two ways to report: draw a frame, and write a record. It carries the"
       "log rather than writing it, so the walk decides what a record says --"
       "only the walk knows which phase it is or how far along."
-    Eye(view = view, snapshot = snapshot, shownMs = 0, stopped = false, log = log, candidates = candidates, board = board, boardMs = 0, chunkFrom = 0, chunkTo = 0, chunkStartedMs = 0, chunkBudgetMs = 0, chunkSaid = false, blockEndedMs = 0, stopAskedMs = 0)
+    Eye(view = view, snapshot = snapshot, shownMs = 0, stopped = false, log = log, candidates = candidates, board = board, boardMs = 0, chunkFrom = 0, chunkTo = 0, chunkStartedMs = 0, chunkBudgetMs = 0, chunkSaid = false, blockEndedMs = 0, stopAskedMs = 0, company = Option.None, tendedMs = 0)
 
 fn eyeing(eye: Eye, snapshot: Snapshot) -> Eye
     ? "The Eye, with the Snapshot it will draw from moved on."
-    Eye(view = eye.view, snapshot = snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 fn counting(eye: Eye, candidates: Int) -> Eye
     ? "The Eye, with the Candidate count brought up to date (#230)."
@@ -58,14 +62,14 @@ fn counting(eye: Eye, candidates: Int) -> Eye
       "while only the metrics log read it and wrong the moment the Panel"
       "did: a catch-up of hours would have reported the Book it held when"
       "it began."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 verify counting
     counting(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 7).candidates => 7
 
 fn logging(eye: Eye, log: Log) -> Eye
     ? "The Eye, with the metrics log moved on after a record."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 fn redrawEveryMs() -> Int
     ? "How often a catch-up frame is redrawn: every ten seconds, the cadence"
@@ -81,12 +85,14 @@ fn glanced(eye: Eye, nowMs: Int) -> Result<Eye, String>
       "With no Screen this is one match and nothing else, so the walks can"
       "call it unconditionally."
     ! [
+        Console.error, Console.print,
         Disk.appendText,
-        Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
     ]
-    boarded = answeredBoard(chunkWatched(eye, nowMs)?, nowMs)
+    boarded = answeredBoard(chunkWatched(tendedCompany(eye, nowMs)?, nowMs)?, nowMs)
     match boarded.view
         Option.None -> Result.Ok(boarded)
         Option.Some(view) -> glancedAt(boarded, view, nowMs)
@@ -94,7 +100,7 @@ fn glanced(eye: Eye, nowMs: Int) -> Result<Eye, String>
 fn chunking(eye: Eye, from: Int, to: Int, startedMs: Int, budgetMs: Int) -> Eye
     ? "The Eye told which chunk it is walking and how long that may take"
       "(#268), so a glance inside the walk can say when it has run over."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = from, chunkTo = to, chunkStartedMs = startedMs, chunkBudgetMs = budgetMs, chunkSaid = false, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = from, chunkTo = to, chunkStartedMs = startedMs, chunkBudgetMs = budgetMs, chunkSaid = false, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 verify chunking
     chunking(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 10, 20, 500, 50000).chunkTo => 20
@@ -112,7 +118,7 @@ fn chunkWatched(eye: Eye, nowMs: Int) -> Result<Eye, String>
 
 fn chunkSaidNow(eye: Eye, log: Log) -> Result<Eye, String>
     ? "The Eye remembering it has said so."
-    Result.Ok(Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = true, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs))
+    Result.Ok(Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = true, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs))
 
 verify chunkSaidNow
     chunkSaidNow(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), Infra.Metrics.none())?.chunkSaid => true
@@ -135,7 +141,7 @@ fn blockWatched(eye: Eye, view: BlockView) -> Result<Eye, String>
 
 fn blockEndedAt(eye: Eye, nowMs: Int) -> Eye
     ? "The clock the next Block is measured from."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = nowMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = nowMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 verify blockEndedAt
     blockEndedAt(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 77).blockEndedMs => 77
@@ -143,7 +149,7 @@ verify blockEndedAt
 fn stopAskedAt(eye: Eye, nowMs: Int) -> Eye
     ? "When the stop was first asked for, kept so the loop can say how"
       "long it took to land (#268); a second asking does not move it."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = askedAt(eye.stopAskedMs, nowMs))
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = askedAt(eye.stopAskedMs, nowMs), company = eye.company, tendedMs = eye.tendedMs)
 
 verify stopAskedAt
     stopAskedAt(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 500).stopAskedMs => 500
@@ -158,6 +164,57 @@ fn askedAt(before: Int, nowMs: Int) -> Int
 verify askedAt
     askedAt(0, 9) => 9
     askedAt(4, 9) => 4
+
+fn keeping(eye: Eye, company: Kept) -> Eye
+    ? "The Eye handed the company to keep while it walks (#275)."
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = Option.Some(company), tendedMs = eye.tendedMs)
+
+verify keeping
+    keeping(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), Infra.Tending.kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none())).tendedMs => 0
+
+fn tendEveryMs() -> Int
+    ? "How often a walk tends the company it keeps: once a second, the"
+      "loop's own cadence (#275)."
+    1000
+
+verify tendEveryMs
+    tendEveryMs() => 1000
+
+fn tendedCompany(eye: Eye, nowMs: Int) -> Result<Eye, String>
+    ? "The company tended from inside the walk, once a second (#275):"
+      "Peers read, the dial asked, a Candidate seated, the next dial begun."
+      "The log rides with the company so a seat is noted where the loop"
+      "would note it; a walk with no company glances for free."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match eye.company
+        Option.None -> Result.Ok(eye)
+        Option.Some(company) -> tendedCompanyDue(eye, company, nowMs, nowMs - eye.tendedMs >= tendEveryMs())
+
+fn tendedCompanyDue(eye: Eye, company: Kept, nowMs: Int, due: Bool) -> Result<Eye, String>
+    ? "Only when a second has passed since the last tending."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match due
+        false -> Result.Ok(eye)
+        true -> Result.Ok(tendedAt(eye, Infra.Tending.tended(Infra.Tending.kept(company.pool, company.book, company.nextKey, eye.log))?, nowMs))
+
+fn tendedAt(eye: Eye, company: Kept, nowMs: Int) -> Eye
+    ? "The company and its log back on the Eye, and the clock moved on."
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = company.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = Option.Some(company), tendedMs = nowMs)
+
+verify tendedAt
+    tendedAt(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), Infra.Tending.kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none()), 500).tendedMs => 500
 
 fn boardEveryMs() -> Int
     ? "How often a walk answers the Board: once a second, the loop's own"
@@ -186,7 +243,7 @@ fn answeredBoardDue(eye: Eye, board: Board, nowMs: Int, due: Bool) -> Eye
 fn answeredBoardNow(eye: Eye, nowMs: Int, served: Result<Unit, String>) -> Eye
     ? "The clock moved on whatever the Board did: a Reader is its own"
       "business, never the walk's."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = nowMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs)
+    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = nowMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
 
 verify answeredBoardNow
     answeredBoardNow(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 5000, Result.Ok(Unit)).boardMs => 5000
@@ -198,7 +255,7 @@ fn glancedAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     keys = drainedKeys()?
     acted = Domain.Screen.pressedAll(view, keys)
     match acted.answer
-        Answer.StopNode -> Result.Ok(Eye(view = Option.Some(acted.view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = true, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = askedAt(eye.stopAskedMs, nowMs)))
+        Answer.StopNode -> Result.Ok(Eye(view = Option.Some(acted.view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = true, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = askedAt(eye.stopAskedMs, nowMs), company = eye.company, tendedMs = eye.tendedMs))
         Answer.Redraw -> drawnAt(eye, acted.view, nowMs)
         Answer.Unchanged -> maybeDrawn(eye, acted.view, nowMs)
 
@@ -207,13 +264,13 @@ fn maybeDrawn(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
     match nowMs - eye.shownMs >= redrawEveryMs()
         true -> drawnAt(eye, view, nowMs)
-        false -> Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs))
+        false -> Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs))
 
 fn drawnAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     ? "The frame onto the terminal, and the clock that gates the next one."
     ! [Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print]
     _drawn = shown(Domain.Screen.frameOf(view, eye.snapshot, nowMs))?
-    Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = nowMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs))
+    Result.Ok(Eye(view = Option.Some(view), snapshot = eye.snapshot, shownMs = nowMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = eye.boardMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs))
 
 fn entered() -> Result<Unit, String>
     ? "Take the terminal: raw mode, no cursor, a clean slate."
