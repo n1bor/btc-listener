@@ -1821,6 +1821,44 @@ Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
 `16842752` is `0x01010000` in decimal.
 
+### A caller that will not finish its Handshake
+
+`tools/regtest/caller.py` is the other direction: not a Peer the node dials
+but a caller that dials the node's served port, which is the side anyone on
+the internet can be. It is
+[#284](https://github.com/n1bor/btc-listener/issues/284). Before the fix a
+caller that sent nothing held the loop until some other Peer happened to
+speak — up to the 150-second idle deadline, because the poll beneath the
+greeting waited for anybody — and one that sent a `ping` every fifty-nine
+seconds and never a `verack` held it for ever, because each frame bought
+another sixty-second deadline. Serve beside
+Core, then dial four ways:
+
+```bash
+timeout -s INT 90 $BIN regtest follow 127.0.0.1:18454 $D serve:18456 &
+sleep 5
+for m in early chatty silent pinger; do timeout 40 python3 tools/regtest/caller.py 18456 $m; done
+```
+
+Each is refused, and for the reason named — nothing before `version`, no
+more than eight kept Messages after it, and one ten-second deadline for the
+whole greeting that a `ping` does not extend:
+
+```
+dropping inbound peer 1 from 127.0.0.1:58068: peer 1 sent ping before its version
+dropping inbound peer 1 from 127.0.0.1:58072: peer 1 sent 8 Messages after its version and no verack
+dropping inbound peer 1 from 127.0.0.1:58086: Peer 1 did not answer before its deadline
+dropping inbound peer 1 from 127.0.0.1:54576: Peer 1 did not answer before its deadline
+```
+
+The callers say how long they were held — `early` 0.0 s, `chatty` 1.0 s,
+`silent` 11.0 s, `pinger` 15.0 s (the deadline is ten; the loop accepts on a
+quiet turn, and the pinger only learns it was dropped on its next send) —
+where before it was up to 150 s and for ever.
+What this does not change: the greeting still runs inline, so those ten
+seconds are still the loop's — #30 is the loop-driven Handshake that ends
+that.
+
 ### A body that is not the Block
 
 The `wrongbody` mode is

@@ -211,7 +211,10 @@ conversation straight-line while every other Peer is read and pinged. Every
 phase is a pool — `headers`, `bodies` and `listen` are pools of one. Two
 deadlines, not one: 150s of silence from the whole pool, and 60s for a Peer to
 answer the question it was asked, because with several Peers those stopped
-being the same fact.
+being the same fact. A Handshake has a third, 10s for the whole greeting fixed
+at seating (#284): it runs inline, so it is what a hostile caller costs the
+loop, and it does not reset per frame. `Domain.Handshake` says what a frame
+before `verack` is — nothing before `version`, at most eight kept after it.
 
 **A Peer that misbehaves costs itself** (#27, Stage 5): every frame's magic
 bytes and checksum are verified in `domain/inbox.av` — neither was checked

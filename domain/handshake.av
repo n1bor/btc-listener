@@ -1,0 +1,87 @@
+module Handshake
+    intent =
+        "What a Peer may say before its verack, and how much of it."
+        "A Handshake is version then verack, and between the two a modern"
+        "Peer says a little more: Core sends wtxidrelay, sendaddrv2 and"
+        "sendtxrcncl after its version and before its verack, and would be"
+        "dropped by a node that tolerated nothing. So those are kept for"
+        "later, as they were. What is new (n1bor/btc-listener#284) is the"
+        "edge on it: nothing at all before version, which is Core's own"
+        "rule, and only so many kept Messages before verack -- a caller"
+        "that sends a ping every fifty-nine seconds and never a verack used"
+        "to hold the loop for ever, because every frame bought it another"
+        "answer deadline. The deadline is now one per Handshake and lives"
+        "with whoever waits; this module only says what each frame is."
+    exposes [Step, stepOf]
+    depends []
+    effects []
+
+type Step
+    Done
+    Version
+    Ping
+    Spared
+    Refused(String)
+
+fn sparedLimit() -> Int
+    ? "How many Messages a Peer may have kept for it before its verack."
+      "Core sends three between version and verack; eight leaves room for"
+      "a Peer that also announces addresses early, and is nowhere near the"
+      "sixty-four the spare holds."
+    8
+
+verify sparedLimit
+    sparedLimit() => 8
+
+fn stepOf(command: String, seenVersion: Bool, spared: Int) -> Step
+    ? "What this frame is, given whether version has arrived and how many"
+      "frames have already been kept."
+    match seenVersion
+        false -> beforeVersion(command)
+        true -> afterVersion(command, spared)
+
+verify stepOf
+    stepOf("version", false, 0) => Step.Version
+    stepOf("verack", false, 0) => Step.Refused("sent verack before its version")
+    stepOf("ping", false, 0) => Step.Refused("sent ping before its version")
+    stepOf("verack", true, 0) => Step.Done
+    stepOf("ping", true, 0) => Step.Ping
+    stepOf("wtxidrelay", true, 0) => Step.Spared
+    stepOf("sendaddrv2", true, 7) => Step.Spared
+    stepOf("sendaddrv2", true, 8) => Step.Refused("sent 8 Messages after its version and no verack")
+    stepOf("version", true, 0) => Step.Refused("sent a second version")
+
+fn beforeVersion(command: String) -> Step
+    ? "Only a version may open."
+    match command
+        "version" -> Step.Version
+        _ -> Step.Refused("sent {command} before its version")
+
+verify beforeVersion
+    beforeVersion("version") => Step.Version
+    beforeVersion("addr") => Step.Refused("sent addr before its version")
+
+fn afterVersion(command: String, spared: Int) -> Step
+    ? "verack ends it; a ping is answered; anything else is kept, up to the limit."
+    match command
+        "verack" -> Step.Done
+        "version" -> Step.Refused("sent a second version")
+        "ping" -> Step.Ping
+        _ -> sparedOrEnough(spared)
+
+verify afterVersion
+    afterVersion("verack", 0) => Step.Done
+    afterVersion("ping", 0) => Step.Ping
+    afterVersion("addr", 0) => Step.Spared
+    afterVersion("version", 0) => Step.Refused("sent a second version")
+
+fn sparedOrEnough(spared: Int) -> Step
+    ? "One more kept Message, unless enough have been."
+    match spared >= sparedLimit()
+        true -> Step.Refused("sent {spared} Messages after its version and no verack")
+        false -> Step.Spared
+
+verify sparedOrEnough
+    sparedOrEnough(0) => Step.Spared
+    sparedOrEnough(7) => Step.Spared
+    sparedOrEnough(8) => Step.Refused("sent 8 Messages after its version and no verack")

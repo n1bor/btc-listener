@@ -20,7 +20,7 @@ module Peers
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
     exposes [Pool, Spare, Tick, Waited, WaitedFrom, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
         Random.int,
@@ -605,7 +605,7 @@ fn seating(pool: Pool, key: Int, connection: Tcp.Connection, address: String) ->
     ]
     seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
     _said = saidIfPlain(pool, "peer {key} dialled us from {address}")
-    greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", true))
+    greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", true, Time.unixMs() + handshakeDeadlineMs(), 0))
 
 fn greetedOrDropped(pool: Pool, key: Int, address: String, greeted: Result<Pool, String>) -> Result<Accepted, String>
     ? "A caller that will not complete a Handshake costs itself its slot, and"
@@ -1206,38 +1206,54 @@ fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String
     ]
     body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
     sent = send(pool, key, "version", body)?
-    greeting(sent, key, 0, "", false)
+    greeting(sent, key, 0, "", false, Time.unixMs() + handshakeDeadlineMs(), 0)
 
-fn greeting(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, inbound: Bool) -> Result<Pool, String>
-    ? "Read this Peer's Messages until its verack arrives."
+fn handshakeDeadlineMs() -> Int
+    ? "How long a whole Handshake may take, from the first wait to verack."
+      "One deadline for the Handshake rather than one per frame (#284): a"
+      "caller that sent a ping every fifty-nine seconds and never a verack"
+      "bought itself another answer deadline with each, and held the loop"
+      "for ever. Ten seconds is generous for two Messages a Peer sends the"
+      "moment it connects, and it is what a silent caller now costs at most"
+      "-- the loop still waits here inline, which n1bor/btc-listener#30"
+      "wants driven by the loop instead."
+    10000
+
+verify handshakeDeadlineMs
+    handshakeDeadlineMs() => 10000
+
+fn greeting(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, inbound: Bool, deadlineMs: Int, kept: Int) -> Result<Pool, String>
+    ? "Read this Peer's Messages until its verack arrives, or the one deadline does."
     ! [
         Console.error, Console.print,
         Random.int,
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    waited = awaitAny(pool, key, Time.unixMs() + answerDeadlineMs())?
-    handshaking(waited.pool, key, seenVersion, seenAgent, waited.frame, inbound)
+    waited = awaitAny(pool, key, deadlineMs)?
+    handshaking(waited.pool, key, seenVersion, seenAgent, waited.frame, inbound, deadlineMs, kept)
 
-fn handshaking(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame: Frame, inbound: Bool) -> Result<Pool, String>
+fn handshaking(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame: Frame, inbound: Bool, deadlineMs: Int, kept: Int) -> Result<Pool, String>
     ? "verack ends the Handshake; version says who we are talking to."
-      "Anything else is a Peer being chatty before it agrees, and is put back"
-      "for the caller rather than thrown away -- a Peer that sends its addr"
-      "before our verack has still told us something, and Stage 5's whole"
-      "second half is about not throwing that away."
+      "Anything else after the version is a Peer being chatty before it"
+      "agrees -- Core sends wtxidrelay and sendaddrv2 there -- and is put"
+      "back for the caller rather than thrown away, up to a limit. Nothing"
+      "at all is allowed before the version, which is Core's rule too."
+      "Domain.Handshake says which of those this frame is."
     ! [
         Console.error, Console.print,
         Random.int,
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    match frame.command
-        "verack" -> Result.Ok(withStanding(pool, Domain.Inbox.greeted(pool.standing, key, seenVersion, seenAgent)))
-        "version" -> acknowledged(pool, key, frame.body, inbound)
-        "ping" -> pongThen(pool, key, seenVersion, seenAgent, frame, inbound)
-        _ -> greeting(sparing(pool, key, frame), key, seenVersion, seenAgent, inbound)
+    match Domain.Handshake.stepOf(frame.command, seenVersion > 0, kept)
+        Step.Done -> Result.Ok(withStanding(pool, Domain.Inbox.greeted(pool.standing, key, seenVersion, seenAgent)))
+        Step.Version -> acknowledged(pool, key, frame.body, inbound, deadlineMs, kept)
+        Step.Ping -> pongThen(pool, key, seenVersion, seenAgent, frame, inbound, deadlineMs, kept)
+        Step.Spared -> greeting(sparing(pool, key, frame), key, seenVersion, seenAgent, inbound, deadlineMs, kept + 1)
+        Step.Refused(why) -> Result.Err("peer {key} {why}")
 
-fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool) -> Result<Pool, String>
+fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool, deadlineMs: Int, kept: Int) -> Result<Pool, String>
     ? "Send verack in reply, then keep waiting for theirs."
       "A Peer that dialled us has not seen our version yet -- it opened with"
       "its own and is waiting -- so ours goes first, before the verack that"
@@ -1251,7 +1267,7 @@ fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool) -> Result<
     ]
     presented = ourVersionIfInbound(pool, key, inbound)?
     sent = send(presented, key, "verack", Bytes.fromList([]))?
-    greeting(noticedSelf(sent, body), key, Domain.Version.peerVersionOf(body), Domain.Version.peerUserAgentOf(body), inbound)
+    greeting(noticedSelf(sent, body), key, Domain.Version.peerVersionOf(body), Domain.Version.peerUserAgentOf(body), inbound, deadlineMs, kept)
 
 fn ourVersionIfInbound(pool: Pool, key: Int, inbound: Bool) -> Result<Pool, String>
     ? "Our own version, but only to a Peer that dialled us."
@@ -1303,7 +1319,7 @@ verify addressTextOf
     addressTextOf(Option.None) => ""
     addressTextOf(Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true))) => "1.2.3.4:8333"
 
-fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame: Frame, inbound: Bool) -> Result<Pool, String>
+fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame: Frame, inbound: Bool, deadlineMs: Int, kept: Int) -> Result<Pool, String>
     ? "Answer a ping that arrived mid-Handshake, then carry on."
     ! [
         Console.error, Console.print,
@@ -1313,7 +1329,7 @@ fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, frame: Fr
     ]
     payload = Bytes.fromList(frame.body)?
     sent = send(pool, key, "pong", payload)?
-    greeting(sent, key, seenVersion, seenAgent, inbound)
+    greeting(sent, key, seenVersion, seenAgent, inbound, deadlineMs, kept)
 
 fn send(pool: Pool, key: Int, command: String, payload: Bytes) -> Result<Pool, String>
     ? "Frame a payload for this Network and put it on one Peer's wire."
@@ -1462,8 +1478,34 @@ fn pumpedFor(pool: Pool, key: Int, deadlineMs: Int) -> Result<Waited, String>
       "that the one being waited on had stopped answering."
     ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
     match Time.unixMs() > deadlineMs
-        true -> Result.Err("Peer {key} did not answer within {Int.div(answerDeadlineMs(), 1000)} seconds")
-        false -> awaitAny(pumped(pool)?, key, deadlineMs)
+        true -> Result.Err("Peer {key} did not answer before its deadline")
+        false -> awaitAny(pumpedUntil(pool, deadlineMs)?, key, deadlineMs)
+
+fn pumpedUntil(pool: Pool, deadlineMs: Int) -> Result<Pool, String>
+    ? "One turn of the loop, waiting no longer than one Peer's deadline."
+      "pumped waits the pool's idle deadline for anybody to speak, which is"
+      "right for a loop with nothing particular to wait for and wrong for a"
+      "wait on one Peer: a caller that connected and said nothing was held"
+      "until some other Peer happened to speak, up to the idle deadline"
+      "(#284). The poll is bounded by whichever comes first; when it is this"
+      "Peer's deadline the turn ends quietly and the caller says so."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    before = Time.unixMs()
+    ready = Tcp.poll(pollable(pool), Int.max(0, Int.min(idleDeadlineMs(), deadlineMs - before)))?
+    waited = polledFor(pool, Time.unixMs() - before)
+    match ready
+        [] -> quietUntil(waited, deadlineMs - before)
+        [head, ..tail] -> reading(waited, ready)
+
+fn quietUntil(pool: Pool, leftMs: Int) -> Result<Pool, String>
+    ? "Nobody spoke: the Peer's deadline was the shorter wait, or the pool's."
+    match leftMs < idleDeadlineMs()
+        true -> Result.Ok(pool)
+        false -> Result.Err("no Peer said anything for {Int.div(idleDeadlineMs(), 1000)} seconds")
+
+verify quietUntil
+    quietUntil(opened(Network.Regtest), 5000) => Result.Ok(opened(Network.Regtest))
+    quietUntil(opened(Network.Regtest), 150000) => Result.Err("no Peer said anything for 150 seconds")
 
 fn awaitAnyPeer(pool: Pool) -> Result<WaitedFrom, String>
     ? "The next Message from whichever Peer speaks first, and which one it was."

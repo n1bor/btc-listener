@@ -956,6 +956,20 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+A Handshake gets one deadline, not one per frame
+([#284](https://github.com/n1bor/btc-listener/issues/284)). The greeting
+still runs inline — the loop waits on it, which
+[#30](https://github.com/n1bor/btc-listener/issues/30) wants driven by the
+loop instead — but the wait is now ten seconds for the whole Handshake, fixed
+when the caller is seated, where before every frame that was not a `verack`
+bought another sixty. A caller that sent a `ping` every fifty-nine seconds and
+never a `verack` held the loop for ever, and a silent one held it until some
+other Peer happened to speak, up to the 150-second idle deadline. Now a
+silent caller costs ten seconds, nothing at all is accepted before `version`
+(Core's rule), and [Domain.Handshake](domain/handshake.av) allows eight kept
+Messages between `version` and `verack` — Core sends three there — before
+the caller is dropped. `tools/regtest/caller.py` is the caller, four ways.
+
 A Block body has to be the Block before it is kept
 ([#283](https://github.com/n1bor/btc-listener/issues/283)). Hashing its first
 eighty bytes proved only that a Peer answered under the right Block Id;
