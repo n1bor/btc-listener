@@ -1,0 +1,117 @@
+module Tending
+    intent =
+        "The company kept while the node is busy elsewhere: the pool, the"
+        "Address Book and the next key, tended as one thing (#275)."
+        "The follow loop tends its Peers every turn -- reads what they sent,"
+        "asks the dial what it became, seats a Candidate that answered, starts"
+        "the next dial -- and did so only between chunks of the Set walk, ten"
+        "seconds apart. A dial begun between two chunks was first looked at"
+        "after the next one, past its deadline, so a catching-up node gained"
+        "no Peers: 134 dials in a night, 134 called dead. The walk already"
+        "carries an Eye and glances through it every Block; this is what the"
+        "Eye tends when it glances, once a second, from the same Pool-level"
+        "operations the loop uses, so a Peer is seated within a second of"
+        "answering whether the loop is turning or walking."
+        "Nothing here decides anything about the chain. What a Peer sent"
+        "while the walk was busy is kept by the pool (spare, bounded) for"
+        "the loop to sort out afterwards, as it always was; a ping is"
+        "answered by the pool itself."
+    depends [Bytes, Domain.AddressBook, Domain.Network, Infra.Metrics, Infra.Peers]
+    exposes [Kept, kept, tended, drainBudget]
+    effects [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+
+record Kept
+    pool: Pool
+    book: Map<String, Candidate>
+    nextKey: Int
+    log: Log
+
+fn kept(pool: Pool, book: Map<String, Candidate>, nextKey: Int, log: Log) -> Kept
+    ? "What the loop hands a walk to keep."
+    Kept(pool = pool, book = book, nextKey = nextKey, log = log)
+
+verify kept
+    kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none()).nextKey => 3
+
+fn drainBudget() -> Int
+    ? "How many Messages one tending will take off the sockets: the loop's"
+      "own spare limit, so a chatty Peer cannot hold the walk."
+    64
+
+verify drainBudget
+    drainBudget() => 64
+
+fn tended(held: Kept) -> Result<Kept, String>
+    ? "One tending: what every Peer has already sent read off, the dial"
+      "asked what it became and its answer said, then a new dial if the"
+      "pool is short. Never waits: the poll is asked with no timeout and"
+      "a dial is only ever begun."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    drained = drainedPool(held.pool, drainBudget())?
+    advanced = Infra.Peers.advanced(drained)?
+    told = saidAll(Kept(pool = Infra.Peers.withoutSettled(advanced), book = held.book, nextKey = held.nextKey, log = held.log), Infra.Peers.settledOf(advanced))?
+    toppedInto(told, Infra.Peers.toppedUp(told.pool, told.book, told.nextKey)?)
+
+fn drainedPool(pool: Pool, budget: Int) -> Result<Pool, String>
+    ? "Read what is already there, Message by Message, up to the budget."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    match budget <= 0
+        true -> Result.Ok(pool)
+        false -> drainedOne(Infra.Peers.awaitTick(pool, 0)?, budget)
+
+fn drainedOne(ticked: Tick, budget: Int) -> Result<Pool, String>
+    ? "Nothing there ends the drain; a Message is kept for the loop."
+    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    match ticked.arrived
+        Option.None -> Result.Ok(ticked.pool)
+        Option.Some(one) -> drainedPool(Infra.Peers.spared(ticked.pool, one.key, one.frame), budget - 1)
+
+fn saidAll(held: Kept, outcomes: List<Outcome>) -> Result<Kept, String>
+    ? "Every dial that settled, oldest first."
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    match outcomes
+        [] -> Result.Ok(held)
+        [head, ..tail] -> saidAll(said(held, head)?, tail)
+
+fn said(held: Kept, one: Outcome) -> Result<Kept, String>
+    ? "A Candidate that answered is a Peer, noted and asked who it knows;"
+      "one that did not is noted and stays marked as tried. The same two"
+      "lines the loop writes, so debug.log reads the same whoever seated"
+      "the Peer."
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    match one.seated
+        false -> Result.Ok(withLog(held, Infra.Metrics.noting(held.log, "peer", "candidate {one.address} did not answer: {one.why}")?))
+        true -> seated(held, one.address, one.key)
+
+fn seated(held: Kept, address: String, key: Int) -> Result<Kept, String>
+    ? "Noted with the pool's size, then a getaddr, as the loop does."
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    noted = Infra.Metrics.noting(held.log, "peer", "seated {key} at {address} from the Book while walking, {List.len(Infra.Peers.peerKeys(held.pool))} held")?
+    asked = Infra.Peers.tell(held.pool, key, "getaddr", Bytes.fromList([]))?
+    Result.Ok(Kept(pool = asked, book = held.book, nextKey = held.nextKey, log = noted))
+
+fn withLog(held: Kept, log: Log) -> Kept
+    ? "The log moved on after a note."
+    Kept(pool = held.pool, book = held.book, nextKey = held.nextKey, log = log)
+
+verify withLog
+    withLog(kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none()), Infra.Metrics.none()).nextKey => 3
+
+fn toppedInto(held: Kept, done: Infra.Peers.Topped) -> Result<Kept, String>
+    ? "What the top-up did, folded back."
+    Result.Ok(Kept(pool = done.pool, book = done.book, nextKey = done.nextKey, log = held.log))
+
+verify toppedInto
+    toppedInto(kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none()), Infra.Peers.Topped(pool = Infra.Peers.opened(Network.Regtest), book = Domain.AddressBook.noBook(), nextKey = 4))?.nextKey => 4

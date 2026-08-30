@@ -997,6 +997,21 @@ validated it and left initial block download — the sentence the full-node
 plan was written to earn — and [docs/regtest-testing.md](docs/regtest-testing.md)
 §11–12 is how to repeat that.
 
+### The company is kept while the node walks
+
+A catch-up used to tend its Peers only between chunks of the Set walk, ten
+seconds apart, and a dial begun between two chunks was first looked at after
+the next one — past its deadline — so a catching-up node gained no Peers
+(#275: 134 dials in a night, 134 called dead). The walk's Eye now carries
+the pool, the Address Book and the next key (**Kept**, CONTEXT.md) and tends
+them once a second from inside the walk: what Peers sent is read and kept
+for the loop, the dial is asked what it became, a Candidate that answered is
+seated and asked who it knows, and the next dial is begun. `debug.log` says
+`seated N at … from the Book while walking`. The Peers Panel and the page
+show the company as it stands, chunk by chunk. And a pool that empties with
+nobody left to dial asks the DNS seeds again rather than ending the run
+(#272).
+
 ### When something takes too long: the watchdog lines
 
 `debug.log` also says when the node has overrun itself (#268), because the

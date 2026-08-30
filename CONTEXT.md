@@ -223,6 +223,13 @@ the Snapshot as it stood when the request arrived; nothing on it moves, and
 the reader presses refresh to ask again.
 _Avoid_: dashboard, API, endpoint, web server
 
+**Kept**:
+The company a walk keeps while the loop is not turning: the pool, the
+Address Book and the next Peer key, carried on the Eye and tended once a
+second from inside the Set walk (#275), so a Candidate that answers is a
+Peer within a second whether the node is walking or listening.
+_Avoid_: context, session state
+
 **Reader**:
 Whoever connects to the Board. Not a Peer: no Handshake, no Inbox, no place
 in the Address Book; a Reader is given a tenth of a second to have asked,
