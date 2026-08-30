@@ -1821,6 +1821,45 @@ Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
 `16842752` is `0x01010000` in decimal.
 
+### A body that is not the Block
+
+The `wrongbody` mode is
+[#283](https://github.com/n1bor/btc-listener/issues/283). It takes the
+`bitcoin-cli` command as a third argument and is honest about Headers — it
+answers `getheaders` with Core's own — and lies about bodies: every `getdata`
+for a Block is answered with that Block's real Header followed by one
+coinbase, mainnet's genesis coinbase, which hashes to the Block Id asked for
+and to nothing the Header commits to. Before the fix that body was appended
+to a Segment under the honest Block Id and never asked for again.
+
+The liar has to be named **first**: a catch-up asks its Headers and then its
+bodies of the Peer that told it the chain moved, and a liar named second is
+never handed a `getdata` at all. With the node caught up to Core, make three
+Blocks it has not seen and start it:
+
+```bash
+python3 tools/regtest/liar.py 18455 wrongbody "$C" &
+$C generatetoaddress 3 "$($C getnewaddress)"
+timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The first body must be refused **for its Merkle Root, before it is
+written**, the liar dropped, the three Heights asked of Core, and the node
+end at Core's tip:
+
+```
+headers complete: 174 known
+dropping peer 0: Block 039c26e0…e92ada: Transactions do not build the Merkle Root cf340f9c…376cd0 the Header commits to, but 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b
+blocks 171/173 (98%)
+following at Height 173: 3 connected, 0 disconnected, set +3 -0
+```
+
+`4a5e1e4b…` is the genesis coinbase's Transaction Id, which is the Root of a
+one-Transaction tree. Then `show $D 173 summary` must equal
+`$C getblockhash 173`, and `audit $D 171 173` must be CLEAN with
+`coinbase 3`: the honest bodies were fetched, not the liar's. The liar
+exits when it is dropped, which is the right ending.
+
 ### A Transaction that claims more Inputs than there are bytes
 
 The fourth mode, `hugetx`, is

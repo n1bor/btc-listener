@@ -15,7 +15,7 @@ module Bodies
         "the phase resumable and what lets the follow loop run it over a range"
         "that overlaps what it already has."
     exposes [Fetched, Flight, bodies, bodiesOn, takingOff, flying, reachedAt, settled, stillFlying, sliceUntil, poolOf, eyeOf, bookOf, nextKeyOf, storeOf, blocksOf, opening, withStore, withBook, withPool2, flyingWithEye]
-    depends [Bytes, Domain.Address, Domain.AddressBook, Infra.Metrics, Domain.Block, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
+    depends [Bytes, Domain.Address, Domain.AddressBook, Infra.Metrics, Domain.Block, Domain.Body, Domain.Inbox, Domain.Index, Domain.Inventory, Domain.Network, Infra.Blocks, Infra.Peers, Infra.Store, Domain.IndexKeys, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Infra.Pace, Infra.Screen]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
@@ -617,14 +617,29 @@ fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, 
         Option.Some(one) -> kept(flight, payload, blockId, one, size, to)
 
 fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, to: Int) -> Result<Flight, String>
+    ? "The body checked against its Header, then written and recorded (#283)."
+      "Hashing the first eighty bytes proved only that a Peer answered under"
+      "the right Block Id. Domain.Body proves the rest is that Block: the"
+      "Transactions decode, the first and only the first is a coinbase, each"
+      "passes TxCheck, none repeats, and they build the Merkle Root the Header"
+      "commits to without a duplicated pair. A body that fails is the fault"
+      "of the Peer that sent it, which is what owed names."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    match Domain.Body.fault(payload, blockId)
+        Option.Some(why) -> poisoned(flight, owed, why, to)
+        Option.None -> filed(flight, payload, blockId, size, to)
+
+fn filed(flight: Flight, payload: Bytes, blockId: String, size: Int, to: Int) -> Result<Flight, String>
     ? "Write the Block to a Segment, then record where it went."
-      "The bytes are on disk before the Index names them, so a crash between"
-      "the two costs a Block that is fetched again rather than an entry"
-      "pointing at nothing."
-      "Segments hold Blocks in the order they were fetched and never in"
-      "Height order -- Infra.Prune says so and looks rather than assumes --"
-      "so Blocks arriving from several Peers at once need no reordering"
-      "before the write. The Location records where each one went."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
@@ -639,6 +654,26 @@ fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, 
     held = Fetched(pool = flight.progress.pool, store = flight.progress.store, blocks = appended.store, pending = List.prepend(Entry(key = Domain.IndexKeys.blockKey(blockId)?, value = Domain.Index.encodeLocation(appended.location)), flight.progress.pending), waiting = flight.progress.waiting + 1, count = flight.progress.count + 1, bytes = flight.progress.bytes + size, pace = flight.progress.pace, eye = flight.progress.eye, reached = flight.progress.reached, book = flight.progress.book, nextKey = flight.progress.nextKey)
     written = maybeWrite(held)?
     reporting(Flight(progress = written, plan = Plan(wanted = flight.plan.wanted, owed = Map.remove(flight.plan.owed, blockId)), heardMs = Time.unixMs(), deadlineMs = flight.deadlineMs), to)
+
+fn poisoned(flight: Flight, owed: Owed, why: String, to: Int) -> Result<Flight, String>
+    ? "Drop the Peer that sent a body that is not the Block, and ask the"
+      "Height of whoever is left. The plan is regathered against the Peers"
+      "still standing, which puts every Block that Peer owed back on the"
+      "wanted list, not only this one."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText,
+        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    _said = Console.error("dropping peer {owed.key}: {why}")
+    shed = Infra.Peers.dropOne(flight.progress.pool, owed.key)?
+    live = Infra.Peers.peerKeys(shed)
+    flying(requeued(withProgress(flight, withPool(flight.progress, shed)), live), to)
 
 fn quiet(flight: Flight, to: Int) -> Result<Flight, String>
     ? "A tick with no Block in it. Usually there is simply nothing to say"

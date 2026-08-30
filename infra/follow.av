@@ -23,7 +23,7 @@ module Follow
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
     exposes [follow]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.Watchdog, Infra.Tending]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Domain.Watchdog, Infra.Tending]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -3036,12 +3036,71 @@ fn completed(state: Following, key: Int, compact: Compact, built: Result<Bytes, 
         Result.Ok(payload) -> storing(state, key, compact, payload, supplied)
 
 fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplied: Int) -> Result<Unit, String>
-    ? "Put the rebuilt Block where a fetched one would have gone."
-      "The same two steps Infra.Bodies takes: the bytes into a Segment, and"
-      "the Location recorded against the Block Id. Nothing else needs saying"
-      "-- the Header walk has already put the Height against the Id, and the"
-      "catch-up that follows will find the body already here and fetch"
-      "nothing."
+    ? "Put the rebuilt Block where a fetched one would have gone -- once it"
+      "is proved to be a Block this node is waiting for (#283). It has to"
+      "be the one being rebuilt, its Header has to be in the tree, which is"
+      "where proof of work was checked, and its body has to pass Domain.Body"
+      "like any fetched one. Anything else falls back to the ordinary fetch,"
+      "which asks for Headers first and checks them."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.now, Time.unixMs,
+    ]
+    blockId = Domain.Block.blockIdOf(Result.withDefault(Bytes.fromList(compact.header), Bytes.fromList([])))
+    placed = Infra.Store.get(state.store, Domain.TreeStore.headerKey(blockId)?)?
+    match storable(state.rebuilding, blockId, placed, Domain.Body.fault(payload, blockId))
+        Option.Some(why) -> fellBack(state, key, why)
+        Option.None -> putAway(state, key, compact, payload, supplied, blockId)
+
+fn storable(rebuilding: Option<Rebuilding>, blockId: String, placed: Option<Bytes>, fault: Option<String>) -> Option<String>
+    ? "Why a rebuilt Block may not be kept, or nothing."
+    match rebuilding
+        Option.None -> Option.Some("a compact Block {blockId} was rebuilt with nothing being rebuilt")
+        Option.Some(pending) -> storableFor(pending, blockId, placed, fault)
+
+verify storable
+    storable(Option.None, "aa", Option.None, Option.None) => Option.Some("a compact Block aa was rebuilt with nothing being rebuilt")
+    storable(Option.Some(sampleRebuilding("aa")), "aa", Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.None
+    storable(Option.Some(sampleRebuilding("bb")), "aa", Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.Some("a compact Block aa arrived while bb was being rebuilt")
+    storable(Option.Some(sampleRebuilding("aa")), "aa", Option.None, Option.None) => Option.Some("a compact Block aa has no Header in the tree")
+    storable(Option.Some(sampleRebuilding("aa")), "aa", Option.Some(Domain.Index.emptyBytes()), Option.Some("no")) => Option.Some("no")
+
+fn storableFor(pending: Rebuilding, blockId: String, placed: Option<Bytes>, fault: Option<String>) -> Option<String>
+    ? "The one being rebuilt, placed, and sound."
+    match pending.blockId == blockId
+        false -> Option.Some("a compact Block {blockId} arrived while {pending.blockId} was being rebuilt")
+        true -> storablePlaced(blockId, placed, fault)
+
+verify storableFor
+    storableFor(sampleRebuilding("aa"), "aa", Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.None
+    storableFor(sampleRebuilding("bb"), "aa", Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.Some("a compact Block aa arrived while bb was being rebuilt")
+
+fn storablePlaced(blockId: String, placed: Option<Bytes>, fault: Option<String>) -> Option<String>
+    ? "Placed in the tree, and sound."
+    match placed
+        Option.None -> Option.Some("a compact Block {blockId} has no Header in the tree")
+        Option.Some(held) -> fault
+
+verify storablePlaced
+    storablePlaced("aa", Option.None, Option.None) => Option.Some("a compact Block aa has no Header in the tree")
+    storablePlaced("aa", Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.None
+    storablePlaced("aa", Option.Some(Domain.Index.emptyBytes()), Option.Some("no")) => Option.Some("no")
+
+fn sampleRebuilding(blockId: String) -> Rebuilding
+    ? "A rebuild in flight, for the cases here."
+    Rebuilding(blockId = blockId, hash = [], key = 0, askedMs = 0, compact = Option.None, asked = [])
+
+verify sampleRebuilding
+    sampleRebuilding("aa").blockId => "aa"
+
+fn putAway(state: Following, key: Int, compact: Compact, payload: Bytes, supplied: Int, blockId: String) -> Result<Unit, String>
+    ? "Proved, so put where a fetched Block would have gone."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
@@ -3053,7 +3112,6 @@ fn storing(state: Following, key: Int, compact: Compact, payload: Bytes, supplie
         Time.now, Time.unixMs,
     ]
     appended = Infra.Blocks.append(state.blocks, payload)?
-    blockId = Domain.Block.blockIdOf(Result.withDefault(Bytes.fromList(compact.header), Bytes.fromList([])))
     kept = Infra.Store.put(state.store, Domain.IndexKeys.blockKey(blockId)?, Domain.Index.encodeLocation(appended.location))?
     _said = saidRebuilt(state.watch, blockId, Domain.CompactBlock.totalOf(compact), supplied, List.len(Bytes.octets(payload)))
     onMoved(givenUp(Following(pool = state.pool, store = kept, blocks = appended.store, book = state.book, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log, board = state.board)), key, "Block {blockId} rebuilt from the Mempool")

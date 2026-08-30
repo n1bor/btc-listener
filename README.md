@@ -956,6 +956,23 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+A Block body has to be the Block before it is kept
+([#283](https://github.com/n1bor/btc-listener/issues/283)). Hashing its first
+eighty bytes proved only that a Peer answered under the right Block Id;
+[Domain.Body](domain/body.av) now proves the rest is that Block before a byte
+of it reaches a Segment — the Transactions decode, the first and only the first
+is a coinbase, each passes `TxCheck`, none repeats, and they build the Merkle
+Root the Header commits to without a duplicated pair (CVE-2012-2459). A body
+that fails is the fault of the Peer that sent it: that Peer is dropped and the
+Height goes back on the list for whoever is left. A compact Block rebuilt from
+the Mempool goes through the same check, and is kept only if it is the Block
+being rebuilt and its Header is in the tree. A body read back from disk is
+hashed against the Block Id the Index filed it under before its Transactions
+are connected, so a torn Segment is a report naming the Height rather than the
+wrong Block under the right Id. Until this, any Peer handed a `getdata` could
+answer with the honest Header and a body of its choosing, and `b:` being
+append-only meant the honest body was never asked for again.
+
 A Header has to prove its work before it is placed
 ([#281](https://github.com/n1bor/btc-listener/issues/281)). Its Block Id must
 fall under the target its own bits name; those bits must be what the Network's

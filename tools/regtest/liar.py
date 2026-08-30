@@ -17,6 +17,19 @@ def headers_payload(headers):
     return bytes([len(headers)]) + b''.join(h + b'\0' for h in headers)
 def command_of(frame):
     return frame[4:16].rstrip(b'\0').decode(errors='replace') if len(frame) >= 16 else ''
+def frames(conn):
+    # One frame at a time, however many a read returns: a node sends verack,
+    # getaddr and getheaders back to back, and a reader that takes each recv
+    # as one frame sees only the first.
+    buf = b''
+    while True:
+        while len(buf) >= 24:
+            length = struct.unpack('<I', buf[16:20])[0]
+            if len(buf) < 24 + length: break
+            yield buf[:24 + length]; buf = buf[24 + length:]
+        chunk = conn.recv(65536)
+        if not chunk: return
+        buf += chunk
 def answer_getheaders(conn, payload, then=b'', on='getheaders'):
     # Announce the Headers unasked, then answer every getheaders with them, so
     # the follow loop's catch-up asks this Peer and gets the same lie back.
@@ -25,15 +38,54 @@ def answer_getheaders(conn, payload, then=b'', on='getheaders'):
     conn.sendall(msg('headers', payload))
     conn.settimeout(120)
     try:
-        while True:
-            frame = conn.recv(65536)
-            if not frame: return
+        for frame in frames(conn):
             print('liar: got', command_of(frame), file=sys.stderr, flush=True)
             if command_of(frame) == 'getheaders': conn.sendall(msg('headers', payload))
             if command_of(frame) == on and then:
                 conn.sendall(then); then = b''; print('liar: sent the lie', file=sys.stderr, flush=True)
     except socket.timeout:
         return
+GENESIS_COINBASE = bytes.fromhex(
+    '01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000')
+def header_of(cli, block_hash):
+    # The honest Header for a Block Id, from Core, so the body can be wrong
+    # under a Header that is right (#283). `cli` is the bitcoin-cli command.
+    import subprocess
+    return bytes.fromhex(subprocess.check_output(cli.split() + ['getblockheader', block_hash, 'false']).decode().strip())
+def rpc(cli, *args):
+    import subprocess
+    return subprocess.check_output(cli.split() + list(args)).decode().strip()
+def honest_headers(cli, getheaders_payload):
+    # Core's own Headers after the first Locator entry we hold, so a node
+    # that asks this Peer for Headers gets the truth and then asks it for
+    # bodies -- which is the whole point.
+    import json
+    count = getheaders_payload[4]; first = getheaders_payload[5:37][::-1].hex()
+    height = json.loads(rpc(cli, 'getblockheader', first, 'true'))['height']
+    tip = int(rpc(cli, 'getblockcount'))
+    return headers_payload([bytes.fromhex(rpc(cli, 'getblockheader', rpc(cli, 'getblockhash', str(h)), 'false')) for h in range(height + 1, min(tip, height + 2000) + 1)])
+def wrong_bodies(conn, cli):
+    # Answer every getdata for a Block with its real Header and a body that
+    # is one coinbase -- mainnet's genesis coinbase -- which hashes to the
+    # Block Id asked for and to nothing the Header commits to.
+    conn.settimeout(120)
+    try:
+        for frame in frames(conn):
+            cmd = command_of(frame)
+            print('liar: got', cmd, file=sys.stderr, flush=True)
+            if cmd == 'getheaders':
+                conn.sendall(msg('headers', honest_headers(cli, frame[24:])))
+            if cmd == 'getdata':
+                payload = frame[24:]
+                count = payload[0]; at = 1
+                for _ in range(count):
+                    kind = struct.unpack('<I', payload[at:at+4])[0]; h = payload[at+4:at+36]; at += 36
+                    if kind & 2:
+                        block_hash = h[::-1].hex()
+                        conn.sendall(msg('block', header_of(cli, block_hash) + b'\x01' + GENESIS_COINBASE))
+                        print('liar: sent a wrong body for', block_hash, file=sys.stderr, flush=True)
+    except (socket.timeout, OSError):
+        return                                        # dropped, as it should be
 def serve(port, mode):
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('127.0.0.1', port)); s.listen(1)
@@ -56,6 +108,9 @@ def serve(port, mode):
         # announces; then the liar stays connected and answers getheaders
         # with nothing.
         answer_getheaders(conn, headers_payload([]), then=msg('tx', struct.pack('<i', 1) + b'\xff' + b'\xff'*8), on='getaddr')
+        return
+    elif mode == 'wrongbody':
+        wrong_bodies(conn, sys.argv[3])
         return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))

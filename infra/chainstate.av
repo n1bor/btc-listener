@@ -327,9 +327,27 @@ fn fetchedLocated(blocks: BlockStore, height: Int, blockId: String, located: Opt
 
 fn fetchedAt(blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Option<Ahead>, String>
     ? "Read the Block and decode its Transactions."
+      "The bytes are hashed against the Block Id the Index filed them under"
+      "(#283, #280 item 8): a Segment's tail can be torn by a crash after the"
+      "Location that names it was synced, and the next download writes at"
+      "that offset. Before this the wrong Block's Transactions would have"
+      "been connected under the right Id. Either failure names the Height,"
+      "because it is the chain directory that is wrong and no Peer."
     ! [Disk.readBytesAt]
     payload = Infra.Blocks.read(blocks, location)?
-    Result.Ok(Option.Some(Ahead(height = height, blockId = blockId, location = location, transactions = Domain.Block.transactionsOf(payload)?)))
+    match Domain.Block.idOfWholeBlock(payload) == blockId
+        false -> Result.Err("the body filed for Height {height} hashes to {Domain.Block.idOfWholeBlock(payload)}, not the {blockId} the Index names; the chain directory needs reindex")
+        true -> decodedAhead(height, blockId, location, Domain.Block.transactionsOf(payload))
+
+fn decodedAhead(height: Int, blockId: String, location: Location, transactions: Result<List<Transaction>, String>) -> Result<Option<Ahead>, String>
+    ? "The Transactions, or the reason the body on disk has none."
+    match transactions
+        Result.Err(why) -> Result.Err("the body filed for Height {height}, Block {blockId}, would not decode: {why}; the chain directory needs reindex")
+        Result.Ok(decoded) -> Result.Ok(Option.Some(Ahead(height = height, blockId = blockId, location = location, transactions = decoded)))
+
+verify decodedAhead
+    decodedAhead(5, "aa", Location(segment = 0, offset = 0, length = 0), Result.Err("no")) => Result.Err("the body filed for Height 5, Block aa, would not decode: no; the chain directory needs reindex")
+    decodedAhead(5, "aa", Location(segment = 0, offset = 0, length = 0), Result.Ok([])) => Result.Ok(Option.Some(Ahead(height = 5, blockId = "aa", location = Location(segment = 0, offset = 0, length = 0), transactions = [])))
 
 fn recorded(network: Network, state: Walk, height: Int, blockId: String, added: Int, removed: Int, fees: Int, confirmed: List<TxFee>, view: BlockView) -> Result<Walk, String>
     ? "Count it. Where the Set stands is written with the window (#247)."

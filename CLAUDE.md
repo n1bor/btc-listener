@@ -218,7 +218,12 @@ bytes and checksum are verified in `domain/inbox.av` — neither was checked
 anywhere before, so a corrupted payload reached the decoders and surfaced as
 whatever they made of the wreckage. A Block body must hash to the Block Id it
 was requested under (`Domain.Block.idOfWholeBlock`, not `blockIdOf` — the
-former takes a whole Block, and getting that wrong accuses every honest Peer).
+former takes a whole Block, and getting that wrong accuses every honest Peer),
+and since #283 must also *be* that Block before it is kept: `Domain.Body.fault`
+(decode, coinbase first and only, `TxCheck`, no repeated txid, Merkle Root
+with no duplicated pair) runs in `Infra.Bodies.kept` and before a compact
+Block is stored, and a body read from disk is re-hashed in
+`Infra.ChainState.fetchedAt`.
 A Peer that breaks the protocol is dropped and the node carries on; a catch-up
 that fails against a Peer drops it and retries on whoever is left, because
 otherwise the first Peer named on the command line can end the node by lying

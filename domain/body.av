@@ -1,0 +1,333 @@
+module Body
+    intent =
+        "What a Block body has to be before it is kept: the Block a Peer was"
+        "asked for, not merely eighty bytes that hash to its Id."
+        "Until n1bor/btc-listener#283 a body was hashed over its Header, looked"
+        "up in what was owed, and appended to a Segment; its Transactions were"
+        "first decoded by the Set phase and first checked against the Merkle"
+        "Root by audit. Headers are public, so any Peer handed a getdata could"
+        "answer with the honest Header and a body of its choosing, and the"
+        "body was kept under the honest Block Id for good."
+        "These are Core's CheckBlock rules that need nothing but the body:"
+        "it decodes to at least one Transaction, the first is a coinbase and"
+        "no other is, every Transaction passes Domain.TxCheck, no Transaction"
+        "Id appears twice, the Merkle tree has no duplicated pair at any level"
+        "(CVE-2012-2459: a duplicated last Transaction leaves the Root as it"
+        "was), and the Root is the one the Header commits to. Weight and"
+        "signature-operation limits are not here; they are #280's list."
+        "A fault is a fault of the Peer that sent the body, which the caller"
+        "drops, and the Height goes back on the list to be asked of another."
+    exposes [fault]
+    depends [Bytes, Domain.Block, Domain.Transaction, Domain.TxCheck]
+    effects []
+
+fn fault(payload: Bytes, blockId: String) -> Option<String>
+    ? "Why this body is not Block blockId, or nothing when it is."
+    match Domain.Block.decodeHeader(List.take(Bytes.octets(payload), Domain.Block.headerLength()))
+        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Ok(header) -> decoded(blockId, header, Domain.Block.transactionsOf(payload))
+
+verify fault
+    fault(Bytes.fromHex(genesisHex())?, genesisId()) => Option.None
+    fault(Bytes.fromHex("01")?, "aa") => Option.Some("Block aa: Block Header must be 80 bytes, got 1")
+    fault(Bytes.fromHex(genesisHeaderHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries no Transactions")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + "01000000")?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f would not decode: Transaction ends before its lock time")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + spendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not begin with a coinbase")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + coinbaseHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + spendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transactions do not build the Merkle Root 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + doubleSpendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transaction 5887ce6952c895b568e2609cc4782f4be3558c8caf34edf13a9e1c24a316a19e spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
+
+fn decoded(blockId: String, header: BlockHeader, transactions: Result<List<Transaction>, String>) -> Option<String>
+    ? "The Transactions, or the reason there are none."
+    match transactions
+        Result.Err(why) -> Option.Some("Block {blockId} would not decode: {why}")
+        Result.Ok(decodedList) -> shaped(blockId, header, decodedList)
+
+verify decoded
+    decoded("aa", sampleHeader(), Result.Err("no")) => Option.Some("Block aa would not decode: no")
+    decoded("aa", sampleHeader(), Result.Ok([])) => Option.Some("Block aa carries no Transactions")
+
+fn shaped(blockId: String, header: BlockHeader, transactions: List<Transaction>) -> Option<String>
+    ? "A coinbase first, then the rest checked one by one."
+    match transactions
+        [] -> Option.Some("Block {blockId} carries no Transactions")
+        [first, ..rest] -> withCoinbase(blockId, header, transactions, first, rest)
+
+verify shaped
+    shaped("aa", sampleHeader(), []) => Option.Some("Block aa carries no Transactions")
+    shaped("aa", sampleHeader(), [spend()]) => Option.Some("Block aa does not begin with a coinbase")
+
+fn withCoinbase(blockId: String, header: BlockHeader, transactions: List<Transaction>, first: Transaction, rest: List<Transaction>) -> Option<String>
+    ? "The first Transaction has to be the coinbase, and it alone."
+    match Domain.TxCheck.isCoinbase(first)
+        false -> Option.Some("Block {blockId} does not begin with a coinbase")
+        true -> eachChecked(blockId, header, transactions, first, rest)
+
+verify withCoinbase
+    withCoinbase("aa", sampleHeader(), [spend()], spend(), []) => Option.Some("Block aa does not begin with a coinbase")
+    withCoinbase("aa", sampleHeader(), [coinbase(), coinbase()], coinbase(), [coinbase()]) => Option.Some("Block aa carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+
+fn eachChecked(blockId: String, header: BlockHeader, transactions: List<Transaction>, coinbaseTx: Transaction, rest: List<Transaction>) -> Option<String>
+    ? "Every Transaction against the rules that need only itself."
+    match Domain.TxCheck.wrongWith(coinbaseTx)
+        Option.Some(why) -> Option.Some("Block {blockId}: coinbase {why}")
+        Option.None -> othersChecked(blockId, header, transactions, rest)
+
+verify eachChecked
+    eachChecked("aa", sampleHeader(), [coinbase()], coinbase(), []) => Option.Some("Block aa: Transactions do not build the Merkle Root 0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098 the Header commits to, but 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    eachChecked("aa", sampleHeader(), [shortCoinbase()], shortCoinbase(), []) => Option.Some("Block aa: coinbase coinbase script is 1 bytes, outside two to a hundred")
+
+fn othersChecked(blockId: String, header: BlockHeader, transactions: List<Transaction>, rest: List<Transaction>) -> Option<String>
+    ? "No other Transaction is a coinbase, and each passes on its own."
+    match rest
+        [] -> unique(blockId, header, transactions)
+        [head, ..tail] -> oneOther(blockId, header, transactions, head, tail)
+
+verify othersChecked
+    othersChecked("aa", sampleHeader(), [coinbase()], []) => Option.Some("Block aa: Transactions do not build the Merkle Root 0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098 the Header commits to, but 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    othersChecked("aa", sampleHeader(), [coinbase(), coinbase()], [coinbase()]) => Option.Some("Block aa carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+
+fn oneOther(blockId: String, header: BlockHeader, transactions: List<Transaction>, transaction: Transaction, tail: List<Transaction>) -> Option<String>
+    ? "One of the rest."
+    match Domain.TxCheck.isCoinbase(transaction)
+        true -> Option.Some("Block {blockId} carries a second coinbase, {Domain.Transaction.txidOf(transaction)}")
+        false -> oneOtherRuled(blockId, header, transactions, transaction, tail, Domain.TxCheck.wrongWith(transaction))
+
+verify oneOther
+    oneOther("aa", sampleHeader(), [coinbase(), coinbase()], coinbase(), []) => Option.Some("Block aa carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    oneOther("aa", sampleHeader(), [coinbase(), spend()], spend(), []) => Option.Some("Block aa: Transactions do not build the Merkle Root 0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098 the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
+
+fn oneOtherRuled(blockId: String, header: BlockHeader, transactions: List<Transaction>, transaction: Transaction, tail: List<Transaction>, wrong: Option<String>) -> Option<String>
+    ? "What TxCheck said of it."
+    match wrong
+        Option.Some(why) -> Option.Some("Block {blockId}: Transaction {Domain.Transaction.txidOf(transaction)} {why}")
+        Option.None -> othersChecked(blockId, header, transactions, tail)
+
+verify oneOtherRuled
+    oneOtherRuled("aa", sampleHeader(), [], spend(), [], Option.Some("is wrong")) => Option.Some("Block aa: Transaction e1e925cbe05251f2ffdfceaf551f072fa26bcd45e6cd7305f71b10f4269da6f8 is wrong")
+    oneOtherRuled("aa", sampleHeader(), [coinbase()], spend(), [], Option.None) => Option.Some("Block aa: Transactions do not build the Merkle Root 0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098 the Header commits to, but 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+
+fn unique(blockId: String, header: BlockHeader, transactions: List<Transaction>) -> Option<String>
+    ? "No Transaction Id twice, then the tree."
+    txids = Domain.Block.txidsOf(transactions)
+    match repeated(txids, Map.fromList([]))
+        Option.Some(txid) -> Option.Some("Block {blockId} carries Transaction {txid} twice")
+        Option.None -> rooted(blockId, header, txids)
+
+verify unique
+    unique("aa", sampleHeader(), [coinbase(), coinbase()]) => Option.Some("Block aa carries Transaction 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b twice")
+
+fn repeated(txids: List<String>, seen: Map<String, Bool>) -> Option<String>
+    ? "The first Id already met, if any."
+    match txids
+        [] -> Option.None
+        [head, ..tail] -> repeatedFrom(head, tail, seen)
+
+verify repeated
+    repeated([], Map.fromList([])) => Option.None
+    repeated(["a", "b"], Map.fromList([])) => Option.None
+    repeated(["a", "b", "a"], Map.fromList([])) => Option.Some("a")
+
+fn repeatedFrom(head: String, tail: List<String>, seen: Map<String, Bool>) -> Option<String>
+    ? "This one against those before it."
+    match Map.has(seen, head)
+        true -> Option.Some(head)
+        false -> repeated(tail, Map.set(seen, head, true))
+
+verify repeatedFrom
+    repeatedFrom("a", [], Map.fromList([("a", true)])) => Option.Some("a")
+    repeatedFrom("a", [], Map.fromList([])) => Option.None
+
+fn rooted(blockId: String, header: BlockHeader, txids: List<String>) -> Option<String>
+    ? "The tree is not mutated, and its Root is the Header's."
+    match Domain.Block.leavesFrom(txids, [])
+        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Ok(leaves) -> unmutated(blockId, header, txids, leaves)
+
+verify rooted
+    rooted("aa", sampleHeader(), ["zz"]) => Option.Some("Block aa: Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn unmutated(blockId: String, header: BlockHeader, txids: List<String>, level: List<List<Int>>) -> Option<String>
+    ? "Core's mutation check: at no level of the tree do two entries that"
+      "both exist sit side by side and equal, which is the shape a duplicated"
+      "tail leaves and the Root cannot tell from the honest one."
+    match twinned(level)
+        true -> Option.Some("Block {blockId}: the Merkle tree has a duplicated pair, which the Root cannot tell from the honest Block")
+        false -> climbed(blockId, header, txids, Domain.Block.pairsOf(level, []))
+
+verify unmutated
+    unmutated("aa", genesisHeaderDecoded(), ["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"], [[1]]) => Option.None
+    unmutated("aa", sampleHeader(), [], [[1], [1]]) => Option.Some("Block aa: the Merkle tree has a duplicated pair, which the Root cannot tell from the honest Block")
+    unmutated("aa", sampleHeader(), [], [[1], [2], [2]]) => Option.Some("Block aa: a Block with no Transactions has no Merkle Root")
+
+fn climbed(blockId: String, header: BlockHeader, txids: List<String>, next: Result<List<List<Int>>, String>) -> Option<String>
+    ? "One level up, until one entry is left."
+    match next
+        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Ok(level) -> upOrDone(blockId, header, txids, level)
+
+verify climbed
+    climbed("aa", sampleHeader(), [], Result.Err("no")) => Option.Some("Block aa: no")
+    climbed("aa", genesisHeaderDecoded(), ["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"], Result.Ok([[1]])) => Option.None
+    climbed("aa", sampleHeader(), [], Result.Ok([])) => Option.Some("Block aa carries no Transactions")
+
+fn upOrDone(blockId: String, header: BlockHeader, txids: List<String>, level: List<List<Int>>) -> Option<String>
+    ? "A level of one entry is the Root; more is another level."
+    match level
+        [] -> Option.Some("Block {blockId} carries no Transactions")
+        [only, ..rest] -> againOrRoot(blockId, header, txids, level, rest)
+
+verify upOrDone
+    upOrDone("aa", sampleHeader(), [], []) => Option.Some("Block aa carries no Transactions")
+    upOrDone("aa", genesisHeaderDecoded(), ["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"], [[1]]) => Option.None
+
+fn againOrRoot(blockId: String, header: BlockHeader, txids: List<String>, level: List<List<Int>>, rest: List<List<Int>>) -> Option<String>
+    ? "Climb while there is more than one."
+    match rest
+        [] -> againstHeader(blockId, header, txids)
+        [head, ..tail] -> unmutated(blockId, header, txids, level)
+
+verify againOrRoot
+    againOrRoot("aa", genesisHeaderDecoded(), ["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"], [[1]], []) => Option.None
+    againOrRoot("aa", sampleHeader(), [], [[1], [1]], [[1]]) => Option.Some("Block aa: the Merkle tree has a duplicated pair, which the Root cannot tell from the honest Block")
+
+fn twinned(level: List<List<Int>>) -> Bool
+    ? "Whether some pair of this level is two existing equal entries."
+    match level
+        [] -> false
+        [left, ..rest] -> twinnedWith(left, rest)
+
+verify twinned
+    twinned([]) => false
+    twinned([[1]]) => false
+    twinned([[1], [1]]) => true
+    twinned([[1], [2], [2]]) => false
+    twinned([[1], [2], [3], [3]]) => true
+    twinned([[1], [2], [2], [3]]) => false
+
+fn twinnedWith(left: List<Int>, rest: List<List<Int>>) -> Bool
+    ? "This pair, then the pairs after it."
+    match rest
+        [] -> false
+        [right, ..tail] -> sameOrOn(left, right, tail)
+
+verify twinnedWith
+    twinnedWith([1], []) => false
+    twinnedWith([1], [[1]]) => true
+    twinnedWith([1], [[2], [3], [3]]) => true
+
+fn sameOrOn(left: List<Int>, right: List<Int>, tail: List<List<Int>>) -> Bool
+    ? "Equal is the answer; otherwise the pairs after."
+    match left == right
+        true -> true
+        false -> twinned(tail)
+
+verify sameOrOn
+    sameOrOn([1], [1], []) => true
+    sameOrOn([1], [2], []) => false
+    sameOrOn([1], [2], [[3], [3]]) => true
+
+fn againstHeader(blockId: String, header: BlockHeader, txids: List<String>) -> Option<String>
+    ? "The Root the Transactions build, against the one the Header carries."
+    match Domain.Block.merkleRootOf(txids)
+        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Ok(root) -> rootAgrees(blockId, header, root)
+
+verify againstHeader
+    againstHeader("aa", genesisHeaderDecoded(), ["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"]) => Option.None
+    againstHeader("aa", sampleHeader(), []) => Option.Some("Block aa: a Block with no Transactions has no Merkle Root")
+    againstHeader("aa", sampleHeader(), ["zz"]) => Option.Some("Block aa: Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn rootAgrees(blockId: String, header: BlockHeader, root: String) -> Option<String>
+    ? "Nothing to say when they agree."
+    match root == header.merkleRoot
+        true -> Option.None
+        false -> Option.Some("Block {blockId}: Transactions do not build the Merkle Root {header.merkleRoot} the Header commits to, but {root}")
+
+verify rootAgrees
+    rootAgrees("aa", sampleHeader(), sampleHeader().merkleRoot) => Option.None
+    rootAgrees("aa", sampleHeader(), "bb") => Option.Some("Block aa: Transactions do not build the Merkle Root 0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098 the Header commits to, but bb")
+
+fn genesisId() -> String
+    ? "Mainnet's genesis Block Id, for the cases here."
+    "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+verify genesisId
+    String.len(genesisId()) => 64
+
+fn genesisHeaderHex() -> String
+    ? "Mainnet's genesis Header, eighty bytes."
+    "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
+
+verify genesisHeaderHex
+    String.len(genesisHeaderHex()) => 160
+
+fn coinbaseHex() -> String
+    ? "Mainnet's genesis coinbase, as it travels."
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000"
+
+verify coinbaseHex
+    Domain.Transaction.txidOf(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex(coinbaseHex())?))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+
+fn genesisHex() -> String
+    ? "The whole genesis Block: its Header, a count of one, its coinbase."
+    genesisHeaderHex() + "01" + coinbaseHex()
+
+verify genesisHex
+    Domain.Block.idOfWholeBlock(Bytes.fromHex(genesisHex())?) => genesisId()
+
+fn spendHex() -> String
+    ? "An ordinary one-Input one-Output Transaction, for the cases here."
+    "01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000"
+
+verify spendHex
+    Domain.TxCheck.isCoinbase(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex(spendHex())?))?) => false
+
+fn doubleSpendHex() -> String
+    ? "Two Inputs naming the same Output, which TxCheck refuses."
+    "0100000002aa000000000000000000000000000000000000000000000000000000000000000000000000ffffffffaa000000000000000000000000000000000000000000000000000000000000000000000000ffffffff01e803000000000000015300000000"
+
+verify doubleSpendHex
+    Domain.TxCheck.wrongWith(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex(doubleSpendHex())?))?) => Option.Some("spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
+
+fn coinbase() -> Transaction
+    ? "The genesis coinbase, decoded."
+    Result.withDefault(Domain.Transaction.decode(Bytes.octets(Result.withDefault(Bytes.fromHex(coinbaseHex()), Bytes.fromList([])))), blank())
+
+verify coinbase
+    Domain.TxCheck.isCoinbase(coinbase()) => true
+
+fn shortCoinbase() -> Transaction
+    ? "A coinbase whose script is one byte, which TxCheck refuses."
+    Result.withDefault(Domain.Transaction.decode(Bytes.octets(Result.withDefault(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0151ffffffff01e803000000000000015300000000"), Bytes.fromList([])))), blank())
+
+verify shortCoinbase
+    Domain.TxCheck.isCoinbase(shortCoinbase()) => true
+
+fn spend() -> Transaction
+    ? "The ordinary Transaction, decoded."
+    Result.withDefault(Domain.Transaction.decode(Bytes.octets(Result.withDefault(Bytes.fromHex(spendHex()), Bytes.fromList([])))), blank())
+
+verify spend
+    Domain.TxCheck.isCoinbase(spend()) => false
+
+fn blank() -> Transaction
+    ? "A Transaction of nothing, for the unreachable fallbacks above."
+    Transaction(version = 0, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)
+
+verify blank
+    blank().txid => ""
+
+fn genesisHeaderDecoded() -> BlockHeader
+    ? "Mainnet's genesis Header, decoded, whose Root is its one coinbase."
+    Result.withDefault(Domain.Block.decodeHeader(Bytes.octets(Result.withDefault(Bytes.fromHex(genesisHeaderHex()), Bytes.fromList([])))), sampleHeader())
+
+verify genesisHeaderDecoded
+    genesisHeaderDecoded().merkleRoot => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+
+fn sampleHeader() -> BlockHeader
+    ? "Mainnet's Block 1 Header, for the cases here."
+    BlockHeader(blockId = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048", version = 1, previousBlockId = genesisId(), merkleRoot = "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098", timestamp = 1231469665, bits = 486604799, nonce = 2573394689)
+
+verify sampleHeader
+    sampleHeader().merkleRoot => "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098"

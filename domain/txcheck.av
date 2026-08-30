@@ -14,7 +14,7 @@ module TxCheck
         "should not disagree about what a valid Transaction is."
         "The first thing wrong is the thing reported. There is no ordering"
         "claim in that beyond the one Bitcoin itself makes."
-    exposes [wrongWith, maxMoney]
+    exposes [wrongWith, maxMoney, isCoinbase]
     depends [Domain.Transaction]
     effects []
 
@@ -135,6 +135,28 @@ fn byCoinbase(first: Input, rest: List<Input>) -> Option<String>
 
 verify byCoinbase
     byCoinbase(spending("aa", 0, ""), []) => Option.None
+
+fn isCoinbase(transaction: Transaction) -> Bool
+    ? "One Input spending nothing: the shape only a coinbase has."
+    match Domain.Transaction.inputsOf(transaction)
+        [] -> false
+        [only, ..rest] -> aloneAndNull(only, rest)
+
+verify isCoinbase
+    isCoinbase(sample([spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151")], [Output(value = 1, script = "51")])) => true
+    isCoinbase(sample([spending("aa", 0, "")], [Output(value = 1, script = "51")])) => false
+    isCoinbase(sample([], [Output(value = 1, script = "51")])) => false
+    isCoinbase(sample([spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151"), spending("aa", 0, "")], [Output(value = 1, script = "51")])) => false
+
+fn aloneAndNull(only: Input, rest: List<Input>) -> Bool
+    ? "The one Input, with none after it, spending nothing."
+    match rest
+        [] -> isNull(only)
+        [head, ..tail] -> false
+
+verify aloneAndNull
+    aloneAndNull(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151"), []) => true
+    aloneAndNull(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151"), [spending("aa", 0, "")]) => false
 
 fn isNull(input: Input) -> Bool
     ? "The prevout a coinbase carries: no Transaction and the last index."
