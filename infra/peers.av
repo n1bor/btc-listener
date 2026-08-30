@@ -590,8 +590,82 @@ fn refusedInbound(pool: Pool, connection: Tcp.Connection) -> Result<Accepted, St
     _said = complainedIfPlain(pool, "refused an inbound Peer: already holding {inboundLimit()}")
     Result.Ok(Accepted(pool = pool, seated = Option.None))
 
+fn hostLimit() -> Int
+    ? "How many inbound Peers one host may hold at once (#291)."
+      "One. Every inbound slot counts toward the self-address tally and"
+      "the Address Book, and eight callers from one host used to be eight"
+      "votes. Core's limit is per netgroup; per host is what an IPv4 text"
+      "address can say."
+    1
+
+verify hostLimit
+    hostLimit() => 1
+
+fn hostText(address: String) -> String
+    ? "The host part of an address as the standing spells it: before the port."
+    match String.split(address, ":")
+        [] -> address
+        [host, ..rest] -> host
+
+verify hostText
+    hostText("127.0.0.1:54668") => "127.0.0.1"
+    hostText("nowhere") => "nowhere"
+
+fn inboundFromHost(standing: Map<Int, Standing>, keys: List<Int>, host: String, sofar: Int) -> Int
+    ? "How many Peers that dialled us came from this host."
+    match keys
+        [] -> sofar
+        [head, ..tail] -> inboundFromHost(standing, tail, host, sofar + oneIfFromHost(Domain.Inbox.standingAt(standing, head), host))
+
+verify inboundFromHost
+    inboundFromHost(Map.fromList([]), [], "1.2.3.4", 0) => 0
+    inboundFromHost(Domain.Inbox.seated(Map.fromList([]), 1, "1.2.3.4:5", true), [1], "1.2.3.4", 0) => 1
+    inboundFromHost(Domain.Inbox.seated(Map.fromList([]), 1, "1.2.3.4:5", false), [1], "1.2.3.4", 0) => 0
+    inboundFromHost(Domain.Inbox.seated(Map.fromList([]), 1, "1.2.3.4:5", true), [1], "5.6.7.8", 0) => 0
+
+fn oneIfFromHost(held: Option<Standing>, host: String) -> Int
+    ? "One for an inbound Peer from this host."
+    match held
+        Option.None -> 0
+        Option.Some(standing) -> oneIfBoth(standing.inbound, hostText(standing.address) == host)
+
+verify oneIfFromHost
+    oneIfFromHost(Option.None, "1.2.3.4") => 0
+
+fn oneIfBoth(inbound: Bool, sameHost: Bool) -> Int
+    ? "One when both hold."
+    match Bool.and(inbound, sameHost)
+        true -> 1
+        false -> 0
+
+verify oneIfBoth
+    oneIfBoth(true, true) => 1
+    oneIfBoth(true, false) => 0
+    oneIfBoth(false, true) => 0
+
 fn seating(pool: Pool, key: Int, connection: Tcp.Connection, address: String) -> Result<Accepted, String>
+    ? "The caller into the pool, then the Handshake from the answering side --"
+      "unless its host already holds an inbound slot (#291)."
+    ! [
+        Console.error, Console.print,
+        Random.int,
+        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match inboundFromHost(pool.standing, Map.keys(pool.standing), hostText(address), 0) >= hostLimit()
+        true -> refusedHost(pool, connection, address)
+        false -> seatingIn(pool, key, connection, address)
+
+fn refusedHost(pool: Pool, connection: Tcp.Connection, address: String) -> Result<Accepted, String>
+    ? "A second caller from one host: close it and carry on."
+    ! [Console.error, Tcp.close]
+    _closed = Tcp.close(connection)
+    _said = complainedIfPlain(pool, "refused an inbound Peer from {address}: already holding one from that host")
+    Result.Ok(Accepted(pool = pool, seated = Option.None))
+
+fn seatingIn(pool: Pool, key: Int, connection: Tcp.Connection, address: String) -> Result<Accepted, String>
     ? "The caller into the pool, then the Handshake from the answering side."
+
       "It goes in exactly where a dialled Peer goes -- same map, same key"
       "space, same standing -- so everything downstream that counts bytes,"
       "reads Messages or drops a misbehaving Peer works on it without"

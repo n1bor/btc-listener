@@ -25,7 +25,7 @@ module AddressBook
         "and has no plans for; that half is not copied."
         "The roll is handed in rather than taken, so selection stays pure and"
         "every case here stays decidable."
-    exposes [Candidate, noBook, heard, heardAll, marked, forgotten, nextUntried, anyUntried, untriedIn, sizeOf, fromSeed, fromCommandLine]
+    exposes [Candidate, noBook, bookLimit, sourceLimit, heard, heardAll, marked, forgotten, nextUntried, anyUntried, untriedIn, sizeOf, fromSeed, fromCommandLine]
     depends []
     effects []
 
@@ -64,20 +64,187 @@ fn sizeOf(book: Map<String, Candidate>) -> Int
     ? "How many Candidates are held."
     Map.len(book)
 
+fn bookLimit() -> Int
+    ? "How many Candidates the Book holds at most (#291)."
+      "Four thousand and ninety-six: a few hundred is all a node ever dials,"
+      "and Core's own table is bucketed at sixteen thousand. Without a cap a"
+      "Peer sending addr in a loop grew the Book by a thousand a Message for"
+      "the life of the process, and every dial turn walked all of it."
+    4096
+
+verify bookLimit
+    bookLimit() => 4096
+
+fn sourceLimit() -> Int
+    ? "How many Candidates one Peer may have put in the Book (#291)."
+      "Two hundred and fifty-six, so no one connection fills more than a"
+      "sixteenth of it. The source is the connection, not the address: a"
+      "Peer that reconnects is a fresh source, and the Book's own cap is"
+      "what bounds that."
+    256
+
+verify sourceLimit
+    sourceLimit() => 256
+
 fn heard(book: Map<String, Candidate>, address: String, from: Int) -> Map<String, Candidate>
-    ? "One Candidate, unless it is already known."
+    ? "One Candidate, unless it is already known, or its source or the Book"
+      "is full."
       "Already known wins: the first Peer to name an address is the one"
       "recorded as having named it, and a later Peer repeating it does not"
       "get to overwrite that or to reset whether it has been tried."
     match Map.has(book, address)
         true -> book
-        false -> Map.set(book, address, Candidate(address = address, heardFrom = from, tried = false))
+        false -> heardNew(book, address, from)
 
 verify heard
     sizeOf(heard(noBook(), "1.2.3.4:8333", 0)) => 1
     Map.get(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333") => Option.Some(Candidate(address = "1.2.3.4:8333", heardFrom = 0, tried = false))
     Map.get(heard(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), "1.2.3.4:8333", 1), "1.2.3.4:8333") => Option.Some(Candidate(address = "1.2.3.4:8333", heardFrom = 0, tried = true))
     sizeOf(heard(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333", 1)) => 1
+    sizeOf(heard(flooded(256, 0, noBook()), "9.9.9.9:8333", 0)) => 256
+    sizeOf(heard(flooded(256, 0, noBook()), "9.9.9.9:8333", 1)) => 257
+
+fn heardNew(book: Map<String, Candidate>, address: String, from: Int) -> Map<String, Candidate>
+    ? "A source at its limit adds nothing more."
+    match countFrom(book, Map.keys(book), from, 0) >= sourceLimit()
+        true -> book
+        false -> heardRoom(book, address, from)
+
+verify heardNew
+    sizeOf(heardNew(noBook(), "1.2.3.4:8333", 0)) => 1
+    sizeOf(heardNew(flooded(256, 0, noBook()), "9.9.9.9:8333", 0)) => 256
+
+fn heardRoom(book: Map<String, Candidate>, address: String, from: Int) -> Map<String, Candidate>
+    ? "Into the Book if there is room, else in place of one already tried."
+    match Map.len(book) >= bookLimit()
+        true -> heardInstead(book, address, from, someTried(book, Map.keys(book)))
+        false -> Map.set(book, address, Candidate(address = address, heardFrom = from, tried = false))
+
+verify heardRoom
+    sizeOf(heardRoom(noBook(), "1.2.3.4:8333", 0)) => 1
+    sizeOf(heardRoom(fullBook(), "9.9.9.9:8333", 0)) => 4096
+    Map.has(heardRoom(fullBook(), "9.9.9.9:8333", 0), "9.9.9.9:8333") => false
+    Map.has(heardRoom(marked(fullBook(), "0.0:8333"), "9.9.9.9:8333", 0), "9.9.9.9:8333") => true
+    Map.has(heardRoom(marked(fullBook(), "0.0:8333"), "9.9.9.9:8333", 0), "0.0:8333") => false
+
+fn heardInstead(book: Map<String, Candidate>, address: String, from: Int, evicted: Option<String>) -> Map<String, Candidate>
+    ? "A full Book gives up a Candidate already tried, or takes nothing."
+      "A tried Candidate has had its chance; an untried one has not, and a"
+      "Book full of untried Candidates is one that will not learn a new one"
+      "until it has dialled some -- which is the bound working."
+    match evicted
+        Option.None -> book
+        Option.Some(gone) -> Map.set(Map.remove(book, gone), address, Candidate(address = address, heardFrom = from, tried = false))
+
+verify heardInstead
+    sizeOf(heardInstead(noBook(), "1.2.3.4:8333", 0, Option.None)) => 0
+    sizeOf(heardInstead(heard(noBook(), "5.6.7.8:8333", 0), "1.2.3.4:8333", 0, Option.Some("5.6.7.8:8333"))) => 1
+    Map.has(heardInstead(heard(noBook(), "5.6.7.8:8333", 0), "1.2.3.4:8333", 0, Option.Some("5.6.7.8:8333")), "1.2.3.4:8333") => true
+
+fn someTried(book: Map<String, Candidate>, keys: List<String>) -> Option<String>
+    ? "Any Candidate that has been tried, if there is one."
+    match keys
+        [] -> Option.None
+        [head, ..tail] -> triedOrNext(book, head, tail)
+
+verify someTried
+    someTried(noBook(), []) => Option.None
+    someTried(heard(noBook(), "1.2.3.4:8333", 0), ["1.2.3.4:8333"]) => Option.None
+    someTried(marked(heard(noBook(), "1.2.3.4:8333", 0), "1.2.3.4:8333"), ["1.2.3.4:8333"]) => Option.Some("1.2.3.4:8333")
+
+fn triedOrNext(book: Map<String, Candidate>, address: String, rest: List<String>) -> Option<String>
+    ? "This one if tried, else onwards."
+    match Map.get(book, address)
+        Option.None -> someTried(book, rest)
+        Option.Some(held) -> triedOrOn(book, address, rest, held.tried)
+
+verify triedOrNext
+    triedOrNext(noBook(), "a", []) => Option.None
+    triedOrNext(marked(heard(noBook(), "a", 0), "a"), "a", []) => Option.Some("a")
+    triedOrNext(heard(noBook(), "a", 0), "a", []) => Option.None
+
+fn triedOrOn(book: Map<String, Candidate>, address: String, rest: List<String>, tried: Bool) -> Option<String>
+    ? "The answer when the Candidate is held."
+    match tried
+        true -> Option.Some(address)
+        false -> someTried(book, rest)
+
+verify triedOrOn
+    triedOrOn(noBook(), "a", [], true) => Option.Some("a")
+    triedOrOn(noBook(), "a", [], false) => Option.None
+
+fn countFrom(book: Map<String, Candidate>, keys: List<String>, from: Int, acc: Int) -> Int
+    ? "How many Candidates one source put in the Book."
+    match keys
+        [] -> acc
+        [head, ..tail] -> countFrom(book, tail, from, acc + oneIfFrom(Map.get(book, head), from))
+
+verify countFrom
+    countFrom(noBook(), [], 0, 0) => 0
+    countFrom(flooded(10, 3, noBook()), Map.keys(flooded(10, 3, noBook())), 3, 0) => 10
+    countFrom(flooded(10, 3, noBook()), Map.keys(flooded(10, 3, noBook())), 4, 0) => 0
+    countFrom(flooded(2, 3, noBook()), ["1:8333"], 3, 0) => 1
+
+fn oneIfFrom(held: Option<Candidate>, from: Int) -> Int
+    ? "One for a Candidate this source named."
+    match held
+        Option.None -> 0
+        Option.Some(candidate) -> oneIf(candidate.heardFrom == from)
+
+verify oneIfFrom
+    oneIfFrom(Option.None, 0) => 0
+    oneIfFrom(Option.Some(Candidate(address = "a", heardFrom = 0, tried = false)), 0) => 1
+    oneIfFrom(Option.Some(Candidate(address = "a", heardFrom = 1, tried = false)), 0) => 0
+
+fn oneIf(yes: Bool) -> Int
+    ? "One or nought."
+    match yes
+        true -> 1
+        false -> 0
+
+verify oneIf
+    oneIf(true) => 1
+    oneIf(false) => 0
+
+fn flooded(count: Int, from: Int, acc: Map<String, Candidate>) -> Map<String, Candidate>
+    ? "A Book with this many Candidates from one source, for the cases here."
+      "Straight into the Map rather than through heard, so a case can build"
+      "a Book past the limits heard enforces."
+    match count <= 0
+        true -> acc
+        false -> flooded(count - 1, from, Map.set(acc, "{count - 1}:8333", Candidate(address = "{count - 1}:8333", heardFrom = from, tried = false)))
+
+verify flooded
+    sizeOf(flooded(0, 0, noBook())) => 0
+    sizeOf(flooded(3, 0, noBook())) => 3
+    Map.has(flooded(3, 0, noBook()), "0:8333") => true
+
+fn fullBook() -> Map<String, Candidate>
+    ? "A Book at its limit, sixteen sources of two hundred and fifty-six."
+    fullFrom(16, noBook())
+
+verify fullBook
+    sizeOf(fullBook()) => 4096
+
+fn fullFrom(sources: Int, acc: Map<String, Candidate>) -> Map<String, Candidate>
+    ? "Each source's share, keyed apart from the others'."
+    match sources <= 0
+        true -> acc
+        false -> fullFrom(sources - 1, sharedInto(256, sources - 1, acc))
+
+verify fullFrom
+    sizeOf(fullFrom(0, noBook())) => 0
+    sizeOf(fullFrom(2, noBook())) => 512
+
+fn sharedInto(count: Int, source: Int, acc: Map<String, Candidate>) -> Map<String, Candidate>
+    ? "One source's Candidates, its number in every key."
+    match count <= 0
+        true -> acc
+        false -> sharedInto(count - 1, source, Map.set(acc, "{source}.{count - 1}:8333", Candidate(address = "{source}.{count - 1}:8333", heardFrom = source, tried = false)))
+
+verify sharedInto
+    sizeOf(sharedInto(3, 0, noBook())) => 3
+    sizeOf(sharedInto(0, 0, noBook())) => 0
 
 fn heardAll(book: Map<String, Candidate>, addresses: List<String>, from: Int) -> Map<String, Candidate>
     ? "Everything one addr Message offered."

@@ -1821,6 +1821,47 @@ Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
 `16842752` is `0x01010000` in decimal.
 
+### An Address Book that will not fill, and a host that gets one slot
+
+[#291](https://github.com/n1bor/btc-listener/issues/291), two halves. The
+liar's `addrflood` mode sends ten `addr` Messages of a thousand routable
+addresses each, after the handshake:
+
+```bash
+python3 tools/regtest/liar.py 18455 addrflood &
+timeout -s INT 30 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The Book takes the first 256 from that Peer and no more, which the `named`
+lines show reaching a plateau:
+
+```
+peer 0 named 1000 Peer(s); the Address Book holds 256
+peer 0 named 1000 Peer(s); the Address Book holds 256
+```
+
+(Before the cap the second line said 2000, and the tenth 10000.) For the
+other half, serve beside Core and dial twice from the same host: first a
+caller that completes its Handshake and stays, then one more:
+
+```bash
+timeout -s INT 40 $BIN regtest follow 127.0.0.1:18454 $D serve:18456 &
+sleep 5; python3 tools/regtest/caller.py 18456 polite & sleep 3; python3 tools/regtest/caller.py 18456 silent
+```
+
+The first is seated; the second is refused at the door, in a tenth of a
+second:
+
+```
+peer 1 dialled us from 127.0.0.1:49810
+refused an inbound Peer from 127.0.0.1:52690: already holding one from that host
+```
+
+The first caller has to be a Peer, not merely connected: the greeting runs
+inline (#30), so a second caller that arrives while the first is still being
+greeted is accepted only after the first was dropped, and by then the host
+holds nothing.
+
 ### A fault in the chain directory is nobody's fault
 
 [#290](https://github.com/n1bor/btc-listener/issues/290): a catch-up that

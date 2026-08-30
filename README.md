@@ -956,6 +956,18 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+The Address Book is bounded, filtered, and one host gets one inbound slot
+([#291](https://github.com/n1bor/btc-listener/issues/291)). A Candidate is
+kept only if it is routable — Core keeps nothing outside `IsRoutable`, and a
+loopback or private-range address is one this node would dial to nowhere —
+and the Book holds at most 4,096 of them, at most 256 from any one connection;
+a full Book gives up a Candidate already tried for a new one, or takes nothing.
+A caller from a host that already holds an inbound slot is refused at the door,
+because every inbound slot is a vote in the self-address tally and a source in
+the Book. Before this a Peer sending `addr` in a loop grew the Book by a
+thousand a Message for the life of the process, every dial turn walked all of
+it, and one host could hold all eight inbound slots.
+
 A fault in the chain directory ends the run with every Peer still connected
 ([#290](https://github.com/n1bor/btc-listener/issues/290)). A catch-up asks
 one Peer for Headers and bodies, and a fault in what that Peer sent costs it

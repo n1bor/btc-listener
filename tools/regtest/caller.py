@@ -7,6 +7,7 @@ import socket, struct, hashlib, time, sys
 #     python3 tools/regtest/caller.py 18456 pinger    # version, then a ping every 3 s, never verack
 #     python3 tools/regtest/caller.py 18456 chatty    # version, then twelve addr frames, never verack
 #     python3 tools/regtest/caller.py 18456 early     # a ping before any version
+#     python3 tools/regtest/caller.py 18456 polite    # a proper Handshake, then stay connected
 MAGIC = bytes([0xfa,0xbf,0xb5,0xda])           # regtest
 def msg(cmd, payload):
     c = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
@@ -32,6 +33,11 @@ def dial(port, mode):
         elif mode == 'early':
             s.sendall(msg('ping', struct.pack('<Q', 1)))
             return held(s, started, 300)
+        elif mode == 'polite':
+            s.sendall(msg('version', version_payload()))
+            s.settimeout(10); s.recv(65536)               # their version
+            s.sendall(msg('verack', b''))
+            return held(s, started, 60)
         elif mode == 'pinger':
             s.sendall(msg('version', version_payload()))
             for i in range(100):

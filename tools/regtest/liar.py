@@ -86,6 +86,13 @@ def wrong_bodies(conn, cli):
                         print('liar: sent a wrong body for', block_hash, file=sys.stderr, flush=True)
     except (socket.timeout, OSError):
         return                                        # dropped, as it should be
+def addr_payload(n, seed):
+    # n routable IPv4 addresses, distinct per seed, as one addr Message.
+    out = bytes([0xfd]) + struct.pack('<H', n)
+    for i in range(n):
+        v = seed * 100000 + i
+        out += struct.pack('<I', 0) + struct.pack('<Q', 1) + b'\0'*10 + b'\xff\xff' + bytes([8, (v >> 16) & 255, (v >> 8) & 255, v & 255]) + struct.pack('>H', 8333)
+    return out
 def serve(port, mode):
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('127.0.0.1', port)); s.listen(1)
@@ -108,6 +115,14 @@ def serve(port, mode):
         # announces; then the liar stays connected and answers getheaders
         # with nothing.
         answer_getheaders(conn, headers_payload([]), then=msg('tx', struct.pack('<i', 1) + b'\xff' + b'\xff'*8), on='getaddr')
+        return
+    elif mode == 'addrflood':
+        # Ten thousand Candidates in ten Messages (#291). A Book without a
+        # cap took every one; one with a per-source cap keeps 256 of them.
+        # Sent once the node is listening (on its getaddr), so each Message
+        # is answered with a `named` line rather than folded in silently.
+        flood = b''.join(msg('addr', addr_payload(1000, i)) for i in range(10))
+        answer_getheaders(conn, headers_payload([]), then=flood, on='getaddr')
         return
     elif mode == 'wrongbody':
         wrong_bodies(conn, sys.argv[3])

@@ -2441,7 +2441,7 @@ fn onAddresses(state: Following, key: Int, body: List<Int>) -> Result<Unit, Stri
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
     ]
-    offered = Domain.Addr.addressesOf(body)
+    offered = routableOnly(Domain.Addr.addressesOf(body), [])
     grown = Domain.AddressBook.heardAll(state.book, renderedAll(offered, []), key)
     _said = heardIfPlain(state.watch, List.len(offered), key, Domain.AddressBook.sizeOf(grown))
     listen(Following(pool = state.pool, store = state.store, blocks = state.blocks, book = grown, nextKey = state.nextKey, watch = state.watch, mempool = state.mempool, rebuilding = state.rebuilding, log = state.log, board = state.board))
@@ -2462,6 +2462,30 @@ fn saidHeard(offered: Int, key: Int, held: Int) -> Unit
     match offered == 0
         true -> Unit
         false -> Console.print("peer {key} named {offered} Peer(s); the Address Book holds {held}")
+
+fn routableOnly(addresses: List<PeerAddress>, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "The offered addresses a Peer could actually be reached at (#291)."
+      "Core keeps nothing outside IsRoutable, and neither should the Book:"
+      "a loopback, private or this-network Candidate is one this node would"
+      "dial to nowhere, and a Peer offering a thousand of them was filling"
+      "the Book with them."
+    match addresses
+        [] -> List.reverse(acc)
+        [head, ..tail] -> routableOnly(tail, keptIfRoutable(head, acc))
+
+verify routableOnly
+    routableOnly([], []) => []
+    List.len(routableOnly([Domain.Address.fromPeerText("1.2.3.4:8333", 8333)?, Domain.Address.fromPeerText("10.0.0.1:8333", 8333)?, Domain.Address.fromPeerText("127.0.0.1:8333", 8333)?], [])) => 1
+
+fn keptIfRoutable(address: PeerAddress, acc: List<PeerAddress>) -> List<PeerAddress>
+    ? "Kept if routable, dropped if not."
+    match Domain.Address.routable(address)
+        true -> List.prepend(address, acc)
+        false -> acc
+
+verify keptIfRoutable
+    List.len(keptIfRoutable(Domain.Address.fromPeerText("1.2.3.4:8333", 8333)?, [])) => 1
+    List.len(keptIfRoutable(Domain.Address.fromPeerText("192.168.1.1:8333", 8333)?, [])) => 0
 
 fn renderedAll(addresses: List<PeerAddress>, acc: List<String>) -> List<String>
     ? "Each Peer Address as the text the Address Book keys it by."
