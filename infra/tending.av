@@ -12,7 +12,9 @@ module Tending
         "Eye tends when it glances, once a second, from the same Pool-level"
         "operations the loop uses, so a Peer is seated within a second of"
         "answering whether the loop is turning or walking."
-        "Nothing here decides anything about the chain. What a Peer sent"
+        "Since #214 it also admits a caller off the listener and tells the"
+        "Network where we are, the two other things a walking node did not"
+        "do. Nothing here decides anything about the chain. What a Peer sent"
         "while the walk was busy is kept by the pool (spare, bounded) for"
         "the loop to sort out afterwards, as it always was; a ping is"
         "answered by the pool itself."
@@ -22,7 +24,7 @@ module Tending
         Console.error, Console.print,
         Disk.appendText,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
 
@@ -56,13 +58,31 @@ fn tended(held: Kept) -> Result<Kept, String>
         Console.error, Console.print,
         Disk.appendText,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
     drained = drainedPool(held.pool, drainBudget())?
     advanced = Infra.Peers.advanced(drained)?
     told = saidAll(Kept(pool = Infra.Peers.withoutSettled(advanced), book = held.book, nextKey = held.nextKey, log = held.log), Infra.Peers.settledOf(advanced))?
-    toppedInto(told, Infra.Peers.toppedUp(told.pool, told.book, told.nextKey)?)
+    topped = toppedInto(told, Infra.Peers.toppedUp(told.pool, told.book, told.nextKey)?)?
+    admitted = acceptedInto(topped, Infra.Peers.accepting(topped.pool, topped.nextKey)?)?
+    advertisedInto(admitted, Infra.Peers.told(admitted.pool, Time.unixMs())?)
+
+fn acceptedInto(held: Kept, taken: Infra.Peers.Accepted) -> Result<Kept, String>
+    ? "A caller admitted off the listener while walking takes the next key"
+      "(#214): the pool greeted it, this notes it."
+    ! [Disk.appendText, Time.unixMs]
+    match taken.seated
+        Option.None -> Result.Ok(Kept(pool = taken.pool, book = held.book, nextKey = held.nextKey, log = held.log))
+        Option.Some(key) -> Result.Ok(Kept(pool = taken.pool, book = held.book, nextKey = key + 1, log = Infra.Metrics.noting(held.log, "peer", "inbound {key} seated while walking, {List.len(Infra.Peers.peerKeys(taken.pool))} held")?))
+
+fn advertisedInto(held: Kept, advertised: Infra.Peers.Advertised) -> Result<Kept, String>
+    ? "Where we told the Network we are, if this tending was the one to"
+      "tell it (#214); the loop says it aloud, a walk only notes it."
+    ! [Disk.appendText, Time.unixMs]
+    match advertised.address
+        Option.None -> Result.Ok(Kept(pool = advertised.pool, book = held.book, nextKey = held.nextKey, log = held.log))
+        Option.Some(one) -> Result.Ok(Kept(pool = advertised.pool, book = held.book, nextKey = held.nextKey, log = Infra.Metrics.noting(held.log, "peer", "advertised {one} to {advertised.peers} Peer(s) while walking")?))
 
 fn drainedPool(pool: Pool, budget: Int) -> Result<Pool, String>
     ? "Read what is already there, Message by Message, up to the budget."

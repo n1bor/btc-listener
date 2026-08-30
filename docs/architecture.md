@@ -3,7 +3,8 @@
 How this program is put together, section by section, with the reasoning
 behind each shape and — because the shape is often the language's doing —
 where Aver (the sibling `../aver` checkout, pinned by `.aver-version`) steered it. Every section links to the code it
-describes; the line numbers are as of pin `74e24a5e`.
+describes; the line numbers are as of pin `74e24a5e` and drift a little with
+every change — the function names are the stable part.
 
 The one-paragraph version: a Bitcoin node written as a **pure core and a
 thin, effectful shell**. `domain/` decides everything and touches nothing;
@@ -42,7 +43,7 @@ flowchart TB
         cli["Cli"] --- node["Node"] --- maintain["Maintain"] --- lookup["Lookup"] --- show["Show"] --- usage["Usage"]
     end
     subgraph infra ["infra/ — the only code with effects"]
-        peers["Peers · Follow · Download · Bodies · Peer · Resolver"]
+        peers["Peers · Tending · Follow · Download · Bodies · Peer · Resolver · Board"]
         state["ChainState · Utxo · Rewind · Headers · Audit · Outputs · TxIndex · Spends · Mempool"]
         store["Store · Kv · Blocks · Lock · Prune · Reindex · Screen · Metrics · Debug"]
     end
@@ -50,7 +51,7 @@ flowchart TB
         d1["Block · Transaction · Message · Inbox · Version · Addr · AddressBook"]
         d2["HeaderTree · Chainwork · Reorg · Rewind · Connect · Disconnect · UtxoStore · Index · IndexKeys · Segment"]
         d3["Script* · Interp · Witness · Taproot · Sighash · Bip143 · Bip341 · Ecdsa · Rules · Checks"]
-        d4["Snapshot · Screen · Mempool · Standard · CompactBlock · Json"]
+        d4["Snapshot · Screen · Page · Watchdog · Mempool · Standard · CompactBlock · Json"]
     end
     subgraph providers ["providers/ — Rust, behind a declared contract"]
         kv["kv: RocksDB"]
@@ -65,8 +66,8 @@ flowchart TB
 |---|---|---|---|
 | [`main.av`](../main.av) | 1 | Declares the program's full effect set and calls the adapter | reachability |
 | [`app/`](../app) | 6 | Parse argv, print usage, choose a command | verify blocks on the parsing |
-| [`infra/`](../infra) | 26 | Sockets, disk, the database, the terminal, time, randomness | regtest end-to-end ([docs/regtest-testing.md](regtest-testing.md)) |
-| [`domain/`](../domain) | 79 | Nothing. Every function is pure | 1,745 colocated verify blocks + the Core corpus (6,050 cases) |
+| [`infra/`](../infra) | 28 | Sockets, disk, the database, the terminal, time, randomness | regtest end-to-end ([docs/regtest-testing.md](regtest-testing.md)) |
+| [`domain/`](../domain) | 81 | Nothing. Every function is pure | colocated verify blocks (about 1,800) + the Core corpus (6,050 cases) |
 | [`providers/`](../providers) | 2 crates | RocksDB; the curve | their own Rust tests |
 
 **Why this split.** The claim the project wants to make is: *a failure against
@@ -103,7 +104,7 @@ command does; it knows how many arguments it takes.
 | `outputs` | [`Infra.Outputs`](../infra/outputs.av) | Every Output under the name an Input calls it by | `o:` |
 | `utxo` | [`Infra.ChainState.build`](../infra/chainstate.av#L53) | Connect Blocks in order into the Set | `u:` `d:` `meta:setTo` |
 | `assumevalid` | [`App.Maintain.assumeValid`](../app/maintain.av#L371) → [`Domain.AssumeValid`](../domain/assumevalid.av) | The Height below which Scripts are taken as settled | `meta:` |
-| `follow` | [`App.Node.follow`](../app/node.av) → [`Infra.Follow.follow`](../infra/follow.av#L155) | All of the above, forever, driven by Peers | everything |
+| `follow` | [`App.Node.follow`](../app/node.av) → [`Infra.Follow.follow`](../infra/follow.av#L155) | All of the above, forever, driven by Peers; `screen`, `serve`, `log`, `http` | everything |
 | `listen` | [`Infra.Peer`](../infra/peer.av) | One Peer, every Transaction it announces, printed | nothing |
 | `show` | [`App.Show`](../app/show.av) over [`Infra.Chain`](../infra/chain.av) | One Block, rendered, with its findings | nothing |
 | `tx` / `spend` | [`App.Lookup.byTxid`](../app/lookup.av) | A Transaction by Id; its Inputs followed back | nothing |
@@ -232,6 +233,23 @@ design decisions, each written in its intent block:
   not hash to the Id it was asked under, a broken Handshake: the Peer is
   dropped and the node carries on. No banscore, because every fault
   detectable here is one Core disconnects on outright.
+
+- **The company is kept while the node walks (#275).** The loop tends its
+  Peers every turn; a Set catch-up used to tend them only between chunks,
+  ten seconds apart, and a dial begun between two chunks was first looked at
+  after the next — past its deadline — so a catching-up node gained no Peers.
+  [`Infra.Tending`](../infra/tending.av) bundles the pool, the Address Book
+  and the next key as **Kept** and tends them from the same Pool-level
+  operations the loop uses: drain what arrived (kept as spare for the loop,
+  pings answered by the pool), ask the dial what it became, seat and greet a
+  Candidate that answered, top up, admit a caller off the listener, tell the
+  Network where we are. The walk's Eye carries a `Kept` and tends it once a
+  second ([`tendedCompany`](../infra/screen.av)); the chunk driver folds it
+  back after every chunk. A Peer is a Peer within a second of answering,
+  walking or listening.
+- **A pool that empties re-seeds (#272).** Nobody left to dial is the normal
+  state a minute after a restart; [`reseeded`](../infra/follow.av) asks the
+  DNS seeds again rather than ending the run.
 
 The Handshake and wire formats are pure: [`Domain.Version`](../domain/version.av),
 [`Domain.Addr`](../domain/addr.av), [`Domain.Message`](../domain/message.av),
@@ -369,6 +387,26 @@ and two of them were losses: prefetching the next Block's Store answers on
 the fetch thread (#251, 6 % slower — the resolve was already off the
 critical path) and RocksDB option changes (#252, within noise).
 
+**Chunks, and what watches them.** `follow` runs the walk in chunks
+([`buildingTo`](../infra/follow.av)): the first is the smallest (5 Blocks)
+and each next is sized from what the last one cost, aiming at ten seconds
+(#217, #273), so the pool is tended and the loop's stop is seen between
+them. The download runs Set chunks of its own while Blocks are still landing
+(#264, "the Set runs inside the download"), bounded the same way since #267 —
+the unbounded version of that walk was #266, an eight-minute wedge that hid
+as a *missing* line. Hence the watchdog (#268): the Eye that every walk
+carries knows which chunk it is walking and when the last Block ended, and
+writes `slow chunk` (from inside the walk), `slow block` and `slow stop`
+lines to `debug.log` when a budget is passed ([`Domain.Watchdog`](../domain/watchdog.av)
+is the budgets and the words). Reporting only.
+
+**The Eye.** [`Infra.Screen.Eye`](../infra/screen.av) is what a walk carries
+of the outside world: the Snapshot it advances, the Log it writes to, the
+Screen's view if one is up, the Board (#261) it answers once a second, the
+company it keeps (#275) and the watchdog's clocks — all threaded through
+`glanced`, one call per Block on the main thread, so nothing the walk owes
+the world waits for a chunk to end.
+
 **The walk has no range.** A UTXO Set is the state after connecting every
 Block, so [`build`](../infra/chainstate.av#L53) is told a target and starts
 from wherever `meta:setTo` says the Set stands — after
@@ -388,13 +426,13 @@ record, carried through a tail-recursive loop
 stateDiagram-v2
     [*] --> Joining: dial the named Peers, or a DNS seed
     Joining --> CatchingUp: any Peer has a higher tip
-    CatchingUp --> CatchingUp: buildingTo — the Set in chunks,<br/>tendedBetween keeps Peers alive
+    CatchingUp --> CatchingUp: buildingTo — the Set in sized chunks;<br/>the Eye tends the company once a second
     CatchingUp --> CaughtUp: Set stands on the tip
     CaughtUp --> CaughtUp: tick — inv/headers/cmpctblock/tx/getdata/addr
     CaughtUp --> CatchingUp: a Header arrives above the tip
     CaughtUp --> Rewinding: the most-work Branch changed
     Rewinding --> CatchingUp: Set at the fork
-    CaughtUp --> [*]: Ctrl-C (Process.stopRequested), seen between Blocks
+    CaughtUp --> [*]: Ctrl-C or the Screen's q/y, seen at the next Block
 ```
 
 What the tick does, and why each piece is where it is:
@@ -417,16 +455,22 @@ What the tick does, and why each piece is where it is:
   can ask for Blocks and Transactions;
   [`servingBlocks`](../infra/follow.av#L2226) answers from the Segments and
   [`serving`](../infra/follow.av#L2294) from the mempool.
-- **Between chunks of a long catch-up** the pool is still tended
-  ([`tendedBetween`](../infra/follow.av#L1053)) — a syncing node reaches the
-  listen loop hours late, and Peers that are not pinged leave.
+- **A long catch-up is not a silence.** The pool is tended between chunks
+  ([`tendedBetween`](../infra/follow.av)) and, since #275, once a second from
+  inside the walk through the Eye — a syncing node reaches the listen loop
+  hours late, and a node that only spoke between chunks gained no Peers.
+- **The Board (#261).** `http[:port]` answers `GET /` with the five Panels as
+  one page ([`Domain.Page`](../domain/page.av) the text, [`Infra.Board`](../infra/board.av)
+  the sockets): a Reader is given a tenth of a second to have asked and is
+  never waited for; answered from the loop and from inside the walk alike.
 - **The Screen.** [`Domain.Snapshot`](../domain/snapshot.av) assembles one
   picture of the node per tick; [`Domain.Screen`](../domain/screen.av)
   decides every character and cursor move from it and from key presses;
   [`Infra.Screen`](../infra/screen.av) executes those draw operations and
   owns raw mode. Because a Screen run leaves nothing behind,
   [`Infra.Metrics`](../infra/metrics.av) appends the same numbers to a file
-  and [`Infra.Debug`](../infra/debug.av) appends one line per decision (#218).
+  and [`Infra.Debug`](../infra/debug.av) appends one line per decision (#218)
+  — and, since #268, one line per overrun.
 - **Independence.** The follow loop is the single writer (ADR 0008); nothing
   else touches the Store while it runs, and the Lock says so.
 
