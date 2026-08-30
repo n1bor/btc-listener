@@ -13,11 +13,20 @@ module Headers
         "outside the batch cost a lookup, which is one per batch on a chain"
         "arriving in order."
         "Nothing here decides anything. Which branch wins is Domain.HeaderTree,"
-        "what changing to it means is Domain.Reorg, and both are covered by"
-        "verify blocks over Maps and Lists. This module is the part that has"
-        "to touch a Store."
-    exposes [Settled, seeded, absorbed, tipOf]
-    depends [Bytes, Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Domain.TreeStore, Infra.Store]
+        "what changing to it means is Domain.Reorg, what a Header has to prove"
+        "is Domain.Target, and all three are covered by verify blocks over Maps"
+        "and Lists. This module is the part that has to touch a Store."
+        "A batch is vetted before it is written (#281). Every Header has to"
+        "meet the target its own bits name, and every Header that attaches to"
+        "a parent has to carry the bits the Network's rule gives for its"
+        "Height and a timestamp after the median of the eleven beneath it and"
+        "not two hours past the clock. The rule needs the Headers below, which"
+        "the batch holds for most of them and k: holds for the rest; a window"
+        "boundary walks 2015 Headers down, once per 2016. A Header that fails"
+        "any of this refuses the whole batch, and nothing of it is written --"
+        "the Peer that sent it is at fault, and the caller drops it."
+    exposes [Settled, Arrival, seeded, absorbed, tipOf]
+    depends [Bytes, Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Domain.Target, Domain.TreeStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
 record Settled
@@ -26,6 +35,16 @@ record Settled
     orphans: Int
     movement: Movement
     tipHeight: Int
+
+record Arrival
+    store: Store
+    network: Network
+    nowSecs: Int
+    batch: Map<String, BlockHeader>
+
+record Link
+    header: BlockHeader
+    height: Int
 
 fn seeded(network: Network, store: Store) -> Result<Store, String>
     ? "The Network's first Header in the tree, if it is not already there."
@@ -51,14 +70,51 @@ fn planted(network: Network, store: Store, blockId: String) -> Result<Store, Str
     kept = Domain.TreeStore.heldFor(root, Domain.HeaderBytes.genesisHexFor(network))
     Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.headerKey(blockId)?, value = Domain.TreeStore.encodeHeld(kept)?), Entry(key = Domain.TreeStore.bestTipKey()?, value = Domain.Index.encodeBlockId(blockId)?)])
 
-fn absorbed(store: Store, decoded: List<BlockHeader>) -> Result<Settled, String>
+fn absorbed(network: Network, store: Store, decoded: List<BlockHeader>, nowSecs: Int) -> Result<Settled, String>
     ? "A batch of Headers into the tree, and h: pointed at the best branch."
+      "Or refused whole: a Header that proves no work or carries bits or a"
+      "timestamp the rule does not allow is an Err before anything is"
+      "written, and the Err names the Header."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
-    known = treeFor(store, decoded, Map.fromList([]))?
+    _proven = allProven(decoded)?
+    arrival = Arrival(store = store, network = network, nowSecs = nowSecs, batch = batchOf(decoded, Map.fromList([])))
+    known = treeFor(arrival, decoded, Map.fromList([]))?
     entries = entriesFor(decoded, known, [])?
     written = Infra.Store.putAll(store, entries)?
     tip = bestAfter(written, decoded, known)?
     followed(written, tip, List.len(entries), List.len(decoded) - List.len(entries))
+
+fn allProven(decoded: List<BlockHeader>) -> Result<Unit, String>
+    ? "Every Header of the batch under its own target, Orphans included."
+    match decoded
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> provenThen(Domain.Target.proven(head), tail)
+
+verify allProven
+    allProven([]) => Result.Ok(Unit)
+    allProven(branchHeaders()) => Result.Ok(Unit)
+    allProven([headerD(), headerUnproven()]) => Result.Err("Header ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff does not meet the target its bits 545259519 name")
+
+fn provenThen(fault: Option<String>, rest: List<BlockHeader>) -> Result<Unit, String>
+    ? "Stop at the first Header that proves nothing."
+    match fault
+        Option.Some(why) -> Result.Err(why)
+        Option.None -> allProven(rest)
+
+verify provenThen
+    provenThen(Option.None, []) => Result.Ok(Unit)
+    provenThen(Option.Some("no"), []) => Result.Err("no")
+
+fn batchOf(decoded: List<BlockHeader>, acc: Map<String, BlockHeader>) -> Map<String, BlockHeader>
+    ? "The batch by Block Id, so a parent inside it costs no lookup."
+    match decoded
+        [] -> acc
+        [head, ..tail] -> batchOf(tail, Map.set(acc, head.blockId, head))
+
+verify batchOf
+    Map.len(batchOf([], Map.fromList([]))) => 0
+    Map.len(batchOf(branchHeaders(), Map.fromList([]))) => 3
+    Map.has(batchOf(branchHeaders(), Map.fromList([])), headerE().blockId) => true
 
 fn followed(store: Store, tip: Option<Placement>, placed: Int, orphans: Int) -> Result<Settled, String>
     ? "Point h: at the tip, unless there is no tip to point at."
@@ -79,26 +135,235 @@ fn repointed(store: Store, tip: Placement, placed: Int, orphans: Int) -> Result<
     named = Infra.Store.putAll(swept, [Entry(key = Domain.TreeStore.bestTipKey()?, value = Domain.Index.encodeBlockId(tip.blockId)?)])?
     Result.Ok(Settled(store = named, placed = placed, orphans = orphans, movement = Domain.Reorg.movementOf(plan), tipHeight = tip.height))
 
-fn treeFor(store: Store, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
+fn treeFor(arrival: Arrival, decoded: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
     ? "Every Header of the batch placed, fetching a parent only when the batch does not hold it."
     ! [Infra.Kv.get]
     match decoded
         [] -> Result.Ok(known)
-        [head, ..tail] -> treeAfter(store, head, tail, known)
+        [head, ..tail] -> treeAfter(arrival, head, tail, known)
 
-fn treeAfter(store: Store, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
+verify treeFor
+    Map.len(treeFor(trunkArrival()?, [], Map.fromList([]))?) => 0
+    Map.len(treeFor(arrivalWith(branchHeaders())?, branchHeaders(), Map.fromList([]))?) => 4
+    Map.len(treeFor(arrivalWith([headerStray()])?, [headerStray()], Map.fromList([]))?) => 0
+    treeFor(Arrival(store = Infra.Store.fixture(trunkPairs()?), network = Network.Regtest, nowSecs = 100000, batch = batchOf([headerLateBits()], Map.fromList([]))), [headerLateBits()], Map.fromList([])) => Result.Err("Header 0000000003030303030303030303030303030303030303030303030303030303 at Height 3 carries bits 486604799 where the rule gives 545259519")
+    treeFor(Arrival(store = Infra.Store.fixture(trunkPairs()?), network = Network.Regtest, nowSecs = 100000, batch = batchOf([headerEarly()], Map.fromList([]))), [headerEarly()], Map.fromList([])) => Result.Err("Header 0404040404040404040404040404040404040404040404040404040404040404 at 2 is not after the median 2 of the Headers before it")
+    treeFor(Arrival(store = Infra.Store.fixture(trunkPairs()?), network = Network.Regtest, nowSecs = 100000, batch = batchOf([headerAhead()], Map.fromList([]))), [headerAhead()], Map.fromList([])) => Result.Err("Header 0505050505050505050505050505050505050505050505050505050505050505 is 7201 s ahead of the clock")
+
+fn treeAfter(arrival: Arrival, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
     ? "Place this one, then carry on with the rest."
     ! [Infra.Kv.get]
     match Map.has(known, header.previousBlockId)
-        true -> treeFor(store, rest, placedInto(known, header))
-        false -> withParent(store, header, rest, known)
+        true -> attached(arrival, header, rest, known)
+        false -> withParent(arrival, header, rest, known)
 
-fn withParent(store: Store, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
+fn withParent(arrival: Arrival, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
     ? "The parent is not in the batch, so ask the Store for it."
     ! [Infra.Kv.get]
-    text = Infra.Store.get(store, Domain.TreeStore.headerKey(header.previousBlockId)?)?
+    text = Infra.Store.get(arrival.store, Domain.TreeStore.headerKey(header.previousBlockId)?)?
     seededWith = withFetched(known, header.previousBlockId, text)?
-    treeFor(store, rest, placedInto(seededWith, header))
+    match Map.has(seededWith, header.previousBlockId)
+        true -> attached(arrival, header, rest, seededWith)
+        false -> treeFor(arrival, rest, seededWith)
+
+fn attached(arrival: Arrival, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
+    ? "A Header whose parent is placed: vetted against it, then placed."
+    ! [Infra.Kv.get]
+    parent = parentLink(arrival, known, header.previousBlockId)?
+    _vetted = vetted(arrival, header, parent, known)?
+    treeFor(arrival, rest, placedInto(known, header))
+
+fn parentLink(arrival: Arrival, known: Map<String, Placement>, parentId: String) -> Result<Link, String>
+    ? "The parent's Header and Height, which a placed parent always has."
+    ! [Infra.Kv.get]
+    link = linkOf(arrival, known, parentId)?
+    match link
+        Option.None -> Result.Err("the tree places {parentId} but holds no Header for it")
+        Option.Some(found) -> Result.Ok(found)
+
+verify parentLink
+    parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?.height => 2
+    parentLink(trunkArrival()?, Map.fromList([]), headerStray().previousBlockId) => Result.Err("the tree places 9999999999999999999999999999999999999999999999999999999999999999 but holds no Header for it")
+
+fn vetted(arrival: Arrival, header: BlockHeader, parent: Link, known: Map<String, Placement>) -> Result<Unit, String>
+    ? "The bits and the timestamp, against what lies beneath the parent."
+    ! [Infra.Kv.get]
+    height = parent.height + 1
+    lineage = lineageFor(arrival, known, Domain.Target.ruleFor(arrival.network, height), header.previousBlockId, parent)?
+    recent = recentTimes(arrival, known, header.previousBlockId, 11, [])?
+    refused(Domain.Target.refusal(arrival.network, header, height, lineage, recent, arrival.nowSecs))
+
+verify vetted
+    vetted(trunkArrival()?, headerG(), parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?, Map.fromList([])) => Result.Ok(Unit)
+    vetted(trunkArrival()?, headerLateBits(), parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?, Map.fromList([])) => Result.Err("Header 0000000003030303030303030303030303030303030303030303030303030303 at Height 3 carries bits 486604799 where the rule gives 545259519")
+
+fn refused(fault: Option<String>) -> Result<Unit, String>
+    ? "A reason to refuse is an Err; none is nothing."
+    match fault
+        Option.None -> Result.Ok(Unit)
+        Option.Some(why) -> Result.Err(why)
+
+verify refused
+    refused(Option.None) => Result.Ok(Unit)
+    refused(Option.Some("no")) => Result.Err("no")
+
+fn lineageFor(arrival: Arrival, known: Map<String, Placement>, rule: Rule, parentId: String, parent: Link) -> Result<Lineage, String>
+    ? "What the rule needs from beneath the parent, and no more."
+      "A window boundary needs the first Header of the window; the two"
+      "Networks that allow the limit need the last Header that was not at"
+      "it; every other Height needs the parent alone."
+    ! [Infra.Kv.get]
+    match rule
+        Rule.Same -> Result.Ok(plainLineage(parent.header))
+        Rule.Retarget -> windowed(arrival, known, parentId, parent)
+        Rule.MinOrLast -> withLast(arrival, known, parentId, parent)
+
+verify lineageFor
+    lineageFor(trunkArrival()?, Map.fromList([]), Rule.Same, headerC().blockId, parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?)?.firstTime => 3
+    lineageFor(trunkArrival()?, Map.fromList([]), Rule.MinOrLast, headerC().blockId, parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?)?.lastBits => 545259519
+    lineageFor(trunkArrival()?, Map.fromList([]), Rule.Retarget, headerC().blockId, parentLink(trunkArrival()?, Map.fromList([]), headerC().blockId)?) => Result.Err("the tree does not hold the whole window beneath 0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c")
+
+fn plainLineage(parent: BlockHeader) -> Lineage
+    ? "The parent alone, which is all a Height inside a window needs."
+    Lineage(parentBits = parent.bits, parentTime = parent.timestamp, firstTime = parent.timestamp, lastBits = parent.bits)
+
+verify plainLineage
+    plainLineage(headerC()).parentBits => 545259519
+    plainLineage(headerC()).firstTime => 3
+
+fn windowed(arrival: Arrival, known: Map<String, Placement>, parentId: String, parent: Link) -> Result<Lineage, String>
+    ? "The parent and the first Header of the window it closes, 2015 below it."
+    ! [Infra.Kv.get]
+    first = ancestorAt(arrival, known, parentId, 2015)?
+    match first
+        Option.None -> Result.Err("the tree does not hold the whole window beneath {parentId}")
+        Option.Some(link) -> Result.Ok(Lineage(parentBits = parent.header.bits, parentTime = parent.header.timestamp, firstTime = link.header.timestamp, lastBits = parent.header.bits))
+
+fn withLast(arrival: Arrival, known: Map<String, Placement>, parentId: String, parent: Link) -> Result<Lineage, String>
+    ? "The parent and the bits of the last Header in the window not at the limit."
+    ! [Infra.Kv.get]
+    last = lastRealBits(arrival, known, parentId, Domain.Target.limitBits(arrival.network))?
+    Result.Ok(Lineage(parentBits = parent.header.bits, parentTime = parent.header.timestamp, firstTime = parent.header.timestamp, lastBits = last))
+
+fn linkOf(arrival: Arrival, known: Map<String, Placement>, blockId: String) -> Result<Option<Link>, String>
+    ? "A Header and its Height, from the batch if it is there and k: if not."
+      "Walks follow previousBlockId strings and never a decoded Header's own"
+      "Id, so the fixtures here need not hash to the Ids they are filed under."
+    ! [Infra.Kv.get]
+    match Map.get(arrival.batch, blockId)
+        Option.Some(header) -> Result.Ok(linkPlaced(header, Map.get(known, blockId)))
+        Option.None -> linkFetched(arrival.store, blockId)
+
+verify linkOf
+    heightIn(linkOf(trunkArrival()?, Map.fromList([]), headerB().blockId)?) => 1
+    linkOf(trunkArrival()?, Map.fromList([]), headerStray().blockId) => Result.Ok(Option.None)
+    linkOf(Arrival(store = Infra.Store.fixture([(Domain.TreeStore.headerKey("aa")?, Domain.Index.emptyBytes())]), network = Network.Regtest, nowSecs = 0, batch = Map.fromList([])), Map.fromList([]), "aa") => Result.Err("a Header record is at least 4 bytes, got 0")
+    heightIn(linkOf(Arrival(store = Infra.Store.fixture([]), network = Network.Regtest, nowSecs = 0, batch = batchOf([headerD()], Map.fromList([]))), Map.fromList([(headerD().blockId, Placement(blockId = headerD().blockId, parentId = headerA().blockId, height = 1, work = 4))]), headerD().blockId)?) => 1
+    linkOf(Arrival(store = Infra.Store.fixture([]), network = Network.Regtest, nowSecs = 0, batch = batchOf([headerD()], Map.fromList([]))), Map.fromList([]), headerD().blockId) => Result.Ok(Option.None)
+
+fn heightIn(link: Option<Link>) -> Int
+    ? "A Link's Height, or minus one for none: for the cases here."
+    match link
+        Option.None -> 0 - 1
+        Option.Some(found) -> found.height
+
+verify heightIn
+    heightIn(Option.None) => 0 - 1
+    heightIn(Option.Some(Link(header = headerD(), height = 4))) => 4
+
+fn linkPlaced(header: BlockHeader, placement: Option<Placement>) -> Option<Link>
+    ? "A batch Header is a Link only once it has a Placement."
+    match placement
+        Option.None -> Option.None
+        Option.Some(found) -> Option.Some(Link(header = header, height = found.height))
+
+verify linkPlaced
+    linkPlaced(headerD(), Option.None) => Option.None
+    linkPlaced(headerD(), Option.Some(Placement(blockId = "x", parentId = "y", height = 4, work = 1))) => Option.Some(Link(header = headerD(), height = 4))
+
+fn linkFetched(store: Store, blockId: String) -> Result<Option<Link>, String>
+    ? "The k: record for a Block Id, decoded, or nothing."
+    ! [Infra.Kv.get]
+    text = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
+    match text
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(value) -> linkDecoded(Domain.TreeStore.decodeHeld(blockId, value)?)
+
+verify linkFetched
+    heightIn(linkFetched(Infra.Store.fixture(trunkPairs()?), headerA().blockId)?) => 0
+    linkFetched(Infra.Store.fixture([]), headerA().blockId) => Result.Ok(Option.None)
+    linkFetched(Infra.Store.fixture([(Domain.TreeStore.headerKey("aa")?, Domain.Index.emptyBytes())]), "aa") => Result.Err("a Header record is at least 4 bytes, got 0")
+
+fn linkDecoded(held: Held) -> Result<Option<Link>, String>
+    ? "The Header out of its hex, beside the Height its Placement records."
+    header = Domain.Block.decodeHeader(Bytes.octets(Bytes.fromHex(held.headerHex)?))?
+    Result.Ok(Option.Some(Link(header = header, height = held.placement.height)))
+
+verify linkDecoded
+    heightIn(linkDecoded(Domain.TreeStore.heldFor(Placement(blockId = "aa", parentId = "bb", height = 5, work = 1), Domain.HeaderBytes.hexOf(headerA())?))?) => 5
+    linkDecoded(Domain.TreeStore.heldFor(Placement(blockId = "aa", parentId = "bb", height = 5, work = 1), "01")) => Result.Err("Block Header must be 80 bytes, got 1")
+
+fn recentTimes(arrival: Arrival, known: Map<String, Placement>, blockId: String, left: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "The timestamps of up to this many Headers, walking down from one."
+    ! [Infra.Kv.get]
+    match left <= 0
+        true -> Result.Ok(acc)
+        false -> recentFrom(arrival, known, linkOf(arrival, known, blockId)?, left, acc)
+
+verify recentTimes
+    recentTimes(trunkArrival()?, Map.fromList([]), headerC().blockId, 11, []) => Result.Ok([1, 2, 3])
+    recentTimes(trunkArrival()?, Map.fromList([]), headerC().blockId, 2, []) => Result.Ok([2, 3])
+    recentTimes(trunkArrival()?, Map.fromList([]), headerStray().blockId, 11, []) => Result.Ok([])
+
+fn recentFrom(arrival: Arrival, known: Map<String, Placement>, link: Option<Link>, left: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "This Header's timestamp, then its parent's; a missing Header ends the walk."
+    ! [Infra.Kv.get]
+    match link
+        Option.None -> Result.Ok(acc)
+        Option.Some(found) -> recentTimes(arrival, known, found.header.previousBlockId, left - 1, List.prepend(found.header.timestamp, acc))
+
+fn ancestorAt(arrival: Arrival, known: Map<String, Placement>, blockId: String, steps: Int) -> Result<Option<Link>, String>
+    ? "The Header this many steps down from one, or nothing if the tree runs out."
+    ! [Infra.Kv.get]
+    link = linkOf(arrival, known, blockId)?
+    match steps <= 0
+        true -> Result.Ok(link)
+        false -> ancestorBeyond(arrival, known, link, steps)
+
+verify ancestorAt
+    heightIn(ancestorAt(trunkArrival()?, Map.fromList([]), headerC().blockId, 0)?) => 2
+    heightIn(ancestorAt(trunkArrival()?, Map.fromList([]), headerC().blockId, 2)?) => 0
+    ancestorAt(trunkArrival()?, Map.fromList([]), headerC().blockId, 3) => Result.Ok(Option.None)
+
+fn ancestorBeyond(arrival: Arrival, known: Map<String, Placement>, link: Option<Link>, steps: Int) -> Result<Option<Link>, String>
+    ? "One step down, if there is a Header to step from."
+    ! [Infra.Kv.get]
+    match link
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(found) -> ancestorAt(arrival, known, found.header.previousBlockId, steps - 1)
+
+fn lastRealBits(arrival: Arrival, known: Map<String, Placement>, blockId: String, limit: Int) -> Result<Int, String>
+    ? "Core's walk for the allow-minimum Networks: down past every Header at"
+      "the limit until one is not, or one starts a window; its bits are the"
+      "answer. A tree that runs out answers the limit, which is what genesis"
+      "carries on both."
+    ! [Infra.Kv.get]
+    link = linkOf(arrival, known, blockId)?
+    match link
+        Option.None -> Result.Ok(limit)
+        Option.Some(found) -> realOrBack(arrival, known, found, limit)
+
+verify lastRealBits
+    lastRealBits(trunkArrival()?, Map.fromList([]), headerC().blockId, 545259519) => Result.Ok(545259519)
+    lastRealBits(trunkArrival()?, Map.fromList([]), headerC().blockId, 7) => Result.Ok(545259519)
+    lastRealBits(trunkArrival()?, Map.fromList([]), headerStray().blockId, 7) => Result.Ok(7)
+
+fn realOrBack(arrival: Arrival, known: Map<String, Placement>, found: Link, limit: Int) -> Result<Int, String>
+    ? "These bits if they are real or start a window; otherwise the parent's."
+    ! [Infra.Kv.get]
+    match Bool.or(found.header.bits != limit, Int.mod(found.height, 2016) == 0)
+        true -> Result.Ok(found.header.bits)
+        false -> lastRealBits(arrival, known, found.header.previousBlockId, limit)
 
 fn withFetched(known: Map<String, Placement>, parentId: String, text: Option<Bytes>) -> Result<Map<String, Placement>, String>
     ? "The fetched parent into the batch's Map, or the Map unchanged."
@@ -350,20 +615,77 @@ verify sampleKnown
     Map.len(sampleKnown()) => 1
     Map.has(sampleKnown(), sampleHeader().blockId) => true
 
+fn synthetic(blockId: String, previousBlockId: String, timestamp: Int, bits: Int) -> BlockHeader
+    ? "A Header for the cases here, at regtest's limit unless told otherwise."
+      "The Ids are runs of one low byte, which is under the regtest target"
+      "for any bits at the limit, so the proof-of-work check passes without"
+      "any Header here being hashed; the hex k: keeps for each is what"
+      "HeaderBytes makes of these fields, and the walks that read it follow"
+      "previousBlockId strings and never re-hash."
+    BlockHeader(blockId = blockId, version = 1, previousBlockId = previousBlockId, merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = timestamp, bits = bits, nonce = 0)
+
+verify synthetic
+    synthetic("0a", "00", 1, 545259519).timestamp => 1
+    synthetic("0a", "00", 1, 545259519).bits => 545259519
+
+fn headerA() -> BlockHeader
+    ? "The trunk's root, at Height 0."
+    synthetic("0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a", Domain.HeaderTree.zeroId(), 1, 545259519)
+
+verify headerA
+    headerA().previousBlockId => Domain.HeaderTree.zeroId()
+
+fn headerB() -> BlockHeader
+    ? "The trunk's second Header."
+    synthetic("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", headerA().blockId, 2, 545259519)
+
+verify headerB
+    headerB().previousBlockId => headerA().blockId
+
+fn headerC() -> BlockHeader
+    ? "The trunk's third Header, its tip."
+    synthetic("0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c", headerB().blockId, 3, 545259519)
+
+verify headerC
+    headerC().previousBlockId => headerB().blockId
+
+fn trunkEntry(header: BlockHeader, height: Int) -> Result<Tuple<Bytes, Bytes>, String>
+    ? "One trunk Header as its k: record."
+    Result.Ok((Domain.TreeStore.headerKey(header.blockId)?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = header.blockId, parentId = header.previousBlockId, height = height, work = 2 * (height + 1)), Domain.HeaderBytes.hexOf(header)?))?))
+
+verify trunkEntry
+    List.contains(trunkPairs()?, trunkEntry(headerA(), 0)?) => true
+    List.contains(trunkPairs()?, trunkEntry(headerA(), 1)?) => false
+    trunkEntry(BlockHeader(blockId = "aa", version = 1, previousBlockId = "zz", merkleRoot = "", timestamp = 0, bits = 0, nonce = 0), 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
 fn trunkPairs() -> Result<List<Tuple<Bytes, Bytes>>, String>
     ? "A Store already following a three-Block chain, for the cases here."
       "Three k: entries, the three Heights they sit at, and a best-tip record"
-      "naming the top. Ids are runs of one byte rather than real Block Ids:"
-      "nothing on this path re-hashes a Header, so what is under test is the"
-      "bookkeeping and not the hashing, which Domain.HeaderBytes covers."
+      "naming the top. Regtest's shape: every Header at the limit, two units"
+      "of work each, timestamps one second apart."
       "The pairs rather than the Store, because a Store is opaque out here and"
       "a list can carry its own cases."
-    Result.Ok([(Domain.TreeStore.headerKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "0000000000000000000000000000000000000000000000000000000000000000", height = 0, work = 4295032833), ""))?), (Domain.TreeStore.headerKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", height = 1, work = 8590065666), ""))?), (Domain.TreeStore.headerKey("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?, Domain.TreeStore.encodeHeld(Domain.TreeStore.heldFor(Domain.HeaderTree.Placement(blockId = "aa", parentId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", height = 2, work = 12885098499), ""))?), (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?), (Domain.IndexKeys.heightKey(1)?, Domain.Index.encodeBlockId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?), (Domain.IndexKeys.heightKey(2)?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?), (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?)])
+    Result.Ok([trunkEntry(headerA(), 0)?, trunkEntry(headerB(), 1)?, trunkEntry(headerC(), 2)?, (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId(headerA().blockId)?), (Domain.IndexKeys.heightKey(1)?, Domain.Index.encodeBlockId(headerB().blockId)?), (Domain.IndexKeys.heightKey(2)?, Domain.Index.encodeBlockId(headerC().blockId)?), (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId(headerC().blockId)?)])
 
 verify trunkPairs
     List.len(trunkPairs()?) => 7
-    List.contains(trunkPairs()?, (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?)) => true
-    List.contains(trunkPairs()?, (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?)) => true
+    List.contains(trunkPairs()?, (Domain.TreeStore.bestTipKey()?, Domain.Index.encodeBlockId(headerC().blockId)?)) => true
+    List.contains(trunkPairs()?, (Domain.IndexKeys.heightKey(0)?, Domain.Index.encodeBlockId(headerA().blockId)?)) => true
+
+fn trunkArrival() -> Result<Arrival, String>
+    ? "That Store as an Arrival with an empty batch, on regtest, at a clock"
+      "every fixture timestamp is well behind."
+    Result.Ok(Arrival(store = Infra.Store.fixture(trunkPairs()?), network = Network.Regtest, nowSecs = 100000, batch = Map.fromList([])))
+
+verify trunkArrival
+    trunkArrival()?.nowSecs => 100000
+
+fn arrivalWith(headers: List<BlockHeader>) -> Result<Arrival, String>
+    ? "The same, with a batch in it."
+    Result.Ok(Arrival(store = Infra.Store.fixture(trunkPairs()?), network = Network.Regtest, nowSecs = 100000, batch = batchOf(headers, Map.fromList([]))))
+
+verify arrivalWith
+    Map.len(arrivalWith(branchHeaders())?.batch) => 3
 
 fn branchHeaders() -> List<BlockHeader>
     ? "Three Headers forking from Height 0, one longer than the trunk."
@@ -380,18 +702,18 @@ fn heightNames(outcome: Settled, height: Int) -> Result<Option<String>, String>
     Result.Ok(Domain.Index.blockIdIn(Infra.Store.get(outcome.store, Domain.IndexKeys.heightKey(height)?)?))
 
 verify heightNames
-    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 0) => Result.Ok(Option.Some(headerA().blockId))
     heightNames(Settled(store = Infra.Store.fixture(trunkPairs()?), placed = 0, orphans = 0, movement = Movement.Unchanged, tipHeight = 2), 9) => Result.Ok(Option.None)
 
 fn absorbedInto(store: Store, headers: List<BlockHeader>) -> Result<Settled, String>
-    ? "Absorb a batch, for the cases that assert on what came out."
+    ? "Absorb a batch on regtest, for the cases that assert on what came out."
       "Note what placed counts: Headers that found a place in the tree, which"
       "includes one the Store already held -- it is derived again and written"
       "again to the same value. So placed is not a measure of new information,"
       "and the phase decides whether to ask for more from the Movement, which"
       "is."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
-    absorbed(store, headers)
+    absorbed(Network.Regtest, store, headers, 100000)
 
 verify absorbedInto
     absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.movement => Movement.Reorganised(0, 2)
@@ -399,61 +721,73 @@ verify absorbedInto
     absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.placed => 3
     absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?.orphans => 0
     absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?.movement => Movement.Extended(1)
-    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?.tipHeight => 3
-    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerB()])?.movement => Movement.Unchanged
-    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerB()])?.placed => 1
     absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerStray()])?.orphans => 1
-    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerStray()])?.placed => 0
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 1) => Result.Ok(Option.Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 2) => Result.Ok(Option.Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 3) => Result.Ok(Option.Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 0) => Result.Ok(Option.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
-    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG()])?, 3) => Result.Ok(Option.Some("1111111111111111111111111111111111111111111111111111111111111111"))
-
-fn headerB() -> BlockHeader
-    ? "The trunk's second Header, which the Store already holds."
-    BlockHeader(blockId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", version = 1, previousBlockId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
-
-verify headerB
-    headerB().blockId => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    headerB().previousBlockId => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG(), headerUnproven()]) => Result.Err("Header ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff does not meet the target its bits 545259519 name")
+    absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerG(), headerLateBits()]) => Result.Err("Header 0000000003030303030303030303030303030303030303030303030303030303 at Height 3 carries bits 486604799 where the rule gives 545259519")
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), branchHeaders())?, 1) => Result.Ok(Option.Some(headerD().blockId))
+    heightNames(absorbedInto(Infra.Store.fixture(trunkPairs()?), [headerC(), headerG()])?, 3) => Result.Ok(Option.Some(headerG().blockId))
 
 fn headerD() -> BlockHeader
     ? "The branch's first Header, claiming Height 1 against the trunk's."
-    BlockHeader(blockId = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", version = 1, previousBlockId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
+    synthetic("0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d", headerA().blockId, 2, 545259519)
 
 verify headerD
-    headerD().blockId => "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-    headerD().previousBlockId => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    headerD().previousBlockId => headerA().blockId
 
 fn headerE() -> BlockHeader
     ? "The branch's second Header."
-    BlockHeader(blockId = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", version = 1, previousBlockId = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
+    synthetic("0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e", headerD().blockId, 3, 545259519)
 
 verify headerE
-    headerE().blockId => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-    headerE().previousBlockId => "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    headerE().previousBlockId => headerD().blockId
 
 fn headerF() -> BlockHeader
     ? "The branch's third, which puts it one Block past the trunk."
-    BlockHeader(blockId = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", version = 1, previousBlockId = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
+    synthetic("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f", headerE().blockId, 4, 545259519)
 
 verify headerF
-    headerF().blockId => "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    headerF().previousBlockId => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    headerF().previousBlockId => headerE().blockId
 
 fn headerG() -> BlockHeader
     ? "One more Header on the trunk itself, which is growth and not a fork."
-    BlockHeader(blockId = "1111111111111111111111111111111111111111111111111111111111111111", version = 1, previousBlockId = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
+    synthetic("0101010101010101010101010101010101010101010101010101010101010101", headerC().blockId, 4, 545259519)
 
 verify headerG
-    headerG().blockId => "1111111111111111111111111111111111111111111111111111111111111111"
-    headerG().previousBlockId => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    headerG().previousBlockId => headerC().blockId
 
 fn headerStray() -> BlockHeader
     ? "A Header whose parent is nowhere: an Orphan."
-    BlockHeader(blockId = "2222222222222222222222222222222222222222222222222222222222222222", version = 1, previousBlockId = "9999999999999999999999999999999999999999999999999999999999999999", merkleRoot = "0000000000000000000000000000000000000000000000000000000000000000", timestamp = 0, bits = 486604799, nonce = 0)
+    synthetic("0202020202020202020202020202020202020202020202020202020202020202", "9999999999999999999999999999999999999999999999999999999999999999", 4, 545259519)
 
 verify headerStray
-    headerStray().blockId => "2222222222222222222222222222222222222222222222222222222222222222"
     headerStray().previousBlockId => "9999999999999999999999999999999999999999999999999999999999999999"
+
+fn headerLateBits() -> BlockHeader
+    ? "On the trunk, but carrying mainnet's bits where regtest's rule gives the limit."
+      "Its Id is under mainnet's target too, so it is the bits rule and not"
+      "the proof of work that refuses it."
+    synthetic("0000000003030303030303030303030303030303030303030303030303030303", headerC().blockId, 4, 486604799)
+
+verify headerLateBits
+    Domain.Target.proven(headerLateBits()) => Option.None
+
+fn headerEarly() -> BlockHeader
+    ? "On the trunk, timestamped at the median of what is beneath it."
+    synthetic("0404040404040404040404040404040404040404040404040404040404040404", headerC().blockId, 2, 545259519)
+
+verify headerEarly
+    headerEarly().timestamp => 2
+
+fn headerAhead() -> BlockHeader
+    ? "On the trunk, one second past two hours ahead of the fixture clock."
+    synthetic("0505050505050505050505050505050505050505050505050505050505050505", headerC().blockId, 107201, 545259519)
+
+verify headerAhead
+    headerAhead().timestamp => 107201
+
+fn headerUnproven() -> BlockHeader
+    ? "An Id of all ones: above any target, so it proves no work at all."
+    synthetic("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", headerC().blockId, 4, 545259519)
+
+verify headerUnproven
+    Domain.Target.proven(headerUnproven()) => Option.Some("Header ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff does not meet the target its bits 545259519 name")

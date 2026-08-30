@@ -1,0 +1,369 @@
+module Target
+    intent =
+        "What a Header has to prove before it can be placed: that its Block Id"
+        "falls under the target its bits name, that those bits are the ones the"
+        "chain's rule gives for that Height, and that its timestamp is neither"
+        "behind the Headers below it nor ahead of the clock."
+        "Until n1bor/btc-listener#281 the tree checked none of this. A Header"
+        "was placed on its parent and credited the work its own bits claimed,"
+        "and meetsTarget was asked only by audit -- so one Header claiming a"
+        "target of one outweighed every Block ever mined, and h: followed it."
+        "The retarget is Core's: every 2016 Headers the target is scaled by how"
+        "long the last 2016 took against the two weeks they should have, held"
+        "to a quarter or four times either way and never past the Network's"
+        "limit. Mainnet's first retarget, Block 32256, is pinned below to the"
+        "bits Core published for it. Testnet and regtest also allow a Header at"
+        "the limit whenever twenty minutes have passed since its parent, and"
+        "otherwise want the bits of the last Header in the window that was not"
+        "at the limit; regtest never retargets at all."
+        "The two time rules are Core's as well: after the median of the eleven"
+        "Headers before it, and no more than two hours past the local clock."
+        "Core measures the second against network-adjusted time; this program"
+        "has no such thing and uses its own clock, which is the stricter side."
+    exposes [Rule, Lineage, ruleFor, limitBits, proven, refusal]
+    depends [Domain.Block, Domain.Network]
+    effects []
+
+type Rule
+    Same
+    Retarget
+    MinOrLast
+
+record Lineage
+    parentBits: Int
+    parentTime: Int
+    firstTime: Int
+    lastBits: Int
+
+fn limitBits(network: Network) -> Int
+    ? "The easiest target a Network allows, in compact form."
+      "Mainnet and testnet share one; signet's is easier and regtest's is the"
+      "easiest the encoding can express, which is what its genesis carries."
+    match network
+        Network.Mainnet -> 486604799
+        Network.Testnet -> 486604799
+        Network.Signet -> 503543726
+        Network.Regtest -> 545259519
+
+verify limitBits
+    limitBits(Network.Mainnet) => 486604799
+    limitBits(Network.Testnet) => 486604799
+    limitBits(Network.Signet) => 503543726
+    limitBits(Network.Regtest) => 545259519
+
+fn ruleFor(network: Network, height: Int) -> Rule
+    ? "Which rule decides the bits of a Header at this Height."
+      "A Height that is a multiple of 2016 is the first of a window and is"
+      "retargeted, except on regtest, which never retargets. Every other"
+      "Height keeps its parent's bits, except on the two Networks that allow"
+      "a Header at the limit after twenty quiet minutes."
+    match Int.mod(height, 2016) == 0
+        true -> atBoundary(network)
+        false -> between(network)
+
+verify ruleFor
+    ruleFor(Network.Mainnet, 2016) => Rule.Retarget
+    ruleFor(Network.Mainnet, 2015) => Rule.Same
+    ruleFor(Network.Mainnet, 1) => Rule.Same
+    ruleFor(Network.Signet, 4032) => Rule.Retarget
+    ruleFor(Network.Signet, 4033) => Rule.Same
+    ruleFor(Network.Testnet, 2016) => Rule.Retarget
+    ruleFor(Network.Testnet, 7) => Rule.MinOrLast
+    ruleFor(Network.Regtest, 2016) => Rule.Same
+    ruleFor(Network.Regtest, 1) => Rule.MinOrLast
+
+fn atBoundary(network: Network) -> Rule
+    ? "The rule at the first Height of a window."
+    match network
+        Network.Mainnet -> Rule.Retarget
+        Network.Testnet -> Rule.Retarget
+        Network.Signet -> Rule.Retarget
+        Network.Regtest -> Rule.Same
+
+verify atBoundary
+    atBoundary(Network.Mainnet) => Rule.Retarget
+    atBoundary(Network.Testnet) => Rule.Retarget
+    atBoundary(Network.Signet) => Rule.Retarget
+    atBoundary(Network.Regtest) => Rule.Same
+
+fn between(network: Network) -> Rule
+    ? "The rule inside a window."
+    match network
+        Network.Mainnet -> Rule.Same
+        Network.Testnet -> Rule.MinOrLast
+        Network.Signet -> Rule.Same
+        Network.Regtest -> Rule.MinOrLast
+
+verify between
+    between(Network.Mainnet) => Rule.Same
+    between(Network.Testnet) => Rule.MinOrLast
+    between(Network.Signet) => Rule.Same
+    between(Network.Regtest) => Rule.MinOrLast
+
+fn compactOf(target: Int) -> Int
+    ? "A target back into the four compact bytes a Header carries."
+      "Core's GetCompact: the top three bytes of the target as the mantissa"
+      "and its length in bytes as the exponent, shifted one byte further when"
+      "the mantissa's top bit is set, because the compact form is signed."
+      "The four round trips below are three genesis targets and one modern"
+      "mainnet target, each unpacked by Domain.Block and packed back here."
+    size = byteLength(target, 0)
+    normalised(mantissaOf(target, size), size)
+
+verify compactOf
+    compactOf(0) => 0
+    compactOf(1) => 16842752
+    compactOf(128) => 33587200
+    compactOf(Domain.Block.targetOf(486604799)) => 486604799
+    compactOf(Domain.Block.targetOf(503543726)) => 503543726
+    compactOf(Domain.Block.targetOf(545259519)) => 545259519
+    compactOf(Domain.Block.targetOf(386075020)) => 386075020
+
+fn byteLength(value: Int, acc: Int) -> Int
+    ? "How many bytes a non-negative number occupies."
+    match value <= 0
+        true -> acc
+        false -> byteLength(Int.div(value, 256), acc + 1)
+
+verify byteLength
+    byteLength(0, 0) => 0
+    byteLength(255, 0) => 1
+    byteLength(256, 0) => 2
+    byteLength(Domain.Block.targetOf(486604799), 0) => 28
+
+fn mantissaOf(target: Int, size: Int) -> Int
+    ? "The top three bytes of the target, padded up when it has fewer."
+      "Total: the divisor is a power of 256 and never zero, so the default"
+      "is unreachable."
+    match size <= 3
+        true -> target * powerOf(256, 3 - size, 1)
+        false -> Result.withDefault(Int.div(target, powerOf(256, size - 3, 1)), 0)
+
+verify mantissaOf
+    mantissaOf(1, 1) => 65536
+    mantissaOf(65535, 2) => 16776960
+    mantissaOf(Domain.Block.targetOf(486604799), 28) => 16776960
+
+fn normalised(mantissa: Int, size: Int) -> Int
+    ? "The mantissa beneath the exponent, shifted when its sign bit is set."
+    match mantissa >= 8388608
+        true -> Int.div(mantissa, 256) + (size + 1) * 16777216
+        false -> mantissa + size * 16777216
+
+verify normalised
+    normalised(16776960, 28) => 486604799
+    normalised(65535, 28) => 469827583
+    normalised(8388608, 1) => 33587200
+    normalised(0, 0) => 0
+
+fn powerOf(base: Int, exponent: Int, acc: Int) -> Int
+    ? "base to the exponent, by repeated multiplication."
+    match exponent <= 0
+        true -> acc
+        false -> powerOf(base, exponent - 1, acc * base)
+
+verify powerOf
+    powerOf(256, 0, 1) => 1
+    powerOf(256, 3, 1) => 16777216
+
+fn retargeted(network: Network, parentBits: Int, firstTime: Int, parentTime: Int) -> Int
+    ? "The bits the first Header of a window has to carry."
+      "The parent's target scaled by the time the last window actually took"
+      "over the two weeks it should have, the span held between a quarter and"
+      "four times, and the result held under the Network's limit. The first"
+      "case is mainnet's first retarget: Block 32256 carries 0x1d00d86a, from"
+      "Block 30240 at 1261130161 and Block 32255 at 1262152739 -- Core's"
+      "published number, reached here from the rule alone."
+    span = clamped(parentTime - firstTime)
+    grown = Int.div(Domain.Block.targetOf(parentBits) * span, 1209600)
+    compactOf(Int.min(grown, Domain.Block.targetOf(limitBits(network))))
+
+verify retargeted
+    retargeted(Network.Mainnet, 486604799, 1261130161, 1262152739) => 486594666
+    retargeted(Network.Mainnet, 486604799, 0, 10000000) => 486604799
+    retargeted(Network.Mainnet, 486604799, 0, 1) => 473956288
+    retargeted(Network.Signet, 503543726, 0, 10000000) => 503543726
+    retargeted(Network.Mainnet, 486604799, 0, 1209600) => 486604799
+
+fn clamped(span: Int) -> Int
+    ? "A window's span held between a quarter and four times two weeks."
+    Int.max(302400, Int.min(4838400, span))
+
+verify clamped
+    clamped(1) => 302400
+    clamped(1209600) => 1209600
+    clamped(99999999) => 4838400
+
+fn expectedBits(network: Network, rule: Rule, lineage: Lineage, time: Int) -> Int
+    ? "The bits a Header must carry, under its rule and from what lies beneath it."
+    match rule
+        Rule.Same -> lineage.parentBits
+        Rule.Retarget -> retargeted(network, lineage.parentBits, lineage.firstTime, lineage.parentTime)
+        Rule.MinOrLast -> minOrLast(network, lineage, time)
+
+verify expectedBits
+    expectedBits(Network.Mainnet, Rule.Same, Lineage(parentBits = 7, parentTime = 0, firstTime = 0, lastBits = 9), 0) => 7
+    expectedBits(Network.Mainnet, Rule.Retarget, Lineage(parentBits = 486604799, parentTime = 1262152739, firstTime = 1261130161, lastBits = 0), 0) => 486594666
+    expectedBits(Network.Regtest, Rule.MinOrLast, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 1500) => 9
+    expectedBits(Network.Regtest, Rule.MinOrLast, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 2201) => 545259519
+
+fn minOrLast(network: Network, lineage: Lineage, time: Int) -> Int
+    ? "The limit after twenty quiet minutes; otherwise the last real bits."
+    match time > lineage.parentTime + 1200
+        true -> limitBits(network)
+        false -> lineage.lastBits
+
+verify minOrLast
+    minOrLast(Network.Testnet, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 2200) => 9
+    minOrLast(Network.Testnet, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 2201) => 486604799
+
+fn proven(header: BlockHeader) -> Option<String>
+    ? "Why this Header proves no work, if it does not."
+      "A Block Id that does not fall under the target its own bits name is"
+      "the one refusal that needs nothing but the Header, so it is asked of"
+      "every Header in a batch before any is placed, Orphans included."
+    match Domain.Block.meetsTarget(header.blockId, header.bits)
+        Result.Err(why) -> Option.Some(why)
+        Result.Ok(met) -> provenOrNot(header, met)
+
+verify proven
+    proven(BlockHeader(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 486604799, nonce = 0)) => Option.None
+    proven(BlockHeader(blockId = "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 486604799, nonce = 0)) => Option.Some("Header ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not meet the target its bits 486604799 name")
+    proven(BlockHeader(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 16842752, nonce = 0)) => Option.Some("Header 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not meet the target its bits 16842752 name")
+    proven(BlockHeader(blockId = "zz", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 486604799, nonce = 0)) => Option.Some("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn provenOrNot(header: BlockHeader, met: Bool) -> Option<String>
+    ? "Nothing to say when the target is met."
+    match met
+        true -> Option.None
+        false -> Option.Some("Header {header.blockId} does not meet the target its bits {header.bits} name")
+
+verify provenOrNot
+    provenOrNot(sampleHeader(), true) => Option.None
+    provenOrNot(sampleHeader(), false) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 does not meet the target its bits 486604799 name")
+
+fn refusal(network: Network, header: BlockHeader, height: Int, lineage: Lineage, recent: List<Int>, nowSecs: Int) -> Option<String>
+    ? "Why a Header that has a parent cannot be placed on it, if it cannot."
+      "Bits first, then the clock, then the median: the order Core asks them"
+      "in, so a Header wrong on more than one count is reported the way Core"
+      "would report it."
+    expected = expectedBits(network, ruleFor(network, height), lineage, header.timestamp)
+    match header.bits == expected
+        false -> Option.Some("Header {header.blockId} at Height {height} carries bits {header.bits} where the rule gives {expected}")
+        true -> timely(header, height, recent, nowSecs)
+
+verify refusal
+    refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => Option.None
+    refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604798, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 at Height 1 carries bits 486604799 where the rule gives 486604798")
+    refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231000000) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 is 469665 s ahead of the clock")
+    refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231469665], 1231469665) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 at 1231469665 is not after the median 1231469665 of the Headers before it")
+
+fn timely(header: BlockHeader, height: Int, recent: List<Int>, nowSecs: Int) -> Option<String>
+    ? "Not past the clock by more than two hours, then past the median."
+    match header.timestamp > nowSecs + 7200
+        true -> Option.Some("Header {header.blockId} is {header.timestamp - nowSecs} s ahead of the clock")
+        false -> afterMedian(header, height, recent)
+
+verify timely
+    timely(sampleHeader(), 1, [1231006505], 1231469665) => Option.None
+    timely(sampleHeader(), 1, [1231006505], 1231462465) => Option.None
+    timely(sampleHeader(), 1, [1231006505], 1231462464) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 is 7201 s ahead of the clock")
+
+fn afterMedian(header: BlockHeader, height: Int, recent: List<Int>) -> Option<String>
+    ? "Strictly after the median of the Headers before it."
+    median = medianOf(recent)
+    match header.timestamp > median
+        true -> Option.None
+        false -> Option.Some("Header {header.blockId} at {header.timestamp} is not after the median {median} of the Headers before it")
+
+verify afterMedian
+    afterMedian(sampleHeader(), 1, []) => Option.None
+    afterMedian(sampleHeader(), 1, [1231469664]) => Option.None
+    afterMedian(sampleHeader(), 1, [1231469665]) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 at 1231469665 is not after the median 1231469665 of the Headers before it")
+
+fn medianOf(times: List<Int>) -> Int
+    ? "The median of up to eleven timestamps, as Core takes it: sorted, the"
+      "middle one, and the upper of the two middles when there is an even"
+      "number. Nothing at all has median zero, which every real timestamp"
+      "is after."
+    sorted = sortedInts(times, [])
+    nth(sorted, Int.div(List.len(sorted), 2))
+
+verify medianOf
+    medianOf([]) => 0
+    medianOf([5]) => 5
+    medianOf([3, 1, 2]) => 2
+    medianOf([4, 1, 3, 2]) => 3
+    medianOf([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]) => 6
+
+fn sortedInts(values: List<Int>, acc: List<Int>) -> List<Int>
+    ? "The values in ascending order, by insertion."
+    match values
+        [] -> acc
+        [head, ..tail] -> sortedInts(tail, inserted(head, acc))
+
+verify sortedInts
+    sortedInts([], []) => []
+    sortedInts([3, 1, 2], []) => [1, 2, 3]
+    sortedInts([2, 2, 1], []) => [1, 2, 2]
+
+fn inserted(value: Int, sorted: List<Int>) -> List<Int>
+    ? "One value into its place in a sorted list."
+    insertedPast(value, sorted, [])
+
+verify inserted
+    inserted(2, []) => [2]
+    inserted(2, [1, 3]) => [1, 2, 3]
+    inserted(0, [1, 3]) => [0, 1, 3]
+    inserted(9, [1, 3]) => [1, 3, 9]
+
+fn insertedPast(value: Int, sorted: List<Int>, passed: List<Int>) -> List<Int>
+    ? "Walk past the smaller values, carrying them reversed, then splice."
+    match sorted
+        [] -> List.reverse(List.prepend(value, passed))
+        [head, ..tail] -> insertedAt(value, head, tail, passed)
+
+verify insertedPast
+    insertedPast(2, [], [1]) => [1, 2]
+    insertedPast(2, [3], [1]) => [1, 2, 3]
+
+fn insertedAt(value: Int, head: Int, tail: List<Int>, passed: List<Int>) -> List<Int>
+    ? "Before the head if it is no larger, else further along."
+    match value <= head
+        true -> List.concat(List.reverse(passed), List.prepend(value, List.prepend(head, tail)))
+        false -> insertedPast(value, tail, List.prepend(head, passed))
+
+verify insertedAt
+    insertedAt(1, 2, [], []) => [1, 2]
+    insertedAt(3, 2, [], []) => [2, 3]
+    insertedAt(3, 2, [4], [1]) => [1, 2, 3, 4]
+
+fn nth(values: List<Int>, index: Int) -> Int
+    ? "The value at an index, or zero past the end."
+    match values
+        [] -> 0
+        [head, ..tail] -> nthFrom(head, tail, index)
+
+verify nth
+    nth([], 0) => 0
+    nth([7, 8, 9], 0) => 7
+    nth([7, 8, 9], 2) => 9
+    nth([7, 8, 9], 3) => 0
+
+fn nthFrom(head: Int, tail: List<Int>, index: Int) -> Int
+    ? "This one at index zero, otherwise onwards."
+    match index <= 0
+        true -> head
+        false -> nth(tail, index - 1)
+
+verify nthFrom
+    nthFrom(7, [8], 0) => 7
+    nthFrom(7, [8], 1) => 8
+
+fn sampleHeader() -> BlockHeader
+    ? "Mainnet's Block 1, for the cases in this module."
+    BlockHeader(blockId = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048", version = 1, previousBlockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", merkleRoot = "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098", timestamp = 1231469665, bits = 486604799, nonce = 2573394689)
+
+verify sampleHeader
+    sampleHeader().timestamp => 1231469665
+    Domain.Block.meetsTarget(sampleHeader().blockId, sampleHeader().bits) => Result.Ok(true)

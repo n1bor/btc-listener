@@ -194,8 +194,12 @@ Header seen, not just the ones on the chain we follow. A Header whose parent is
 not the tip is a Branch, and the chain followed is the Branch with the most
 Chain Work — never the longest. `Domain.Chainwork` is the arithmetic (pinned
 against Core's chainwork for mainnet Block 0), `Domain.HeaderTree` is the tree,
-`Domain.Reorg` tells growth from a Reorganisation, and `Infra.Headers` is the
-only part that touches a Store.
+`Domain.Reorg` tells growth from a Reorganisation, `Domain.Target` is what a
+Header must prove before it is placed — proof of work under its own bits,
+bits per Core's retarget rule (pinned to Block 32256), median-time-past and
+the two-hour future bound (#281) — and `Infra.Headers` is the only part that
+touches a Store. A batch with one failing Header is refused whole before any
+write, and the caller drops the Peer.
 
 **Several Peers on one loop** (#27, Stage 5): `infra/peers.av` owns every
 socket. Bytes are read as they arrive with `Tcp.readSome`, kept per Peer, and

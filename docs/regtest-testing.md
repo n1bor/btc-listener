@@ -1789,6 +1789,42 @@ This found two real bugs in #27 within ten minutes. **Run the honest baseline
 first** — a validity check that has never seen real data can be a permanent
 false accusation, and only the honest run shows it.
 
+### A Header that proves no work
+
+The third mode, `lowbits`, is the attack of
+[#281](https://github.com/n1bor/btc-listener/issues/281): after the
+handshake the liar announces one Header off regtest genesis carrying bits
+`0x01010000` — a target of one, worth 2^255 of work — and answers every
+`getheaders` with the same Header. Before the fix the tree placed it, credited
+it more work than every real chain put together, re-pointed `h:` at it, and
+the Set found itself stranded below the undo window. Run it beside the honest
+node with the chain from sections 1–4 (the port here is the one your Core
+node listens on):
+
+```bash
+python3 tools/regtest/liar.py 18455 lowbits &
+timeout -s INT 40 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The Header must be refused **for its proof of work, before anything is
+written**, the liar dropped, and the node still at the tip it had with the
+honest Peer alone:
+
+```
+dropping peer 0: Header cfbd2ff98bce64b500c1ca0df0889f80166d2f825bf2d2b2d6aded526bb4ed42 does not meet the target its bits 16842752 name
+headers complete: 168 known
+following at Height 167: 0 connected, 0 disconnected, set +0 -0
+stop requested; closing the pool and releasing the claim
+```
+
+Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
+Id in the first line changes every run (the Header carries the clock), and
+`16842752` is `0x01010000` in decimal. A Header that meets its target but
+carries the wrong bits for its Height, or a timestamp at or below the median
+of the eleven beneath it, is refused by the same batch check with a line that
+names the rule instead; those two are covered by the verify cases in
+`infra/headers.av`, because Core will not mine one for you.
+
 ## Before you commit
 
 The language gates come first, and none of them is optional:

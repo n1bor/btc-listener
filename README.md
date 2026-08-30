@@ -947,6 +947,25 @@ A catch-up that fails against a Peer drops it and tries the next, so the first
 Peer named on the command line cannot end the node by lying once — which is
 what it did before this, and what the hostile-Peer test found.
 
+A Header has to prove its work before it is placed
+([#281](https://github.com/n1bor/btc-listener/issues/281)). Its Block Id must
+fall under the target its own bits name; those bits must be what the Network's
+retarget rule gives for its Height — Core's, pinned in
+[Domain.Target](domain/target.av) to the bits Core published for mainnet's
+first retarget at Block 32256, with the twenty-minute rule on testnet and
+regtest; and its timestamp must be after the median of the eleven beneath it
+and no more than two hours past the clock. Until this, the tree credited every
+Header the work its bits claimed and asked `meetsTarget` only in `audit`, so a
+Peer sending one Header with a target of one outweighed the whole chain, `h:`
+followed it, and the Set was stranded below the undo window. A batch with a
+Header that fails is refused whole, before anything is written, and the Peer
+that sent it is dropped:
+
+```
+dropping peer 0: Header cfbd2ff9…4ed42 does not meet the target its bits 16842752 name
+following at Height 167: 0 connected, 0 disconnected, set +0 -0
+```
+
 There is no misbehaviour score. Bitcoin Core keeps one because it has graded
 offences; every fault this program can currently detect is one Core disconnects
 on outright, so a counter with a threshold would be a counter that only ever
