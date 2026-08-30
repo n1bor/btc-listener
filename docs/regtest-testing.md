@@ -1959,6 +1959,69 @@ What this does not change: the greeting still runs inline, so those ten
 seconds are still the loop's — #30 is the loop-driven Handshake that ends
 that.
 
+### A caller that will not finish its Handshake, while another Peer goes
+
+The one above costs the caller its slot. This one costs the node, and it is
+[#304](https://github.com/n1bor/btc-listener/issues/304). It needs two things
+at once and neither on its own does anything: a caller whose Handshake does not
+complete, and another Peer disconnecting while that Handshake waits. The
+Handshake reads every Peer while it waits, so the second Peer is closed and
+forgotten in the pool that wait is building — and the pool handed back on
+failure was the one held *before* the Handshake, which still named the socket
+the runtime had just released. The next `Tcp.poll` refused the whole map, and
+mainnet stopped twice in a day on it: ten hours into a Set walk at Height
+779373, then twenty-three minutes into the restart at 780365.
+
+Both Peers must be real, and the node must have reached the listen loop — a
+disconnect during the body phase proves nothing. The Handshake deadline is ten
+seconds (#284), so the disconnect has to land inside it:
+
+```bash
+$BIN regtest follow 127.0.0.1:18454,127.0.0.1:18464 $D serve:18480 log > run.log 2>&1 &
+until grep -q "following at Height" run.log; do sleep 1; done; sleep 6
+
+timeout 40 python3 tools/regtest/caller.py 18480 silent &
+sleep 2
+for id in $($C getpeerinfo | python3 -c "
+import sys,json
+for p in json.load(sys.stdin):
+    if 'aver' in p.get('subver',''): print(p['id'])
+"); do $C disconnectnode "" $id; done
+```
+
+The caller reports `dropped after 10.5 s` either way, and the node writes the
+same three lines either way:
+
+```
+peer 5 dialled us from 127.0.0.1:45246
+peer 0 closed the connection
+dropping inbound peer 5 from 127.0.0.1:45246: Peer 5 did not answer before its deadline
+```
+
+**The three lines are not the test.** What differs is the fourth: before the
+fix it was `error: Tcp.poll: unknown connection 'tcp-3'` and exit 1, within a
+second of the drop. Now there is no fourth line and the node is still
+following. Give it a minute before believing it.
+
+Run it a second time against one node only (`follow 127.0.0.1:18454`), so that
+the disconnect empties the pool. Before, that died the same way; now the node
+carries on and goes back to dialling the Book. What would be a fail either way
+is `Tcp.poll: unknown connection` — the node blaming the runtime for its own
+bookkeeping.
+
+Underneath the Handshake, a poll that names a released Connection now sheds
+those Peers, says so, and asks again:
+
+```
+a poll named 1 socket(s) the runtime had already released; carrying on with 0 Peer(s)
+```
+
+That line is the backstop rather than the fix, and it should be rare: the
+catch-up path still rewinds its pool the same way (`caughtUp` falls back to the
+state it held before the catch-up), and until that is threaded through
+`Infra.Download`, `Infra.Bodies` and `Infra.ChainState` the shedding is what
+keeps it from ending a run. If you see the line often, that is where to look.
+
 ### A body that is not the Block
 
 The `wrongbody` mode is

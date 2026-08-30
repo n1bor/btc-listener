@@ -233,6 +233,19 @@ design decisions, each written in its intent block:
   not hash to the Id it was asked under, a broken Handshake: the Peer is
   dropped and the node carries on. No banscore, because every fault
   detectable here is one Core disconnects on outright.
+- **A failure that happened holding the pool carries the pool (#304).** A
+  wait reads every Peer while it waits, so one that resets during a
+  Handshake is closed and forgotten in the pool that wait is building. A
+  Handshake that then fails reports it as a `Joined` that did not seat,
+  carrying that pool; handing back only a reason let the caller fall back to
+  the pool it held before the Handshake, which still named a socket the
+  runtime had released, and the next `Tcp.poll` ended the node with nobody at
+  fault — mainnet stopped that way twice in a day. Underneath it, a poll that
+  names a released Connection sheds those Peers and asks again rather than
+  failing the run: a socket the runtime does not know is one Peer's, like a
+  failed read (#203), accept (#227) or write (#244). The catch-up path still
+  rewinds this way ([`caughtUp`](../infra/follow.av)); the shedding is what
+  keeps that from ending a run until it is threaded through too.
 
 - **The company is kept while the node walks (#275).** The loop tends its
   Peers every turn; a Set catch-up used to tend them only between chunks,
