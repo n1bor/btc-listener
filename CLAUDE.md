@@ -56,6 +56,41 @@ that passes every gate. **When you test something that document does not cover,
 add it there** — the coverage only grows if each person leaves behind what they
 had to work out.
 
+**A Peer that lies needs a Peer built to lie.** Core is cooperative by
+construction — you cannot ask it for a bad checksum, another Network's magic,
+an unproven Header or a body that is not the Block — so the paths that exist
+for hostile Peers are exercised by two scripts. `tools/regtest/liar.py` is a
+Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
+`wrongbody`, `addrflood`, `escape`); `tools/regtest/caller.py` is a caller
+that dials the node's served port (`early`, `chatty`, `silent`, `pinger`,
+`polite`). Each security fix in this repo (#281–#284, #291, #293) added a mode
+and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
+shows the offender dropped while the node carries on — that pairing is the
+house pattern, and a security fix without it is unproven. Run the honest
+baseline first: a validity check that has never seen real data can be a
+permanent false accusation, and only the honest run shows it. Practicalities:
+another agent usually holds 18443/18444, so run a second Core on
+`port=18454 rpcport=18453` with its own datadir; a Core restarted without
+`loadwallet` mines nothing; `headers`/`bodies`/`listen` cannot take
+`host:port` (#140), so sync with `follow host:port dir` under `timeout` and
+read exit 124 as the pass.
+
+**Landing a fix is its own routine, and Robin is specific about it.** One
+branch and PR per issue; put `Closes #NN` in the body so the issue closes when
+the branch lands. Then: rebase onto the latest `main`, wait for the PR's CI to
+go green, fast-forward merge (`git merge --ff-only`, never a merge commit —
+`main` stays linear), push, and **watch the push-triggered CI run on `main`
+and fix anything red there**. The last step is not a formality: a branch that
+passed alone can still break `main` when another branch landed in the
+meantime, and only the post-merge run catches that. Stack a second fix on the
+first rather than waiting, and rebase it once the first is merged. CI is eight
+jobs — `format`, `check`, `provider-tests`, `verify`, `verify-corpus`,
+`compile`, `wasm-node`, and `binary`; `binary` publishes the release artifact
+and runs only on `main`, so on a PR it shows as *skipping*, which is success,
+not a failure. Moving the Aver pin (above) is the one change that also touches
+`main`'s CI timing: the pinned toolchain is built from source, so a run after
+a pin bump is minutes slower than usual while its cache is cold.
+
 **Failures that only Cargo finds.** All survive `check`, `verify` and a plain
 `compile`; since jasisz/aver#1172 closed, `aver compile --check` runs
 `cargo check` on what it emitted and sees them in seconds, where `cargo
@@ -101,6 +136,9 @@ aver verify . --module-root .                        # everything, corpus includ
 aver verify domain/script.av --module-root .         # one file's cases
 aver verify corpus --module-root .                   # the Core corpus only
 aver format . --check
+
+cargo test --manifest-path providers/primitives/Cargo.toml   # the providers carry their own Rust tests, run when you touch providers/
+cargo test --manifest-path providers/kv/Cargo.toml
 ```
 
 Run interpreted (the provider host is built automatically now; plain
@@ -279,10 +317,16 @@ never collapsing "cannot tell" into pass or fail:
   pruning) separately from **FAULTS** (the data is wrong).
 
 **Rules by Height** (`domain/rules.av`): a Block is checked under the rules it
-was mined under, not today's. `Infra.Audit` resolves the rules once per Height
-and the Context carries them into the Script engine. Currently only P2SH
-activation is carried; BIP66 code exists (`Domain.Ecdsa.isValidEncoding`) but
-is unwired because the held chain stops below its activation.
+was mined under, not today's. `Domain.Rules.at(network, height)` resolves them
+once per Height and the Context carries them into the Script engine, which asks
+`rules` rather than a clock. Carried, each at its activation Height: P2SH, BIP66
+strict DER (enforced by `Domain.Checkwork.derFault` reading `rules.strictDer` —
+wired, despite an older note here that said otherwise), CLTV, CSV, SegWit,
+NULLDUMMY and Taproot. What is *not* on the connect path at all is the Script
+engine itself: `Domain.Connect` runs no scripts, so a Block's signatures are
+checked by `audit` and never when the Block is connected to the Set (#303) —
+a fact worth holding, because it is easy to assume connecting a Block verifies
+it.
 
 **The seam for what's missing**: `domain/ecdsa.av` has no `Valid` constructor
 for outcomes it cannot yet produce, so adding Schnorr/witness evaluation will
