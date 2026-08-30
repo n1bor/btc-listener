@@ -956,6 +956,14 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+Disconnecting a Block is one batch
+([#289](https://github.com/n1bor/btc-listener/issues/289)), as connecting one
+has been since #247: the Outputs it spent go back, the Outputs it made and its
+Undo Data go, and `meta:setTo` moves to its parent, in one RocksDB write. It
+was three, and a crash between the second and the third left the Set standing
+on a Block whose Undo Data had just been deleted — which nothing could take
+back off, so the Set had to be rebuilt.
+
 A Handshake gets one deadline, not one per frame
 ([#284](https://github.com/n1bor/btc-listener/issues/284)). The greeting
 still runs inline — the loop waits on it, which

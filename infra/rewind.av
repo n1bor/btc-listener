@@ -16,7 +16,7 @@ module Rewind
         "Domain.Rewind, and carries out what comes back."
     exposes [Realigned, realigned, branchOf]
     depends [Bytes, Domain.Block, Domain.Disconnect, Domain.HeaderTree, Domain.Index, Domain.Reorg, Domain.Rewind, Domain.Screen, Domain.Snapshot, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Infra.Blocks, Infra.Screen, Infra.Store, Infra.Utxo, Domain.IndexKeys]
-    effects [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    effects [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
 
 record Realigned
     store: Store
@@ -33,7 +33,7 @@ fn realigned(store: Store, blocks: BlockStore, eye: Eye) -> Result<Realigned, St
       "What a disconnected Block confirmed comes back out as unconfirmed --"
       "bounded by the Undo window, and exactly what a Mempool wants offered"
       "back (#28, #133). The Eye keeps the walk's lines off a Screen's frame."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     held = Infra.Store.get(store, Domain.UtxoStore.reachedKey()?)?
     standsOn(store, blocks, held, eye)
 
@@ -44,21 +44,21 @@ fn standsOn(store: Store, blocks: BlockStore, held: Option<Bytes>, eye: Eye) -> 
       "its Output is not spendable -- Bitcoin Core never puts it in the UTXO"
       "Set either, which is why the fifty coins of Block 0 are missing from"
       "the supply that can ever move."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     match held
         Option.None -> Result.Ok(Realigned(store = store, from = 1, dropped = 0, unconfirmed = []))
         Option.Some(stored) -> decoded(store, blocks, Domain.UtxoStore.decodeReached(stored), eye)
 
 fn decoded(store: Store, blocks: BlockStore, reached: Result<Reached, String>, eye: Eye) -> Result<Realigned, String>
     ? "A standing that will not decode stops the walk before it touches the Set."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     match reached
         Result.Err(why) -> Result.Err(why)
         Result.Ok(where) -> comparing(store, blocks, where, eye)
 
 fn comparing(store: Store, blocks: BlockStore, where: Reached, eye: Eye) -> Result<Realigned, String>
     ? "Read the branch the Set stands on, then do what it says has to be done."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     floor = undoFloor(store)?
     branch = branchOf(store, where.blockId, floor, [])?
     acted(store, blocks, Domain.Rewind.rewinding(branch), eye)
@@ -125,7 +125,7 @@ fn deeper(store: Store, one: Standing, floor: Int, acc: List<Standing>) -> Resul
 
 fn acted(store: Store, blocks: BlockStore, plan: Rewinding, eye: Eye) -> Result<Realigned, String>
     ? "Nothing to do, something to undo, or nothing that can be done."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     match plan
         Rewinding.Aligned(height) -> Result.Ok(Realigned(store = store, from = height + 1, dropped = 0, unconfirmed = []))
         Rewinding.Stranded(height) -> Result.Err(strandedWhy(height))
@@ -144,7 +144,7 @@ verify strandedWhy
 
 fn dropping(store: Store, blocks: BlockStore, fork: Int, blocksOff: List<Placement>, eye: Eye) -> Result<Realigned, String>
     ? "Disconnect the branch that lost, highest first, then stand on the fork."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     count = List.len(blocksOff)
     _said = saidIfPlain(eye, "REORGANISED: the Set stands on a branch the chain has left; taking it back to Height {fork}, disconnecting {count} Block(s)")
     unwound = removing(store, blocks, blocksOff, eye)?
@@ -162,7 +162,7 @@ fn removing(store: Store, blocks: BlockStore, blocksOff: List<Placement>, eye: E
       "The order is the whole of it: each Block's Undo Data restores what its"
       "own Inputs spent, so the Set has to reach a Block in the state that"
       "Block left it, which means the one above it has to be off first."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     match blocksOff
         [] -> Result.Ok(Removed(store = store, unconfirmed = []))
         [head, ..tail] -> removingOne(store, blocks, head, tail, eye)
@@ -175,12 +175,11 @@ fn removingOne(store: Store, blocks: BlockStore, placement: Placement, rest: Lis
       "is money that never happened. The carry comes out lowest Block"
       "first, because a child spends its parent and a Mempool re-admitting"
       "them meets them in an order that can work."
-    ! [Console.print, Disk.readBytesAt, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    ! [Console.print, Disk.readBytesAt, Infra.Kv.applyAll, Infra.Kv.get]
     carried = bodyOf(store, blocks, placement.blockId)?
-    applied = Infra.Utxo.disconnectBlock(store, placement.blockId, transactionsIn(carried, []))?
-    standing = parked(applied.store, placement.height - 1, placement.parentId)?
+    applied = Infra.Utxo.disconnectBlock(store, placement.blockId, transactionsIn(carried, []), Reached(height = placement.height - 1, blockId = placement.parentId))?
     _said = saidIfPlain(eye, "  height {placement.height} disconnected: set +{applied.added} -{applied.removed}")
-    deeper2 = removing(standing, blocks, rest, eye)?
+    deeper2 = removing(applied.store, blocks, rest, eye)?
     Result.Ok(Removed(store = deeper2.store, unconfirmed = List.concat(deeper2.unconfirmed, restorable(carried))))
 
 fn restorable(carried: List<Carried>) -> List<Carried>
@@ -219,15 +218,6 @@ fn bodyAt(blocks: BlockStore, location: Result<Location, String>) -> Result<List
     ! [Disk.readBytesAt]
     at = location?
     Domain.Block.carriedOf(Infra.Blocks.read(blocks, at)?)
-
-fn parked(store: Store, height: Int, blockId: String) -> Result<Store, String>
-    ? "Record that the Set now stands on this Block."
-      "Written as each Block comes off rather than once when they all have,"
-      "so a run that stops halfway leaves a standing that matches what the"
-      "Set holds. The Block below the one just disconnected is its parent,"
-      "which the tree recorded beside it precisely so this needs no lookup."
-    ! [Infra.Kv.putAll]
-    Infra.Store.putAll(store, [Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(Reached(height = height, blockId = blockId))?)])
 
 fn sample() -> Result<Store, String>
     ? "A two-Block branch whose tip h: has stopped naming, for the cases here."

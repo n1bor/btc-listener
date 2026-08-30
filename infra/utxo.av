@@ -531,35 +531,45 @@ verify fromScanOrder
     fromScanOrder([0, 0, 1, 0], 0) => 256
     fromScanOrder(Domain.IndexKeys.scanOrder(962268, 4), 0) => 962268
 
-fn disconnectBlock(store: Store, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
-    ? "Take this Block back out of the Set, from what it recorded on the way in."
-    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+fn disconnectBlock(store: Store, blockId: String, transactions: List<Transaction>, standing: Reached) -> Result<Applied, String>
+    ? "Take this Block back out of the Set, from what it recorded on the way in,"
+      "and record where the Set now stands, all as one change (#289)."
+      "Connect became one batch in #247; this was still three -- restore,"
+      "delete, then the standing -- and a crash after the delete left"
+      "meta:setTo naming a Block whose Undo Data was gone, which nothing"
+      "could take back off. One applyAll: the restored Outputs and the new"
+      "standing in, the created Outputs and the Undo record out."
+    ! [Infra.Kv.applyAll, Infra.Kv.get]
     held = Infra.Store.get(store, Domain.UtxoStore.undoKey(blockId)?)?
-    reversing(store, blockId, transactions, held)
+    reversing(store, blockId, transactions, held, standing)
 
-fn reversing(store: Store, blockId: String, transactions: List<Transaction>, held: Option<Bytes>) -> Result<Applied, String>
+verify disconnectBlock
+    Infra.Store.get(disconnectBlock(Infra.Store.fixture([(Domain.UtxoStore.undoKey("aa")?, Domain.UtxoStore.encodeUndo([])?)]), "aa", [], Reached(height = 1, blockId = "bb"))?.store, Domain.UtxoStore.undoKey("aa")?) => Result.Ok(Option.None)
+    Infra.Store.get(disconnectBlock(Infra.Store.fixture([(Domain.UtxoStore.undoKey("aa")?, Domain.UtxoStore.encodeUndo([])?)]), "aa", [], Reached(height = 1, blockId = "bb"))?.store, Domain.UtxoStore.reachedKey()?) => Result.Ok(Option.Some(Domain.UtxoStore.encodeReached(Reached(height = 1, blockId = "bb"))?))
+    disconnectBlock(Infra.Store.fixture([]), "aa", [], Reached(height = 1, blockId = "bb")) => Result.Err("Block aa has no Undo Data, so it cannot be disconnected")
+
+fn reversing(store: Store, blockId: String, transactions: List<Transaction>, held: Option<Bytes>, standing: Reached) -> Result<Applied, String>
     ? "No Undo Data means the Block was never connected, or the window has passed it."
-    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    ! [Infra.Kv.applyAll]
     match held
         Option.None -> Result.Err("Block {blockId} has no Undo Data, so it cannot be disconnected")
-        Option.Some(stored) -> undoing(store, blockId, transactions, Domain.UtxoStore.decodeUndo(stored))
+        Option.Some(stored) -> undoing(store, blockId, transactions, Domain.UtxoStore.decodeUndo(stored), standing)
 
-fn undoing(store: Store, blockId: String, transactions: List<Transaction>, undo: Result<List<Unspent>, String>) -> Result<Applied, String>
+fn undoing(store: Store, blockId: String, transactions: List<Transaction>, undo: Result<List<Unspent>, String>, standing: Reached) -> Result<Applied, String>
     ? "Undo Data that will not decode is corruption."
-    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
+    ! [Infra.Kv.applyAll]
     match undo
         Result.Err(why) -> Result.Err(why)
-        Result.Ok(removed) -> reversed(store, blockId, Domain.Disconnect.reversal(transactions, removed)?)
+        Result.Ok(removed) -> reversed(store, blockId, Domain.Disconnect.reversal(transactions, removed)?, standing)
 
-fn reversed(store: Store, blockId: String, reversal: Reversal) -> Result<Applied, String>
-    ? "Put back what was taken, take out what was made, and forget the record."
-      "Restoring before deleting, so that an Output this Block both made and"
-      "spent is deleted rather than left behind: it is in neither list, but a"
-      "Set that was written in the other order could still be holding one."
-    ! [Infra.Kv.deleteAll, Infra.Kv.putAll]
-    restored = Infra.Store.putAll(store, entriesFor(reversal.restored, [])?)?
-    cleared = Infra.Store.deleteAll(restored, List.prepend(Domain.UtxoStore.undoKey(blockId)?, reversal.deleted))?
-    Result.Ok(Applied(store = cleared, added = List.len(reversal.restored), removed = List.len(reversal.deleted), fees = 0, confirmed = []))
+fn reversed(store: Store, blockId: String, reversal: Reversal, standing: Reached) -> Result<Applied, String>
+    ? "Put back what was taken, take out what was made, forget the record,"
+      "and stand on the parent -- one batch. applyAll writes its puts before"
+      "its deletes, so an Output this Block both made and spent, which is in"
+      "neither list, cannot be left behind by the order."
+    ! [Infra.Kv.applyAll]
+    changed = Infra.Store.applyAll(store, List.prepend(Entry(key = Domain.UtxoStore.reachedKey()?, value = Domain.UtxoStore.encodeReached(standing)?), entriesFor(reversal.restored, [])?), List.prepend(Domain.UtxoStore.undoKey(blockId)?, reversal.deleted))?
+    Result.Ok(Applied(store = changed, added = List.len(reversal.restored), removed = List.len(reversal.deleted), fees = 0, confirmed = []))
 
 fn prunedUndo(store: Store, tipHeight: Int) -> Result<Store, String>
     ? "Forget the Undo Data of Blocks the window has moved past."
