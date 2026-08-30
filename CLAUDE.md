@@ -233,7 +233,10 @@ Block is stored, and a body read from disk is re-hashed in
 A Peer that breaks the protocol is dropped and the node carries on; a catch-up
 that fails against a Peer drops it and retries on whoever is left, because
 otherwise the first Peer named on the command line can end the node by lying
-once. No banscore counter: every fault detectable here is one Core disconnects
+once. A fault on this node's own side — `Infra.Rewind` refusing, a body on
+disk that will not read or hash to its Id — is `Caught.ChainStopped` (#183,
+#290): the run ends with the reason and no Peer is dropped, because asking
+another Peer cannot change what is on this disk. No banscore counter: every fault detectable here is one Core disconnects
 on outright, so a threshold would only ever count to one.
 
 **The Address Book** (#27, Stage 5): `follow` sends `getaddr` on joining and

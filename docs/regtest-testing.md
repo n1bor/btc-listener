@@ -1821,6 +1821,43 @@ Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
 `16842752` is `0x01010000` in decimal.
 
+### A fault in the chain directory is nobody's fault
+
+[#290](https://github.com/n1bor/btc-listener/issues/290): a catch-up that
+fails on this node's own side — a fork below the Undo window, a body that
+was pruned, a Segment that will not read or whose bytes are not the Block
+the Index filed there — used to be charged to the Peer that was asked, then
+to the next, until the pool was empty and the last honest Peer was blamed for
+a fault in the chain directory. Now `Infra.Rewind` and the Set phase end the
+run as `ChainStopped`, with the reason and every Peer still connected.
+
+The easiest such fault to make is the one #280 item 8 describes: the Index
+names a Location whose bytes are another Block's. Overwrite the last Segment
+with a copy taken earlier (a torn tail that `reopen` repaired and the next
+download wrote past, then the old bytes put back), or flip a byte inside the
+tip's record, then force a reorganisation that has to take the tip off:
+
+```bash
+SEG=$(ls $D/blocks/blk*.dat | tail -1); cp $SEG segment.bak
+# ... a follow that fetches new Blocks, then:
+cp segment.bak $SEG
+$C invalidateblock $($C getblockhash 175); $C generatetoaddress 2 "$($C getnewaddress)"
+timeout -s INT 60 $BIN regtest follow 127.0.0.1:18454 $D
+```
+
+The rewind reads the tip's body, hashes it, and stops — with Core still
+connected and nothing dropped:
+
+```
+REORGANISED: the Set stands on a branch the chain has left; taking it back to Height 174, disconnecting 2 Block(s)
+the chain cannot be followed past here: the body filed for Block 5578d5e8…dfdd9499 hashes to 12a55832…c6d474c0; the chain directory needs reindex, and the Set has to be rebuilt
+error: the chain cannot be followed past here, and no Peer is at fault: …
+```
+
+No `dropping peer` line may appear. The directory is now honestly broken
+— `reindex` then `utxo` rebuild it, or start again — which is the right
+answer to bytes on disk that are not what the Index says they are.
+
 ### A caller that will not finish its Handshake
 
 `tools/regtest/caller.py` is the other direction: not a Peer the node dials

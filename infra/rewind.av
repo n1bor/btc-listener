@@ -211,13 +211,21 @@ fn bodyOf(store: Store, blocks: BlockStore, blockId: String) -> Result<List<Carr
     located = Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?
     match located
         Option.None -> Result.Err("Block {blockId} has to come off the Set but its body is not held; it was pruned or never fetched, so the Set has to be rebuilt")
-        Option.Some(text) -> bodyAt(blocks, Domain.Index.decodeLocation(text))
+        Option.Some(text) -> bodyAt(blocks, blockId, Domain.Index.decodeLocation(text))
 
-fn bodyAt(blocks: BlockStore, location: Result<Location, String>) -> Result<List<Carried>, String>
-    ? "The Transactions at a Location, each beside its bytes."
+fn bodyAt(blocks: BlockStore, blockId: String, location: Result<Location, String>) -> Result<List<Carried>, String>
+    ? "The Transactions at a Location, each beside its bytes -- once the"
+      "bytes hash to the Block Id they were filed under (#290, #280 item 8)."
+      "A Block coming off the Set restores what its Undo Data says and takes"
+      "out what its body says it made; a body that is not the Block would"
+      "take out the wrong Outputs, silently. The Set phase checks this on"
+      "the way in since #283; this is the same check on the way out."
     ! [Disk.readBytesAt]
     at = location?
-    Domain.Block.carriedOf(Infra.Blocks.read(blocks, at)?)
+    payload = Infra.Blocks.read(blocks, at)?
+    match Domain.Block.idOfWholeBlock(payload) == blockId
+        false -> Result.Err("the body filed for Block {blockId} hashes to {Domain.Block.idOfWholeBlock(payload)}; the chain directory needs reindex, and the Set has to be rebuilt")
+        true -> Domain.Block.carriedOf(payload)
 
 fn sample() -> Result<Store, String>
     ? "A two-Block branch whose tip h: has stopped naming, for the cases here."

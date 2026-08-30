@@ -956,6 +956,16 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+A fault in the chain directory ends the run with every Peer still connected
+([#290](https://github.com/n1bor/btc-listener/issues/290)). A catch-up asks
+one Peer for Headers and bodies, and a fault in what that Peer sent costs it
+its place; but a fork below the Undo window, a body that was pruned, a Segment
+that will not read or whose bytes hash to some other Block are facts about
+this node's own disk, and used to be charged to that Peer, then the next, until
+the pool was empty. `Infra.Rewind` and the Set phase now end the run as
+`ChainStopped` with the reason, and a body coming off the Set is hashed
+against its Block Id on the way out as it has been on the way in since #283.
+
 Disconnecting a Block is one batch
 ([#289](https://github.com/n1bor/btc-listener/issues/289)), as connecting one
 has been since #247: the Outputs it spent go back, the Outputs it made and its

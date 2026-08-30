@@ -964,13 +964,69 @@ fn catchingUp(state: Following, key: Int) -> Result<Caught, String>
     drained = drainSpare(Following(pool = grown.pool, store = grown.store, blocks = state.blocks, book = state.book, nextKey = state.nextKey, watch = watchSeen(state.watch, grown.eye), mempool = state.mempool, rebuilding = state.rebuilding, log = headersLog, board = state.board))
     _heard = saidBookIfPlain(drained.watch, Domain.AddressBook.sizeOf(state.book), Domain.AddressBook.sizeOf(drained.book))
     afterHeaders = toppedUp(dialsAsked(drained)?)?
-    tipHeight = tipHeightOf(afterHeaders.store)?
-    aligned = Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders))?
-    startLog = marking(afterHeaders, afterHeaders.pool, "bodies", aligned.from, tipHeight, true)?
-    fetched = alternating(withLog(afterHeaders, startLog), key, aligned, tipHeight)?
-    bodiesLog = markingCounts(withLog(afterHeaders, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
-    onward = connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(afterHeaders.watch, fetched.eye), mempool = afterHeaders.mempool, rebuilding = afterHeaders.rebuilding, log = bodiesLog, board = state.board), tipHeight, aligned.unconfirmed)?
-    afterSet(onward)
+    realigning(afterHeaders, key, Infra.Rewind.realigned(afterHeaders.store, state.blocks, eyeOf(afterHeaders)))
+
+fn realigning(state: Following, key: Int, aligned: Result<Realigned, String>) -> Result<Caught, String>
+    ? "The Set taken back to the fork, or the reason it cannot be (#290)."
+      "Everything Infra.Rewind can refuse is a fact about this node's own"
+      "chain directory -- a fork below the Undo window, a body that was"
+      "pruned, a Segment that will not read, Undo Data that will not decode"
+      "-- and none of it is the fault of the Peer that was asked for"
+      "Headers. Before this its Err was charged to that Peer, then to the"
+      "next, until the pool was empty. It is ChainStopped now: the run ends"
+      "with the reason and every Peer still connected."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    match aligned
+        Result.Err(why) -> Result.Ok(Caught.ChainStopped(why))
+        Result.Ok(found) -> fetching(state, key, found)
+
+fn fetching(state: Following, key: Int, aligned: Realigned) -> Result<Caught, String>
+    ? "The bodies above the fork from the Peer asked, then the Set forward over them."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+    ]
+    tipHeight = tipHeightOf(state.store)?
+    startLog = marking(state, state.pool, "bodies", aligned.from, tipHeight, true)?
+    fetched = alternating(withLog(state, startLog), key, aligned, tipHeight)?
+    bodiesLog = markingCounts(withLog(state, fetched.eye.log), fetched.pool, "bodies", fetched.reached, tipHeight, fetched.count, fetched.bytes, true)?
+    settling(connected(Following(pool = fetched.pool, store = fetched.store, blocks = fetched.blocks, book = fetched.book, nextKey = fetched.nextKey, watch = watchSeen(state.watch, fetched.eye), mempool = state.mempool, rebuilding = state.rebuilding, log = bodiesLog, board = state.board), tipHeight, aligned.unconfirmed))
+
+fn settling(onward: Result<Settled, String>) -> Result<Caught, String>
+    ? "The Set forward, refused, or unable: the last two are the chain's (#290)."
+      "connected reads bodies this node holds and connects them; #183 made a"
+      "refusal ChainStopped, and an Err out of it -- a body on disk that will"
+      "not read or hash to its Id, a Store that will not answer -- is the"
+      "same kind of fact and ends the run the same way."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.Kv.get,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Time.unixMs,
+    ]
+    match onward
+        Result.Err(why) -> Result.Ok(Caught.ChainStopped(why))
+        Result.Ok(settled) -> afterSet(settled)
+
+verify settling
+    settling(Result.Err("no")) => Result.Ok(Caught.ChainStopped("no"))
 
 fn sliceMs() -> Int
     ? "How long one slice of the download runs before the Set gets a turn"
