@@ -201,7 +201,9 @@ fn decode(raw: List<Int>) -> Result<Transaction, String>
 
 verify decode
     decode(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => Result.Ok(Transaction(version = 2, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 0, script = "", sequence = 4294967295, witness = ["aabb", "cc"])], outputs = [Output(value = 5000, script = "5151")], lockTime = 0, txid = "e563e2177169c448edef27ccdf2db9d66cbbd93f3176560b69d667145c51d79c", size = 70, isSegWit = true))
-    decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("Transaction ends before its lock time")
+    decode([300, 0, 0, 0, 1, 0, 0, 0, 0]) => Result.Err("Transaction ends inside an Input")
+    decode([1, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255]) => Result.Err("Transaction claims 18446744073709551615 Input(s) in 0 byte(s)")
+    decode(Bytes.octets(Bytes.fromHex("0100000001000000000000000000000000000000000000000000000000000000000000000000000000fc")?)) => Result.Err("Input script of 252 byte(s) and its sequence outrun the Transaction")
     txidOf(decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
     sizeOf(decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => 204
     isSegWitOf(decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => false
@@ -265,7 +267,7 @@ fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsR
       "is only right when the input is exactly one Transaction. Read in place it"
       "is right either way, and where it ends is where the next one starts."
     outputsRead = readOutputs(inputsRead.rest)?
-    witnessRead = attachWitnesses(inputsRead.items, segwit, outputsRead.rest)
+    witnessRead = attachWitnesses(inputsRead.items, segwit, outputsRead.rest)?
     core = List.concat(List.concat(List.take(raw, 4), List.take(body, inputsRead.consumed + outputsRead.consumed)), List.take(witnessRead.rest, 4))
     finish(version, witnessRead, outputsRead.items, segwit, core, 8 + markerWidth(segwit) + inputsRead.consumed + outputsRead.consumed + witnessRead.consumed)
 
@@ -307,32 +309,34 @@ verify sealed
     sizeOf(sealed(1, WitnessRead(items = [], rest = [0, 0, 0, 0], consumed = 0), [], false, [1, 2, 3, 4], 8)?.transaction) => 8
     sealed(1, WitnessRead(items = [], rest = [0, 0, 0, 0], consumed = 0), [], false, [256], 8) => Result.Err("byte 256 at index 0 is outside 0..=255")
 
-fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> WitnessRead
+fn attachWitnesses(inputs: List<Input>, segwit: Bool, afterOutputs: List<Int>) -> Result<WitnessRead, String>
     ? "Record how many Witness items each Input carried, and where they ended."
       "A Transaction with no Witnesses has nothing between its Outputs and its"
       "lock time, so the Outputs' remainder is already the answer."
     match segwit
         true -> countWitnesses(inputs, afterOutputs, [], 0)
-        false -> WitnessRead(items = inputs, rest = afterOutputs, consumed = 0)
+        false -> Result.Ok(WitnessRead(items = inputs, rest = afterOutputs, consumed = 0))
 
 verify attachWitnesses
-    List.len(attachWitnesses([], true, []).items) => 0
-    List.len(attachWitnesses([], false, []).items) => 0
-    attachWitnesses([], false, [9, 9]).rest => [9, 9]
-    attachWitnesses([], false, [9, 9]).consumed => 0
+    List.len(attachWitnesses([], true, [])?.items) => 0
+    List.len(attachWitnesses([], false, [])?.items) => 0
+    attachWitnesses([], false, [9, 9])?.rest => [9, 9]
+    attachWitnesses([], false, [9, 9])?.consumed => 0
+    attachWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], true, [255, 255, 255, 255, 255, 255, 255, 255, 255]) => Result.Err("Transaction claims 18446744073709551615 Witness item(s) in 0 byte(s)")
 
-fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>, consumed: Int) -> WitnessRead
+fn countWitnesses(inputs: List<Input>, rest: List<Int>, acc: List<Input>, consumed: Int) -> Result<WitnessRead, String>
     ? "Walk the Witness stacks in step with the Inputs they belong to."
     match inputs
-        [] -> WitnessRead(items = List.reverse(acc), rest = rest, consumed = consumed)
+        [] -> Result.Ok(WitnessRead(items = List.reverse(acc), rest = rest, consumed = consumed))
         [head, ..tail] -> countOne(head, tail, rest, acc, consumed)
 
 verify countWitnesses
-    List.len(countWitnesses([], [], [], 0).items) => 0
-    countWitnesses([], [9], [], 0).rest => [9]
-    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187], [], 0).items)) => 2
-    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0).rest => [9]
-    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0).consumed => 5
+    List.len(countWitnesses([], [], [], 0)?.items) => 0
+    countWitnesses([], [9], [], 0)?.rest => [9]
+    witnessItemsOf(headOf(countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187], [], 0)?.items)) => 2
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0)?.rest => [9]
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 1, 187, 9], [], 0)?.consumed => 5
+    countWitnesses([Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], [2, 1, 170, 3, 187], [], 0) => Result.Err("Witness item of 3 byte(s) outruns the Transaction")
 
 fn headOf(inputs: List<Input>) -> Input
     ? "The first Input, for the verify cases above."
@@ -341,30 +345,36 @@ fn headOf(inputs: List<Input>) -> Input
 verify headOf
     witnessItemsOf(headOf([])) => 0
 
-fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>, consumed: Int) -> WitnessRead
+fn countOne(input: Input, remaining: List<Input>, rest: List<Int>, acc: List<Input>, consumed: Int) -> Result<WitnessRead, String>
     ? "Read one Input's Witness stack and carry on to the next."
+      "The item count is checked against the bytes first (#282), as the Input"
+      "and Output counts are."
     stack = Domain.CompactSize.read(rest)
-    taken = takeWitnessItems(stack.rest, stack.value, 0, [])
+    _held = countHeld("Witness item", stack.value, stack.rest)?
+    taken = takeWitnessItems(stack.rest, stack.value, 0, [])?
     countWitnesses(remaining, taken.rest, List.prepend(Input(previousTxid = input.previousTxid, previousIndex = input.previousIndex, script = input.script, sequence = input.sequence, witness = taken.items), acc), consumed + stack.width + taken.consumed)
 
 verify countOne
-    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170], [], 0).items) => 1
-    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0).rest => [9]
-    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0).consumed => 3
+    List.len(countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170], [], 0)?.items) => 1
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0)?.rest => [9]
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [1, 1, 170, 9], [], 0)?.consumed => 3
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [2, 1, 170], [], 0) => Result.Err("Transaction ends inside a Witness")
+    countOne(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), [], [3, 1, 170], [], 0) => Result.Err("Transaction claims 3 Witness item(s) in 2 byte(s)")
 
-fn takeWitnessItems(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Taken
+fn takeWitnessItems(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Result<Taken, String>
     ? "Read `count` length-prefixed Witness items, keeping each one."
       "Accumulated by prepending and turned round at the end, so the cost is the"
       "number of items rather than its square."
     match count <= 0
-        true -> Taken(items = List.reverse(acc), rest = rest, consumed = consumed)
+        true -> Result.Ok(Taken(items = List.reverse(acc), rest = rest, consumed = consumed))
         false -> takeOneItem(rest, count, consumed, acc)
 
 verify takeWitnessItems
-    takeWitnessItems([9], 0, 0, []) => Taken(items = [], rest = [9], consumed = 0)
-    takeWitnessItems([1, 170, 9], 1, 0, []) => Taken(items = ["aa"], rest = [9], consumed = 2)
-    takeWitnessItems([1, 170, 1, 187, 9], 2, 0, []) => Taken(items = ["aa", "bb"], rest = [9], consumed = 4)
-    takeWitnessItems([0, 9], 1, 0, []) => Taken(items = [""], rest = [9], consumed = 1)
+    takeWitnessItems([9], 0, 0, []) => Result.Ok(Taken(items = [], rest = [9], consumed = 0))
+    takeWitnessItems([1, 170, 9], 1, 0, []) => Result.Ok(Taken(items = ["aa"], rest = [9], consumed = 2))
+    takeWitnessItems([1, 170, 1, 187, 9], 2, 0, []) => Result.Ok(Taken(items = ["aa", "bb"], rest = [9], consumed = 4))
+    takeWitnessItems([0, 9], 1, 0, []) => Result.Ok(Taken(items = [""], rest = [9], consumed = 1))
+    takeWitnessItems([1, 170, 1], 2, 0, []) => Result.Err("Witness item of 1 byte(s) outruns the Transaction")
 
 fn hexOf(bytes: List<Int>) -> String
     ? "One Witness item as text."
@@ -378,24 +388,59 @@ verify hexOf
     hexOf([170, 187]) => "aabb"
     hexOf([]) => ""
 
-fn takeOneItem(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Taken
-    ? "Read one length-prefixed Witness item."
+fn takeOneItem(rest: List<Int>, count: Int, consumed: Int, acc: List<String>) -> Result<Taken, String>
+    ? "Read one length-prefixed Witness item, which has to be there in full (#282)."
       "An item that will not render as hexadecimal cannot arise: its bytes came"
       "out of a Bytes and are octets by construction, so the default is dead."
-    item = Domain.CompactSize.read(rest)
-    text = hexOf(List.take(item.rest, item.value))
-    takeWitnessItems(List.drop(item.rest, item.value), count - 1, consumed + item.width + item.value, List.prepend(text, acc))
+    match rest
+        [] -> Result.Err("Transaction ends inside a Witness")
+        [head, ..tail] -> takeItemFrom(Domain.CompactSize.read(rest), count, consumed, acc)
 
 verify takeOneItem
-    takeOneItem([1, 170, 9], 1, 0, []) => Taken(items = ["aa"], rest = [9], consumed = 2)
+    takeOneItem([1, 170, 9], 1, 0, []) => Result.Ok(Taken(items = ["aa"], rest = [9], consumed = 2))
+    takeOneItem([2, 170], 1, 0, []) => Result.Err("Witness item of 2 byte(s) outruns the Transaction")
+    takeOneItem([], 1, 0, []) => Result.Err("Transaction ends inside a Witness")
+
+fn takeItemFrom(item: Count, count: Int, consumed: Int, acc: List<String>) -> Result<Taken, String>
+    ? "The item behind its length, which has to be there in full."
+    bytes = List.take(item.rest, item.value)
+    match List.len(bytes) < item.value
+        true -> Result.Err("Witness item of {item.value} byte(s) outruns the Transaction")
+        false -> takeWitnessItems(List.drop(item.rest, item.value), count - 1, consumed + item.width + item.value, List.prepend(hexOf(bytes), acc))
+
+verify takeItemFrom
+    takeItemFrom(Domain.CompactSize.read([1, 170, 9]), 1, 0, []) => Result.Ok(Taken(items = ["aa"], rest = [9], consumed = 2))
+    takeItemFrom(Domain.CompactSize.read([2, 170]), 1, 0, []) => Result.Err("Witness item of 2 byte(s) outruns the Transaction")
 
 fn readInputs(body: List<Int>) -> Result<InputsRead, String>
     ? "Read the Input count, then that many Inputs."
+      "The count is checked against the bytes before the loop starts (#282)."
+      "It is a CompactSize a Peer chose, up to two to the sixty-fourth, and"
+      "Aver's Int would count that high; an Input is at least forty-one"
+      "bytes, so a count the bytes cannot hold is refused for the price of"
+      "walking them once, not once per claimed Input."
     count = Domain.CompactSize.read(body)
+    _held = countHeld("Input", count.value, count.rest)?
     readInputsInto(count.value, count.rest, [], count.width)
 
 verify readInputs
     List.len(readInputs(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?.items) => 1
+    readInputs([255, 255, 255, 255, 255, 255, 255, 255, 255]) => Result.Err("Transaction claims 18446744073709551615 Input(s) in 0 byte(s)")
+    readInputs([2, 0]) => Result.Err("Transaction claims 2 Input(s) in 1 byte(s)")
+
+fn countHeld(what: String, count: Int, rest: List<Int>) -> Result<Unit, String>
+    ? "Whether the bytes could hold this many of something at least one byte each."
+      "Measured with a take of the count, which walks the smaller of the two"
+      "and never the whole rest of a Block for a small count."
+    held = List.len(List.take(rest, count))
+    match held < count
+        true -> Result.Err("Transaction claims {count} {what}(s) in {held} byte(s)")
+        false -> Result.Ok(Unit)
+
+verify countHeld
+    countHeld("Input", 0, []) => Result.Ok(Unit)
+    countHeld("Input", 2, [1, 2]) => Result.Ok(Unit)
+    countHeld("Input", 3, [1, 2]) => Result.Err("Transaction claims 3 Input(s) in 2 byte(s)")
 
 fn readInputsInto(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: Int) -> Result<InputsRead, String>
     ? "Accumulator form so the recursion stays in tail position."
@@ -408,39 +453,72 @@ fn readInputsInto(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: I
 
 verify readInputsInto
     List.len(readInputsInto(0, [9], [], 1)?.items) => 0
+    readInputsInto(1, [9], [], 1) => Result.Err("Transaction ends inside an Input")
     readInputsInto(0, [9], [], 1)?.rest => [9]
     readInputsInto(0, [9], [], 1)?.consumed => 1
 
 fn readOneInput(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: Int) -> Result<InputsRead, String>
     ? "An Input: the Output it spends, its script, and its sequence."
       "Thirty-two bytes of Transaction Id, four of index, the script behind its"
-      "length, then four of sequence."
-    index = Domain.Message.readLittleEndian(List.take(List.drop(rest, 32), 4))
-    script = Domain.CompactSize.read(List.drop(rest, 36))
-    inputFrom(remaining, List.take(rest, 32), index, script.value, script.rest, acc, consumed + 40 + script.width + script.value)
+      "length, then four of sequence. The thirty-six in front of the length"
+      "have to be there (#282): before this an empty rest read as an Input of"
+      "nothing, and a count that outran the bytes made one phantom per turn."
+    head = List.take(rest, 36)
+    match List.len(head) < 36
+        true -> Result.Err("Transaction ends inside an Input")
+        false -> readInputAfter(remaining, rest, acc, consumed, head)
 
 verify readOneInput
     List.len(readOneInput(1, List.drop(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.items) => 1
     readOneInput(1, List.drop(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0)?.consumed => 41
+    readOneInput(1, [], [], 0) => Result.Err("Transaction ends inside an Input")
+    readOneInput(1, List.take(List.drop(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), 35), [], 0) => Result.Err("Transaction ends inside an Input")
+
+fn readInputAfter(remaining: Int, rest: List<Int>, acc: List<Input>, consumed: Int, head: List<Int>) -> Result<InputsRead, String>
+    ? "The fixed part is there; read the script length and what it names."
+    index = Domain.Message.readLittleEndian(List.drop(head, 32))
+    script = Domain.CompactSize.read(List.drop(rest, 36))
+    inputFrom(remaining, List.take(head, 32), index, script.value, script.rest, acc, consumed + 40 + script.width + script.value)
+
+verify readInputAfter
+    readInputAfter(1, List.drop(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), [], 0, List.take(List.drop(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), 1), 36))?.consumed => 41
 
 fn inputFrom(remaining: Int, previous: List<Int>, index: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Input>, consumed: Int) -> Result<InputsRead, String>
     ? "Assemble one Input and continue with the bytes that follow it."
-    script = Bytes.fromList(List.take(afterLength, scriptLength))?
-    previousBytes = Bytes.fromList(List.reverse(previous))?
-    afterScript = List.drop(afterLength, scriptLength)
-    readInputsInto(remaining - 1, List.drop(afterScript, 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.take(afterScript, 4)), witness = []), acc), consumed)
+      "The script and the four bytes of sequence have to be there in full:"
+      "a take that came up short used to make a shorter script and a"
+      "Transaction Id over bytes that were never sent."
+    taken = List.take(afterLength, scriptLength + 4)
+    match List.len(taken) < scriptLength + 4
+        true -> Result.Err("Input script of {scriptLength} byte(s) and its sequence outrun the Transaction")
+        false -> inputWhole(remaining, previous, index, scriptLength, afterLength, acc, consumed, taken)
 
 verify inputFrom
     List.len(inputFrom(1, [], 0, 0, [0, 0, 0, 0], [], 41)?.items) => 1
     inputFrom(1, [], 0, 0, [0, 0, 0, 0], [], 41)?.consumed => 41
+    inputFrom(1, [], 0, 2, [81, 0, 0, 0, 0], [], 41) => Result.Err("Input script of 2 byte(s) and its sequence outrun the Transaction")
+    inputFrom(1, [], 0, 0, [0, 0, 0], [], 41) => Result.Err("Input script of 0 byte(s) and its sequence outrun the Transaction")
+
+fn inputWhole(remaining: Int, previous: List<Int>, index: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Input>, consumed: Int, taken: List<Int>) -> Result<InputsRead, String>
+    ? "The bytes are all there, so make the Input."
+    script = Bytes.fromList(List.take(taken, scriptLength))?
+    previousBytes = Bytes.fromList(List.reverse(previous))?
+    readInputsInto(remaining - 1, List.drop(afterLength, scriptLength + 4), List.prepend(Input(previousTxid = Bytes.toHex(previousBytes), previousIndex = index, script = Bytes.toHex(script), sequence = Domain.Message.readLittleEndian(List.drop(taken, scriptLength)), witness = []), acc), consumed)
+
+verify inputWhole
+    inputWhole(1, [], 0, 1, [81, 1, 0, 0, 0, 9], [], 42, [81, 1, 0, 0, 0])?.rest => [9]
+    sequenceOf(headOf(inputWhole(1, [], 0, 1, [81, 1, 0, 0, 0, 9], [], 42, [81, 1, 0, 0, 0])?.items)) => 1
+    inputWhole(1, [300], 0, 0, [0, 0, 0, 0], [], 41, [0, 0, 0, 0]) => Result.Err("byte 300 at index 0 is outside 0..=255")
 
 fn readOutputs(rest: List<Int>) -> Result<OutputsRead, String>
-    ? "Read the Output count, then that many Outputs."
+    ? "Read the Output count, then that many Outputs, the count checked first (#282)."
     count = Domain.CompactSize.read(rest)
+    _held = countHeld("Output", count.value, count.rest)?
     readOutputsInto(count.value, count.rest, [], count.width)
 
 verify readOutputs
     List.len(readOutputs(List.prepend(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81]))?.items) => 1
+    readOutputs([255, 255, 255, 255, 255, 255, 255, 255, 255]) => Result.Err("Transaction claims 18446744073709551615 Output(s) in 0 byte(s)")
 
 fn readOutputsInto(remaining: Int, rest: List<Int>, acc: List<Output>, consumed: Int) -> Result<OutputsRead, String>
     ? "Accumulator form so the recursion stays in tail position."
@@ -455,19 +533,43 @@ verify readOutputsInto
 
 fn readOneOutput(remaining: Int, rest: List<Int>, acc: List<Output>, consumed: Int) -> Result<OutputsRead, String>
     ? "An Output: eight bytes of amount, then the script behind its length."
-    value = Domain.Message.readLittleEndian(List.take(rest, 8))
-    script = Domain.CompactSize.read(List.drop(rest, 8))
-    outputFrom(remaining, value, script.value, script.rest, acc, consumed + 8 + script.width + script.value)
+      "The eight have to be there (#282), for the reason readOneInput gives."
+    valueBytes = List.take(rest, 8)
+    match List.len(valueBytes) < 8
+        true -> Result.Err("Transaction ends inside an Output")
+        false -> readOutputAfter(remaining, rest, acc, consumed, Domain.Message.readLittleEndian(valueBytes))
 
 verify readOneOutput
     List.len(readOneOutput(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81], [], 0)?.items) => 1
     readOneOutput(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81], [], 0)?.consumed => 11
+    readOneOutput(1, [136, 19, 0, 0, 0, 0, 0], [], 0) => Result.Err("Transaction ends inside an Output")
+
+fn readOutputAfter(remaining: Int, rest: List<Int>, acc: List<Output>, consumed: Int, value: Int) -> Result<OutputsRead, String>
+    ? "The amount is there; read the script length and what it names."
+    script = Domain.CompactSize.read(List.drop(rest, 8))
+    outputFrom(remaining, value, script.value, script.rest, acc, consumed + 8 + script.width + script.value)
+
+verify readOutputAfter
+    readOutputAfter(1, [136, 19, 0, 0, 0, 0, 0, 0, 2, 81, 81], [], 0, 5000)?.consumed => 11
 
 fn outputFrom(remaining: Int, value: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Output>, consumed: Int) -> Result<OutputsRead, String>
     ? "Assemble one Output and continue with the bytes that follow it."
-    script = Bytes.fromList(List.take(afterLength, scriptLength))?
-    readOutputsInto(remaining - 1, List.drop(afterLength, scriptLength), List.prepend(Output(value = value, script = Bytes.toHex(script)), acc), consumed)
+      "The script has to be there in full (#282)."
+    taken = List.take(afterLength, scriptLength)
+    match List.len(taken) < scriptLength
+        true -> Result.Err("Output script of {scriptLength} byte(s) outruns the Transaction")
+        false -> outputWhole(remaining, value, scriptLength, afterLength, acc, consumed, taken)
 
 verify outputFrom
     List.len(outputFrom(1, 5000, 0, [], [], 9)?.items) => 1
     outputFrom(1, 5000, 0, [], [], 9)?.consumed => 9
+    outputFrom(1, 5000, 3, [81, 81], [], 9) => Result.Err("Output script of 3 byte(s) outruns the Transaction")
+
+fn outputWhole(remaining: Int, value: Int, scriptLength: Int, afterLength: List<Int>, acc: List<Output>, consumed: Int, taken: List<Int>) -> Result<OutputsRead, String>
+    ? "The bytes are all there, so make the Output."
+    script = Bytes.fromList(taken)?
+    readOutputsInto(remaining - 1, List.drop(afterLength, scriptLength), List.prepend(Output(value = value, script = Bytes.toHex(script)), acc), consumed)
+
+verify outputWhole
+    outputWhole(1, 5000, 2, [81, 81, 9], [], 11, [81, 81])?.rest => [9]
+    outputWhole(1, 5000, 1, [300], [], 10, [300]) => Result.Err("byte 300 at index 0 is outside 0..=255")

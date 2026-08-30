@@ -1819,7 +1819,41 @@ stop requested; closing the pool and releasing the claim
 
 Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
-`16842752` is `0x01010000` in decimal. A Header that meets its target but
+`16842752` is `0x01010000` in decimal.
+
+### A Transaction that claims more Inputs than there are bytes
+
+The fourth mode, `hugetx`, is
+[#282](https://github.com/n1bor/btc-listener/issues/282): a thirteen-byte
+`tx` — version 1, then an Input count of 2^64−1 and nothing behind it. A
+decoder that trusts the count loops that many times building phantom Inputs,
+and Aver's `Int` would count that high; before the fix one such Message held
+the loop for ever. The liar waits for the `getaddr` the node sends on joining
+— a Message kept during a catch-up is acted on only if it is an `addr`, so a
+`tx` sent earlier is thrown away with the rest of the spare — then sends it
+and stays connected:
+
+```bash
+python3 tools/regtest/liar.py 18455 hugetx &
+timeout -s INT 45 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The count must be refused **before the loop starts**, and the node must go
+on to stop politely:
+
+```
+following at Height 167: 0 connected, 0 disconnected, set +0 -0
+mempool refused a Transaction: it would not decode: Transaction claims 18446744073709551615 Input(s) in 0 byte(s)
+stop requested; closing the pool and releasing the claim
+```
+
+No line at all means the Transaction never reached the Mempool — check the
+liar printed `liar: sent the lie` — and a run that does not print `stop
+requested` within the timeout is the hang the issue describes. The same
+guard covers the Output count, each Witness stack's item count, and every
+script and item length against the bytes that follow it; those are the
+verify cases in `domain/transaction.av`, because Core will not relay a
+Transaction that does not decode. A Header that meets its target but
 carries the wrong bits for its Height, or a timestamp at or below the median
 of the eleven beneath it, is refused by the same batch check with a line that
 names the rule instead; those two are covered by the verify cases in

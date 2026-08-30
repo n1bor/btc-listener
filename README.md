@@ -947,6 +947,15 @@ A catch-up that fails against a Peer drops it and tries the next, so the first
 Peer named on the command line cannot end the node by lying once — which is
 what it did before this, and what the hostile-Peer test found.
 
+A Transaction is decoded only as far as its bytes go
+([#282](https://github.com/n1bor/btc-listener/issues/282)). Every count in
+it — Inputs, Outputs, each Witness stack's items — is a CompactSize the Peer
+chose, up to 2^64, and every script and Witness item carries its own length;
+each is refused when the bytes that follow could not hold it, for the price
+of walking those bytes once, before anything is built from it. Before this a
+thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
+Input per turn.
+
 A Header has to prove its work before it is placed
 ([#281](https://github.com/n1bor/btc-listener/issues/281)). Its Block Id must
 fall under the target its own bits name; those bits must be what the Network's

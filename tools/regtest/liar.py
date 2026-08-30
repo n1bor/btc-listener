@@ -17,16 +17,21 @@ def headers_payload(headers):
     return bytes([len(headers)]) + b''.join(h + b'\0' for h in headers)
 def command_of(frame):
     return frame[4:16].rstrip(b'\0').decode(errors='replace') if len(frame) >= 16 else ''
-def answer_getheaders(conn, payload):
-    # Announce the Header unasked, then answer every getheaders with it, so
+def answer_getheaders(conn, payload, then=b'', on='getheaders'):
+    # Announce the Headers unasked, then answer every getheaders with them, so
     # the follow loop's catch-up asks this Peer and gets the same lie back.
+    # `then` is sent once, on the first Message named by `on`: what the liar
+    # really came to say, delivered when the node is where it should hear it.
     conn.sendall(msg('headers', payload))
     conn.settimeout(120)
     try:
         while True:
             frame = conn.recv(65536)
             if not frame: return
+            print('liar: got', command_of(frame), file=sys.stderr, flush=True)
             if command_of(frame) == 'getheaders': conn.sendall(msg('headers', payload))
+            if command_of(frame) == on and then:
+                conn.sendall(then); then = b''; print('liar: sent the lie', file=sys.stderr, flush=True)
     except socket.timeout:
         return
 def serve(port, mode):
@@ -43,6 +48,15 @@ def serve(port, mode):
     elif mode == 'network':
         bad = bytes([0xf9,0xbe,0xb4,0xd9]) + b'ping'.ljust(12, b'\0') + struct.pack('<I', 0) + hashlib.sha256(hashlib.sha256(b'').digest()).digest()[:4]
         conn.sendall(bad)
+    elif mode == 'hugetx':
+        # Thirteen bytes: version 1, then an Input count of 2^64-1 and nothing
+        # behind it. A decoder that trusts the count spins for ever (#282).
+        # Sent once the node is in its listen loop -- a Message kept during
+        # a catch-up is acted on only if it is an addr -- which the getaddr it sends on joining
+        # announces; then the liar stays connected and answers getheaders
+        # with nothing.
+        answer_getheaders(conn, headers_payload([]), then=msg('tx', struct.pack('<i', 1) + b'\xff' + b'\xff'*8), on='getaddr')
+        return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))
         return
