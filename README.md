@@ -956,6 +956,15 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+A Peer's user agent is made safe before it is shown
+([#293](https://github.com/n1bor/btc-listener/issues/293)). Every byte of it
+is the Peer's choice, and until this every byte reached the operator's
+terminal through the Peers panel: an escape sequence in a user agent could
+clear the Screen, retitle the window, or write the clipboard. As Core's
+`SanitizeString` does, `Domain.Version.peerUserAgentOf` keeps printable ASCII,
+turns everything else into `?`, and cuts at sixty-four characters; its length
+is read as the CompactSize it is, not the one byte it was.
+
 Three spends Core refuses are now refused here too
 ([#292](https://github.com/n1bor/btc-listener/issues/292)): a P2WSH witness
 Script over 10,000 bytes (the limit lived only where a hex Script enters, and

@@ -4,9 +4,10 @@ def msg(cmd, payload, corrupt=False):
     c = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
     if corrupt: c = bytes([(c[0]+1) % 256]) + c[1:]
     return MAGIC + cmd.encode().ljust(12, b'\0') + struct.pack('<I', len(payload)) + c + payload
+AGENT = b'/liar:1/'
 def version_payload():
     return (struct.pack('<iQq', 70016, 0, int(time.time())) + b'\0'*26 + b'\0'*26
-            + struct.pack('<Q', 12345) + b'\x08/liar:1/' + struct.pack('<i', 0) + b'\0')
+            + struct.pack('<Q', 12345) + bytes([len(AGENT)]) + AGENT + struct.pack('<i', 0) + b'\0')
 REGTEST_GENESIS = bytes.fromhex('0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206')[::-1]
 def low_bits_header():
     # A Header off regtest genesis claiming bits 0x01010000: a target of one,
@@ -94,6 +95,11 @@ def addr_payload(n, seed):
         out += struct.pack('<I', 0) + struct.pack('<Q', 1) + b'\0'*10 + b'\xff\xff' + bytes([8, (v >> 16) & 255, (v >> 8) & 255, v & 255]) + struct.pack('>H', 8333)
     return out
 def serve(port, mode):
+    global AGENT
+    if mode == 'escape':
+        # A user agent that clears the terminal and retitles the window
+        # (#293): ESC [ 2 J, then OSC 0 ; pwned BEL, then a name.
+        AGENT = b'\x1b[2J\x1b]0;pwned\x07/liar:1/'
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('127.0.0.1', port)); s.listen(1)
     conn, addr = s.accept()
@@ -115,6 +121,9 @@ def serve(port, mode):
         # announces; then the liar stays connected and answers getheaders
         # with nothing.
         answer_getheaders(conn, headers_payload([]), then=msg('tx', struct.pack('<i', 1) + b'\xff' + b'\xff'*8), on='getaddr')
+        return
+    elif mode == 'escape':
+        answer_getheaders(conn, headers_payload([]))
         return
     elif mode == 'addrflood':
         # Ten thousand Candidates in ten Messages (#291). A Book without a

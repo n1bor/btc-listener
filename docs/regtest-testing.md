@@ -1821,6 +1821,28 @@ Then `show $D 167 summary` must still equal `$C getblockhash 167`. The Block
 Id in the first line changes every run (the Header carries the clock), and
 `16842752` is `0x01010000` in decimal.
 
+### A user agent that tries to draw on the terminal
+
+[#293](https://github.com/n1bor/btc-listener/issues/293). The liar's
+`escape` mode announces itself as `ESC[2J ESC]0;pwned BEL /liar:1/` — clear
+the screen, retitle the window, then a name. Serve the status Board beside
+it and read the Peers panel back:
+
+```bash
+python3 tools/regtest/liar.py 18455 escape &
+timeout -s INT 25 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D http:8330 &
+sleep 8; curl -s http://127.0.0.1:8330/ | grep liar
+```
+
+The agent arrives with every control byte turned into a question mark, so
+the same text is what the Screen would print:
+
+```
+?[2J?]0;pwned?/liar:1/
+```
+
+`curl | od -c` is the stronger check: no `033` anywhere in the page.
+
 ### An Address Book that will not fill, and a host that gets one slot
 
 [#291](https://github.com/n1bor/btc-listener/issues/291), two halves. The

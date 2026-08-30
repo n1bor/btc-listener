@@ -6,7 +6,7 @@ module Version
         "rather than this module reaching for them — so the exact bytes are"
         "checkable against a known-good vector instead of against a live Peer."
     exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf, addrRecvOffset, addrRecvOf]
-    depends [Bytes, Domain.Message, Domain.Address]
+    depends [Bytes, Domain.Message, Domain.Address, Domain.CompactSize, Domain.ScriptState]
     effects []
 
 fn protocolVersion() -> Int
@@ -200,16 +200,73 @@ verify allZero
     allZero([0, 1]) => false
 
 fn peerUserAgentOf(body: List<Int>) -> String
-    ? "The user agent a Peer reported, read from its length prefix."
-    readVarString(List.drop(body, userAgentOffset()))
+    ? "The user agent a Peer reported, read from its length prefix and made"
+      "safe to print (#293)."
+      "A Peer chooses every byte of it, and until this they all reached the"
+      "operator's terminal: an escape sequence in a user agent could clear"
+      "the Screen, retitle the window, or write the clipboard. Core's"
+      "SanitizeString keeps printable ASCII and nothing else; so does this,"
+      "and it cuts at sixty-four characters, which is more than any real"
+      "agent needs and less than a Peers panel can show."
+    sanitised(readVarString(List.drop(body, userAgentOffset())), [])
 
-fn readVarString(rest: List<Int>) -> String
-    ? "Read a length-prefixed string, tolerating a payload that ends early."
-    match rest
-        [] -> ""
-        [length, ..tail] -> Domain.Message.asciiText(List.take(tail, length))
+verify peerUserAgentOf
+    peerUserAgentOf(List.concat(Domain.ScriptState.zeros(userAgentOffset()), [16, 47, 83, 97, 116, 111, 115, 104, 105, 58, 50, 55, 46, 48, 46, 48, 47])) => "/Satoshi:27.0.0/"
+    peerUserAgentOf(List.concat(Domain.ScriptState.zeros(userAgentOffset()), [4, 27, 91, 50, 74])) => "?[2J"
+
+fn readVarString(rest: List<Int>) -> List<Int>
+    ? "Read a length-prefixed string's bytes, tolerating a payload that ends"
+      "early. The length is a CompactSize, as the protocol says, and not the"
+      "one byte this used to read: an agent of 253 bytes or more mis-parsed."
+    count = Domain.CompactSize.read(rest)
+    List.take(count.rest, count.value)
 
 verify readVarString
-    readVarString([2, 97, 98, 99]) => "ab"
-    readVarString([0]) => ""
-    readVarString([]) => ""
+    readVarString([2, 97, 98, 99]) => [97, 98]
+    readVarString([0]) => []
+    readVarString([]) => []
+    readVarString([253, 1, 0, 97, 98]) => [97]
+
+fn agentLimit() -> Int
+    ? "How many characters of a user agent are kept."
+    64
+
+verify agentLimit
+    agentLimit() => 64
+
+fn sanitised(bytes: List<Int>, acc: List<String>) -> String
+    ? "Printable ASCII kept, everything else a question mark, cut at the limit."
+    match List.len(acc) >= agentLimit()
+        true -> String.join(List.reverse(acc), "")
+        false -> sanitisedNext(bytes, acc)
+
+verify sanitised
+    sanitised([47, 65, 47], []) => "/A/"
+    sanitised([27, 91, 50, 74, 7], []) => "?[2J?"
+    sanitised([127, 200, 31], []) => "???"
+    String.len(sanitised(Domain.ScriptState.zeros(100), [])) => 64
+    sanitised([], []) => ""
+
+fn sanitisedNext(bytes: List<Int>, acc: List<String>) -> String
+    ? "One byte at a time."
+    match bytes
+        [] -> String.join(List.reverse(acc), "")
+        [head, ..tail] -> sanitised(tail, List.prepend(printable(head), acc))
+
+verify sanitisedNext
+    sanitisedNext([], ["a"]) => "a"
+    sanitisedNext([98], ["a"]) => "ab"
+
+fn printable(byte: Int) -> String
+    ? "The character, if it is printable ASCII; otherwise a question mark."
+    match Bool.and(byte >= 32, byte <= 126)
+        true -> Option.withDefault(String.fromCodePoint(byte), "?")
+        false -> "?"
+
+verify printable
+    printable(65) => "A"
+    printable(32) => " "
+    printable(126) => "~"
+    printable(31) => "?"
+    printable(127) => "?"
+    printable(27) => "?"
