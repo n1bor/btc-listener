@@ -24,7 +24,7 @@ module SpendScript
         "redeem script is the one committed to, and say nothing at all about"
         "whether it runs."
     exposes [check, Outcomes, noOutcomes, count, merged, noteOf]
-    depends [Domain.Network, Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.Witness, Domain.WitnessUse]
+    depends [Domain.Network, Bytes, Domain.Primitives, Domain.Rules, Domain.Interp, Domain.Script, Domain.ScriptParse, Domain.ScriptState, Domain.SpendContext, Domain.StackItem, Domain.Witness, Domain.WitnessUse]
     effects []
 
 fn check(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
@@ -134,7 +134,7 @@ fn notWitness(inputScriptHex: String, outputScriptHex: String, context: Context)
       "passes out of an engine that has never verified a signature. The number"
       "was real and meant nothing."
     match Bool.and(context.rules.segWit, Domain.Script.isAnyWitnessProgram(outputScriptHex))
-        true -> Domain.Witness.spend(inputScriptHex, outputScriptHex, context)
+        true -> witnessIfTruthy(inputScriptHex, outputScriptHex, context)
         false -> parsed(inputScriptHex, outputScriptHex, context)
 
 verify notWitness
@@ -145,6 +145,28 @@ verify notWitness
     notWitness("", "0014751e76e8199196d454941c45d1b3a323f1433bd6", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
     notWitness("", "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
     notWitness("51", "00", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+
+fn witnessIfTruthy(inputScriptHex: String, outputScriptHex: String, context: Context) -> Outcome
+    ? "Core runs the Output Script before it looks at the witness program, and"
+      "a program whose bytes cast to false leaves a false value on top (#292):"
+      "EVAL_FALSE before VerifyWitnessProgram is reached. A program of all"
+      "noughts is such a value, whatever its version."
+    match Domain.StackItem.isTruthy(programOf(outputScriptHex))
+        false -> Outcome.Decided(Ending.Failed("script left a false value on top"))
+        true -> Domain.Witness.spend(inputScriptHex, outputScriptHex, context)
+
+verify witnessIfTruthy
+    witnessIfTruthy("", "52020000", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
+    witnessIfTruthy("", "52020100", Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+
+fn programOf(scriptHex: String) -> List<Int>
+    ? "The bytes a witness program pushes: everything after the version"
+      "opcode and the push's length byte."
+    List.drop(Domain.Script.bytesOf(scriptHex), 2)
+
+verify programOf
+    programOf("52020000") => [0, 0]
+    programOf("0014751e76e8199196d454941c45d1b3a323f1433bd6") => Bytes.octets(Bytes.fromHex("751e76e8199196d454941c45d1b3a323f1433bd6")?)
 
 fn tooLong(scriptHex: String) -> Bool
     ? "Two hexadecimal characters to the byte."
@@ -315,7 +337,7 @@ fn redeemedWith(ops: List<Op>, redeem: List<Int>, rest: List<List<Int>>, context
       "with the wrong key\", which Core answers EVAL_FALSE and this engine"
       "answered Decided(Passed) until this arm was added."
     match Bool.and(context.rules.segWit, Domain.Script.isAnyWitnessProgram(hexOf(redeem)))
-        true -> nestedWitness(ops, redeem, context)
+        true -> nestedIfTruthy(ops, redeem, context)
         false -> redeemRun(redeem, rest, context)
 
 verify redeemedWith
@@ -325,6 +347,16 @@ verify redeemedWith
     redeemedWith([], nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 481823))) => Outcome.Decided(Ending.Passed)
     redeemedWith(pushOfRedeem(), nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Undecided("a witness program needs the transaction that carries its witness")
     redeemedWith([], nestedWitnessRedeem(), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a nested witness program needs an input script of exactly one push of the redeem script"))
+
+fn nestedIfTruthy(ops: List<Op>, redeem: List<Int>, context: Context) -> Outcome
+    ? "The same rule for a program nested in P2SH: Core runs the redeem"
+      "script and checks the top of the stack before the witness (#292)."
+    match Domain.StackItem.isTruthy(List.drop(redeem, 2))
+        false -> Outcome.Decided(Ending.Failed("script left a false value on top"))
+        true -> nestedWitness(ops, redeem, context)
+
+verify nestedIfTruthy
+    nestedIfTruthy([], [82, 2, 0, 0], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("script left a false value on top"))
 
 fn pushOfRedeem() -> List<Op>
     ? "The Input Script of a well formed nested spend: one push, of the"

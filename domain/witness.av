@@ -356,6 +356,20 @@ verify executed
     executed([81], [Domain.ScriptState.zeros(521)], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a witness item is 521 bytes, over the 520 byte limit"))
 
 fn parsed(script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
+    ? "A witness Script over the size limit fails, before it is parsed (#292)."
+      "Core's EvalScript applies MAX_SCRIPT_SIZE to a WITNESS_V0 script as it"
+      "does to any other; this path used to reach the interpreter without"
+      "asking, because the limit lived only where a hex Script enters. The"
+      "item check above does not catch it: the script was popped first."
+    match List.len(script) > Domain.ScriptState.maxScript()
+        true -> Outcome.Decided(Ending.Failed("witness script is over the {Domain.ScriptState.maxScript()} byte limit"))
+        false -> parsedSized(script, stack, context)
+
+verify parsed
+    parsed([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    parsed(Domain.ScriptState.zeros(10001), [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("witness script is over the 10000 byte limit"))
+
+fn parsedSized(script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcome
     ? "A witness Script that does not parse fails the spend rather than going"
       "undecided: it was committed to by hash, so there is nothing further to"
       "learn about it."
@@ -363,10 +377,10 @@ fn parsed(script: List<Int>, stack: List<List<Int>>, context: Context) -> Outcom
         Result.Err(why) -> Outcome.Decided(Ending.Failed("witness script: {why}"))
         Result.Ok(ops) -> cleanly(Domain.Interp.reach(ops, Domain.ScriptState.holding(stack), Domain.SpendContext.inWitnessV0(context, hexOf(script))))
 
-verify parsed
-    parsed([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
-    parsed([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("witness script: push of 2 bytes runs past the end of the script"))
-    parsed([81, 81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not 2"))
+verify parsedSized
+    parsedSized([81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Passed)
+    parsedSized([2, 170], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("witness script: push of 2 bytes runs past the end of the script"))
+    parsedSized([81, 81], [], Domain.SpendContext.bare(Domain.Rules.latest())) => Outcome.Decided(Ending.Failed("a witness script must leave exactly one item, not 2"))
 
 fn cleanly(step: Step) -> Outcome
     ? "Inside a Witness the stack must hold exactly one item at the end."

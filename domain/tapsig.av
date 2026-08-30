@@ -26,7 +26,7 @@ module Tapsig
         "script_assets_test.json has crafted ones, and n1bor/btc-listener#68"
         "is the record of the engine calling them valid before this counted."
     exposes [checked, added, spending]
-    depends [Bytes, Domain.Bip341, Domain.Opcode, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.StackItem]
+    depends [Bytes, Domain.Bip341, Domain.Opcode, Domain.Rules, Domain.Schnorr, Domain.ScriptState, Domain.SpendContext, Domain.StackItem, Domain.Transaction]
     effects []
 
 fn checked(code: Int, two: Two, state: State, context: Context) -> Step
@@ -201,11 +201,31 @@ fn overMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: 
       "undecided there would leave the lax reading standing in an audit."
     match Domain.Bip341.validHashType(hashType)
         false -> Answer.Fails("hash type {hashType} is not one Taproot defines")
-        true -> overBuiltMessage(code, signature, publicKey, hashType, context)
+        true -> overSingle(code, signature, publicKey, hashType, context, Domain.SpendContext.transactionOf(context))
 
 verify overMessage
     overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 0, spending()) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
     overMessage(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 4, spending()) => Answer.Fails("hash type 4 is not one Taproot defines")
+
+fn overSingle(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context, transaction: Option<Transaction>) -> Answer
+    ? "SIGHASH_SINGLE with no Output at this Input fails (#292); without a"
+      "Transaction there is nothing to ask, and the message step says so."
+    match transaction
+        Option.None -> overBuiltMessage(code, signature, publicKey, hashType, context)
+        Option.Some(held) -> overSingleIn(code, signature, publicKey, hashType, context, Domain.Bip341.singleUnmatched(held, Domain.SpendContext.inputIndexOf(context), hashType))
+
+verify overSingle
+    overSingle(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 3, spending(), Option.None) => Answer.Undecided("OP_CHECKSIG needs the transaction its signature commits to")
+    overSingle(172, Domain.ScriptState.zeros(64), Domain.ScriptState.zeros(32), 3, spending(), Option.Some(Domain.Bip341.emptyTransaction())) => Answer.Fails("SIGHASH_SINGLE signs an output that does not exist")
+
+fn overSingleIn(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context, unmatched: Bool) -> Answer
+    ? "The answer once the question has been asked."
+    match unmatched
+        true -> Answer.Fails("SIGHASH_SINGLE signs an output that does not exist")
+        false -> overBuiltMessage(code, signature, publicKey, hashType, context)
+
+verify overSingleIn
+    overSingleIn(172, [], [], 3, spending(), true) => Answer.Fails("SIGHASH_SINGLE signs an output that does not exist")
 
 fn overBuiltMessage(code: Int, signature: List<Int>, publicKey: List<Int>, hashType: Int, context: Context) -> Answer
     ? "The hash type is one BIP341 defines; now ask for the message."

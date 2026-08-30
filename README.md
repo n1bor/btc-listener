@@ -956,6 +956,17 @@ of walking those bytes once, before anything is built from it. Before this a
 thirteen-byte `tx` claiming 2^64−1 Inputs held the loop for ever, one phantom
 Input per turn.
 
+Three spends Core refuses are now refused here too
+([#292](https://github.com/n1bor/btc-listener/issues/292)): a P2WSH witness
+Script over 10,000 bytes (the limit lived only where a hex Script enters, and
+the witness path reached the interpreter without asking); a Taproot signature
+under `SIGHASH_SINGLE` at an Input with no Output at its index (the message
+was built with the field left out, which is a message Core never makes — it
+fails the Script, `SCHNORR_SIG_HASHTYPE`); and a witness program whose bytes
+cast to false (Core runs the Output Script and checks the top of the stack
+before it looks at the witness at all). BIP66 strict DER, which the review
+listed beside these, was already applied by Height in `Domain.Checkwork`.
+
 The Address Book is bounded, filtered, and one host gets one inbound slot
 ([#291](https://github.com/n1bor/btc-listener/issues/291)). A Candidate is
 kept only if it is routable — Core keeps nothing outside `IsRoutable`, and a

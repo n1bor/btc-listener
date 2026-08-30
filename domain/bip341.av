@@ -19,7 +19,7 @@ module Bip341
         "The annex is a Witness item beginning 0x50 which has no meaning yet"
         "and is committed to anyway, so that giving it one later is a soft"
         "fork rather than a way to rewrite old signatures."
-    exposes [message, messageWith, validHashType, Extension, preimage, sigMsg, Spent, emptyTransaction, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
+    exposes [message, messageWith, validHashType, singleUnmatched, Extension, preimage, sigMsg, Spent, emptyTransaction, hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs]
     depends [Bytes, Domain.CompactSize, Domain.Message, Domain.Sighash, Domain.Tagged, Domain.Transaction]
     effects []
 
@@ -92,12 +92,40 @@ fn withHashType(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>
       "legacy would have signed something."
     match validHashType(hashType)
         false -> Result.Err("hash type {hashType} is not one Taproot defines")
-        true -> Result.Ok(sigMsg(transaction, inputIndex, prevouts, hashType, annex, extension))
+        true -> withOutput(transaction, inputIndex, prevouts, hashType, annex, extension)
 
 verify withHashType
     withHashType(emptyTransaction(), 0, [], 4, Option.None, Option.None) => Result.Err("hash type 4 is not one Taproot defines")
     withHashType(emptyTransaction(), 0, [], 255, Option.None, Option.None) => Result.Err("hash type 255 is not one Taproot defines")
     List.len(withHashType(Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), 0, [Spent(amount = 1, script = "51")], 0, Option.None, Option.None)?) => 175
+
+fn withOutput(transaction: Transaction, inputIndex: Int, prevouts: List<Spent>, hashType: Int, annex: Option<String>, extension: Option<Extension>) -> Result<List<Int>, String>
+    ? "SIGHASH_SINGLE needs the Output at the Input's index to exist (#292)."
+      "BIP341 makes its absence an error and BIP342 fails the Script; there"
+      "is no legacy bug here that signs the number one. singleOutputField"
+      "used to omit the field and hash on, which made a message Core would"
+      "never make."
+    match singleUnmatched(transaction, inputIndex, hashType)
+        true -> Result.Err("SIGHASH_SINGLE at input {inputIndex}, which has no output to sign")
+        false -> Result.Ok(sigMsg(transaction, inputIndex, prevouts, hashType, annex, extension))
+
+verify withOutput
+    withOutput(Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), 0, [Spent(amount = 1, script = "51")], 3, Option.None, Option.None) => Result.Err("SIGHASH_SINGLE at input 0, which has no output to sign")
+    List.len(withOutput(Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), 0, [Spent(amount = 1, script = "51")], 0, Option.None, Option.None)?) => 175
+
+fn singleUnmatched(transaction: Transaction, inputIndex: Int, hashType: Int) -> Bool
+    ? "Whether this is SIGHASH_SINGLE with no Output at the Input's index."
+    match Domain.Sighash.baseOf(hashType)
+        Base.SignSingle -> inputIndex >= List.len(transaction.outputs)
+        Base.SignAll -> false
+        Base.SignNone -> false
+
+verify singleUnmatched
+    singleUnmatched(emptyTransaction(), 0, 3) => true
+    singleUnmatched(emptyTransaction(), 0, 0) => false
+    singleUnmatched(emptyTransaction(), 0, 2) => false
+    singleUnmatched(Transaction(version = 1, inputs = [], outputs = [Output(value = 1, script = "51")], lockTime = 0, txid = "", size = 0, isSegWit = false), 0, 3) => false
+    singleUnmatched(Transaction(version = 1, inputs = [], outputs = [Output(value = 1, script = "51")], lockTime = 0, txid = "", size = 0, isSegWit = false), 1, 131) => true
 
 fn validHashType(hashType: Int) -> Bool
     ? "Zero, or one of ALL, NONE and SINGLE with or without ANYONECANPAY."

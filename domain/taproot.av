@@ -605,11 +605,22 @@ fn overMessage(program: List<Int>, signature: String, hashType: Int, annex: Opti
       "Transaction invalid, which is the one mistake that must not happen."
     match Domain.Bip341.validHashType(hashType)
         false -> Outcome.Decided(Ending.Failed("hash type {hashType} is not one Taproot defines"))
-        true -> overBuiltMessage(program, signature, hashType, annex, context)
+        true -> overSingle(program, signature, hashType, annex, context)
 
 verify overMessage
     overMessage(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
     overMessage(Domain.ScriptState.zeros(32), "", 4, Option.None, spending([])) => Outcome.Decided(Ending.Failed("hash type 4 is not one Taproot defines"))
+
+fn overSingle(program: List<Int>, signature: String, hashType: Int, annex: Option<String>, context: Context) -> Outcome
+    ? "SIGHASH_SINGLE with no Output at this Input fails the spend (#292),"
+      "as SCHNORR_SIG_HASHTYPE does in Core, rather than being undecided."
+    match Domain.Bip341.singleUnmatched(transactionIn(context), Domain.SpendContext.inputIndexOf(context), hashType)
+        true -> Outcome.Decided(Ending.Failed("SIGHASH_SINGLE signs an output that does not exist"))
+        false -> overBuiltMessage(program, signature, hashType, annex, context)
+
+verify overSingle
+    overSingle(Domain.ScriptState.zeros(32), "", 0, Option.None, spending([])) => Outcome.Undecided("taproot message: no input at index 0 to sign")
+    overSingle(Domain.ScriptState.zeros(32), "", 3, Option.None, spending([])) => Outcome.Decided(Ending.Failed("SIGHASH_SINGLE signs an output that does not exist"))
 
 fn overBuiltMessage(program: List<Int>, signature: String, hashType: Int, annex: Option<String>, context: Context) -> Outcome
     ? "The hash type is one BIP341 defines; now build the message."
