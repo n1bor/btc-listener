@@ -139,7 +139,6 @@ aver format . --check
 
 cargo test --manifest-path providers/primitives/Cargo.toml   # the providers carry their own Rust tests, run when you touch providers/
 cargo test --manifest-path providers/kv/Cargo.toml
-cargo test --manifest-path providers/durable/Cargo.toml
 ```
 
 Run interpreted (the provider host is built automatically now; plain
@@ -202,12 +201,15 @@ and supplied at run time by Rust crates named in `aver.toml`:
   libclang-dev to build, ADR 0009). Effectful, so
   each operation declares an Oracle dimension. `Handle` is an opaque capability
   resource Aver code cannot construct or serialise.
-- `infra/durable.av` → `providers/durable` — an fsync, thirty lines of
-  `std::fs` (#301). Aver's `Disk.appendBytes` returns once the bytes are in
-  the page cache, and a Segment whose `b:` Location is about to be written by
-  a RocksDB that *does* fsync needs to be durable first. A capability because
-  Aver has no fsync; jasisz/aver#1229 asks for `Disk.sync` upstream, and this
-  contract retires the day it lands.
+
+~~`infra/durable.av` → `providers/durable`~~ — **retired.** It was an fsync in
+thirty lines of `std::fs`, a capability only because Aver had none (#301), and
+it said it would retire the day `Disk.sync` landed. jasisz/aver#1229 closed on
+the `74f1cbbd` pin and it did. `Infra.Blocks.synced` now calls the effect and
+also syncs the directory, which the capability never did: an fsync on a file
+makes that file durable and says nothing about the entry naming it in the
+parent, so a newly created Segment could be wholly on the disk in a directory
+that did not name it.
 
 The providers carry their own Rust tests; everything else is tested from Aver.
 

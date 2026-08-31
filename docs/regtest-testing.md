@@ -1883,36 +1883,49 @@ made of system calls, so `strace` is the whole test. Fetch a few Blocks:
 rm -rf $D && $BIN regtest headers 127.0.0.1:18454 $D
 strace -f -e trace=openat,fsync,fdatasync -o /tmp/sync.log \
   $BIN regtest bodies 127.0.0.1:18454 $D 1 40
-grep -nE 'blk[0-9]+\.dat", O_RDONLY|fsync\(' /tmp/sync.log | tail -4
+grep -nE 'blk[0-9]+\.dat", O_RDONLY|blocks", O_RDONLY|fsync\(' /tmp/sync.log | tail -8
 ```
 
-The provider opens the Segment read-only purely to sync it, so that open is
-the marker to find, and the `fsync` on the descriptor it returns must come
-**before** RocksDB's:
+`Disk.sync` opens its target read-only purely to sync it, so those opens are
+the markers to find, and both `fsync`s must come **before** RocksDB's:
 
 ```
-162  openat(AT_FDCWD, ".../dchain/blocks/blk000000.dat", O_RDONLY|O_CLOEXEC) = 11
+162  openat(AT_FDCWD, ".../blocks/blk000000.dat", O_RDONLY|O_CLOEXEC) = 11
 163  fsync(11)                        = 0        <- the Segment
-165  fsync(4)                         = 0        <- the batch of b: Locations
+164  openat(AT_FDCWD, ".../blocks", O_RDONLY|O_CLOEXEC)               = 11
+165  fsync(11)                        = 0        <- the directory naming it
+167  fsync(4)                         = 0        <- the batch of b: Locations
 ```
 
-Two lines apart, and in that order, is the fix. The earlier `fsync`s in the
-trace are RocksDB opening its own database and belong to no batch.
+Three syncs, in that order, is the fix. The earlier `fsync`s in the trace are
+RocksDB opening its own database and belong to no batch.
+
+**The directory is the half that is easy to leave out**, and the capability
+this replaced did leave it out. An `fsync` on a file makes that file's data
+and its own inode durable and says nothing about the entry naming it in the
+parent, which is a different inode. A Segment created by this batch can
+therefore be entirely on the disk inside a directory that does not name it
+yet -- the same lost Block by another route. Watch for line 164: without it
+the trace still looks right, because the file sync it follows is the one
+everybody thinks of.
 
 **Check the test still bites.** Against a binary from before the fix, the
 Segment is never opened for a sync and never synced at all:
 
 ```
 pre-fix : 0 read-only opens of blk000000.dat, 0 fsyncs on it
-fixed   : 1 read-only open, 1 fsync, before the batch
+fixed   : 1 open of the Segment + 1 of blocks/, 2 fsyncs, both before the batch
 ```
 
-One, for forty Blocks, is the design and not a shortfall: the Locations go
-down in one batch per phase, so one sync per batch buys the whole ordering.
-An fsync a Block would have cost forty to buy the same thing.
+Two, for forty Blocks, is the design and not a shortfall: the Locations go
+down in one batch per phase, so one sync per Segment touched plus one for the
+directory buys the whole ordering. An fsync a Block would have cost forty to
+buy the same thing.
 
-`providers/durable` carries the unit tests for the provider itself — one
-file, several, an empty list, and an absent Segment answered with an `Err`
+`Disk.sync` carries its own tests upstream — an existing file, a directory,
+and a missing path answered as a catchable error rather than a fault. This
+was `providers/durable` until jasisz/aver#1229 landed the effect and the
+capability retired; the ordering above is what this repository still owns
 naming it rather than a silence — because whether an fsync reached the platter
 is not a claim Aver can evaluate.
 
@@ -2353,7 +2366,6 @@ aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release
 cargo test --manifest-path providers/primitives/Cargo.toml
 cargo test --manifest-path providers/kv/Cargo.toml
-cargo test --manifest-path providers/durable/Cargo.toml
 ```
 
 `cargo build` is not a formality: the failure classes that survive `check`,

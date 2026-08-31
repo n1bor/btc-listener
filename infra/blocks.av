@@ -24,10 +24,9 @@ module Blocks
         "makes exactly those durable. The caller writes no Location until it"
         "has returned."
     exposes [BlockStore, Appended, open, append, read, prune, synced, unsyncedIn, currentSegment, segmentPath, segmentNumberOf]
-    depends [Bytes, Domain.Index, Domain.Segment, Infra.Durable]
+    depends [Bytes, Domain.Index, Domain.Segment]
     effects [
-        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
-        Infra.Durable.synced,
+        Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.sync, Disk.writeBytes,
     ]
 
 record BlockStore
@@ -265,13 +264,33 @@ verify unsyncedIn
 fn synced(store: BlockStore) -> Result<BlockStore, String>
     ? "Every Segment appended to since the last time here, on the disk (#301)."
       "Called before the batch of b: Locations that names those bytes, so the"
-      "Index can never be durable ahead of the Segments. A store with nothing"
-      "outstanding still calls the provider — with an empty list, which is a"
-      "legal batch and costs one crossing — rather than branching here, and"
-      "the provider answers Ok without touching a file."
-    ! [Infra.Durable.synced]
-    _done = Infra.Durable.synced(pathsOf(store.dir, store.unsynced, []))?
+      "Index can never be durable ahead of the Segments."
+      "The directory goes down after the files, and that is not tidiness"
+      "(jasisz/aver#1229). An fsync on a file makes that file's data and its"
+      "own metadata durable; it says nothing about the entry naming it in the"
+      "parent, which is a different inode. A Segment that has just been"
+      "created can therefore be entirely on the disk inside a directory that"
+      "does not name it yet, which is the same lost Block by another route."
+      "A store with nothing outstanding still syncs the directory, which is"
+      "one call and cannot be wrong."
+    ! [Disk.sync]
+    _done = syncedAll(pathsOf(store.dir, store.unsynced, []))?
+    _dir = Disk.sync(store.dir)?
     Result.Ok(BlockStore(dir = store.dir, state = store.state, unsynced = []))
+
+fn syncedAll(paths: List<String>) -> Result<Unit, String>
+    ? "Each Segment named, one at a time, stopping at the first that will"
+      "not go -- because a partial sync that reported Ok would let the"
+      "Locations follow bytes that are not there."
+    ! [Disk.sync]
+    match paths
+        [] -> Result.Ok(Unit)
+        [head, ..tail] -> syncedNext(Disk.sync(head)?, tail)
+
+fn syncedNext(done: Unit, paths: List<String>) -> Result<Unit, String>
+    ? "One down, the rest to go."
+    ! [Disk.sync]
+    syncedAll(paths)
 
 fn pathsOf(dir: String, segments: List<Int>, acc: List<String>) -> List<String>
     ? "Each Segment number as the file it is."
