@@ -87,6 +87,39 @@ def wrong_bodies(conn, cli):
                         print('liar: sent a wrong body for', block_hash, file=sys.stderr, flush=True)
     except (socket.timeout, OSError):
         return                                        # dropped, as it should be
+REGTEST_GENESIS_HEADER = bytes.fromhex(
+    '0100000000000000000000000000000000000000000000000000000000000000000000003b'
+    'a3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff'
+    '7f2002000000')
+def header_flood(conn):
+    # A Peer that says the chain moved, for ever, having spent nothing (#300).
+    # Two claims in turn, both free to make: a headers with no Headers in it
+    # at all, and a headers carrying regtest genesis -- a Header every node
+    # holds, so it names nothing the tree has not placed. Each one used to be
+    # answered with a whole catch-up: the Header round trip, the realignment,
+    # the body walk and the Set build. Every getheaders is answered with
+    # nothing, so a catch-up that does start against this Peer moves nothing
+    # and quiets it.
+    conn.settimeout(1)
+    sent = 0
+    started = time.time()
+    while time.time() - started < 90:
+        payload = headers_payload([] if sent % 2 else [REGTEST_GENESIS_HEADER])
+        try:
+            conn.sendall(msg('headers', payload))
+        except OSError:
+            print('liar: dropped after', sent, 'claims', file=sys.stderr, flush=True)
+            return
+        sent += 1
+        try:
+            for frame in frames(conn):
+                if command_of(frame) == 'getheaders':
+                    conn.sendall(msg('headers', headers_payload([])))
+                break
+        except (socket.timeout, OSError):
+            pass
+        time.sleep(0.5)
+    print('liar: sent', sent, 'claims', file=sys.stderr, flush=True)
 def addr_payload(n, seed):
     # n routable IPv4 addresses, distinct per seed, as one addr Message.
     out = bytes([0xfd]) + struct.pack('<H', n)
@@ -138,6 +171,9 @@ def serve(port, mode):
         return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))
+        return
+    elif mode == 'headerflood':
+        header_flood(conn)
         return
     time.sleep(120)
 serve(int(sys.argv[1]), sys.argv[2])

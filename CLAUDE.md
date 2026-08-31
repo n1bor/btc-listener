@@ -61,10 +61,10 @@ construction — you cannot ask it for a bad checksum, another Network's magic,
 an unproven Header or a body that is not the Block — so the paths that exist
 for hostile Peers are exercised by two scripts. `tools/regtest/liar.py` is a
 Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
-`wrongbody`, `addrflood`, `escape`); `tools/regtest/caller.py` is a caller
-that dials the node's served port (`early`, `chatty`, `silent`, `pinger`,
-`polite`). Each security fix in this repo (#281–#284, #291, #293) added a mode
-and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
+`wrongbody`, `addrflood`, `escape`, `headerflood`); `tools/regtest/caller.py`
+is a caller that dials the node's served port (`early`, `chatty`, `silent`,
+`pinger`, `polite`). Each security fix in this repo (#281–#284, #291, #293,
+#300) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
 shows the offender dropped while the node carries on — that pairing is the
 house pattern, and a security fix without it is unproven. Run the honest
 baseline first: a validity check that has never seen real data can be a
@@ -296,8 +296,15 @@ blocks the loop (#119, jasisz/aver#1125).
 phases run again every time a Peer announces a Block. An `inv` naming a Block
 is answered with `getheaders`, not `getdata` — a Block whose Header the tree
 has not placed cannot be connected and cannot be told from one on a Branch we
-do not follow; the `getdata` is the body phase, one Header later. The Set
-therefore has to know which Block it stands on and not merely which Height, so
+do not follow; the `getdata` is the body phase, one Header later. **What is
+announced is weighed before those phases are run** (#300, `domain/catchup.av`):
+an `inv` naming only Blocks the tree has placed is ignored, an unasked-for
+`headers` must name an unplaced Header that proves work under the Network's
+limit — not under the bits it claims, which are the sender's own word for
+itself — and a Peer whose last Catch-up moved nothing has its next claim
+**held** for twenty seconds rather than dropped, so the rate is capped without
+a single-Peer node sitting a Block behind. The Set therefore has to know which
+Block it stands on and not merely which Height, so
 `meta:setTo` holds `{height}:{blockId}`; a record holding a bare Height was
 written before #26 and is **refused**, because a Height alone cannot say
 whether `h:` was re-pointed underneath it. `Domain.Rewind` plans the walk back

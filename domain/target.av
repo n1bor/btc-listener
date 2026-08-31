@@ -20,7 +20,7 @@ module Target
         "Headers before it, and no more than two hours past the local clock."
         "Core measures the second against network-adjusted time; this program"
         "has no such thing and uses its own clock, which is the stricter side."
-    exposes [Rule, Lineage, ruleFor, limitBits, proven, refusal]
+    exposes [Rule, Lineage, ruleFor, limitBits, proven, provenAtLimit, refusal]
     depends [Domain.Block, Domain.Network]
     effects []
 
@@ -241,6 +241,43 @@ fn provenOrNot(header: BlockHeader, met: Bool) -> Option<String>
 verify provenOrNot
     provenOrNot(sampleHeader(), true) => Option.None
     provenOrNot(sampleHeader(), false) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 does not meet the target its bits 486604799 name")
+
+fn provenAtLimit(network: Network, header: BlockHeader) -> Option<String>
+    ? "Why an announced Header is not worth acting on, if it is not: it"
+      "proves less work than the Network's easiest target admits."
+      "The sibling above asks whether a Header meets the target its own bits"
+      "name, which is the right question once the Header is being placed and"
+      "the wrong one for a Header that has merely been announced. Bits are a"
+      "claim the sender makes about itself: a Peer that wants a Message"
+      "acted on can name whatever target it likes, and against an easy"
+      "enough claim any eighty bytes prove work. Measured against the"
+      "Network's limit instead, the claim does not enter into it, and the"
+      "cheapest announcement that gets anywhere costs what the easiest Block"
+      "on that Network costs. On mainnet that is the whole point (#300); on"
+      "regtest the limit is the easiest the encoding can express, so this"
+      "refuses nothing there and the rate limit is what a hostile Peer meets."
+    match Domain.Block.meetsTarget(header.blockId, limitBits(network))
+        Result.Err(why) -> Option.Some(why)
+        Result.Ok(met) -> provenAtLimitOrNot(network, header, met)
+
+verify provenAtLimit
+    provenAtLimit(Network.Mainnet, BlockHeader(blockId = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 486604799, nonce = 0)) => Option.None
+    provenAtLimit(Network.Mainnet, BlockHeader(blockId = "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 545259519, nonce = 0)) => Option.Some("Header ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f proves less work than the easiest Block mainnet admits")
+    provenAtLimit(Network.Regtest, BlockHeader(blockId = "0f00000000000000000000000000000000000000000000000000000000000000", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 545259519, nonce = 0)) => Option.None
+    provenAtLimit(Network.Regtest, BlockHeader(blockId = "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 545259519, nonce = 0)) => Option.Some("Header ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f proves less work than the easiest Block regtest admits")
+    provenAtLimit(Network.Mainnet, BlockHeader(blockId = "0f00000000000000000000000000000000000000000000000000000000000000", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 545259519, nonce = 0)) => Option.Some("Header 0f00000000000000000000000000000000000000000000000000000000000000 proves less work than the easiest Block mainnet admits")
+    provenAtLimit(Network.Signet, BlockHeader(blockId = "00000377ae000000000000000000000000000000000000000000000000000000", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 503543726, nonce = 0)) => Option.None
+    provenAtLimit(Network.Mainnet, BlockHeader(blockId = "zz", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 0, bits = 486604799, nonce = 0)) => Option.Some("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn provenAtLimitOrNot(network: Network, header: BlockHeader, met: Bool) -> Option<String>
+    ? "Nothing to say when the Network's own limit is met."
+    match met
+        true -> Option.None
+        false -> Option.Some("Header {header.blockId} proves less work than the easiest Block {Domain.Network.nameOf(network)} admits")
+
+verify provenAtLimitOrNot
+    provenAtLimitOrNot(Network.Mainnet, sampleHeader(), true) => Option.None
+    provenAtLimitOrNot(Network.Mainnet, sampleHeader(), false) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 proves less work than the easiest Block mainnet admits")
 
 fn refusal(network: Network, header: BlockHeader, height: Int, lineage: Lineage, recent: List<Int>, nowSecs: Int) -> Option<String>
     ? "Why a Header that has a parent cannot be placed on it, if it cannot."

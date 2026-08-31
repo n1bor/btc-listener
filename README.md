@@ -788,10 +788,30 @@ following at Height 318980: 4 connected, 0 disconnected, set +9 -6
 following at Height 318981: 1 connected, 0 disconnected, set +2 -1
 ```
 
-Whichever Peer announces a Block is the one asked for it. A second Peer
-announcing the same Block a moment later is not a special case and is not
-suppressed: the Header phase places what it already holds, nothing moves, and
-the run says `0 connected`.
+Whichever Peer announces a Block is the one asked for it. What is announced is
+weighed before the three phases are run again, because they are the expensive
+thing this node does and until
+[#300](https://github.com/n1bor/btc-listener/issues/300) nothing stood between
+an arriving Message and all of them:
+
+- An `inv` naming only Blocks the Header tree has already placed is ignored.
+  The tree has already decided where those sit and whether we follow them, so
+  announcing one again says nothing — which is what a second Peer announcing
+  the same Block a moment later is doing.
+- A `headers` nobody asked for has to name a Header the tree has not placed,
+  and that Header has to prove work under the Network's easiest target. Bits
+  are the sender's own claim about itself, so they are not what it is measured
+  against; the cost of getting a Message acted on here is the cost of the
+  easiest Block on the Network. A Peer that sends eighty bytes proving nothing
+  is dropped.
+- A Peer whose last Catch-up moved nothing waits twenty seconds before another
+  of its claims is acted on. The claim is **held**, not dropped: it is acted on
+  the moment the cooldown passes, so a node following one Peer never sits a
+  Block behind. A Peer announcing real Blocks moves the chain every time and is
+  never quieted.
+
+A Catch-up that finds nothing to do still says so — the Header phase places
+what it already holds, nothing moves, and the run says `0 connected`.
 
 An `inv` naming a Block is answered with **getheaders**, not `getdata`. A Block
 whose Header the tree has not placed cannot be connected, and cannot even be
