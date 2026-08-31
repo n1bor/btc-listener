@@ -17,7 +17,7 @@ module Disconnect
         "node has to say so and stop -- guessing would mean a UTXO Set that"
         "silently disagrees with the chain it claims to be following, which is"
         "the one failure a validating node must never have."
-    exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize]
+    exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize, prunable]
     depends [Bytes, Domain.Transaction, Domain.UtxoStore]
     effects []
 
@@ -147,3 +147,58 @@ fn someOutputs(count: Int, acc: List<Output>) -> List<Output>
 verify someOutputs
     someOutputs(0, []) => []
     List.len(someOutputs(3, [])) => 3
+
+fn prunable(below: Int, standing: Option<Int>) -> Option<String>
+    ? "Why pruning below this Height must be refused, if it must (#302)."
+      "Pruning is told a Height and deletes everything under it. It used to be"
+      "told nothing else, so it would take bodies the node was about to need"
+      "and nothing said so: the Set walk read the resulting gap as the end of"
+      "the chain and reported the target reached, and a Reorganisation that"
+      "wanted a body from inside the Undo window found it gone."
+      "Two Heights bound it, and they are different facts with different"
+      "reasons, so they are refused apart. Above where the Set stands is a"
+      "body the walk has not reached yet and is going to ask for. Between the"
+      "bottom of the Undo window and the Set is a body no walk wants but a"
+      "Reorganisation would, which is the only thing the window is for."
+      "A directory whose Set has never been built has no standing, and there"
+      "is nothing to protect: the whole point of the window is what the Set"
+      "would have to walk back over, and a Set that does not exist walks back"
+      "over nothing. Pruning it is the operator saying they will not be"
+      "rebuilding from genesis, which the Prune Watermark already records."
+    match standing
+        Option.None -> Option.None
+        Option.Some(height) -> beneathStanding(below, height)
+
+verify prunable
+    prunable(500, Option.None) => Option.None
+    prunable(1, Option.Some(1000)) => Option.None
+    prunable(713, Option.Some(1000)) => Option.None
+    prunable(714, Option.Some(1000)) => Option.Some("pruning below Height 714 would take Undo Data a Reorganisation needs: the Set stands at Height 1000, so the Undo window reaches back to 713 and nothing above that may be pruned")
+    prunable(1001, Option.Some(1000)) => Option.Some("pruning below Height 1001 would take a body the Set walk has not reached: the Set stands at Height 1000, and nothing above 713 may be pruned")
+    prunable(1, Option.Some(0)) => Option.Some("pruning below Height 1 would take a body the Set walk has not reached: the Set stands at Height 0, and nothing above 0 may be pruned")
+    prunable(0, Option.Some(0)) => Option.None
+
+fn beneathStanding(below: Int, height: Int) -> Option<String>
+    ? "Above the Set, or into its Undo window, or neither."
+    match below > height
+        true -> Option.Some("pruning below Height {below} would take a body the Set walk has not reached: the Set stands at Height {height}, and nothing above {windowFrom(height)} may be pruned")
+        false -> withinWindow(below, height)
+
+verify beneathStanding
+    beneathStanding(1001, 1000) => Option.Some("pruning below Height 1001 would take a body the Set walk has not reached: the Set stands at Height 1000, and nothing above 713 may be pruned")
+    beneathStanding(713, 1000) => Option.None
+    beneathStanding(1000, 1000) => Option.Some("pruning below Height 1000 would take Undo Data a Reorganisation needs: the Set stands at Height 1000, so the Undo window reaches back to 713 and nothing above that may be pruned")
+
+fn withinWindow(below: Int, height: Int) -> Option<String>
+    ? "Inside the Undo window is refused; at its floor or under it is fine."
+    match below > windowFrom(height)
+        true -> Option.Some("pruning below Height {below} would take Undo Data a Reorganisation needs: the Set stands at Height {height}, so the Undo window reaches back to {windowFrom(height)} and nothing above that may be pruned")
+        false -> Option.None
+
+verify withinWindow
+    withinWindow(714, 1000) => Option.Some("pruning below Height 714 would take Undo Data a Reorganisation needs: the Set stands at Height 1000, so the Undo window reaches back to 713 and nothing above that may be pruned")
+    withinWindow(713, 1000) => Option.None
+    withinWindow(100, 200) => Option.Some("pruning below Height 100 would take Undo Data a Reorganisation needs: the Set stands at Height 200, so the Undo window reaches back to 0 and nothing above that may be pruned")
+    withinWindow(0, 200) => Option.None
+    withinWindow(0, 287) => Option.None
+    withinWindow(1, 288) => Option.None

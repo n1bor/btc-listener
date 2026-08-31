@@ -16,8 +16,15 @@ module Prune
         "The Segment currently being appended to is never deleted. It is where"
         "the next Block goes, and Blocks.open resumes from the highest Segment"
         "present, so removing it would move the append point backwards."
+        "Where the Set stands bounds all of it, and used to bound none of it"
+        "(#302). Pruning was told a Height and read nothing else, so it would"
+        "take a body the Set walk had not reached -- the walk then read the"
+        "gap as the end of the chain and reported the target reached -- or a"
+        "body inside the Undo window, which is the one thing that window is"
+        "for. Domain.Disconnect.prunable decides it and this refuses before"
+        "anything is deleted, because nothing here can be undone."
     exposes [Pruned, run]
-    depends [Bytes, Domain.Index, Domain.IndexKeys, Infra.Blocks, Infra.Chain, Infra.Store]
+    depends [Bytes, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.UtxoStore, Infra.Blocks, Infra.Chain, Infra.Store]
     effects [Disk.delete, Disk.exists, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
 record Pruned
@@ -37,7 +44,11 @@ fn run(store: Store, blocks: BlockStore, below: Int) -> Result<Pruned, String>
       "Blocks on disk that nothing names, which merely wastes the space pruning"
       "was trying to reclaim. Neither is good and the second is recoverable, so"
       "the Watermark is written last and the whole thing is safe to run again."
+      "Refused first, though, if the Height would cross what the Set still"
+      "needs (#302). Nothing below can be taken back, so the check has to"
+      "come before the first delete rather than be noticed after it."
     ! [Disk.delete, Disk.exists, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    _allowed = allowed(store, below)?
     watermark = watermarkFor(store, below)?
     floor = floorSegment(store, watermark, Infra.Blocks.currentSegment(blocks))?
     segments = Infra.Blocks.prune(blocks, floor)?
@@ -203,3 +214,46 @@ verify dropped
     dropped(1, 1, "aa", []) => Result.Ok([])
     dropped(5, 1, "aa", []) => Result.Ok([])
     dropped(0, 1, "zz", []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn allowed(store: Store, below: Int) -> Result<Unit, String>
+    ? "Refuse a prune that would cross into what the Set still needs (#302)."
+      "Read from meta:setTo, which is where the Set stands and what a"
+      "Reorganisation walks back from. A directory whose Set has never been"
+      "built has no standing and nothing to protect."
+    ! [Infra.Kv.get]
+    standing = standingIn(Infra.Store.get(store, Domain.UtxoStore.reachedKey()?)?)?
+    refused(Domain.Disconnect.prunable(below, standing))
+
+fn standingIn(held: Option<Bytes>) -> Result<Option<Int>, String>
+    ? "The Height the Set stands at, if it stands anywhere."
+      "A standing that will not decode is corruption and is not read as a Set"
+      "that was never built: that would turn a damaged directory into one this"
+      "command feels free to delete from."
+    match held
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(stored) -> someStanding(Domain.UtxoStore.decodeReached(stored))
+
+verify standingIn
+    standingIn(Option.None) => Result.Ok(Option.None)
+    standingIn(Option.Some(Domain.UtxoStore.encodeReached(Domain.UtxoStore.Reached(height = 900, blockId = "aa"))?)) => Result.Ok(Option.Some(900))
+    standingIn(Option.Some(Domain.Index.emptyBytes())) => Result.Err("a Set standing is at least 4 bytes, got 0")
+
+fn someStanding(decoded: Result<Reached, String>) -> Result<Option<Int>, String>
+    ? "The Height out of a standing that decoded."
+    match decoded
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(reached) -> Result.Ok(Option.Some(reached.height))
+
+verify someStanding
+    someStanding(Result.Ok(Domain.UtxoStore.Reached(height = 900, blockId = "aa"))) => Result.Ok(Option.Some(900))
+    someStanding(Result.Err("broken")) => Result.Err("broken")
+
+fn refused(why: Option<String>) -> Result<Unit, String>
+    ? "A reason not to prune is an Err; no reason is a go-ahead."
+    match why
+        Option.None -> Result.Ok(Unit)
+        Option.Some(reason) -> Result.Err(reason)
+
+verify refused
+    refused(Option.None) => Result.Ok(Unit)
+    refused(Option.Some("no")) => Result.Err("no")

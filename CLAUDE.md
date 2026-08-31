@@ -225,6 +225,15 @@ spend resolve in one lookup), `u:<txid>:<index>` → unspent Output, `d:` Block 
 spend; `b:`, `t:`, `n:`, `k:` and `o:` are append-only, because a Block Id
 always names the same bytes.
 
+**Pruning is bounded by what the Set still needs** (#302): `prune <dir> <h>` is
+refused when `h` is above where `meta:setTo` stands (a body the walk has not
+reached) or inside the 288-Block Undo window (a body only a Reorganisation
+wants) — `Domain.Disconnect.prunable`, refused before the first delete. A
+directory with no Set standing has nothing to protect and is allowed. The Set
+walk asks `Domain.Index.bodyStateOf` now, so a named Height whose body is below
+the Watermark is a reported gap rather than the end of the chain; it used to
+exit 0 having built nothing.
+
 **The UTXO Set** (#25, Stage 2): `u:` is deliberately not `o:`. `o:` answers
 *what did this Input spend*, which a reorganised Block still has to be able to
 ask, and only grows; `u:` answers *may this Input spend it*, which only the

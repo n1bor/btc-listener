@@ -24,7 +24,7 @@ module ChainState
         "holds what recent Blocks made and spent in a window that is written"
         "through in batches (#247); the shape of both is in overlapped."
     exposes [Built, build, buildFrom]
-    depends [Bytes, Domain.AssumeValid, Infra.Metrics, Domain.Connect, Domain.Transaction, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
+    depends [Bytes, Domain.AssumeValid, Infra.Metrics, Domain.Connect, Domain.Transaction, Domain.Screen, Infra.Screen, Domain.Block, Domain.Disconnect, Domain.Index, Domain.Network, Domain.Snapshot, Domain.UtxoStore, Infra.Blocks, Infra.Chain, Infra.Pace, Infra.Rewind, Infra.Store, Infra.Utxo, Domain.IndexKeys]
     effects [
         Console.error, Console.print,
         Disk.appendText, Disk.readBytesAt,
@@ -312,18 +312,39 @@ fn fetched(store: Store, blocks: BlockStore, height: Int) -> Result<Option<Ahead
     fetchedNamed(store, blocks, height, Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height)?)?))
 
 fn fetchedNamed(store: Store, blocks: BlockStore, height: Int, named: Option<String>) -> Result<Option<Ahead>, String>
-    ? "A Height the Index does not name is nothing to fetch."
+    ? "A Height the Index does not name is nothing to fetch, and is the end"
+      "of the chain we hold: h: names a prefix, so the first Height it does"
+      "not name is above everything we have."
     ! [Disk.readBytesAt, Infra.Kv.get]
     match named
         Option.None -> Result.Ok(Option.None)
-        Option.Some(blockId) -> fetchedLocated(blocks, height, blockId, Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?)
+        Option.Some(blockId) -> fetchedHeld(store, blocks, height, blockId)
 
-fn fetchedLocated(blocks: BlockStore, height: Int, blockId: String, located: Option<Bytes>) -> Result<Option<Ahead>, String>
-    ? "A Block whose body is not held is nothing to fetch either."
+fn fetchedHeld(store: Store, blocks: BlockStore, height: Int, blockId: String) -> Result<Option<Ahead>, String>
+    ? "A Height the Index does name, whose body may or may not be held."
+      "Why it is absent is the whole of #302. It used to be read as the end"
+      "of the walk either way, so a prune that had crossed above where the"
+      "Set stood was reported as the target reached and the Set silently"
+      "stopped short. Domain.Index.bodyStateOf has drawn the distinction"
+      "since pruning was written -- show and spend have always asked it --"
+      "and the walk simply never did."
+    ! [Disk.readBytesAt, Infra.Kv.get]
+    located = Infra.Store.get(store, Domain.IndexKeys.blockKey(blockId)?)?
+    below = Infra.Chain.watermark(store)?
+    fetchedLocated(blocks, height, blockId, Domain.Index.bodyStateOf(located, height, below)?)
+
+fn fetchedLocated(blocks: BlockStore, height: Int, blockId: String, state: BodyState) -> Result<Option<Ahead>, String>
+    ? "Held, never fetched, or deliberately deleted."
+      "Never fetched ends the walk, which is what an interrupted download"
+      "leaves and is not a fault. Pruned is a fault and says so: the Index"
+      "names the Height, so the chain goes on past here and the walk cannot,"
+      "and reporting the target reached would be a lie about a Set that"
+      "stopped short."
     ! [Disk.readBytesAt]
-    match located
-        Option.None -> Result.Ok(Option.None)
-        Option.Some(stored) -> fetchedAt(blocks, height, blockId, Domain.Index.decodeLocation(stored)?)
+    match state
+        BodyState.Missing -> Result.Ok(Option.None)
+        BodyState.Pruned -> Result.Err("Height {height}, Block {blockId}, was pruned; the Set cannot be built past it without those bodies")
+        BodyState.Stored(location) -> fetchedAt(blocks, height, blockId, location)
 
 fn fetchedAt(blocks: BlockStore, height: Int, blockId: String, location: Location) -> Result<Option<Ahead>, String>
     ? "Read the Block and decode its Transactions."

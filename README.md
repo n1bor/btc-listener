@@ -1235,6 +1235,36 @@ Height already passed leaves it where it is. There is no command to lower it,
 and `bodies` will re-fetch a pruned range if you ask for it — the Watermark
 records what was discarded, it does not refuse to fetch it again.
 
+**A prune that would cross what the Set still needs is refused**
+([#302](https://github.com/n1bor/btc-listener/issues/302)), before anything is
+deleted, because nothing here can be undone. Two Heights bound it and they are
+different facts, so they are refused apart:
+
+```
+$ main prune ~/chain 500001            # the Set stands at 500000
+error: pruning below Height 500001 would take a body the Set walk has not
+       reached: the Set stands at Height 500000, and nothing above 499713 may
+       be pruned
+
+$ main prune ~/chain 499800            # inside the 288-Block Undo window
+error: pruning below Height 499800 would take Undo Data a Reorganisation needs:
+       the Set stands at Height 500000, so the Undo window reaches back to
+       499713 and nothing above that may be pruned
+```
+
+Above where the Set stands is a body the walk has not reached and is going to
+ask for; between the bottom of the Undo window and the Set is a body no walk
+wants but a Reorganisation would, which is the only thing that window is for.
+A directory whose Set has never been built has no standing and nothing to
+protect, so pruning it is allowed — that is the operator saying they will not
+be rebuilding from genesis, which the Watermark already records.
+
+The Set walk tells a pruned Height from the end of the chain, rather than
+stopping quietly at either. A Height the Index does not name is the end of what
+we hold; a Height it *does* name whose body is below the Watermark is a gap the
+walk cannot cross, and it says so and stops with a failure instead of reporting
+a Set that silently stopped short.
+
 Worked example, on 20,000 Blocks in three Segments:
 
 ```bash

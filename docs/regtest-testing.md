@@ -1765,6 +1765,71 @@ can go backwards; `sinceLast` reports the raw value when they do. Written the
 obvious way it emitted `-2000` at every boundary, which reads as a fault and
 would sum to nonsense under `awk`.
 
+### A prune that would cross what the Set still needs
+
+[#302](https://github.com/n1bor/btc-listener/issues/302), two halves. `prune`
+was told a Height and read nothing else — not `meta:setTo`, where the Set
+stands, and not the Undo window — so it would happily delete bodies the node
+was about to want, and the Set walk then read the resulting gap as the end of
+the chain.
+
+The window is 288 Blocks, so a chain has to be longer than that for the
+boundary to be anywhere but zero. Mine past it and sync:
+
+```bash
+$C generatetoaddress 300 "$($C getnewaddress)"
+timeout -s INT 150 $BIN regtest follow 127.0.0.1:18454 $D
+```
+
+With the Set at 427 the window reaches back to 140, and the three cases
+either side of that are the test:
+
+```
+$ $BIN regtest prune $D 428      # above where the Set stands
+error: pruning below Height 428 would take a body the Set walk has not reached:
+       the Set stands at Height 427, and nothing above 140 may be pruned
+
+$ $BIN regtest prune $D 141      # one Height inside the Undo window
+error: pruning below Height 141 would take Undo Data a Reorganisation needs:
+       the Set stands at Height 427, so the Undo window reaches back to 140
+       and nothing above that may be pruned
+
+$ $BIN regtest prune $D 140      # exactly the floor
+0 Segments deleted, 0 Locations dropped, Prune Watermark now 140
+```
+
+Two refusals with **different reasons** is the point: above the Set is a body
+the walk has not reached, and between the window floor and the Set is a body
+only a Reorganisation wants. Against a binary from before the fix,
+`prune $D 428` succeeds and sets the Watermark to 428 — above where the Set
+stands, which is the state that makes the walk lie.
+
+Zero Segments deleted is expected here and not a failure: a Segment is 128 MB
+and 427 regtest Blocks are 249 bytes each, so they all sit in Segment 0, which
+is the one being appended to and is never deleted.
+
+**The walk over a pruned gap.** That same 128 MB means regtest cannot make
+`prune` actually drop a Location, so the second half is reached the way a
+headers-only directory reaches it — `h:` names the Height, no `b:` holds a
+body, and the Watermark is above it, which is byte for byte the state a
+genuinely pruned mainnet directory is in:
+
+```bash
+rm -rf $D && $BIN regtest headers 127.0.0.1:18454 $D
+$BIN regtest prune $D 200        # allowed: no Set has ever been built here
+$BIN regtest utxo $D 300
+```
+
+```
+fixed   : error: Height 1, Block 5591275d…ffed39, was pruned; the Set cannot be
+          built past it without those bodies                        (exit 1)
+pre-fix : 0 Blocks connected to Height 0; Set +0 -0 Outputs         (exit 0)
+```
+
+**Exit 0 having built nothing** is the bug: `Domain.Index.bodyStateOf` has
+told Pruned from Missing since pruning was written, `show` and `spend` have
+always asked it, and the Set walk never did.
+
 ### A Segment on the disk before the Index names it
 
 [#301](https://github.com/n1bor/btc-listener/issues/301) is not a Peer and
