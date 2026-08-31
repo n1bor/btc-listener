@@ -1354,6 +1354,34 @@ printf '* soft nofile 65535\n* hard nofile 65535\n' | sudo tee -a /etc/security/
 
 Log out and back in for it to apply.
 
+### How much of the Index stays in memory
+
+`BTC_LISTENER_KV_CACHE_MB` is the Index's block cache in megabytes. A gigabyte
+is the default; the variable is read when the database is opened, so changing
+it costs a restart.
+
+The size worth giving it is the size of the Index, which grows with the UTXO
+Set and passes nine gigabytes on mainnet. What the cache does not hold, the
+page cache might -- but the same walk streams hundreds of gigabytes of Segments
+past it and keeps flushing what the Index put there, so on a machine with
+spinning disks the difference is a seek rather than a memory read. On the
+server this is written from, a UTXO operation cost 40 microseconds for four
+hundred thousand Blocks and then tripled at Height 790000, which is where the
+Index outgrew what survived that stream (#308).
+
+```bash
+BTC_LISTENER_KV_CACHE_MB=6144 ./main follow 1.2.3.4 /data/mainnet screen log
+```
+
+A cache is a ceiling and not an allocation, so a regtest Index of ten megabytes
+holds ten whatever this says. A value that is not a whole number of megabytes
+above zero is refused rather than quietly replaced by the default: a deployment
+that names a size and is given another has been told nothing.
+
+Two chains on one machine each open their own cache and compete for the same
+page cache besides. Running mainnet and signet together on this server cost
+mainnet about a fifth of its Set rate.
+
 ### Choosing a peer
 
 `headers` and `bodies` want an address; only the bare listener asks a DNS seed

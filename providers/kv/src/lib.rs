@@ -8,6 +8,12 @@
 //! the Index with it (n1bor/btc-listener#92). The swap changed this file and
 //! nothing in Aver: the contract is the same six operations (#96).
 //!
+//! How much of the Index stays in memory is a parameter, not a constant:
+//! `BTC_LISTENER_KV_CACHE_MB` names the block cache in megabytes and a
+//! gigabyte is the default. The size that matters is the size of the Index
+//! being walked, which a mainnet node grows past nine gigabytes, and a
+//! deployment cannot be asked to rebuild to change it. n1bor/btc-listener#308.
+//!
 //! Durability is the point, so every batch is written with `sync = true`:
 //! `putAll` and `deleteAll` return only once the write-ahead log is on the
 //! disk. One batch is one fsync, which is why the callers batch.
@@ -39,10 +45,58 @@ pub const CONTRACT_HASH: &str =
 /// `Sync`, so the resource needs no lock of its own.
 struct Open(DB);
 
+/// How much block cache the Index is given when nothing says otherwise, in
+/// mebibytes.
+///
+/// A parameter and not a constant because the right size is the size of the
+/// Index being walked, and that spans four orders of magnitude: a regtest
+/// Index is a few megabytes and a mainnet one is nine gigabytes and still
+/// growing. The constant was 256 MB, which against mainnet held under three
+/// per cent of the Index and left every `u:` read depending on the page
+/// cache -- which the same walk keeps flushing, because it streams hundreds
+/// of gigabytes of Segments past it. A UTXO read cost 40 microseconds for
+/// four hundred thousand Blocks and then tripled. n1bor/btc-listener#308.
+///
+/// A gigabyte by default. RocksDB's LRU cache is a ceiling rather than an
+/// allocation, so a regtest run that touches ten megabytes holds ten.
+const CACHE_MB_DEFAULT: usize = 1024;
+
+/// Where a deployment says how big the block cache should be.
+///
+/// An environment variable rather than a CLI flag or `aver.toml`: this is
+/// deployment policy, like the disk the node runs on, and no Aver code should
+/// have to name a number that belongs to the machine. It is read at `open`,
+/// so it costs a restart and not a rebuild.
+const CACHE_MB_VAR: &str = "BTC_LISTENER_KV_CACHE_MB";
+
+/// The block cache size to open with, in bytes.
+///
+/// Unset is the default. Set is honoured or refused -- never quietly replaced
+/// by the default, because a deployment that names a size and is given another
+/// has been told nothing and gets the slow Index it was trying to avoid.
+fn cache_bytes() -> Result<usize, String> {
+    match std::env::var(CACHE_MB_VAR) {
+        Err(std::env::VarError::NotPresent) => Ok(CACHE_MB_DEFAULT << 20),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{CACHE_MB_VAR} is not text")),
+        Ok(raw) => parsed_cache_mb(&raw),
+    }
+}
+
+/// What one setting of the variable means, in bytes.
+fn parsed_cache_mb(raw: &str) -> Result<usize, String> {
+    let said = raw.trim();
+    match said.parse::<usize>() {
+        Ok(mb) if mb > 0 => mb
+            .checked_mul(1 << 20)
+            .ok_or_else(|| format!("{CACHE_MB_VAR} is '{said}', which is more megabytes than this machine can address")),
+        _ => Err(format!("{CACHE_MB_VAR} must be a whole number of megabytes above zero, not '{said}'")),
+    }
+}
+
 /// How the database is tuned for this program's shape: a few hundred million
 /// small keys written in large batches, read one at a time by exact key or
 /// by prefix, and compacted in the background while the writer keeps going.
-fn tuned() -> Options {
+fn tuned(cache_bytes: usize) -> Options {
     let mut options = Options::default();
     options.create_if_missing(true);
     // Block Ids and scripts are hex text today and bytes after #45/#46;
@@ -59,7 +113,10 @@ fn tuned() -> Options {
     // Every spend resolves by one exact-key read of the o: keyspace; a bloom
     // filter answers the misses without touching a table.
     table.set_bloom_filter(10.0, false);
-    table.set_block_cache(&Cache::new_lru_cache(256 << 20));
+    // The Index is read one exact key at a time and is far larger than any
+    // cache it will be given, so what this holds is the upper levels and the
+    // hot blocks of the lower ones; the rest is a seek. #308.
+    table.set_block_cache(&Cache::new_lru_cache(cache_bytes));
     options.set_block_based_table_factory(&table);
     options
 }
@@ -167,7 +224,11 @@ impl CapabilityProvider for Kv {
                     return Err(ProviderFault::new("bad_arity", "open takes one String"));
                 };
                 let dir = string_in(dir, "dir")?;
-                Ok(match DB::open(&tuned(), &dir) {
+                let cache = match cache_bytes() {
+                    Ok(bytes) => bytes,
+                    Err(why) => return Ok(failed("cannot open the database", why)),
+                };
+                Ok(match DB::open(&tuned(cache), &dir) {
                     Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(db)))),
                     Err(why) => failed(&format!("cannot open the database at '{dir}'"), why),
                 })
@@ -776,6 +837,39 @@ mod tests {
         let deletes = ProviderValue::List(vec![raw("u:aa"), raw("u:zz")]);
         did(call("applyAll", &[handle.clone(), puts, deletes]));
         assert_eq!(gotAll(&handle, &["u:aa", "u:bb", "u:cc"]), vec![None, Some("2".to_string()), Some("3".to_string())]);
+    }
+
+    #[test]
+    fn a_cache_size_is_a_whole_number_of_megabytes_above_zero() {
+        assert_eq!(parsed_cache_mb("1"), Ok(1 << 20));
+        assert_eq!(parsed_cache_mb("6144"), Ok(6144 << 20));
+        assert_eq!(parsed_cache_mb("  512  "), Ok(512 << 20));
+    }
+
+    /// A deployment that names a size and is given the default instead has been
+    /// told nothing, so every one of these is refused rather than replaced. #308.
+    #[test]
+    fn a_cache_size_that_is_not_one_is_refused_rather_than_defaulted() {
+        for said in ["0", "-1", "512MB", "1.5", "", "  ", "lots"] {
+            assert!(parsed_cache_mb(said).is_err(), "'{said}' should be refused");
+        }
+        assert!(parsed_cache_mb("0").expect_err("zero is refused").contains(CACHE_MB_VAR));
+    }
+
+    /// usize::MAX megabytes is more bytes than the machine can address, and the
+    /// shift that would have wrapped is caught rather than opening a database
+    /// with a cache of a few bytes.
+    #[test]
+    fn a_cache_size_too_large_to_address_is_refused() {
+        assert!(parsed_cache_mb(&usize::MAX.to_string()).is_err());
+    }
+
+    /// Not asserted through cache_bytes(): the variable is process-wide and
+    /// another test setting it would decide this one. The default is the
+    /// contract, and the binary proves the variable end to end.
+    #[test]
+    fn a_gigabyte_is_the_default() {
+        assert_eq!(CACHE_MB_DEFAULT << 20, 1024 * 1024 * 1024);
     }
 
     #[test]

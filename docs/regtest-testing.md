@@ -2207,6 +2207,40 @@ cargo test --manifest-path providers/kv/Cargo.toml
 `cargo build` is not a formality: the failure classes that survive `check`,
 `verify` **and** `compile` are listed in CLAUDE.md.
 
+### How much of the Index stays in memory
+
+The block cache is `BTC_LISTENER_KV_CACHE_MB`, in megabytes, read when the
+database is opened (#308). It needs no node and no chain: every path is
+visible on an empty directory.
+
+```bash
+D=$(mktemp -d)
+BTC_LISTENER_KV_CACHE_MB=512MB ./main reindex "$D"   # not a number
+BTC_LISTENER_KV_CACHE_MB=0     ./main reindex "$D"   # not above zero
+ls -A "$D"                                            # still empty
+BTC_LISTENER_KV_CACHE_MB=6144  ./main reindex "$D"   # honoured
+ls -A "$D"                                            # blocks  kv
+```
+
+The two refusals name the variable and say what was wrong with the value:
+
+```
+error: cannot open the database: BTC_LISTENER_KV_CACHE_MB must be a whole number of megabytes above zero, not '512MB'
+error: cannot open the database: BTC_LISTENER_KV_CACHE_MB must be a whole number of megabytes above zero, not '0'
+```
+
+The `ls` between them is the half worth keeping: a refusal must leave nothing
+behind, because a `kv/` made with the wrong cache and then opened again is a
+directory nobody asked for. The fourth run prints `0 Blocks located across 0
+Segments` and makes `blocks` and `kv`, and so does the same command with the
+variable unset, which takes the gigabyte default.
+
+What it would have caught: a value quietly replaced by the default. A
+deployment that names six gigabytes, is given one, and is told nothing has the
+slow Index it set the variable to avoid — and the only symptom is a UTXO read
+costing a seek, which looks exactly like a busy disk. Refusing is the only
+answer that can be seen from outside.
+
 ### Prove the binary is the one you built
 
 **A negative result is worth nothing until the thing under test is known to be
