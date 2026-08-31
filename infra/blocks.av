@@ -13,15 +13,27 @@ module Blocks
         "empty store. Reopening walks the current Segment's record headers and"
         "truncates a torn final record, so the framing invariant — a Segment is"
         "whole records, end to end — survives a crash mid-append."
-    exposes [BlockStore, Appended, open, append, read, prune, currentSegment, segmentPath, segmentNumberOf]
-    depends [Bytes, Domain.Index, Domain.Segment]
+        "That invariant is about framing and not about durability, and the two"
+        "were confused until #301. An append returns once the bytes are in the"
+        "operating system's cache; the batch of b: Locations that names them"
+        "goes down with fsync. A power cut between the two leaves a durable"
+        "Location naming bytes that were never written, and reopen then cuts"
+        "the torn tail off so the next download appends at that offset — the"
+        "stale Location now names a different Block. So this store remembers"
+        "which Segments it has appended to since anyone last asked, and synced"
+        "makes exactly those durable. The caller writes no Location until it"
+        "has returned."
+    exposes [BlockStore, Appended, open, append, read, prune, synced, unsyncedIn, currentSegment, segmentPath, segmentNumberOf]
+    depends [Bytes, Domain.Index, Domain.Segment, Infra.Durable]
     effects [
         Disk.appendBytes, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Durable.synced,
     ]
 
 record BlockStore
     dir: String
     state: SegmentState
+    unsynced: List<Int>
 
 record Appended
     store: BlockStore
@@ -44,7 +56,7 @@ fn resume(dir: String, highest: Option<Int>) -> Result<BlockStore, String>
     ? "An empty directory starts at the beginning; otherwise reopen the last Segment."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes]
     match highest
-        Option.None -> Result.Ok(BlockStore(dir = dir, state = Domain.Segment.initial()))
+        Option.None -> Result.Ok(BlockStore(dir = dir, state = Domain.Segment.initial(), unsynced = []))
         Option.Some(segment) -> reopen(dir, segment)
 
 fn reopen(dir: String, segment: Int) -> Result<BlockStore, String>
@@ -58,7 +70,7 @@ fn reopen(dir: String, segment: Int) -> Result<BlockStore, String>
     size = Disk.size(path)?
     whole = wholeRecordsEnd(path, size, 0)?
     match whole == size
-        true -> Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = size)))
+        true -> Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = size), unsynced = []))
         false -> repaired(dir, segment, whole)
 
 fn wholeRecordsEnd(path: String, size: Int, headerAt: Int) -> Result<Int, String>
@@ -91,7 +103,7 @@ fn repaired(dir: String, segment: Int, keep: Int) -> Result<BlockStore, String>
     path = segmentPath(dir, segment)
     whole = Disk.readBytesAt(path, 0, keep)?
     _written = Disk.writeBytes(path, whole)?
-    Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = keep)))
+    Result.Ok(BlockStore(dir = dir, state = SegmentState(segment = segment, used = keep), unsynced = []))
 
 fn hexIn(names: List<String>) -> Bool
     ? "Whether the directory holds Segments in the old hex format."
@@ -195,8 +207,8 @@ fn currentSegment(store: BlockStore) -> Int
     store.state.segment
 
 verify currentSegment
-    currentSegment(BlockStore(dir = "d", state = Domain.Segment.initial())) => 0
-    currentSegment(BlockStore(dir = "d", state = SegmentState(segment = 7, used = 40))) => 7
+    currentSegment(BlockStore(dir = "d", state = Domain.Segment.initial(), unsynced = [])) => 0
+    currentSegment(BlockStore(dir = "d", state = SegmentState(segment = 7, used = 40), unsynced = [])) => 7
 
 fn segmentPath(dir: String, segment: Int) -> String
     ? "Where a Segment lives."
@@ -212,6 +224,10 @@ fn append(store: BlockStore, payload: Bytes) -> Result<Appended, String>
       "written before the Location is believed, so a crash anywhere in between"
       "loses the Block rather than inventing one: reopen truncates whatever"
       "tail the headers cannot frame."
+      "The Segment written to is remembered as not yet durable (#301). Nothing"
+      "here fsyncs: an fsync a Block would be a fsync per Block, where the"
+      "Locations are written in one batch per phase, so the sync belongs where"
+      "the batch does and synced is what the caller calls."
     ! [Disk.appendBytes]
     blockBytes = List.len(Bytes.octets(payload))
     placement = Domain.Segment.place(store.state, blockBytes)
@@ -219,7 +235,54 @@ fn append(store: BlockStore, payload: Bytes) -> Result<Appended, String>
     header = Domain.Segment.headerFor(blockBytes)?
     _header = Disk.appendBytes(path, header)?
     _payload = Disk.appendBytes(path, payload)?
-    Result.Ok(Appended(store = BlockStore(dir = store.dir, state = placement.state), location = placement.location))
+    Result.Ok(Appended(store = BlockStore(dir = store.dir, state = placement.state, unsynced = alsoUnsynced(store.unsynced, placement.location.segment)), location = placement.location))
+
+fn alsoUnsynced(unsynced: List<Int>, segment: Int) -> List<Int>
+    ? "This Segment among the ones still to be made durable, once."
+      "A body phase appends thousands of Blocks and touches one Segment, or"
+      "two when one fills, so this list is one or two long and holding it as"
+      "a list rather than a set costs nothing."
+    match List.contains(unsynced, segment)
+        true -> unsynced
+        false -> List.prepend(segment, unsynced)
+
+verify alsoUnsynced
+    alsoUnsynced([], 0) => [0]
+    alsoUnsynced([0], 0) => [0]
+    alsoUnsynced([0], 1) => [1, 0]
+    alsoUnsynced([1, 0], 0) => [1, 0]
+
+fn unsyncedIn(store: BlockStore) -> List<Int>
+    ? "Which Segments have been appended to since the last sync, lowest last."
+      "Exposed for the caller that wants to say how many, and for the cases"
+      "that check append remembers them."
+    store.unsynced
+
+verify unsyncedIn
+    unsyncedIn(BlockStore(dir = "d", state = Domain.Segment.initial(), unsynced = [])) => []
+    unsyncedIn(BlockStore(dir = "d", state = Domain.Segment.initial(), unsynced = [1, 0])) => [1, 0]
+
+fn synced(store: BlockStore) -> Result<BlockStore, String>
+    ? "Every Segment appended to since the last time here, on the disk (#301)."
+      "Called before the batch of b: Locations that names those bytes, so the"
+      "Index can never be durable ahead of the Segments. A store with nothing"
+      "outstanding still calls the provider — with an empty list, which is a"
+      "legal batch and costs one crossing — rather than branching here, and"
+      "the provider answers Ok without touching a file."
+    ! [Infra.Durable.synced]
+    _done = Infra.Durable.synced(pathsOf(store.dir, store.unsynced, []))?
+    Result.Ok(BlockStore(dir = store.dir, state = store.state, unsynced = []))
+
+fn pathsOf(dir: String, segments: List<Int>, acc: List<String>) -> List<String>
+    ? "Each Segment number as the file it is."
+    match segments
+        [] -> List.reverse(acc)
+        [head, ..tail] -> pathsOf(dir, tail, List.prepend(segmentPath(dir, head), acc))
+
+verify pathsOf
+    pathsOf("d", [], []) => []
+    pathsOf("d", [0], []) => ["d/blk000000.dat"]
+    pathsOf("d", [1, 0], []) => ["d/blk000001.dat", "d/blk000000.dat"]
 
 fn read(store: BlockStore, location: Location) -> Result<Bytes, String>
     ? "The Block a Location names: one positional read of exactly its bytes."

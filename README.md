@@ -1452,6 +1452,23 @@ RocksDB that replaced it syncs every batch, [ADR 0009](docs/adr/0009-rocksdb-und
 exists so that costs minutes rather than a download
 ([#93](https://github.com/n1bor/btc-listener/issues/93)):
 
+That the database fsyncs and the Segments did not was its own hole, and the
+opposite one: an Index durable *ahead* of the bytes it names.
+[#301](https://github.com/n1bor/btc-listener/issues/301). A Segment append
+returns once the bytes are in the page cache; the batch recording their `b:`
+Locations returns only once RocksDB's log is on the disk. A power cut between
+the two left a Location naming bytes that were never written, and reopening
+then cut the torn tail off, so the next download appended at that offset and
+the stale Location came to name a different Block's bytes. The Segments are
+now made durable **before** the batch that names them —
+[`infra/durable.av`](infra/durable.av), one fsync per batch rather than per
+Block — so the Index can never run ahead. Getting it wrong is still detected
+rather than believed: a body is re-hashed against its Block Id on the way into
+the Set and on the way out of it
+([#283](https://github.com/n1bor/btc-listener/issues/283),
+[#290](https://github.com/n1bor/btc-listener/issues/290)), and a mismatch stops
+the node asking for a `reindex` instead of connecting the wrong Block.
+
 ```bash
 mv ~/chain/kv ~/chain/kv-lost            # or delete it; a fresh database is made on open
 rm -f ~/chain/index.log                  # a log beside no database is refused
@@ -1719,6 +1736,7 @@ supplied at run time by Rust providers named in [`aver.toml`](aver.toml).
 | --- | --- | --- |
 | [`domain/primitives.av`](domain/primitives.av) | RIPEMD-160 and secp256k1 signature verification | [`providers/primitives`](providers/primitives) |
 | [`infra/kv.av`](infra/kv.av) | a key-value database | [`providers/kv`](providers/kv) |
+| [`infra/durable.av`](infra/durable.av) | an fsync, so a Segment is on the disk before the Index names it | [`providers/durable`](providers/durable) |
 
 ```toml
 [[providers.bindings]]

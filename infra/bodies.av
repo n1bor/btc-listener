@@ -19,7 +19,7 @@ module Bodies
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -76,7 +76,7 @@ fn bodies(network: Network, address: PeerAddress, store: Store, blocks: BlockSto
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -114,7 +114,7 @@ fn bodiesOn(pool: Pool, key: Int, store: Store, blocks: BlockStore, from: Int, t
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -139,7 +139,7 @@ fn wholly(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -195,10 +195,21 @@ verify stallMs
     stallMs() => 30000
 
 fn settled(progress: Fetched) -> Result<Fetched, String>
-    ? "Write whatever Locations are still held back."
-    ! [Infra.Kv.putAll]
+    ? "The Segments on the disk, then whatever Locations are still held back."
+      "That order is the whole of #301. Infra.Store.putAll goes down with"
+      "fsync -- RocksDB is told set_sync(true) for every batch -- while the"
+      "appends that put the bodies in the Segments did not, so a power cut"
+      "between them left a durable b: Location naming bytes that were never"
+      "written. Syncing first cannot leave the Index ahead of the Segments,"
+      "whichever of the two a crash lands between: Segments durable and no"
+      "Location is a Block to fetch again, which is what an interrupted"
+      "download already is."
+      "One sync per batch and not per Block: the appends are thousands and"
+      "the batch is one, and the Segments they touched are one or two."
+    ! [Infra.Durable.synced, Infra.Kv.putAll]
+    durable = Infra.Blocks.synced(progress.blocks)?
     grown = Infra.Store.putAll(progress.store, List.reverse(progress.pending))?
-    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = progress.blocks, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey))
+    Result.Ok(Fetched(pool = progress.pool, store = grown, blocks = durable, pending = [], waiting = 0, count = progress.count, bytes = progress.bytes, pace = progress.pace, eye = progress.eye, reached = progress.reached, book = progress.book, nextKey = progress.nextKey))
 
 fn flying(flight: Flight, to: Int) -> Result<Flight, String>
     ? "One turn: hand out what can be handed out, then take whatever comes"
@@ -209,7 +220,7 @@ fn flying(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -233,7 +244,7 @@ fn flyingWhile(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -261,7 +272,7 @@ fn flyingOn(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -290,7 +301,7 @@ fn tended(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -308,7 +319,7 @@ fn dialStarted(flight: Flight, done: Infra.Peers.Topped, to: Int) -> Result<Flig
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -328,7 +339,7 @@ fn turning(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -344,7 +355,7 @@ fn asking(flight: Flight, live: List<Int>, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -506,7 +517,7 @@ fn waitingFor(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -521,7 +532,7 @@ fn landed(flight: Flight, arrived: Option<Spare>, to: Int) -> Result<Flight, Str
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -542,7 +553,7 @@ fn sorted(flight: Flight, one: Spare, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -560,7 +571,7 @@ fn ponged(flight: Flight, key: Int, frame: Frame, to: Int) -> Result<Flight, Str
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -585,7 +596,7 @@ fn blockIn(flight: Flight, frame: Frame, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -605,7 +616,7 @@ fn matched(flight: Flight, payload: Bytes, blockId: String, owed: Option<Owed>, 
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -627,7 +638,7 @@ fn kept(flight: Flight, payload: Bytes, blockId: String, owed: Owed, size: Int, 
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -643,7 +654,7 @@ fn filed(flight: Flight, payload: Bytes, blockId: String, size: Int, to: Int) ->
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -663,7 +674,7 @@ fn poisoned(flight: Flight, owed: Owed, why: String, to: Int) -> Result<Flight, 
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -682,7 +693,7 @@ fn quiet(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -705,7 +716,7 @@ fn stalled(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -768,7 +779,7 @@ fn reporting(flight: Flight, to: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -782,7 +793,7 @@ fn saying(flight: Flight, to: Int, nowMs: Int) -> Result<Flight, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -802,7 +813,7 @@ fn said(flight: Flight, progress: Fetched, at: Int, to: Int, nowMs: Int) -> Resu
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
+        Infra.Durable.synced, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
         Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
@@ -936,7 +947,7 @@ verify addedIfSame
 
 fn maybeWrite(progress: Fetched) -> Result<Fetched, String>
     ? "Write the batch once it is big enough, and start a new one."
-    ! [Infra.Kv.putAll]
+    ! [Infra.Durable.synced, Infra.Kv.putAll]
     match progress.waiting >= locationBatch()
         false -> Result.Ok(progress)
         true -> settled(progress)
