@@ -2,7 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fsyncSync,
+  openSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -22,6 +25,13 @@ const PRIMITIVES_MODULE =
   "aver:user/cap-n446f6d61696e2e5072696d697469766573-c3354d53ba72a2929c13c737ebe90ec182fed1f7fa4db4a50a99910f10c82678b";
 const KV_MODULE =
   "aver:user/cap-n496e6672612e4b76-c82f1f0a28f3a09ebb5c6406c3ba87a131051934e0a953b7434e14f10d797e5f9";
+// n1bor/btc-listener#301. The Segment a Location is about to name has to be on
+// the disk first, and Aver has no fsync, so this is a capability like the two
+// above it. Node has the call, so the host makes it for real rather than
+// pretending: a smoke test that answered Ok without syncing would prove the
+// wiring and nothing else.
+const DURABLE_MODULE =
+  "aver:user/cap-n496e6672612e44757261626c65-c1b95bd10e074e8ba87cda51847d603885ddbcd0f51a3c0960270aab672644185";
 const REGTEST_MAGIC = Buffer.from([0xfa, 0xbf, 0xb5, 0xda]);
 const TCP_BODY_LIMIT = 10 * 1024 * 1024;
 const FAKE_FRAME_BYTES = Number(process.env.BTC_LISTENER_FAKE_FRAME_BYTES ?? 8);
@@ -610,7 +620,27 @@ function providerImports() {
       return resultOk("List<Tuple<Bytes, Bytes>>", encodePairs(pairs));
     },
   };
-  return { [PRIMITIVES_MODULE]: primitives, [KV_MODULE]: kv };
+  const durable = {
+    [operation("synced")]: (pathsRef, _caller) => {
+      for (const each of listToArray("String", pathsRef, averToJs)) {
+        let fd;
+        try {
+          fd = openSync(each, "r");
+        } catch (error) {
+          return resultErr("Unit", `cannot open '${each}' to make it durable: ${error.message}`);
+        }
+        try {
+          fsyncSync(fd);
+        } catch (error) {
+          return resultErr("Unit", `cannot make '${each}' durable: ${error.message}`);
+        } finally {
+          closeSync(fd);
+        }
+      }
+      return resultOk("Unit");
+    },
+  };
+  return { [PRIMITIVES_MODULE]: primitives, [KV_MODULE]: kv, [DURABLE_MODULE]: durable };
 }
 
 const suspending = (fn) => new WebAssembly.Suspending(fn);
