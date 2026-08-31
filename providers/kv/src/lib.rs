@@ -9,10 +9,10 @@
 //! nothing in Aver: the contract is the same six operations (#96).
 //!
 //! How much of the Index stays in memory is a parameter, not a constant:
-//! `BTC_LISTENER_KV_CACHE_MB` names the block cache in megabytes and a
-//! gigabyte is the default. The size that matters is the size of the Index
-//! being walked, which a mainnet node grows past nine gigabytes, and a
-//! deployment cannot be asked to rebuild to change it. n1bor/btc-listener#308.
+//! `BTC_LISTENER_KV_CACHE_MB` names the block cache in megabytes. The size
+//! that matters is the size of the Index being walked, which a mainnet node
+//! grows past nine gigabytes, and a deployment cannot be asked to rebuild to
+//! change it. n1bor/btc-listener#308.
 //!
 //! Durability is the point, so every batch is written with `sync = true`:
 //! `putAll` and `deleteAll` return only once the write-ahead log is on the
@@ -51,15 +51,22 @@ struct Open(DB);
 /// A parameter and not a constant because the right size is the size of the
 /// Index being walked, and that spans four orders of magnitude: a regtest
 /// Index is a few megabytes and a mainnet one is nine gigabytes and still
-/// growing. The constant was 256 MB, which against mainnet held under three
-/// per cent of the Index and left every `u:` read depending on the page
-/// cache -- which the same walk keeps flushing, because it streams hundreds
-/// of gigabytes of Segments past it. A UTXO read cost 40 microseconds for
-/// four hundred thousand Blocks and then tripled. n1bor/btc-listener#308.
+/// growing. n1bor/btc-listener#308.
 ///
-/// A gigabyte by default. RocksDB's LRU cache is a ceiling rather than an
-/// allocation, so a regtest run that touches ten megabytes holds ten.
-const CACHE_MB_DEFAULT: usize = 1024;
+/// The default is what it has always been. #308 raised it to a gigabyte on the
+/// reasoning that a nine-gigabyte Index deserved more, and the measurement did
+/// not support it: on the mainnet node the cost of a UTXO operation swings
+/// from 57 to 167 microseconds between neighbouring thousand-Height buckets on
+/// one unchanged setting, which is wider than anything 6144 MB moved, and
+/// reverting did not give back the trough it was compared against. What a
+/// larger cache does cost is measurable and immediate -- 7.24 GB of RSS
+/// against 1.1, and three gigabytes off the page cache on a machine with
+/// fifteen. So the number here claims only what has been shown, and a
+/// deployment that wants more says so. n1bor/btc-listener#313.
+///
+/// RocksDB's LRU cache is a ceiling rather than an allocation, so a regtest
+/// run that touches ten megabytes holds ten whatever this says.
+const CACHE_MB_DEFAULT: usize = 256;
 
 /// Where a deployment says how big the block cache should be.
 ///
@@ -868,8 +875,8 @@ mod tests {
     /// another test setting it would decide this one. The default is the
     /// contract, and the binary proves the variable end to end.
     #[test]
-    fn a_gigabyte_is_the_default() {
-        assert_eq!(CACHE_MB_DEFAULT << 20, 1024 * 1024 * 1024);
+    fn the_default_is_the_one_with_the_operating_history() {
+        assert_eq!(CACHE_MB_DEFAULT << 20, 256 * 1024 * 1024);
     }
 
     #[test]

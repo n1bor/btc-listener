@@ -2385,11 +2385,11 @@ The `ls` between them is the half worth keeping: a refusal must leave nothing
 behind, because a `kv/` made with the wrong cache and then opened again is a
 directory nobody asked for. The fourth run prints `0 Blocks located across 0
 Segments` and makes `blocks` and `kv`, and so does the same command with the
-variable unset, which takes the gigabyte default.
+variable unset, which takes the 256 MB default.
 
 What it would have caught: a value quietly replaced by the default. A
-deployment that names six gigabytes, is given one, and is told nothing has the
-slow Index it set the variable to avoid — and the only symptom is a UTXO read
+deployment that names six gigabytes, is given 256 MB, and is told nothing has
+the Index it set the variable to change — and the only symptom is a UTXO read
 costing a seek, which looks exactly like a busy disk. Refusing is the only
 answer that can be seen from outside.
 

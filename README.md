@@ -1398,9 +1398,9 @@ Log out and back in for it to apply.
 
 ### How much of the Index stays in memory
 
-`BTC_LISTENER_KV_CACHE_MB` is the Index's block cache in megabytes. A gigabyte
-is the default; the variable is read when the database is opened, so changing
-it costs a restart.
+`BTC_LISTENER_KV_CACHE_MB` is the Index's block cache in megabytes, 256 by
+default. The variable is read when the database is opened, so changing it costs
+a restart.
 
 The size worth giving it is the size of the Index, which grows with the UTXO
 Set and passes nine gigabytes on mainnet. What the cache does not hold, the
@@ -1410,6 +1410,15 @@ spinning disks the difference is a seek rather than a memory read. On the
 server this is written from, a UTXO operation cost 40 microseconds for four
 hundred thousand Blocks and then tripled at Height 790000, which is where the
 Index outgrew what survived that stream (#308).
+
+Whether a larger cache buys any of that back is **not settled**. Six gigabytes
+was tried against the default on the mainnet node and moved nothing that could
+be told apart from the Height: the cost of a UTXO operation swings from 57 to
+167 microseconds between neighbouring thousand-Height buckets without anything
+changing, which is wider than the difference being looked for (#313). What a
+larger cache does cost is immediate -- 7.24 GB of RSS against 1.1, and three
+gigabytes off the page cache -- so raise it deliberately and measure over hours
+rather than minutes.
 
 ```bash
 BTC_LISTENER_KV_CACHE_MB=6144 ./main follow 1.2.3.4 /data/mainnet screen log
