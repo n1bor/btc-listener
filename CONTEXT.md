@@ -292,10 +292,13 @@ the chain.
 _Avoid_: reorg depth, rollback limit, history window
 
 **Assume-valid Height**:
-The Height below which a syncing node takes Scripts as settled and does not run
-them; merkle, parent, work and value accounting are still checked. Above it,
-everything is verified. What was skipped is exactly what `audit` exists to
-revisit — a claim deferred, never a claim made.
+The Height below which Scripts are taken as settled rather than run. It records
+which range `audit` may be taken to have covered, and it pins a Block Id, so a
+Reorganisation that moves that Height onto a different Block is reported rather
+than quietly inherited. It is **not** a switch on the connect path: nothing on
+that path runs Scripts at any Height (#303), so the claim defers work `audit`
+would do, not work the node is doing. What was skipped is exactly what `audit`
+exists to revisit — a claim deferred, never a claim made.
 _Avoid_: checkpoint, assumevalid, trusted height
 
 **Prune Watermark**:
@@ -303,3 +306,34 @@ The Height below which Blocks were deliberately deleted. What separates a Block
 we never fetched from one we chose to discard — the two look identical in the
 Index and demand opposite responses.
 _Avoid_: cutoff, floor, horizon, threshold
+
+### Deferred consensus rules
+
+What this node does **not** check when it connects a Block, recorded here so
+that no one has to infer it from an absence (#303). Everything in this section
+is deliberate and none of it is a claim the node makes.
+
+**Scripts on the connect path**:
+`Domain.Connect` has no Script dependency and never has, so a Block's
+signatures are not checked when it is connected to the UTXO Set. The Set phase
+enforces input existence, no intra-Block double-spend, coinbase maturity, value
+out ≤ value in, coinbase claim ≤ subsidy plus fees, and unspendable Outputs
+kept out of `u:`; the body gate adds the Merkle Root, coinbase first-and-only,
+no repeated txid, CVE-2012-2459 and `TxCheck`. Signatures are `audit`'s work.
+[ADR 0007](docs/adr/0007-two-claims-two-tools.md) is the reasoning: this engine
+walks Scripts single-threaded, so a sync gated on them would be measured in
+weeks, and the Script coverage itself is still arriving.
+_Avoid_: saying the node "validates" a Block without saying which rules
+
+**By-Height consensus rules**:
+Six that Bitcoin Core enforces on connect and this node does not — BIP34
+(Height in the coinbase), block weight ≤ 4,000,000 WU, sigop cost ≤ 80,000,
+`IsFinalTx` (locktime against Height and median-time-past), BIP68 sequence
+locks, and BIP113. They are deferred rather than forgotten: each needs a Peer
+willing to spend **real proof of work** before it could matter at all, because
+since #281 an unproven Header is refused before it is placed. So the exposure
+is a false CLEAN from `audit` on a hypothetically-mined bad Block, not anything
+a Peer can do to a running node. `Domain.Rules.at` already resolves the
+activation Heights, so adding one is a rule to write rather than a mechanism to
+build.
+_Avoid_: fully validating, consensus-complete, Core-equivalent

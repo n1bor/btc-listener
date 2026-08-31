@@ -1765,6 +1765,42 @@ can go backwards; `sinceLast` reports the raw value when they do. Written the
 obvious way it emitted `-2000` at every boundary, which reads as a fault and
 would sum to nonsense under `awk`.
 
+### What the node says it checked, and what it checked
+
+[#303](https://github.com/n1bor/btc-listener/issues/303) is a documentation
+fix with program output in it, so it is testable. The node used to say it ran
+Scripts above the Assume-valid Height and skipped them below it. It runs none
+at any Height — `Domain.Connect` has no Script dependency — and
+`Domain.AssumeValid.runsScriptsAt` has no caller, so nothing was ever gated.
+Three lines said otherwise; read them back:
+
+```bash
+$BIN regtest utxo $D 427                  # with no claim set
+$BIN regtest assumevalid $D 400
+$BIN regtest utxo $D 427                  # with one
+```
+
+```
+no Assume-valid Height is set, so audit takes nothing on trust; the Set phase
+runs no Scripts at any Height either way (ADR 0007)
+
+Assume-valid Height 400, pinned to 7de79c17…4d8ab5; audit may take Scripts at
+or below it as settled. Nothing runs Scripts on the connect path, so this
+changes no Block the node connects (#303, ADR 0007)
+
+Assume-valid Height 400 still pins its Block: 401 Block(s) audit may take as
+settled; the Set phase runs no Scripts at any Height (ADR 0007)
+```
+
+Against a binary from before the fix the first of those reads `scripts every
+Block above the Assume-valid Height; none is set, so none were skipped`, which
+claims work the node did not do. Nothing else changed: the claim is still
+pinned to a Block Id and still reported broken if a Reorganisation moves that
+Height, which is the check worth keeping.
+
+What the Set phase *does* enforce, and the six by-Height rules deferred with
+the Scripts, are listed in CONTEXT.md under **Deferred consensus rules**.
+
 ### A prune that would cross what the Set still needs
 
 [#302](https://github.com/n1bor/btc-listener/issues/302), two halves. `prune`

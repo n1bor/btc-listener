@@ -349,7 +349,15 @@ NULLDUMMY and Taproot. What is *not* on the connect path at all is the Script
 engine itself: `Domain.Connect` runs no scripts, so a Block's signatures are
 checked by `audit` and never when the Block is connected to the Set (#303) —
 a fact worth holding, because it is easy to assume connecting a Block verifies
-it.
+it. **The Assume-valid Height is not the switch for that** and never was:
+`Domain.AssumeValid.runsScriptsAt` has no caller, so the Height is a record of
+what `audit` may be taken to have settled plus a tripwire on the Block Id it
+pins. #303 corrected ADR 0007, the two standing lines and the `assumevalid`
+message to say so, and left `runsScriptsAt` in place as the seam for #20/#12.
+CONTEXT.md **Deferred consensus rules** lists what else the connect path does
+not check — BIP34, block weight, sigop cost, `IsFinalTx`, BIP68, BIP113 — each
+needing a Peer to spend real proof of work before it could matter, which #281
+requires before a Header is placed.
 
 **The seam for what's missing**: `domain/ecdsa.av` has no `Valid` constructor
 for outcomes it cannot yet produce, so adding Schnorr/witness evaluation will

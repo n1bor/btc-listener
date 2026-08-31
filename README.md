@@ -40,7 +40,7 @@ of them to speak that Network instead of mainnet ([Signet](#signet)).
 | `spend <dir> <txid>` | [check](#checking-a-spend) what one Transaction spends against what it pays, and [run its Scripts](#running-the-scripts) | no |
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
-| `assumevalid <dir> <height>` | [take](#the-utxo-set) Scripts at or below a Height as settled | no |
+| `assumevalid <dir> <height>` | [record](#the-assume-valid-height) that `audit` may take Scripts at or below a Height as settled | no |
 | `follow <peers> <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
 | `follow <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | the same, finding its Peers through the DNS seeds | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
@@ -742,11 +742,23 @@ read as though the question never mattered.
 ./target/release/main signet assumevalid ~/chain 2000
 ```
 
-Below the Height, Scripts are not run; merkle roots, parent links, work, value
-accounting and the UTXO Set are all still checked. Above it, everything is
-verified. [ADR 0007](docs/adr/0007-two-claims-two-tools.md) has the reasoning,
-and `audit` is the other half of it: the tool that goes back and fully verifies
-any range, at whatever pace the engine and the disk allow.
+The Height records how far `audit` may be taken to have settled the Scripts.
+[ADR 0007](docs/adr/0007-two-claims-two-tools.md) has the reasoning, and
+`audit` is the other half of it: the tool that goes back and fully verifies any
+range, at whatever pace the engine and the disk allow.
+
+**It is not a switch on the connect path.** Nothing the node does when it
+connects a Block runs a Script, at any Height
+([#303](https://github.com/n1bor/btc-listener/issues/303)) — `Domain.Connect`
+has no Script dependency. So setting this Height does not make the node skip
+work it would otherwise do; it records which range you are treating as already
+audited. What the Set phase *does* check on every Block, whatever this is set
+to, is input existence, no intra-Block double-spend, coinbase maturity, value
+out against value in, and the coinbase claim against subsidy plus fees — with
+the Merkle Root, coinbase first-and-only, no repeated txid and `TxCheck` at the
+body gate before that. Signatures are `audit`'s work, and CONTEXT.md lists
+under **Deferred consensus rules** the six by-Height rules that are deferred
+with them.
 
 The claim is pinned to a **Block Id**, not a bare Height — the one the Index
 held there when the claim was made. If a reorganisation later moves that Height
@@ -761,8 +773,8 @@ or clear the claim
 
 There is no default. Bitcoin Core ships a constant per Network; this does not,
 because a constant nobody here can check is the kind of borrowed claim the rest
-of the project refuses. Unset means every Script runs, and every `utxo` run says
-that too.
+of the project refuses. Unset means nothing is taken as settled and `audit` has
+everything still to do, and every `utxo` run says so.
 
 ## Following the tip
 
