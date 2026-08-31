@@ -1615,6 +1615,7 @@ diagrams.
 ```
 CONTEXT.md          glossary — the vocabulary this project commits to
 CLAUDE.md           how to write Aver here, the gates, what only Cargo finds
+AGENTS.md           a pointer at the two Aver skills, written by aver agent-connect
 aver.toml           the provider bindings — see Providers
 .aver-version       the Aver commit CI builds — see Moving the Aver pin
 docs/architecture.md          how it is put together, and why
@@ -1922,7 +1923,8 @@ upstream's tip nightly so the routine is rarely a surprise:
 ```bash
 cd ../aver && git fetch upstream && git log --oneline $(cat ../btc-listener/.aver-version)..upstream/main
 git merge --ff-only upstream/main && cargo install --path . aver-lang --locked
-cd ../btc-listener && git -C ../aver rev-parse HEAD > .aver-version
+cd ../btc-listener && git -C ../aver rev-parse HEAD | tr -d '\n' > .aver-version
+aver agent-connect                       # the skills ship in the binary, so the new one may say something different
 aver check . --module-root . && aver verify . --module-root . && aver compile main.av --module-root . -o ../btc-listener-build --check
 cargo build --release --manifest-path ../btc-listener-build/Cargo.toml
 ```

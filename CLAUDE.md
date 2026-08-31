@@ -12,11 +12,30 @@ goes to `../btc-listener-build`.
 
 ## Writing Aver
 
-Aver is not a language you already know. Before writing any `.av` code, read
-`../aver/llms.txt` — it is the curated rule sheet for exactly this situation
-(single-line match arms, qualified constructors like `Result.Ok`, no `if`/`else`,
-no lambdas, no type parameters, `verify` blocks colocated with pure functions,
-explicit effect lists on both the module and each effectful function).
+Aver is not a language you already know. **Run `aver agent-connect` in this
+directory once per checkout**, and the rules arrive as two skills:
+
+- **`aver`** — the language: single-line match arms, qualified constructors
+  like `Result.Ok`, no `if`/`else`, no lambdas, no type parameters, `verify`
+  blocks colocated with pure functions, explicit effect lists on both the
+  module and each effectful function, `decision` blocks.
+- **`aver-tooling`** — the toolchain: `run`, `check`, `verify`, `context`,
+  `shape`, `compile`, `proof`, `replay`, and `aver.toml` policy.
+
+They are worth invoking before writing any `.av` code, and `aver context
+<entry.av> --budget 10kb` reads a program before you open its files.
+
+The command also writes a marked pointer section into `AGENTS.md`, which is
+committed. **The skills themselves are not**: `.claude/skills/` is gitignored,
+and they are unpacked from the `aver` binary rather than kept here on purpose —
+a copy in git would drift from `.aver-version` silently, and the guide that
+matches the pinned compiler is the only one worth reading. So a fresh checkout
+has no skills until the command is run, and **moving the pin means running it
+again** (the routine below says so).
+
+This replaced an instruction to go and read `../aver/llms.txt` in the sibling
+repository, which the guides shipping inside the binary made unnecessary
+(jasisz/aver#863). `../aver/docs/` is still where the deep dives live.
 
 **An effect list has to be exact, not merely sufficient.** Under-declaring has
 always been an error; since the `8a45a945` pin, declaring an effect the
@@ -27,7 +46,8 @@ function at a time up every caller and then through the module boundary, which
 fails separately — loop `aver check` until it is quiet rather than trying to
 predict the fan-out. n1bor/btc-listener#178 narrowed 58 lists this way and
 every one of them was a copy-paste of a caller's list.
-`../aver/docs/` has the deep dives (`language.md`, `types.md`, `effects.md`,
+
+The deep dives are `../aver/docs/` (`language.md`, `types.md`, `effects.md`,
 `cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
 whatever that checkout was at when it was last installed — and **`aver
 --version` cannot tell you which**, because the version string does not move
@@ -35,9 +55,11 @@ between releases. CI builds the commit named in `.aver-version`. When
 something verifies and will not compile, or the VM and the compiled binary
 disagree, check `git log upstream/main` before believing it is a live bug.
 **Moving the pin is a routine** — README "Moving the Aver pin": pull
-`../aver`, reinstall, write the SHA to `.aver-version`, run the gates, then
-grep the repo for `jasisz/aver#` and retire every workaround whose issue has
-closed, in the same PR. **But read each citation before retiring**: a line
+`../aver`, reinstall, write the SHA to `.aver-version`, **run `aver
+agent-connect` again** because the skills come out of the binary and the new
+one may say something different, run the gates, then grep the repo for
+`jasisz/aver#` and retire every workaround whose issue has closed, in the same
+PR. **But read each citation before retiring**: a line
 recording *where something came from* looks identical to one recording *what
 is worked around*, and only the second retires with its issue —
 `connect_timeout_secs` in `aver.toml` cites #1118 and #1125, both now closed,
