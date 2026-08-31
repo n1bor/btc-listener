@@ -1,0 +1,229 @@
+module Catchup
+    intent =
+        "Which claim that the chain moved is worth a Catch-up, and how often"
+        "one Peer may be obeyed (#300)."
+        "A Catch-up is the expensive thing this node does: a Header round"
+        "trip against one Peer, the Set taken back to the fork, the bodies"
+        "above it, the Set forward again. Every one of those reads disk, and"
+        "the Header round trip can cost the whole answer deadline if the Peer"
+        "that asked for it then goes quiet. Nothing used to stand between an"
+        "arriving Message and that work: any Peer, an inbound stranger"
+        "included, could send an empty headers and be obeyed, and send it"
+        "again a moment later and be obeyed again."
+        "The rule here is that a Peer whose claim moved nothing waits before"
+        "its next one is acted on. It is charged for waste rather than for"
+        "asking: a Peer announcing real Blocks moves the chain every time and"
+        "is never quieted, so an honest Peer never meets this at all."
+        "A claim arriving inside the cooldown is held rather than dropped."
+        "Dropping it would be cheaper and would lose Blocks: a node following"
+        "one Peer -- which is how this program is usually started -- would"
+        "sit a Block behind until the next one was mined. A held claim is"
+        "acted on the moment the cooldown passes, so the rate is capped"
+        "without the tip being lost."
+    exposes [Gate, Due, noGate, cooldownMs, allowed, held, dueNow, taken, wasted, moved, forgotten, waiting, quieted, charging]
+    depends []
+    effects []
+
+record Gate
+    quietUntil: Map<Int, Int>
+    deferred: Map<Int, String>
+
+record Due
+    key: Int
+    why: String
+
+fn noGate() -> Gate
+    ? "Nobody quieted and nothing held back: the gate a loop starts with."
+    Gate(quietUntil = Map.fromList([]), deferred = Map.fromList([]))
+
+verify noGate
+    quieted(noGate()) => 0
+    waiting(noGate()) => 0
+    allowed(noGate(), 1, 0) => true
+
+fn cooldownMs() -> Int
+    ? "How long a Peer whose claim moved nothing waits before another of its"
+      "claims is acted on: twenty seconds."
+      "Short on purpose. The cost being capped is a Catch-up that found"
+      "nothing to do, which is disk reads and a Header round trip rather"
+      "than anything unbounded, and the claim is held rather than dropped,"
+      "so a longer cooldown would buy little and delay the tip by more."
+      "Twenty seconds against a ten-minute Block is a thirtieth of the"
+      "interval, and against a Peer sending headers in a loop it is the"
+      "difference between thousands of Catch-ups an hour and one hundred and"
+      "eighty."
+    20000
+
+verify cooldownMs
+    cooldownMs() => 20000
+
+fn allowed(gate: Gate, key: Int, nowMs: Int) -> Bool
+    ? "Whether this Peer may be obeyed now."
+      "A Peer nothing is known about is allowed, which is the case that"
+      "matters: the gate only ever holds Peers that have already wasted a"
+      "Catch-up."
+    match Map.get(gate.quietUntil, key)
+        Option.None -> true
+        Option.Some(until) -> nowMs >= until
+
+verify allowed
+    allowed(noGate(), 7, 0) => true
+    allowed(wasted(noGate(), 7, 1000), 7, 1000) => false
+    allowed(wasted(noGate(), 7, 1000), 7, 1000 + cooldownMs() - 1) => false
+    allowed(wasted(noGate(), 7, 1000), 7, 1000 + cooldownMs()) => true
+    allowed(wasted(noGate(), 7, 1000), 8, 1000) => true
+
+fn wasted(gate: Gate, key: Int, nowMs: Int) -> Gate
+    ? "A Catch-up this Peer asked for moved nothing: quiet it for the"
+      "cooldown."
+    Gate(quietUntil = Map.set(gate.quietUntil, key, nowMs + cooldownMs()), deferred = gate.deferred)
+
+verify wasted
+    quieted(wasted(noGate(), 7, 1000)) => 1
+    allowed(wasted(noGate(), 7, 1000), 7, 1000) => false
+    quieted(wasted(wasted(noGate(), 7, 1000), 7, 2000)) => 1
+    allowed(wasted(wasted(noGate(), 7, 1000), 7, 2000), 7, 1000 + cooldownMs()) => false
+
+fn moved(gate: Gate, key: Int) -> Gate
+    ? "A Catch-up this Peer asked for moved the chain: nothing is held"
+      "against it, and nothing of its is still waiting."
+    Gate(quietUntil = Map.remove(gate.quietUntil, key), deferred = Map.remove(gate.deferred, key))
+
+verify moved
+    quieted(moved(wasted(noGate(), 7, 1000), 7)) => 0
+    allowed(moved(wasted(noGate(), 7, 1000), 7), 7, 1000) => true
+    waiting(moved(held(noGate(), 7, "why"), 7)) => 0
+    quieted(moved(wasted(noGate(), 7, 1000), 8)) => 1
+
+fn held(gate: Gate, key: Int, why: String) -> Gate
+    ? "A claim that arrived inside the cooldown, kept for when it passes."
+      "One per Peer, newest wins: a Peer that says the chain moved four"
+      "times while quieted is caught up once, which is the whole point, and"
+      "the Catch-up it eventually gets goes to the tip rather than to"
+      "whichever claim happened to arrive first."
+    Gate(quietUntil = gate.quietUntil, deferred = Map.set(gate.deferred, key, why))
+
+verify held
+    waiting(held(noGate(), 7, "why")) => 1
+    waiting(held(held(noGate(), 7, "one"), 7, "two")) => 1
+    waiting(held(held(noGate(), 7, "one"), 8, "two")) => 2
+
+fn taken(gate: Gate, key: Int) -> Gate
+    ? "The claim being held for this Peer is about to be acted on, so it is"
+      "no longer waiting."
+    Gate(quietUntil = gate.quietUntil, deferred = Map.remove(gate.deferred, key))
+
+verify taken
+    waiting(taken(held(noGate(), 7, "why"), 7)) => 0
+    waiting(taken(held(noGate(), 7, "why"), 8)) => 1
+    quieted(taken(wasted(held(noGate(), 7, "why"), 7, 1000), 7)) => 1
+
+fn dueNow(gate: Gate, nowMs: Int) -> Option<Due>
+    ? "A held claim whose Peer's cooldown has passed, if there is one."
+      "The loop asks this once a turn. Only one is answered per turn even"
+      "when several are due, because acting on it runs a whole Catch-up and"
+      "the next turn comes a second later."
+    firstDue(gate, Map.keys(gate.deferred), nowMs)
+
+verify dueNow
+    dueNow(noGate(), 0) => Option.None
+    dueNow(held(wasted(noGate(), 7, 1000), 7, "why"), 1000) => Option.None
+    dueNow(held(wasted(noGate(), 7, 1000), 7, "why"), 1000 + cooldownMs()) => Option.Some(Due(key = 7, why = "why"))
+    dueNow(held(noGate(), 7, "why"), 0) => Option.Some(Due(key = 7, why = "why"))
+    dueNow(taken(held(wasted(noGate(), 7, 1000), 7, "why"), 7), 1000 + cooldownMs()) => Option.None
+
+fn firstDue(gate: Gate, keys: List<Int>, nowMs: Int) -> Option<Due>
+    ? "The first Peer in the held set that is allowed to be obeyed again."
+    match keys
+        [] -> Option.None
+        [head, ..tail] -> dueOrNext(gate, head, tail, nowMs)
+
+verify firstDue
+    firstDue(noGate(), [], 0) => Option.None
+    firstDue(held(noGate(), 7, "why"), [7], 0) => Option.Some(Due(key = 7, why = "why"))
+    firstDue(held(wasted(noGate(), 7, 1000), 7, "why"), [7], 1000) => Option.None
+    firstDue(noGate(), [7], 0) => Option.None
+
+fn dueOrNext(gate: Gate, key: Int, rest: List<Int>, nowMs: Int) -> Option<Due>
+    ? "This Peer if its cooldown has passed, otherwise look at the rest."
+    match allowed(gate, key, nowMs)
+        false -> firstDue(gate, rest, nowMs)
+        true -> claimOf(gate, key, rest, nowMs)
+
+verify dueOrNext
+    dueOrNext(held(noGate(), 7, "why"), 7, [], 0) => Option.Some(Due(key = 7, why = "why"))
+    dueOrNext(held(wasted(noGate(), 7, 1000), 7, "why"), 7, [], 1000) => Option.None
+    dueOrNext(held(wasted(noGate(), 7, 1000), 8, "later"), 7, [8], 1000) => Option.Some(Due(key = 8, why = "later"))
+
+fn claimOf(gate: Gate, key: Int, rest: List<Int>, nowMs: Int) -> Option<Due>
+    ? "What this Peer said, if it is still being held."
+    match Map.get(gate.deferred, key)
+        Option.None -> firstDue(gate, rest, nowMs)
+        Option.Some(why) -> Option.Some(Due(key = key, why = why))
+
+verify claimOf
+    claimOf(held(noGate(), 7, "why"), 7, [], 0) => Option.Some(Due(key = 7, why = "why"))
+    claimOf(noGate(), 7, [], 0) => Option.None
+    claimOf(held(noGate(), 8, "later"), 7, [8], 0) => Option.Some(Due(key = 8, why = "later"))
+
+fn waiting(gate: Gate) -> Int
+    ? "How many Peers have a claim being held back."
+    Map.len(gate.deferred)
+
+verify waiting
+    waiting(noGate()) => 0
+    waiting(held(noGate(), 7, "why")) => 1
+
+fn quieted(gate: Gate) -> Int
+    ? "How many Peers are inside a cooldown."
+      "Counts Peers whose cooldown has been set rather than Peers whose"
+      "cooldown has not yet passed -- an expired entry is left in the Map"
+      "until the Peer either moves the chain or goes -- so this is what the"
+      "gate is remembering, not what it is currently refusing."
+    Map.len(gate.quietUntil)
+
+verify quieted
+    quieted(noGate()) => 0
+    quieted(wasted(noGate(), 7, 1000)) => 1
+
+fn forgotten(gate: Gate, key: Int) -> Gate
+    ? "The Peer is gone, so neither its cooldown nor its held claim means"
+      "anything. Keys are reused as Peers come and go, and a new Peer"
+      "inheriting the last one's cooldown would be quieted for something it"
+      "did not do."
+    Gate(quietUntil = Map.remove(gate.quietUntil, key), deferred = Map.remove(gate.deferred, key))
+
+verify forgotten
+    quieted(forgotten(wasted(noGate(), 7, 1000), 7)) => 0
+    waiting(forgotten(held(noGate(), 7, "why"), 7)) => 0
+    quieted(forgotten(wasted(noGate(), 7, 1000), 8)) => 1
+
+fn charging(gate: Gate, key: Int, stillSeated: Bool, stoodStill: Bool, nowMs: Int) -> Gate
+    ? "The gate after a Catch-up this Peer asked for."
+      "A Peer the Catch-up itself dropped is left alone: it has already been"
+      "forgotten, and quieting a key nobody holds would leave an entry"
+      "behind for every Peer the node ever seated."
+    match stillSeated
+        false -> gate
+        true -> chargedFor(gate, key, stoodStill, nowMs)
+
+verify charging
+    quieted(charging(noGate(), 7, false, true, 1000)) => 0
+    quieted(charging(noGate(), 7, true, true, 1000)) => 1
+    allowed(charging(noGate(), 7, true, true, 1000), 7, 1000) => false
+    allowed(charging(noGate(), 7, true, true, 1000), 7, 1000 + cooldownMs()) => true
+    allowed(charging(noGate(), 7, false, true, 1000), 7, 1000) => true
+    allowed(charging(wasted(noGate(), 7, 0), 7, true, true, 1000), 7, 1000) => false
+    quieted(charging(wasted(noGate(), 7, 1000), 7, true, false, 2000)) => 0
+
+fn chargedFor(gate: Gate, key: Int, stoodStill: Bool, nowMs: Int) -> Gate
+    ? "Moved the chain, or moved nothing."
+    match stoodStill
+        false -> moved(gate, key)
+        true -> wasted(gate, key, nowMs)
+
+verify chargedFor
+    quieted(chargedFor(noGate(), 7, true, 1000)) => 1
+    quieted(chargedFor(wasted(noGate(), 7, 1000), 7, false, 2000)) => 0
+    waiting(chargedFor(held(noGate(), 7, "why"), 7, false, 2000)) => 0
+    waiting(chargedFor(held(noGate(), 7, "why"), 7, true, 2000)) => 1

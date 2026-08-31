@@ -64,8 +64,10 @@ payload arrived intact; a mismatch means the stream is no longer trustworthy.
 _Avoid_: hash, digest, crc
 
 **Announcement**:
-An `inv` Message offering transactions the Peer holds. It carries identifiers
-only — the transactions themselves must be requested.
+An `inv` Message offering Transactions or Blocks the Peer holds. It carries
+identifiers only — what it names must be requested. An identifier is a claim
+and not evidence: anyone can name anything, so what an Announcement is worth is
+decided against what this node already holds rather than taken on trust (#300).
 _Avoid_: notification, advertisement, inv
 
 ### What we decode
@@ -123,8 +125,12 @@ The run from where the node stands to the Tip it is following: the Header
 phase, then the body phase, then the Set phase. Bounded at both ends — it
 starts from what the directory already holds and ends when the UTXO Set stands
 on the Tip, not merely when the last body is on disk. A node that has caught up
-still catches up again every time a Peer announces a Block; the same three
-phases over a range of one.
+still catches up again every time a Peer announces a Block worth believing; the
+same three phases over a range of one. Worth believing is a decision of its own
+(#300): an Announcement naming nothing the Header tree has yet to place moves
+nothing and starts none of it, an unasked-for `headers` has to carry proof of
+work before it is acted on, and a Peer whose last Catch-up moved nothing has
+its next claim held for a cooldown rather than obeyed.
 _Avoid_: sync, IBD, initial block download, backfill, bootstrap
 
 **Chain Work**:

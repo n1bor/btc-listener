@@ -2099,6 +2099,97 @@ of the eleven beneath it, is refused by the same batch check with a line that
 names the rule instead; those two are covered by the verify cases in
 `infra/headers.av`, because Core will not mine one for you.
 
+### A Peer that says the chain moved, having spent nothing
+
+The `headerflood` mode is
+[#300](https://github.com/n1bor/btc-listener/issues/300). A Catch-up is the
+expensive thing this node does — the Header round trip, the realignment, the
+body walk, the Set build — and nothing used to stand between an arriving
+Message and all of it. The liar makes two claims in turn, half a second
+apart, both free: a `headers` with no Headers in it at all, and a `headers`
+carrying regtest genesis, a Header every node already holds. Each one used
+to be answered with a whole Catch-up, and if the liar then went quiet the
+Header round trip cost the sixty-second answer deadline as well.
+
+Run it beside the honest node, with the chain from sections 1–4, and mine a
+Block partway through so the honest path is exercised in the same run. Give
+the liar a moment to bind before the node dials it, and pass `log` so the
+decisions land in `debug.log`:
+
+```bash
+python3 tools/regtest/liar.py 18455 headerflood &
+sleep 3
+timeout -s INT 65 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D log &
+sleep 30; $C generatetoaddress 1 "$($C getnewaddress)"; wait
+```
+
+The liar says how many claims it got out; the node must have run a Catch-up
+for **the honest Block only**:
+
+```
+liar: dropped after 42 claims
+```
+
+```
+peer 0 is 127.0.0.1:18455
+peer 1 is 127.0.0.1:18454
+headers complete: 127 known
+following at Height 126: 0 connected, 0 disconnected, set +0 -0
+a compact Block 3bcd83db…456453 has no Header in the tree; fetching it whole instead
+2026-08-31T06:35:07.537Z  falling back to a whole Block from peer 1
+headers to 127
+headers complete: 128 known
+dropping peer 0: owed Blocks and sent none for 30 seconds
+block 127 3bcd83db…456453 1 tx 249 bytes
+following at Height 127: 1 connected, 0 disconnected, set +1 -0
+```
+
+Two `headers complete` lines against forty-two claims is the whole test: the
+first is the Catch-up on joining, the second is the honest Block. The counts
+are what to read, not the wording — `grep -c "headers complete" ` must stay
+in single figures however long the flood runs.
+
+`debug.log` says why each claim went nowhere:
+
+```
+1788158079031 fault ignoring 0 unasked-for Header(s) from peer 0: the tree has placed every one (#300)
+1788158080533 fault ignoring 1 unasked-for Header(s) from peer 0: the tree has placed every one (#300)
+```
+
+Fewer of those than the liar sent is expected and not a failure: a Message
+that arrives while a Catch-up is running is kept as spare and acted on only
+if it is an `addr`, so the claims sent during the first Catch-up are thrown
+away without a line.
+
+**Check the test still bites.** Build the tree from before the fix into its
+own directory and run the same flood against it:
+
+```bash
+git worktree add /tmp/pre300 <the commit before the fix>
+cd /tmp/pre300 && aver compile main.av --module-root . -o /tmp/pre300-build
+cd /tmp/pre300-build && cargo build --release
+```
+
+Then count Catch-ups on each. Measured on the run this section was written
+from, same liar, same sixty seconds, same honest Peer:
+
+```
+pre-fix : 118
+fixed   : 2
+```
+
+A hundred and eighteen is more than the liar sent, because a Catch-up that
+finds nothing to do ends back in the loop where the next claim is already
+waiting. That is the amplification the issue describes, and a test that
+passes on both binaries is testing nothing.
+
+The other two halves of the fix have no mode of their own because Core
+exercises them: an `inv` naming a Block already placed is what a second Peer
+announcing the same Block sends, and section 16 (bodies from several Peers)
+is the run where that happens. Watch that the node still reaches Core's tip
+— the filter sits directly on the tip-following path, and a mistake there
+costs Blocks rather than only work.
+
 ## Before you commit
 
 The language gates come first, and none of them is optional:
