@@ -1765,6 +1765,56 @@ can go backwards; `sinceLast` reports the raw value when they do. Written the
 obvious way it emitted `-2000` at every boundary, which reads as a fault and
 would sum to nonsense under `awk`.
 
+### A Segment on the disk before the Index names it
+
+[#301](https://github.com/n1bor/btc-listener/issues/301) is not a Peer and
+not a lie: it is the order two writes happen in. A Segment append returns once
+the bytes are in the page cache; the RocksDB batch recording their `b:`
+Locations returns only once its own log is on the disk. A power cut between
+them left a durable Location naming bytes that were never written, and the
+next open cut the torn tail off so the following download appended at that
+offset — the stale Location then named a different Block's bytes.
+
+Power loss is not something to arrange on a laptop. The ordering, though, is
+made of system calls, so `strace` is the whole test. Fetch a few Blocks:
+
+```bash
+rm -rf $D && $BIN regtest headers 127.0.0.1:18454 $D
+strace -f -e trace=openat,fsync,fdatasync -o /tmp/sync.log \
+  $BIN regtest bodies 127.0.0.1:18454 $D 1 40
+grep -nE 'blk[0-9]+\.dat", O_RDONLY|fsync\(' /tmp/sync.log | tail -4
+```
+
+The provider opens the Segment read-only purely to sync it, so that open is
+the marker to find, and the `fsync` on the descriptor it returns must come
+**before** RocksDB's:
+
+```
+162  openat(AT_FDCWD, ".../dchain/blocks/blk000000.dat", O_RDONLY|O_CLOEXEC) = 11
+163  fsync(11)                        = 0        <- the Segment
+165  fsync(4)                         = 0        <- the batch of b: Locations
+```
+
+Two lines apart, and in that order, is the fix. The earlier `fsync`s in the
+trace are RocksDB opening its own database and belong to no batch.
+
+**Check the test still bites.** Against a binary from before the fix, the
+Segment is never opened for a sync and never synced at all:
+
+```
+pre-fix : 0 read-only opens of blk000000.dat, 0 fsyncs on it
+fixed   : 1 read-only open, 1 fsync, before the batch
+```
+
+One, for forty Blocks, is the design and not a shortfall: the Locations go
+down in one batch per phase, so one sync per batch buys the whole ordering.
+An fsync a Block would have cost forty to buy the same thing.
+
+`providers/durable` carries the unit tests for the provider itself — one
+file, several, an empty list, and an absent Segment answered with an `Err`
+naming it rather than a silence — because whether an fsync reached the platter
+is not a claim Aver can evaluate.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
@@ -2202,6 +2252,7 @@ aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release
 cargo test --manifest-path providers/primitives/Cargo.toml
 cargo test --manifest-path providers/kv/Cargo.toml
+cargo test --manifest-path providers/durable/Cargo.toml
 ```
 
 `cargo build` is not a formality: the failure classes that survive `check`,

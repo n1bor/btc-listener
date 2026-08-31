@@ -139,6 +139,7 @@ aver format . --check
 
 cargo test --manifest-path providers/primitives/Cargo.toml   # the providers carry their own Rust tests, run when you touch providers/
 cargo test --manifest-path providers/kv/Cargo.toml
+cargo test --manifest-path providers/durable/Cargo.toml
 ```
 
 Run interpreted (the provider host is built automatically now; plain
@@ -191,8 +192,8 @@ arrangement of `domain/` parts; `app/` adapts argv to those; `main.av` is
 deliberately thin. A failure against a live peer is therefore a socket
 problem, never an ambiguity in the pure code.
 
-**Capability providers.** Two contracts are declared in Aver with no bodies and
-supplied at run time by Rust crates named in `aver.toml`:
+**Capability providers.** Three contracts are declared in Aver with no bodies
+and supplied at run time by Rust crates named in `aver.toml`:
 
 - `domain/primitives.av` → `providers/primitives` — RIPEMD-160 and secp256k1
   (libsecp256k1, the same code Bitcoin Core runs). The curve is a provider on
@@ -201,6 +202,12 @@ supplied at run time by Rust crates named in `aver.toml`:
   libclang-dev to build, ADR 0009). Effectful, so
   each operation declares an Oracle dimension. `Handle` is an opaque capability
   resource Aver code cannot construct or serialise.
+- `infra/durable.av` → `providers/durable` — an fsync, thirty lines of
+  `std::fs` (#301). Aver's `Disk.appendBytes` returns once the bytes are in
+  the page cache, and a Segment whose `b:` Location is about to be written by
+  a RocksDB that *does* fsync needs to be durable first. A capability because
+  Aver has no fsync; jasisz/aver#1229 asks for `Disk.sync` upstream, and this
+  contract retires the day it lands.
 
 The providers carry their own Rust tests; everything else is tested from Aver.
 
