@@ -1433,6 +1433,45 @@ Two chains on one machine each open their own cache and compete for the same
 page cache besides. Running mainnet and signet together on this server cost
 mainnet about a fifth of its Set rate.
 
+### Which shape the Index is compacted in
+
+`BTC_LISTENER_KV_COMPACTION` is `leveled` or `universal`, read when the
+database is opened, so it too costs a restart. Anything else is refused by
+name rather than quietly replaced by the default.
+
+**Leveled is the default and is almost certainly what you want.** It keeps
+each level a single non-overlapping sorted run, and pays for that invariant by
+rewriting the overlapping part of the level below every time data moves down.
+On mainnet at Height 886000 that is expensive: the bottom level held 94% of a
+12.7 GB Index, and RocksDB wrote 101 GB into it to add 1.9 GB of new data --
+a write amplification of 7.3 overall.
+
+Universal drops the invariant and merges runs of similar size instead. The
+argument for it here is that most of this Index is append-only -- `b:`, `t:`,
+`n:`, `k:` and `o:` never change, because a Block Id always names the same
+bytes -- so the rewriting leveled does to reclaim obsolete versions buys
+nothing for nine tenths of the keyspace.
+
+It was measured on the spinning-disk server this is written from, and **it
+lost by a wide margin**:
+
+| | leveled | universal |
+| --- | --- | --- |
+| Set rate | 36.4 Blocks/min | **14.5** |
+| write amplification | 7.3 | 4.9 |
+| compaction write | 3.0 MB/s | 1.0 MB/s |
+| read latency | 1.44 ms | **10.26 ms** |
+| disk utilisation | 67% | 85% |
+
+The writes fell exactly as predicted and the reads paid for it: a UTXO lookup
+probes every sorted run, and there were more runs than a 256 MB cache could
+hold, so each probe became a seek. That is a fact about two 7,200 rpm spindles
+and a small cache, not about universal compaction -- on an SSD, or with a
+cache that holds the Index, the trade could go the other way. The setting is
+here so the question can be asked again on different hardware without a
+rebuild, and the numbers are here so nobody has to ask it twice on the same
+hardware.
+
 ### Choosing a peer
 
 `headers` and `bodies` want an address; only the bare listener asks a DNS seed

@@ -29,8 +29,8 @@ use aver_rt::provider::{
     ProviderValue,
 };
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, Direction, IteratorMode, Options, WriteBatch,
-    WriteOptions, DB,
+    BlockBasedOptions, Cache, DBCompactionStyle, DBCompressionType, Direction, IteratorMode,
+    Options, WriteBatch, WriteOptions, DB,
 };
 
 /// Pinned to the contract in `infra/kv.av`. A mismatch fails at startup rather
@@ -100,10 +100,60 @@ fn parsed_cache_mb(raw: &str) -> Result<usize, String> {
     }
 }
 
+/// Which compaction style to open with. Deployment policy like the cache
+/// above, and for the same reason: which one wins depends on the disk under
+/// the Index.
+///
+/// Leveled keeps each level a single non-overlapping sorted run, and holds
+/// that invariant by rewriting the whole overlapping part of the level below
+/// -- which on this project's mainnet node meant writing 101 GB into a 12 GB
+/// bottom level to add 1.9 GB. Universal drops the invariant and merges runs
+/// of similar size instead, trading space and read amplification for far
+/// fewer rewrites. Most of this Index is append-only (`b:`, `t:`, `n:`, `k:`
+/// and `o:` never change), so the rewriting leveled does to reclaim obsolete
+/// versions buys nothing for those keyspaces, which is the argument for
+/// trying universal at all.
+///
+/// It was tried, and on that node it lost badly: an hour of universal ran at
+/// 14.5 Blocks a minute against 36.4 for the leveled hour before it. The
+/// writes did fall exactly as the argument said -- write amplification 7.3 to
+/// 4.9, compaction traffic 3.0 MB/s to 1.0 -- and the reads paid for it,
+/// going from 1.44 ms to 10.26 ms a piece with the disks busier than before.
+/// A UTXO lookup probes every sorted run, and there were more of them than a
+/// 256 MB cache could keep. That is a fact about two 7,200 rpm spindles and a
+/// small cache rather than about universal compaction, which is why this is a
+/// setting and not a decision: on an SSD, or with a cache that holds the
+/// Index, the trade could go the other way. Leveled is the default because it
+/// is what every measurement in this repo was taken against.
+const COMPACTION_VAR: &str = "BTC_LISTENER_KV_COMPACTION";
+
+/// Leveled unless the deployment says otherwise: it is what every measurement
+/// in this repo was taken against, and a default that changes under a running
+/// node is a default that cannot be reasoned about.
+fn compaction_style() -> Result<DBCompactionStyle, String> {
+    match std::env::var(COMPACTION_VAR) {
+        Err(std::env::VarError::NotPresent) => Ok(DBCompactionStyle::Level),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{COMPACTION_VAR} is not text")),
+        Ok(raw) => parsed_compaction(&raw),
+    }
+}
+
+/// What one setting of the variable means. Refused rather than guessed: a
+/// deployment that names a style and is given another has been told nothing.
+fn parsed_compaction(raw: &str) -> Result<DBCompactionStyle, String> {
+    match raw.trim() {
+        "leveled" | "level" => Ok(DBCompactionStyle::Level),
+        "universal" => Ok(DBCompactionStyle::Universal),
+        said => Err(format!(
+            "{COMPACTION_VAR} must be 'leveled' or 'universal', not '{said}'"
+        )),
+    }
+}
+
 /// How the database is tuned for this program's shape: a few hundred million
 /// small keys written in large batches, read one at a time by exact key or
 /// by prefix, and compacted in the background while the writer keeps going.
-fn tuned(cache_bytes: usize) -> Options {
+fn tuned(cache_bytes: usize, style: DBCompactionStyle) -> Options {
     let mut options = Options::default();
     options.create_if_missing(true);
     // Block Ids and scripts are hex text today and bytes after #45/#46;
@@ -125,6 +175,10 @@ fn tuned(cache_bytes: usize) -> Options {
     // hot blocks of the lower ones; the rest is a seek. #308.
     table.set_block_cache(&Cache::new_lru_cache(cache_bytes));
     options.set_block_based_table_factory(&table);
+    // Last, so it is the line a reader looking for the style finds. The
+    // level_* settings above apply to leveled only and are inert under
+    // universal; they are left in place so switching back needs no edit.
+    options.set_compaction_style(style);
     options
 }
 
@@ -235,7 +289,11 @@ impl CapabilityProvider for Kv {
                     Ok(bytes) => bytes,
                     Err(why) => return Ok(failed("cannot open the database", why)),
                 };
-                Ok(match DB::open(&tuned(cache), &dir) {
+                let style = match compaction_style() {
+                    Ok(style) => style,
+                    Err(why) => return Ok(failed("cannot open the database", why)),
+                };
+                Ok(match DB::open(&tuned(cache, style), &dir) {
                     Ok(db) => ok(ProviderValue::Resource(ProviderResource::new(Open(db)))),
                     Err(why) => failed(&format!("cannot open the database at '{dir}'"), why),
                 })
@@ -889,5 +947,34 @@ mod tests {
             vec![Some("3".to_string()), None, Some("1".to_string())]
         );
         assert_eq!(gotAll(&handle, &[]), Vec::<Option<String>>::new());
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    /// Absent means leveled, which is what every measurement in this repo was
+    /// taken against.
+    #[test]
+    fn absent_is_leveled() {
+        assert!(matches!(parsed_compaction("leveled"), Ok(DBCompactionStyle::Level)));
+        assert!(matches!(parsed_compaction("level"), Ok(DBCompactionStyle::Level)));
+    }
+
+    #[test]
+    fn universal_is_understood() {
+        assert!(matches!(parsed_compaction("universal"), Ok(DBCompactionStyle::Universal)));
+        assert!(matches!(parsed_compaction("  universal  "), Ok(DBCompactionStyle::Universal)));
+    }
+
+    /// Refused, not guessed: a deployment that names a style and is given
+    /// another has been told nothing and gets the Index it was avoiding.
+    #[test]
+    fn anything_else_is_refused_by_name() {
+        match parsed_compaction("tiered") {
+            Err(why) => assert!(why.contains("tiered") && why.contains("universal"), "{why}"),
+            Ok(_) => panic!("an unknown style was accepted"),
+        }
     }
 }
