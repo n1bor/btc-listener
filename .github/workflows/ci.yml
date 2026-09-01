@@ -298,6 +298,72 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  windows:
+    name: Windows binary
+    # Not in the release job's `needs`, and nothing depends on it: this is an
+    # experiment in whether the program builds for Windows at all, and a red
+    # cross here should not stop a Linux release going out. Wire it into
+    # `binary` once it has been green for a while.
+    #
+    # Known to be broken at run time even if this builds: Disk.sync on a
+    # directory cannot work on Windows (jasisz/aver#1238), and
+    # Infra.Blocks.synced calls it once per batch. So a binary from here is
+    # a compile-level answer, not a node that runs.
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # The rocksdb crate binds RocksDB through bindgen, which wants libclang.
+      # The Windows image ships LLVM; the crate only needs to be told where.
+      - name: Point bindgen at the image's LLVM (ADR 0009)
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      # providers/*/Cargo.toml pin aver-rt by the dev path, and on Windows a
+      # rooted path with no drive resolves against the *current* drive. So the
+      # source has to land on whichever drive the workspace is on, or Cargo
+      # looks for it on the wrong one.
+      - name: Check out the Aver source at the pinned revision, on the workspace drive
+        shell: bash
+        run: |
+          drive=$(pwd | cut -d/ -f2)
+          echo "workspace drive: $drive"
+          mkdir -p "/$drive/home/owensr/aver/aver"
+          git -C "/$drive/home/owensr/aver/aver" init --quiet
+          git -C "/$drive/home/owensr/aver/aver" fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
+          git -C "/$drive/home/owensr/aver/aver" checkout --quiet FETCH_HEAD
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver.exe
+          key: aver-path-${{ hashFiles('.aver-version') }}-windows-latest
+      - name: Install aver from that source
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo install --path "/$(pwd | cut -d/ -f2)/home/owensr/aver/aver" aver-lang --locked
+      - name: Cache the generated project's target
+        uses: actions/cache@v4
+        with:
+          path: build/target
+          key: aver-buildtarget-${{ hashFiles('.aver-version', 'providers/**', 'aver.toml') }}-windows-latest
+      - name: Compile Aver to Rust
+        shell: bash
+        run: aver compile main.av --module-root . -o build
+      - name: Build the release binary
+        shell: bash
+        run: cargo build --release --manifest-path build/Cargo.toml
+      - name: Show that it starts
+        shell: bash
+        run: build/target/release/main.exe help | head -3
+      - name: Keep it, so the shape of a Windows artefact can be looked at
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-windows
+          path: build/target/release/main.exe
+          if-no-files-found: error
+          retention-days: 7
+
   wasm-node:
     name: wasm-gc graph and Node host
     runs-on: ubuntu-latest
