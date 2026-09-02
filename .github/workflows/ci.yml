@@ -418,8 +418,24 @@ jobs:
     # The download server does not build anything -- it is handed a binary, and
     # this is where that binary comes from (issue #138). Only on main, and only
     # behind every gate: a binary that failed verify is worse than none.
-    if: github.ref == 'refs/heads/main'
-    needs: [format, check, verify, verify-corpus, provider-tests, compile, wasm-node]
+    #
+    # windows is in `needs` so this waits for it and can publish main.exe, but
+    # the `if` below requires success only from the others. So a red or absent
+    # Windows job delays the release by the length of that job and then ships
+    # without main.exe, rather than stopping it. Waiting matters: the Windows
+    # job outlasts the ones this used to wait on, so without it in `needs` the
+    # artefact would usually not exist yet and every release would quietly
+    # lack it.
+    needs: [format, check, verify, verify-corpus, provider-tests, compile, wasm-node, windows]
+    if: >-
+      always() && github.ref == 'refs/heads/main'
+      && needs.format.result == 'success'
+      && needs.check.result == 'success'
+      && needs.verify.result == 'success'
+      && needs['verify-corpus'].result == 'success'
+      && needs['provider-tests'].result == 'success'
+      && needs.compile.result == 'success'
+      && needs['wasm-node'].result == 'success'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -439,6 +455,16 @@ jobs:
         with:
           name: main-wasm
           path: build/target/release
+      # Deliberately not in this job's `needs`, and deliberately allowed to
+      # fail: a Windows runner outage must not stop a Linux release. If the
+      # job did not produce one, the release goes out without it and says so.
+      - name: Collect the Windows binary, if the Windows job made one
+        id: windows
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: main-windows
+          path: build/target/release
       # Artifacts do not keep the execute bit. Running `help` here is the proof
       # that what ships starts on a 22.04 box, which is the floor it claims.
       # Captured rather than piped into head: a reader that closes the pipe
@@ -453,7 +479,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd build/target/release && sha256sum main main.wasm > SHA256SUMS && cd -
+          cd build/target/release && sha256sum main main.wasm $([ -f main.exe ] && echo main.exe) > SHA256SUMS && cd -
           floor=$(objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1)
           # Deleted and recreated rather than edited, so the tag names the
           # commit that actually produced the asset hanging off it.
@@ -487,6 +513,18 @@ jobs:
               "directory it deletes on exit, so it is a conformance harness rather than" \
               "a way to run a node that keeps a chain." \
               "" \
-              "This release is replaced on every push to main. \`SHA256SUMS\` covers both" \
-              "files. Setting a server up with it: #138.")" \
-            build/target/release/main build/target/release/main.wasm build/target/release/SHA256SUMS
+              "### And as a Windows binary, which has been built and not much else" \
+              "" \
+              "\`main.exe\` is present when the Windows job produced one. It is the same" \
+              "program, built on windows-latest with RocksDB and libsecp256k1 compiled" \
+              "in, and CI has shown it starts." \
+              "" \
+              "**That is the whole of what has been checked.** No chain has been synced" \
+              "on Windows -- not headers, not bodies, not the Set -- and \`prune\` deletes" \
+              "Segments, which Windows refuses for a file a process still holds open." \
+              "Treat it as something to try rather than something to run, and see #325." \
+              "" \
+              "This release is replaced on every push to main. \`SHA256SUMS\` covers every" \
+              "file in it. Setting a server up with it: #138.")" \
+            build/target/release/main build/target/release/main.wasm build/target/release/SHA256SUMS \
+            $([ -f build/target/release/main.exe ] && echo build/target/release/main.exe)
