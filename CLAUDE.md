@@ -85,7 +85,7 @@ for hostile Peers are exercised by two scripts. `tools/regtest/liar.py` is a
 Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
 `wrongbody`, `addrflood`, `escape`, `headerflood`); `tools/regtest/caller.py`
 is a caller that dials the node's served port (`early`, `chatty`, `silent`,
-`pinger`, `polite`). Each security fix in this repo (#281–#284, #291, #293,
+`pinger`, `polite`, `lurker`). Each security fix in this repo (#281–#284, #291, #293,
 #300) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
 shows the offender dropped while the node carries on — that pairing is the
 house pattern, and a security fix without it is unproven. Run the honest

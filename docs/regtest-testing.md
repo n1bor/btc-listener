@@ -2263,6 +2263,64 @@ of the eleven beneath it, is refused by the same batch check with a line that
 names the rule instead; those two are covered by the verify cases in
 `infra/headers.av`, because Core will not mine one for you.
 
+### A caller that greets you and then says nothing for ever
+
+[#330](https://github.com/n1bor/btc-listener/issues/330). A crawler is not
+hostile and breaks no rule: it completes the Handshake correctly and then
+listens. On the mainnet node five of eight inbound slots were held by crawlers,
+one of them silent for two hours and thirty-six minutes and still seated,
+because the only silence rule there was is pool-wide — `stillHeard` asks
+whether *anybody* has spoken, and somebody always has.
+
+The `lurker` mode is that Peer: a proper `version`/`verack`, then nothing, held
+past the twenty-minute per-Peer deadline.
+
+```bash
+$BIN regtest follow 127.0.0.1:18454 $D serve:18472 &
+sleep 20
+python3 tools/regtest/caller.py 18472 lurker
+```
+
+The node seats it, and twenty minutes later takes the slot back. Both sides say
+so, which is what makes this worth running rather than reasoning about:
+
+```
+peer 1 dialled us from 127.0.0.1:51318
+dropping peer 1: inbound and silent for 20 minutes
+```
+
+```
+caller: dropped after 1200.6 s
+```
+
+**It takes twenty-one minutes and there is no way to shorten it**, because the
+deadline is the thing being tested. Read `1200.6` as the check: the caller
+learns it was dropped only by its socket closing, so that number is measured
+from the far side rather than from the node's own log.
+
+Twenty minutes is what Core allows before an unanswered ping, and Core pings a
+quiet connection every two minutes — so a Peer that is there at all is heard
+from six times inside the window, and this cannot drop one that is
+participating.
+
+**Check the cap while you are here**, since it is the other half of the same
+table ([#329](https://github.com/n1bor/btc-listener/issues/329)):
+
+```
+$ $BIN regtest follow … serve:18470
+listening on port 18470 as NODE_NETWORK|NODE_WITNESS at Height 130, for up to 125 inbound Peer(s)
+
+$ BTC_LISTENER_INBOUND_MAX=3 $BIN regtest follow … serve:18471
+listening on port 18471 … for up to 3 inbound Peer(s)
+
+$ BTC_LISTENER_INBOUND_MAX=lots $BIN regtest follow …
+error: BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not 'lots'
+```
+
+A number that is not a whole number of Peers above zero is refused rather than
+replaced by the default, for the reason the Index's cache size is: a deployment
+that names a number and is given another has been told nothing.
+
 ### A Peer that says the chain moved, having spent nothing
 
 The `headerflood` mode is
