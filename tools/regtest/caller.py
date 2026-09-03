@@ -9,6 +9,12 @@ import socket, struct, hashlib, time, sys
 #     python3 tools/regtest/caller.py 18456 early     # a ping before any version
 #     python3 tools/regtest/caller.py 18456 polite    # a proper Handshake, then stay connected
 #     python3 tools/regtest/caller.py 18456 lurker    # a proper Handshake, then silence past the sweep (#330)
+#
+# A third argument binds the source address, which is how one machine seats
+# more than one inbound Peer (#333): hostLimit is one slot per host, and every
+# 127.x.x.x is a different host that loopback already carries.
+#
+#     python3 tools/regtest/caller.py 18456 lurker 127.0.0.5
 MAGIC = bytes([0xfa,0xbf,0xb5,0xda])           # regtest
 def msg(cmd, payload):
     c = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
@@ -25,8 +31,9 @@ def held(s, started, seconds):
     except socket.timeout:
         print('caller: still connected after %.1f s' % (time.time() - started), file=sys.stderr, flush=True); return
     print('caller: dropped after %.1f s' % (time.time() - started), file=sys.stderr, flush=True)
-def dial(port, mode):
-    s = socket.create_connection(('127.0.0.1', port))
+def dial(port, mode, source=None):
+    src = (source, 0) if source else None
+    s = socket.create_connection(('127.0.0.1', port), source_address=src)
     started = time.time()
     try:
         if mode == 'silent':
@@ -61,4 +68,4 @@ def dial(port, mode):
         print('caller: dropped after %.1f s (%s)' % (time.time() - started, e), file=sys.stderr, flush=True)
         return
     print('caller: still connected after %.1f s' % (time.time() - started), file=sys.stderr, flush=True)
-dial(int(sys.argv[1]), sys.argv[2])
+dial(int(sys.argv[1]), sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)

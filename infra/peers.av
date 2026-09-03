@@ -903,6 +903,41 @@ verify inboundAmong
     inboundAmong(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", true), [1], 0) => 1
     inboundAmong(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", false), [1], 0) => 0
 
+fn outboundHeld(pool: Pool) -> Int
+    ? "How many of the Peers we hold are ones we chose to dial (#333)."
+      "The counterpart of inboundHeld, and the number the dial target is"
+      "about. It is counted rather than subtracted from the pool size"
+      "because the two maps are set together -- seatingIn and the dialled"
+      "seat each write sockets and standing in one expression -- so a count"
+      "over the standing cannot disagree with the sockets, while a"
+      "subtraction would quietly go negative if they ever did."
+    outboundAmong(pool.standing, Map.keys(pool.standing), 0)
+
+fn outboundAmong(standing: Map<Int, Standing>, keys: List<Int>, sofar: Int) -> Int
+    ? "One at a time, counting only the ones we dialled."
+    match keys
+        [] -> sofar
+        [head, ..tail] -> outboundAmong(standing, tail, sofar + oneIfOutbound(Domain.Inbox.standingAt(standing, head)))
+
+verify outboundAmong
+    outboundAmong(Domain.Inbox.noStanding(), [], 0) => 0
+    outboundAmong(Domain.Inbox.noStanding(), [7], 0) => 0
+    outboundAmong(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", false), [1], 0) => 1
+    outboundAmong(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", true), [1], 0) => 0
+
+fn oneIfOutbound(standing: Option<Standing>) -> Int
+    ? "One for a Peer we dialled, nothing for one that dialled us."
+      "A key with no standing is not counted, which is the safe direction:"
+      "it can only make the node dial, never stop it."
+    match standing
+        Option.None -> 0
+        Option.Some(held) -> countedDirection(Bool.not(held.inbound))
+
+verify oneIfOutbound
+    oneIfOutbound(Option.None) => 0
+    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false))) => 1
+    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true))) => 0
+
 fn oneIfInbound(standing: Option<Standing>) -> Int
     ? "One for a Peer that dialled us, nothing for one we dialled."
     match standing
@@ -1177,13 +1212,21 @@ fn targetPeers() -> Int
       "same reason: enough that losing one is routine and that no single Peer"
       "decides what chain we see, few enough that a node is not a burden on"
       "the Network it joined."
+      "Outbound, and counted as such since #333. It used to be measured"
+      "against every seated Peer, so Peers that dialled us were spent out of"
+      "the budget for the Peers we choose: a node with a full inbound table"
+      "stopped dialling altogether and its whole view of the chain came to"
+      "rest on whatever outbound Peers it happened to hold. Mainnet sat on"
+      "one, with 3,621 Candidates in the Book it would never try, held there"
+      "by eight crawlers. Inbound has its own budget in inboundLimit, the"
+      "way Core keeps the two apart."
     8
 
 verify targetPeers
     targetPeers() => 8
 
 fn toppedUp(pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Result<Topped, String>
-    ? "Start a dial when the pool is short of Peers, and do not wait for it."
+    ? "Start a dial when we are short of Peers we chose, and do not wait."
       "It lives here rather than in the follow loop (#199) because the loop"
       "is not the only thing that takes turns. A body walk polls, waits and"
       "hands out work for hours, and while it did none of this the pool"
@@ -1197,7 +1240,7 @@ fn toppedUp(pool: Pool, book: Map<String, Candidate>, nextKey: Int) -> Result<To
       "which is a number and not a Peer -- the startup walk still hands keys"
       "out only to Peers that seat, and regtest section 13 still reads key 0."
     ! [Random.int, Tcp.beginConnect, Time.unixMs]
-    match Bool.or(List.len(peerKeys(pool)) >= targetPeers(), dialingNow(pool))
+    match Bool.or(outboundHeld(pool) >= targetPeers(), dialingNow(pool))
         true -> Result.Ok(Topped(pool = pool, book = book, nextKey = nextKey))
         false -> topChosen(pool, book, nextKey, Domain.AddressBook.nextUntried(book, Domain.Inbox.addressesHeld(pool.standing), Result.withDefault(Random.int(0, rollSpread()), 0)))
 
