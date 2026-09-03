@@ -27,6 +27,7 @@ module Follow
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt, Disk.sync,
+        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -109,7 +110,7 @@ fn listeningOn(pool: Pool, store: Store, port: Int) -> Result<Pool, String>
     services = servicesFrom(store)?
     height = tipHeightOf(store)?
     bound = Infra.Peers.listening(pool, port, services, height)?
-    _said = Console.print("listening on port {port} as {promiseNamed(bound.serves)} at Height {bound.height}, for up to {Infra.Peers.inboundLimit()} inbound Peer(s)")
+    _said = Console.print("listening on port {port} as {promiseNamed(bound.serves)} at Height {bound.height}, for up to {Infra.Peers.inboundLimit(bound)} inbound Peer(s)")
     Result.Ok(bound)
 
 fn servicesFrom(store: Store) -> Result<Int, String>
@@ -174,6 +175,7 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt, Disk.sync,
+        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -185,7 +187,8 @@ fn follow(network: Network, addresses: List<PeerAddress>, store: Store, blocks: 
     noteOpened = Infra.Metrics.noting(opening, "start", "{Domain.Network.nameOf(network)} pid-run, {List.len(addresses)} seed address(es), screen {screened}")?
     metricsLog = Infra.Metrics.opened(noteOpened, Domain.Network.nameOf(network), 0, 0)?
     book = bootstrapped(network, addresses)?
-    ready = listeningIf(Infra.Peers.opened(network), store, answering)?
+    cap = Infra.Peers.inboundCapFrom(Env.get("BTC_LISTENER_INBOUND_MAX"))?
+    ready = listeningIf(Infra.Peers.withInboundCap(Infra.Peers.opened(network), cap), store, answering)?
     board = boardIf(boarding)?
     pool = joining(ready, addresses, 0)?
     asked = askingAll(pool, Infra.Peers.peerKeys(pool))?

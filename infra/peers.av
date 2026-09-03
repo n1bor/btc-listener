@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, opened, listening, accepting, inboundLimit, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, opened, listening, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
     depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -48,6 +48,7 @@ record Pool
     port: Int
     seenAs: Map<String, Int>
     toldMs: Int
+    inboundCap: Int
 
 record Dialing
     key: Int
@@ -290,7 +291,7 @@ fn drawnElsewhere(pool: Pool) -> Pool
       "to know is whether a line it prints reaches a reader or lands in the"
       "middle of somebody's frame. In raw mode the second one has no carriage"
       "return after it, so the frame becomes a staircase."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = false, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = false, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn saidIfPlain(pool: Pool, line: String) -> Unit
     ? "One line, unless something else owns the terminal."
@@ -386,7 +387,7 @@ fn sendingEach(pool: Pool, keys: List<Int>, body: Bytes) -> Result<Pool, String>
 
 fn toldAt(pool: Pool, nowMs: Int) -> Pool
     ? "The pool, with the advertising clock moved on."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = nowMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = nowMs, inboundCap = pool.inboundCap)
 
 verify toldAt
     tellingDue(toldAt(twiceSeen(), 5), 5) => false
@@ -429,7 +430,7 @@ verify privateVersionBody
 
 fn listeningAt(pool: Pool, port: Int) -> Pool
     ? "A pool that has bound a port, for the cases here."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 verify listeningAt
     servingPort(listeningAt(opened(Network.Regtest), 8333)) => 8333
@@ -470,7 +471,7 @@ verify countedIfRoutable
 
 fn tallied(pool: Pool, address: String) -> Pool
     ? "The pool, with one more Peer having named that address."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = Map.set(pool.seenAs, address, timesSeen(pool, address) + 1), toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = Map.set(pool.seenAs, address, timesSeen(pool, address) + 1), toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 verify tallied
     timesSeen(tallied(opened(Network.Regtest), "1.2.3.4:8333"), "1.2.3.4:8333") => 1
@@ -651,7 +652,7 @@ fn admitting(pool: Pool, key: Int, connection: Tcp.Connection) -> Result<Accepte
         Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    match inboundHeld(pool) >= inboundLimit()
+    match inboundHeld(pool) >= inboundLimit(pool)
         true -> refusedInbound(pool, connection)
         false -> seatingIfNamed(pool, key, connection, Tcp.peerAddress(connection))
 
@@ -685,7 +686,7 @@ fn refusedInbound(pool: Pool, connection: Tcp.Connection) -> Result<Accepted, St
     ? "The cap reached: close the caller and carry on."
     ! [Console.error, Tcp.close]
     _closed = Tcp.close(connection)
-    _said = complainedIfPlain(pool, "refused an inbound Peer: already holding {inboundLimit()}")
+    _said = complainedIfPlain(pool, "refused an inbound Peer: already holding {inboundLimit(pool)}")
     Result.Ok(Accepted(pool = pool, seated = Option.None))
 
 fn hostLimit() -> Int
@@ -775,7 +776,7 @@ fn seatingIn(pool: Pool, key: Int, connection: Tcp.Connection, address: String) 
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
     _said = saidIfPlain(pool, "peer {key} dialled us from {address}")
     greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", true, Time.unixMs() + handshakeDeadlineMs(), 0))
 
@@ -872,18 +873,94 @@ fn listenerKey() -> Int
 verify listenerKey
     listenerKey() => 0 - 1
 
-fn inboundLimit() -> Int
-    ? "How many Peers may arrive on their own initiative."
+fn inboundDefault() -> Int
+    ? "How many Peers may arrive on their own initiative, unless the"
+      "deployment says otherwise (#329)."
       "Inbound slots are an attack surface outbound ones are not: we choose"
-      "who we dial, and anybody at all may dial us. Eight is small enough"
-      "that a flood cannot crowd out the Peers we chose and large enough to"
-      "be worth serving. n1bor/btc-listener#30 wants eviction of the least"
-      "useful inbound Peer on top of this; a cap is the part that cannot be"
-      "skipped, because without it there is nothing to evict from."
-    8
+      "who we dial, and anybody at all may dial us. It was eight, chosen"
+      "before this node served anything, on the reasoning that a flood"
+      "should not crowd out the Peers we chose. Two of the defences that"
+      "worried about have since landed and do not scale with the number:"
+      "one host holds at most one slot (hostLimit, #291), and accepting"
+      "admits one caller per turn, so filling a table of any size costs the"
+      "flood a second per slot."
+      "A hundred and twenty-five is what Bitcoin Core allows by default, and"
+      "the mainnet node records fourteen thousand inbound seatings in a"
+      "single run -- with eight slots it spends its life cycling strangers"
+      "through them. What eight was really buying was protection from a cost"
+      "nobody had measured; the cap is now a number a deployment can choose."
+    125
+
+verify inboundDefault
+    inboundDefault() => 125
+
+fn inboundLimit(pool: Pool) -> Int
+    ? "How many inbound Peers this pool will hold."
+      "Carried on the Pool rather than read where it is needed: the read is"
+      "an effect and this is asked from inside the accept path, so a Pool"
+      "field keeps the decision at the edge and this answer pure."
+    pool.inboundCap
 
 verify inboundLimit
-    inboundLimit() => 8
+    inboundLimit(opened(Network.Regtest)) => 125
+    inboundLimit(withInboundCap(opened(Network.Regtest), 8)) => 8
+
+fn withInboundCap(pool: Pool, cap: Int) -> Pool
+    ? "The pool, holding a cap the deployment chose."
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = cap)
+
+verify withInboundCap
+    withInboundCap(opened(Network.Regtest), 40).inboundCap => 40
+    withInboundCap(opened(Network.Regtest), 40).network => Network.Regtest
+
+fn inboundCapFrom(said: Option<String>) -> Result<Int, String>
+    ? "What one setting of BTC_LISTENER_INBOUND_MAX means (#329)."
+      "Refused rather than quietly replaced by the default, the way the"
+      "Index's cache size is: a deployment that names a number and is given"
+      "another has been told nothing. Absent is the default, which is the"
+      "only reading of absent there is."
+    match said
+        Option.None -> Result.Ok(inboundDefault())
+        Option.Some(raw) -> inboundCapOf(String.trim(raw))
+
+verify inboundCapFrom
+    inboundCapFrom(Option.None) => Result.Ok(125)
+    inboundCapFrom(Option.Some("40")) => Result.Ok(40)
+    inboundCapFrom(Option.Some("  40  ")) => Result.Ok(40)
+    inboundCapFrom(Option.Some("0")) => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not '0'")
+    inboundCapFrom(Option.Some("lots")) => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not 'lots'")
+
+fn inboundCapOf(raw: String) -> Result<Int, String>
+    ? "A whole number above zero, or the reason it is not one."
+    capAtLeastOne(raw, Int.fromString(raw))
+
+verify inboundCapOf
+    inboundCapOf("1") => Result.Ok(1)
+    inboundCapOf("125") => Result.Ok(125)
+    inboundCapOf("x") => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not 'x'")
+
+fn capAtLeastOne(raw: String, parsed: Result<Int, String>) -> Result<Int, String>
+    ? "Zero inbound Peers is a node that does not serve, which is what"
+      "leaving the port unbound already says; it is refused here so that a"
+      "typo cannot quietly turn serving off."
+    match parsed
+        Result.Err(why) -> Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not '{raw}'")
+        Result.Ok(cap) -> capIfPositive(raw, cap)
+
+verify capAtLeastOne
+    capAtLeastOne("5", Result.Ok(5)) => Result.Ok(5)
+    capAtLeastOne("0", Result.Ok(0)) => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not '0'")
+    capAtLeastOne("x", Result.Err("no")) => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not 'x'")
+
+fn capIfPositive(raw: String, cap: Int) -> Result<Int, String>
+    ? "Above zero, or say so."
+    match cap > 0
+        true -> Result.Ok(cap)
+        false -> Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not '{raw}'")
+
+verify capIfPositive
+    capIfPositive("5", 5) => Result.Ok(5)
+    capIfPositive("0", 0) => Result.Err("BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not '0'")
 
 fn listening(pool: Pool, port: Int, services: Int, height: Int) -> Result<Pool, String>
     ? "Bind the port and put the listener in the pool beside the Peers."
@@ -893,18 +970,18 @@ fn listening(pool: Pool, port: Int, services: Int, height: Int) -> Result<Pool, 
       "is not its own memory to fill."
     ! [Tcp.listen]
     listener = Tcp.listen(port, 16)?
-    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs))
+    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap))
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0)
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0, inboundCap = inboundDefault())
 
 fn withStanding(pool: Pool, standing: Map<Int, Standing>) -> Pool
     ? "The pool, with what is known about the Peers moved on."
       "The sockets and the standing are kept in step by only ever changing"
       "one of them here: the pure half is Domain.Inbox's and this is the one"
       "place it is folded back in."
-    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn spareLimit() -> Int
     ? "How many unasked-for Messages to keep for the caller."
@@ -924,7 +1001,7 @@ fn spareOf(pool: Pool) -> List<Spare>
 
 fn withoutSpare(pool: Pool) -> Pool
     ? "The pool, with the kept Messages handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept for whoever wants it later (#168)."
@@ -937,7 +1014,7 @@ fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
 
 fn sparing(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept, oldest dropped once the bound is reached."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn bounded(spare: List<Spare>) -> List<Spare>
     ? "Keep the newest, because an address heard a minute ago is worth more"
@@ -1125,7 +1202,7 @@ fn began(pool: Pool, key: Int, address: PeerAddress, dial: Result<Tcp.Dial, Stri
     ! [Time.unixMs]
     match dial
         Result.Err(why) -> reported(pool, Outcome(key = key, address = Domain.Address.toString(address), seated = false, why = why))
-        Result.Ok(one) -> Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.Some(Dialing(key = key, address = address, dial = one, deadlineMs = Time.unixMs() + dialBudgetMs())), settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+        Result.Ok(one) -> Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.Some(Dialing(key = key, address = address, dial = one, deadlineMs = Time.unixMs() + dialBudgetMs())), settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn reported(pool: Pool, outcome: Outcome) -> Pool
     ? "The pool, with one more thing for the caller to say out loud."
@@ -1133,7 +1210,7 @@ fn reported(pool: Pool, outcome: Outcome) -> Pool
       "module does not know whether anybody may be spoken to. Kept rather"
       "than returned, so a dial that settles inside a walk is still reported"
       "when the walk ends -- the same shape as the spare Messages."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = List.concat(pool.settled, [outcome]), port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = List.concat(pool.settled, [outcome]), port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn sampleOutcome() -> Outcome
     ? "One dial that came to nothing, for the cases here."
@@ -1153,7 +1230,7 @@ verify settledOf
 
 fn withoutSettled(pool: Pool) -> Pool
     ? "The pool, with those handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = [], port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = [], port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 verify withoutSettled
     settledOf(withoutSettled(reported(opened(Network.Regtest), sampleOutcome()))) => []
@@ -1361,7 +1438,7 @@ fn seatedOut(pool: Pool, key: Int, address: PeerAddress, connection: Tcp.Connect
         Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
         Time.unixMs,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
     introducedOrDropped(seated, key, address)
 
 fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
@@ -1894,7 +1971,7 @@ fn polledFor(pool: Pool, elapsedMs: Int) -> Pool
       "Wall clock is what Aver can offer, and here it is the better measure"
       "anyway: it attributes the wait to the Peer rather than to the"
       "scheduler."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs + elapsedMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs + elapsedMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 verify polledFor
     polledMsOf(polledFor(opened(Network.Regtest), 40)) => 40
@@ -2001,12 +2078,12 @@ fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: Bytes) -> Result<Poo
       "be looking at the Peers Panel."
     ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
     heard = Time.unixMs()
-    marked = Pool(network = pool.network, sockets = pool.sockets, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    marked = Pool(network = pool.network, sockets = pool.sockets, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
     reading(marked, rest)
 
 fn forgotten(pool: Pool, key: Int) -> Pool
     ? "Forget a Peer, without closing anything."
-    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
     ? "Close one Peer's socket and forget it."
@@ -2065,7 +2142,7 @@ fn cancelled(pool: Pool, one: Dialing) -> Pool
       "release anyway."
     ! [Tcp.closeDial]
     _released = Tcp.closeDial(one.dial)
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs)
+    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
 
 fn closingEach(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "One at a time, so one failure does not strand the rest."

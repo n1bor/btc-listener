@@ -1433,6 +1433,32 @@ Two chains on one machine each open their own cache and compete for the same
 page cache besides. Running mainnet and signet together on this server cost
 mainnet about a fifth of its Set rate.
 
+### How many Peers may dial in
+
+`BTC_LISTENER_INBOUND_MAX` is how many inbound Peers this node will hold, read
+once when the listener is bound, so changing it costs a restart. The default is
+**125**, which is what Bitcoin Core allows. A value that is not a whole number
+of Peers above zero is refused rather than quietly replaced by the default;
+zero would be a node that does not serve, which is what leaving the port
+unbound already says.
+
+```bash
+BTC_LISTENER_INBOUND_MAX=32 ./main follow 1.2.3.4 /data/mainnet screen log http
+```
+
+Inbound slots are an attack surface outbound ones are not: we choose who we
+dial, and anybody at all may dial us. Two things bound the damage whatever this
+is set to, and neither scales with it -- one host holds at most one slot
+([#291](https://github.com/n1bor/btc-listener/issues/291)), and a caller is
+admitted once per turn of the loop, so filling a table of any size costs the
+flood a second a slot.
+
+The number worth choosing is about **disk, not safety**. Every inbound Peer
+syncing from us is a positional read of a Segment competing with the Set walk,
+so a node on spinning disks may want fewer than one on an SSD. The mainnet node
+this is written from records fourteen thousand inbound seatings in a single
+run, so the demand is there to fill whatever it is given.
+
 ### Which shape the Index is compacted in
 
 `BTC_LISTENER_KV_COMPACTION` is `leveled` or `universal`, read when the
