@@ -7,11 +7,10 @@ module Node
         "full-node plan -- one Peer at first, a pool of them since Stage 5,"
         "inbound ones since Stage 8 -- and the adapter should not grow with it."
     exposes [follow]
-    depends [App.Usage, Domain.Address, Domain.Network, Infra.Blocks, Infra.Follow, Infra.Lock, Infra.Store]
+    depends [Infra.Peers, App.Usage, Domain.Address, Domain.Network, Infra.Blocks, Infra.Follow, Infra.Lock, Infra.Store]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -25,7 +24,6 @@ fn follow(network: Network, rest: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -42,7 +40,6 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -51,7 +48,7 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
         Time.now, Time.unixMs,
     ]
     match keywordOnly(more)
-        true -> parsed(network, Result.Ok([]), address, screenAsked(more), servePort(more, network), logPath(more, address), boardPort(more))
+        true -> parsed(network, Result.Ok([]), address, screenAsked(more), servePort(more, network), logPath(more, address), boardPort(more), inboundSaid(more))
         false -> namedPeers(network, address, more)
 
 fn namedPeers(network: Network, address: String, more: List<String>) -> Result<Unit, String>
@@ -60,7 +57,6 @@ fn namedPeers(network: Network, address: String, more: List<String>) -> Result<U
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -70,7 +66,7 @@ fn namedPeers(network: Network, address: String, more: List<String>) -> Result<U
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
-        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network), logPath(extra, dir), boardPort(extra))
+        [dir, ..extra] -> parsed(network, addressesIn(network, String.split(address, ","), []), dir, screenAsked(extra), servePort(extra, network), logPath(extra, dir), boardPort(extra), inboundSaid(extra))
 
 fn keywordOnly(more: List<String>) -> Bool
     ? "Whether what follows the first argument is only words, which is how"
@@ -105,7 +101,7 @@ verify keywordThenRest
 fn isKeyword(word: String) -> Bool
     ? "The words that are not a directory: screen, serve, serve:PORT, log"
       "and log:PATH."
-    Bool.or(word == "screen", Bool.or(word == "log", Bool.or(String.startsWith(word, "log:"), Bool.or(word == "serve", Bool.or(String.startsWith(word, "serve:"), Bool.or(word == "http", String.startsWith(word, "http:")))))))
+    Bool.or(word == "screen", Bool.or(word == "log", Bool.or(String.startsWith(word, "log:"), Bool.or(word == "serve", Bool.or(String.startsWith(word, "serve:"), Bool.or(word == "http", Bool.or(String.startsWith(word, "http:"), String.startsWith(word, "inbound:"))))))))
 
 verify isKeyword
     isKeyword("screen") => true
@@ -185,6 +181,41 @@ verify logPathAfter
     logPathAfter("log:/tmp/m.log", [], "/d/m.log") => Option.Some("/tmp/m.log")
     logPathAfter("screen", ["log"], "/d/m.log") => Option.Some("/d/m.log")
     logPathAfter("screen", [], "/d/m.log") => Option.None
+
+fn inboundSaid(extra: List<String>) -> Option<String>
+    ? "The number after inbound:, if the word was given (#329)."
+      "A word rather than an environment variable because the cap only means"
+      "anything when serve is on, and serve is already spelled here. It also"
+      "keeps the read out of the program: Infra.Peers holds the cap on the"
+      "Pool, so nothing in the accept path has to reach for the world."
+    inboundIn(extra)
+
+verify inboundSaid
+    inboundSaid([]) => Option.None
+    inboundSaid(["serve"]) => Option.None
+    inboundSaid(["inbound:40"]) => Option.Some("40")
+    inboundSaid(["screen", "serve", "inbound:8"]) => Option.Some("8")
+
+fn inboundIn(extra: List<String>) -> Option<String>
+    ? "The first inbound: word, if there is one."
+    match extra
+        [] -> Option.None
+        [head, ..tail] -> inboundOrNext(head, tail)
+
+verify inboundIn
+    inboundIn([]) => Option.None
+    inboundIn(["inbound:2"]) => Option.Some("2")
+
+fn inboundOrNext(word: String, rest: List<String>) -> Option<String>
+    ? "This word if it names the cap, otherwise look further."
+    match String.startsWith(word, "inbound:")
+        true -> Option.Some(String.slice(word, 8, String.len(word)))
+        false -> inboundIn(rest)
+
+verify inboundOrNext
+    inboundOrNext("inbound:40", []) => Option.Some("40")
+    inboundOrNext("serve", ["inbound:9"]) => Option.Some("9")
+    inboundOrNext("serve", []) => Option.None
 
 fn servePort(extra: List<String>, network: Network) -> Option<Int>
     ? "Which port to answer callers on, if the word serve was given (#30)."
@@ -325,12 +356,11 @@ verify screenAsked
     screenAsked(["screen"]) => true
     screenAsked(["something"]) => false
 
-fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<Unit, String>
+fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>, inbound: Option<String>) -> Result<Unit, String>
     ? "Follow the tip, or say why the address was rejected."
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -340,9 +370,9 @@ fn parsed(network: Network, addresses: Result<List<PeerAddress>, String>, dir: S
     ]
     match addresses
         Result.Err(message) -> Result.Err("error: {message}")
-        Result.Ok(peers) -> said(claimed(network, peers, dir, screened, answering, logging, boarding))
+        Result.Ok(peers) -> said(claimed(network, peers, dir, screened, answering, logging, boarding, inbound))
 
-fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<String, String>
+fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>, inbound: Option<String>) -> Result<String, String>
     ? "Take the directory for the life of the process."
       "A follower holds the claim until it stops, which is the point: the"
       "Index, the Segments and the UTXO Set are all being written as Blocks"
@@ -355,7 +385,6 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -365,9 +394,9 @@ fn claimed(network: Network, addresses: List<PeerAddress>, dir: String, screened
     ]
     _claimed = Infra.Lock.claim(dir, "follow")?
     _armed = Process.stopRequested()
-    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened, answering, logging, boarding))
+    Infra.Lock.releasingAfter(dir, following(network, addresses, dir, screened, answering, logging, boarding, inbound))
 
-fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>) -> Result<String, String>
+fn following(network: Network, addresses: List<PeerAddress>, dir: String, screened: Bool, answering: Option<Int>, logging: Option<String>, boarding: Option<Int>, inbound: Option<String>) -> Result<String, String>
     ? "Open everything the three phases write to, then hand over to the loop."
       "This returns only when the loop stops, and the loop stops only on a"
       "read that failed, a Peer that went silent, or a Block that would not"
@@ -376,7 +405,6 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String, screen
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.sync, Disk.writeBytes,
-        Env.get,
         Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
@@ -386,7 +414,8 @@ fn following(network: Network, addresses: List<PeerAddress>, dir: String, screen
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
-    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened, answering, logging, notePath(logging, dir), boarding)?
+    cap = Infra.Peers.inboundCapFrom(inbound)?
+    _followed = Infra.Follow.follow(network, addresses, store, blocks, screened, answering, logging, notePath(logging, dir), boarding, cap)?
     Result.Ok("stopped following")
 
 fn addressesIn(network: Network, texts: List<String>, acc: List<PeerAddress>) -> Result<List<PeerAddress>, String>

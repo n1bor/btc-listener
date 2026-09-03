@@ -330,8 +330,9 @@ loop hours late. Selection is uniform by source (#118), and since #291 the
 Book is bounded — 4,096 Candidates, 256 per connection, routable only, a full
 Book gives up a tried Candidate for a new one — and one host holds at most one
 inbound slot (`hostLimit` in `Infra.Peers.seating`). How many inbound Peers
-at all is `BTC_LISTENER_INBOUND_MAX`, default 125 and carried on the Pool so
-the accept path stays pure (#329). A dead Candidate no longer
+at all is `inbound:N` on the command line, default 125 and carried on the Pool
+so the accept path stays pure (#329) — it was an environment variable until
+jasisz/aver#1255 made `Env.get` emit invalid wasm-gc. A dead Candidate no longer
 blocks the loop (#119, jasisz/aver#1125).
 
 **Following the tip** (#26, Stage 4): `follow` is the header, body and Set

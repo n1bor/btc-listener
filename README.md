@@ -41,8 +41,8 @@ of them to speak that Network instead of mainnet ([Signet](#signet)).
 | `audit <dir> <a> <b>` | [run every check above](#checking-a-range) over a whole range of Heights | no |
 | `utxo <dir> <height>` | [connect](#the-utxo-set) Blocks into the UTXO Set up to a Height | no |
 | `assumevalid <dir> <height>` | [record](#the-assume-valid-height) that `audit` may take Scripts at or below a Height as settled | no |
-| `follow <peers> <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
-| `follow <dir> [screen] [serve[:port]] [log[:path]] [http[:port]]` | the same, finding its Peers through the DNS seeds | yes |
+| `follow <peers> <dir> [screen] [serve[:port]] [inbound:N] [log[:path]] [http[:port]]` | [stay](#following-the-tip) on the tip, and never stop | yes |
+| `follow <dir> [screen] [serve[:port]] [inbound:N] [log[:path]] [http[:port]]` | the same, finding its Peers through the DNS seeds | yes |
 | `prune <dir> <height>` | [delete](#reclaiming-space) the Blocks below a Height | no |
 | `reindex <dir>` | [rebuild](#recovering-a-lost-index) every Block's Location from the Segments | no |
 | `help` | print the usage | no |
@@ -1435,16 +1435,19 @@ mainnet about a fifth of its Set rate.
 
 ### How many Peers may dial in
 
-`BTC_LISTENER_INBOUND_MAX` is how many inbound Peers this node will hold, read
-once when the listener is bound, so changing it costs a restart. The default is
+`inbound:N` is how many inbound Peers this node will hold. The default is
 **125**, which is what Bitcoin Core allows. A value that is not a whole number
 of Peers above zero is refused rather than quietly replaced by the default;
 zero would be a node that does not serve, which is what leaving the port
 unbound already says.
 
 ```bash
-BTC_LISTENER_INBOUND_MAX=32 ./main follow 1.2.3.4 /data/mainnet screen log http
+./main follow 1.2.3.4 /data/mainnet screen serve inbound:32 log http
 ```
+
+A word on the command line rather than an environment variable, unlike the two
+Index settings above, because the cap only means anything when `serve` is on
+and `serve` is already spelled there.
 
 Inbound slots are an attack surface outbound ones are not: we choose who we
 dial, and anybody at all may dial us. Two things bound the damage whatever this
