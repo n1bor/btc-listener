@@ -2324,6 +2324,59 @@ A number that is not a whole number of Peers above zero is refused rather than
 replaced by the default, for the reason the Index's cache size is: a deployment
 that names a number and is given another has been told nothing.
 
+### An inbound table that holds the outbound budget shut
+
+[#333](https://github.com/n1bor/btc-listener/issues/333). The dial target is
+eight and it used to be measured against every seated Peer, so Peers that
+dialled us were spent out of the budget for the Peers we choose. A node with a
+full inbound table stopped dialling altogether, and its whole view of the chain
+came to rest on whatever outbound Peers it happened to hold. Mainnet sat on one
+of them for days, with 3,621 Candidates in the Book it would never try, held
+there by eight crawlers that were not doing anything wrong.
+
+This needs a Book with something in it and eight inbound Peers from eight
+hosts. The liar's `addrflood` fills the Book; `hostLimit` is one slot per host,
+so the callers take a source address (every `127.x.x.x` is a different host
+that loopback already carries):
+
+```bash
+python3 tools/regtest/liar.py 18500 addrflood &
+sleep 2
+$BIN regtest follow 127.0.0.1:18500,127.0.0.1:18454 $D serve:18490 &
+sleep 20                                   # the Book fills, two outbound seated
+for i in 2 3 4 5 6 7 8 9; do
+  python3 tools/regtest/caller.py 18490 lurker 127.0.0.$i &
+  sleep 1
+done
+```
+
+All eight are seated and none is refused:
+
+```
+peer 8 dialled us from 127.0.0.2:51605
+peer 9 dialled us from 127.0.0.3:41799
+...
+peer 16 dialled us from 127.0.0.9:40217
+```
+
+The node now holds ten Peers: two it chose and eight that chose it. **Count the
+dial attempts from the moment the eighth is seated** -- the Candidates are
+invented and none of them answers, so every attempt is one line:
+
+```bash
+mark=$(grep -n "127.0.0.9" node.log | tail -1 | cut -d: -f1)
+sleep 60; tail -n +$mark node.log | grep -c "^candidate "
+```
+
+Before the fix that number is **1** -- the dial already in flight when the
+table filled, and nothing after it, still nothing ninety seconds later. After
+it, **206**. The node goes on looking for the eight Peers it chose while the
+eight that chose it sit there.
+
+Run the unfixed binary beside it if you want the baseline in the same session;
+the giveaway without one is that the count stops dead rather than thinning,
+because this is a latch and not a slowdown.
+
 ### A Peer that says the chain moved, having spent nothing
 
 The `headerflood` mode is

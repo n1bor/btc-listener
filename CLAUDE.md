@@ -329,7 +329,12 @@ phases as well as in the listen loop, because a syncing node reaches the listen
 loop hours late. Selection is uniform by source (#118), and since #291 the
 Book is bounded — 4,096 Candidates, 256 per connection, routable only, a full
 Book gives up a tried Candidate for a new one — and one host holds at most one
-inbound slot (`hostLimit` in `Infra.Peers.seating`). How many inbound Peers
+inbound slot (`hostLimit` in `Infra.Peers.seating`). The dial target of 8 is
+**outbound** and is counted as such since #333: it used to be measured against
+every seated Peer, so a full inbound table stopped the node dialling and left
+its view of the chain resting on whichever outbound Peers it happened to hold
+— mainnet sat on one, with 3,621 Candidates it would never try. Inbound has
+its own budget, the way Core keeps the two apart. How many inbound Peers
 at all is `inbound:N` on the command line, default 125 and carried on the Pool
 so the accept path stays pure (#329) — it was an environment variable until
 jasisz/aver#1255 made `Env.get` emit invalid wasm-gc. An inbound Peer silent
