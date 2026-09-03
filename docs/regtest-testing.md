@@ -459,7 +459,7 @@ $BIN regtest follow 127.0.0.1:18444 $D serve:18455 &
 ```
 
 ```
-listening on port 18455 for up to 8 inbound Peer(s)
+listening on port 18455 for up to 125 inbound Peer(s)
 ```
 
 Then have the *second* node dial it. It must be a node with no other route to
@@ -579,7 +579,7 @@ $C3 addnode "127.0.0.1:18455" onetry
 ```
 
 ```
-listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 179, for up to 8 inbound Peer(s)
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 179, for up to 125 inbound Peer(s)
 peer 1 dialled us from 127.0.0.1:40228
 served 179 Header(s) to peer 1
 served a Block of 898 bytes to peer 1
@@ -677,7 +677,7 @@ $C2 addnode "127.0.0.1:18455" onetry
 ```
 
 ```
-listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 187, for up to 8 inbound Peer(s)
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 187, for up to 125 inbound Peer(s)
 peer 1 dialled us from 127.0.0.1:55206
 served 32 Header(s) to peer 1
 served a Block of 250 bytes to peer 1
@@ -1200,7 +1200,7 @@ that is its dial in to us, both with `"subver": "/aver-btc-listener:0.1/"`.
 must be the listener, not the Peer:
 
 ```
-listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 0, for up to 8 inbound Peer(s)
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 0, for up to 125 inbound Peer(s)
 peer 0 is 127.0.0.1:18444
 ```
 
@@ -2310,11 +2310,14 @@ table ([#329](https://github.com/n1bor/btc-listener/issues/329)):
 $ $BIN regtest follow … serve:18470
 listening on port 18470 as NODE_NETWORK|NODE_WITNESS at Height 130, for up to 125 inbound Peer(s)
 
-$ BTC_LISTENER_INBOUND_MAX=3 $BIN regtest follow … serve:18471
+$ $BIN regtest follow … serve:18471 inbound:3
 listening on port 18471 … for up to 3 inbound Peer(s)
 
-$ BTC_LISTENER_INBOUND_MAX=lots $BIN regtest follow …
-error: BTC_LISTENER_INBOUND_MAX must be a whole number of Peers above zero, not 'lots'
+$ $BIN regtest follow … serve:18472 inbound:lots
+error: inbound must be a whole number of Peers above zero, not 'lots'
+
+$ $BIN regtest follow … serve:18473 inbound:0
+error: inbound must be a whole number of Peers above zero, not '0'
 ```
 
 A number that is not a whole number of Peers above zero is refused rather than
