@@ -2206,8 +2206,31 @@ fn minded(state: Following, nowMs: Int) -> Result<Following, String>
     ]
     fresh = withTended(refreshed(state, nowMs), nowMs)
     kept = withLog(fresh, marking(fresh, fresh.pool, "listen", fresh.watch.snapshot.tip.height, fresh.watch.snapshot.tip.height, false)?)
-    taken = Infra.Peers.accepting(kept.pool, kept.nextKey)?
-    tended(afterAccepting(kept, taken), nowMs)
+    swept = quietSwept(kept, Infra.Peers.quietInbound(kept.pool, nowMs), nowMs)?
+    taken = Infra.Peers.accepting(swept.pool, swept.nextKey)?
+    tended(afterAccepting(swept, taken), nowMs)
+
+fn quietSwept(state: Following, quiet: List<Int>, nowMs: Int) -> Result<Following, String>
+    ? "Take back the slots of inbound Peers that have gone quiet (#330)."
+      "Before accepting rather than after, so a slot freed this turn is one a"
+      "caller can have this turn. Swept on the loop's own clock, which runs"
+      "once a second, so this walks the table once a second and not once a"
+      "Message."
+    ! [Console.error, Disk.appendText, Tcp.close, Time.unixMs]
+    match quiet
+        [] -> Result.Ok(state)
+        [head, ..tail] -> quietSweptOne(state, head, tail, nowMs)
+
+fn quietSweptOne(state: Following, key: Int, rest: List<Int>, nowMs: Int) -> Result<Following, String>
+    ? "One of them, then the others."
+      "Said out loud and noted, because a Peer going without being at fault"
+      "is worth being able to see afterwards: it is the difference between a"
+      "table of crawlers and a table doing something."
+    ! [Console.error, Disk.appendText, Tcp.close, Time.unixMs]
+    _said = saidErrorIfPlain(state.watch, "dropping peer {key}: inbound and silent for {Int.div(Infra.Peers.peerIdleDeadlineMs(), 60000)} minutes")
+    noted = Infra.Metrics.noting(state.log, "peer", "inbound {key} swept: silent past the deadline, slot taken back (#330)")?
+    shrunk = Infra.Peers.dropOne(state.pool, key)?
+    quietSwept(withGate(withLog(withPool(state, shrunk), noted), Domain.Catchup.forgotten(state.gate, key)), rest, nowMs)
 
 fn tended(state: Following, nowMs: Int) -> Result<Following, String>
     ? "A Screen gets a frame, a plain run gets the line that has come due."

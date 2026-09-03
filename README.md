@@ -1456,6 +1456,16 @@ is set to, and neither scales with it -- one host holds at most one slot
 admitted once per turn of the loop, so filling a table of any size costs the
 flood a second a slot.
 
+An inbound Peer that says nothing for **twenty minutes** has its slot taken
+back ([#330](https://github.com/n1bor/btc-listener/issues/330)). That is a
+different rule from the one that ends a run when *every* Peer has gone silent:
+nothing used to ask whether a single Peer had gone quiet, so one that completed
+its Handshake and then said nothing held its slot for ever. On the mainnet node
+one had been silent for two hours and thirty-six minutes and was still seated
+while crawlers held five of the eight slots. Twenty minutes is what Core allows
+before an unanswered ping, and Core pings a quiet connection every two minutes,
+so a Peer that is there at all is heard from six times inside it.
+
 The number worth choosing is about **disk, not safety**. Every inbound Peer
 syncing from us is a positional read of a Segment competing with the Set walk,
 so a node on spinning disks may want fewer than one on an SSD. The mainnet node

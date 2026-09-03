@@ -19,7 +19,7 @@ module Peers
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
         "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, opened, listening, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
+    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, opened, listening, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, peerIdleDeadlineMs, quietInbound, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers]
     depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -821,6 +821,69 @@ fn droppedCaller(pool: Pool, key: Int, address: String, why: String) -> Result<A
     _said = complainedIfPlain(pool, "dropping inbound peer {key} from {address}: {why}")
     without = dropOne(pool, key)?
     Result.Ok(Accepted(pool = without, seated = Option.None))
+
+fn peerIdleDeadlineMs() -> Int
+    ? "How long one inbound Peer may say nothing before its slot is taken"
+      "back (#330)."
+      "idleDeadlineMs above is a different rule and answers a different"
+      "question: silence from *everybody* means this node is connected to"
+      "nothing that is still talking. Nothing asked whether one Peer had"
+      "gone quiet, so an inbound Peer that completed its Handshake and then"
+      "said nothing held its slot for ever. On the mainnet node one had been"
+      "silent for two hours and thirty-six minutes and was still seated,"
+      "while crawlers held five of the eight slots."
+      "Twenty minutes, which is what Core allows a Peer before its ping goes"
+      "unanswered. Core pings a quiet connection every two minutes, so a Peer"
+      "that is there at all is heard from six times inside this; a Peer that"
+      "is not heard from in twenty minutes is either gone, not listening, or"
+      "not participating, and the slot is worth more than it is."
+    1200000
+
+verify peerIdleDeadlineMs
+    peerIdleDeadlineMs() => 1200000
+
+fn quietInbound(pool: Pool, nowMs: Int) -> List<Int>
+    ? "The inbound Peers that have said nothing for longer than the deadline."
+      "Inbound only, deliberately. An outbound Peer is one we chose and is"
+      "already answerable to the deadlines a catch-up puts on it; the slot"
+      "being competed for is the inbound one, and taking an outbound Peer"
+      "away from a walk that is mid-conversation with it is a way to break"
+      "the thing this is meant to protect."
+    quietAmong(pool, Map.keys(pool.standing), nowMs, [])
+
+verify quietInbound
+    quietInbound(opened(Network.Regtest), 0) => []
+
+fn quietAmong(pool: Pool, keys: List<Int>, nowMs: Int, acc: List<Int>) -> List<Int>
+    ? "One at a time, keeping the inbound ones that have gone quiet."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> quietAmong(pool, tail, nowMs, keptIfQuiet(pool, head, nowMs, acc))
+
+verify quietAmong
+    quietAmong(opened(Network.Regtest), [], 0, []) => []
+    quietAmong(opened(Network.Regtest), [1], 0, []) => []
+
+fn keptIfQuiet(pool: Pool, key: Int, nowMs: Int, acc: List<Int>) -> List<Int>
+    ? "Kept when it is inbound and has been silent past the deadline."
+      "A Peer with no recorded time is one seated this turn, and the pool's"
+      "own last-heard stands in for it, so a fresh Peer is never quiet."
+    match Bool.and(isInbound(Domain.Inbox.standingAt(pool.standing, key)), nowMs - Option.withDefault(Map.get(pool.heardMs, key), pool.anyHeardMs) > peerIdleDeadlineMs())
+        true -> List.prepend(key, acc)
+        false -> acc
+
+verify keptIfQuiet
+    keptIfQuiet(opened(Network.Regtest), 1, 0, []) => []
+    keptIfQuiet(opened(Network.Regtest), 1, 9999999, []) => []
+
+fn isInbound(standing: Option<Standing>) -> Bool
+    ? "Whether the Peer at this key dialled us."
+    match standing
+        Option.None -> false
+        Option.Some(one) -> one.inbound
+
+verify isInbound
+    isInbound(Option.None) => false
 
 fn inboundHeld(pool: Pool) -> Int
     ? "How many of the Peers we hold arrived on their own initiative."

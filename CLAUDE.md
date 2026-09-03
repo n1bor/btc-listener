@@ -332,7 +332,12 @@ Book gives up a tried Candidate for a new one — and one host holds at most one
 inbound slot (`hostLimit` in `Infra.Peers.seating`). How many inbound Peers
 at all is `inbound:N` on the command line, default 125 and carried on the Pool
 so the accept path stays pure (#329) — it was an environment variable until
-jasisz/aver#1255 made `Env.get` emit invalid wasm-gc. A dead Candidate no longer
+jasisz/aver#1255 made `Env.get` emit invalid wasm-gc. An inbound Peer silent
+for twenty minutes has its slot swept on the loop's own clock (#330); the
+pool-wide silence rule in `stillHeard` asks a different question and never
+noticed one quiet Peer. There is no evict-to-admit: the cap is checked before
+the Handshake, so it would let an unauthenticated caller displace a seated
+Peer. A dead Candidate no longer
 blocks the loop (#119, jasisz/aver#1125).
 
 **Following the tip** (#26, Stage 4): `follow` is the header, body and Set
