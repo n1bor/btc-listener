@@ -39,6 +39,10 @@ verify asNumber
     asNumber([255, 255, 255, 127]) => 2147483647
     asNumber([255, 255, 255, 255]) => 0 - 2147483647
 
+verify asNumber law readsWhatFromNumberWrote
+    given value: Int = [-2147483648, -2147483647, -8388608, -8388607, -32768, -32767, -256, -255, -129, -128, -127, -1, 0, 1, 127, 128, 129, 255, 256, 32767, 32768, 8388607, 8388608, 2147483647, 2147483648]
+    asNumber(fromNumber(value)) => value
+
 fn valued(top: Int, rest: List<Int>) -> Int
     ? "The most significant byte carries the sign; the rest are magnitude."
     signedBy(bigEndian(List.prepend(unsigned(top), rest), 0), top >= 128)
@@ -80,6 +84,12 @@ verify bigEndian
     bigEndian([1], 0) => 1
     bigEndian([1, 2], 0) => 258
 
+verify bigEndian law readsTheLastByteLast
+    given bytes: List<Int> = [[], [1], [1, 2], [255, 0, 7]]
+    given b: Int = [0, 1, 128, 255]
+    given acc: Int = [0, 1, 300]
+    bigEndian(List.concat(bytes, [b]), acc) => bigEndian(bytes, acc) * 256 + b
+
 fn fromNumber(value: Int) -> List<Int>
     ? "A number written the way Script writes one, minimally."
       "Zero is the empty string rather than a zero byte, which is the one case"
@@ -110,6 +120,10 @@ verify magnitudeOf
     magnitudeOf(5) => 5
     magnitudeOf(0 - 5) => 5
 
+verify magnitudeOf law signAndSizeMakeTheNumber
+    given value: Int = [-2147483648, -256, -1, 0, 1, 255, 2147483647]
+    signedBy(magnitudeOf(value), value < 0) => value
+
 fn signedBytes(magnitude: Int, negative: Bool) -> List<Int>
     ? "The magnitude little-endian, then somewhere to put the sign."
       "When the top byte already uses its high bit there is nowhere to put the"
@@ -125,14 +139,30 @@ verify signedBytes
 
 fn littleEndian(value: Int, acc: List<Int>) -> List<Int>
     ? "Least significant byte first, with no leading zero."
-    match value == 0
-        true -> List.reverse(acc)
-        false -> littleEndian(Int.div(value, 256), List.prepend(Int.mod(value, 256), acc))
+      "The guard reads `value > 0` rather than `value == 0` on purpose (#336):"
+      "on a negative value the old guard never held and the recursion never"
+      "returned, and nothing showed the prover that it ends. Every caller"
+      "passes a magnitude, so the two guards agree on every value that"
+      "arrives; only the exported definition changes, from an opaque partial"
+      "one to a total one the kernel can check."
+    match value > 0
+        true -> littleEndian(Int.div(value, 256), List.prepend(Int.mod(value, 256), acc))
+        false -> List.reverse(acc)
 
 verify littleEndian
     littleEndian(0, []) => []
     littleEndian(1, []) => [1]
     littleEndian(258, []) => [2, 1]
+
+verify littleEndian law accumulatorComesFirst
+    given value: Int = [-1, 0, 1, 255, 256, 65536, 2147483648]
+    given acc: List<Int> = [[], [9], [1, 2]]
+    littleEndian(value, acc) => List.concat(List.reverse(acc), littleEndian(value, []))
+
+verify littleEndian law readsBackBigEndian
+    given m: Int = [0, 1, 127, 128, 255, 256, 65535, 65536, 2147483647, 2147483648]
+    when m >= 0
+    bigEndian(List.reverse(littleEndian(m, [])), 0) => m
 
 fn withSign(bytes: List<Int>, negative: Bool) -> List<Int>
     ? "Put the sign in the top byte, or in a new one when that byte is full."
@@ -237,6 +267,10 @@ verify fitsArithmetic
     fitsArithmetic([1, 2, 3, 4]) => true
     fitsArithmetic([1, 2, 3, 4, 5]) => false
 
+verify fitsArithmetic law acceptsCoreOperandRange
+    given value: Int = [-4294967296, -2147483649, -2147483648, -2147483647, -2147483646, -8388608, -8388607, -128, -127, -1, 0, 1, 127, 128, 8388607, 8388608, 2147483646, 2147483647, 2147483648, 4294967295, 4294967296]
+    fitsArithmetic(fromNumber(value)) => Bool.and(value >= 0 - 2147483647, value <= 2147483647)
+
 fn isMinimalNumber(item: List<Int>) -> Bool
     ? "Whether a number is written the shortest way it could be."
       "A trailing zero byte is redundant unless the byte below it needs the"
@@ -255,6 +289,10 @@ verify isMinimalNumber
     isMinimalNumber([128, 0]) => true
     isMinimalNumber([255, 0]) => true
     isMinimalNumber([1, 2]) => true
+
+verify isMinimalNumber law acceptsWhatFromNumberWrites
+    given value: Int = [-2147483648, -2147483647, -8388608, -8388607, -32768, -32767, -256, -255, -129, -128, -127, -1, 0, 1, 127, 128, 129, 255, 256, 32767, 32768, 8388607, 8388608, 2147483647, 2147483648]
+    isMinimalNumber(fromNumber(value)) holds
 
 fn topIsNeeded(top: Int, rest: List<Int>) -> Bool
     ? "A top byte of zero or eighty is spare unless the byte under it is full."
@@ -300,6 +338,11 @@ verify isMinimalPush
     isMinimalPush(1, [17]) => true
     isMinimalPush(76, [17]) => false
     isMinimalPush(75, [1, 2, 3]) => false
+
+verify isMinimalPush law directPushIsMinimalUnlessSmallNumber
+    given b: Int = 0..255
+    when Bool.and(b >= 0, b <= 255)
+    isMinimalPush(1, [b]) => Bool.not(Bool.or(Bool.and(b >= 1, b <= 16), b == 129))
 
 fn singleByteMinimal(code: Int, data: List<Int>) -> Bool
     ? "One byte: the small-number opcodes claim 1 to 16 and negative one."
