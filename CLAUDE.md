@@ -155,6 +155,7 @@ build` took five minutes to say the same.
 aver audit  .                                       # check + verify + format, the CI gate
 aver check  . --module-root .                        # contracts, coverage, lints
 aver verify main.av --module-root .                  # every hand-written case, the program graph, seconds
+aver verify main.av --module-root . --hostile        # the same on type-boundary values and hostile effect profiles; CI runs it (#351)
 aver verify . --module-root .                        # everything, corpus included: what audit runs
 aver verify domain/script.av --module-root .         # one file's cases
 aver verify corpus --module-root .                   # the Core corpus only
