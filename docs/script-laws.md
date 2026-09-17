@@ -283,8 +283,11 @@ exponent), so every Int is answered without unpacking it:
 - `ofBits.zeroTargetProvesNothing`: `when zeroTarget(bits)`, the work is 0.
 - `ofBits.neverNegative`: the work is never below zero, on any Int, which is
   what makes `added` and `over` monotone along a branch.
-- `negative.isTheMantissaTopBit` and `overflowing.isAnExponentAboveThirtyFour`:
-  the two refusals against the bit forms Core's `SetCompact` uses.
+- `overflowing.isAnExponentAboveThirtyFour`: the exponent refusal against the
+  form Core's `SetCompact` uses. The mantissa-bit refusal and "the work is
+  never negative" are cases: relating `Bits.and` to `Int.mod` and the
+  division to its sign are beyond the auto-prover, and stated as laws they
+  land on `sorry`, which the second proof entry (#349) forbids.
 
 Check this cone separately:
 

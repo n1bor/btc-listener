@@ -155,6 +155,17 @@ jobs:
           aver verify main.av --module-root . | tee verify.log
           tail -1 verify.log | grep -E "\| 0 failed" \
             || { echo "verify reported failures"; exit 1; }
+      - name: Verify the program graph again on the hostile lane
+        # Every typed `given` gets its type-boundary values and every classified
+        # effect its hostile profile (n1bor/btc-listener#351): a law scoped too
+        # loosely fails here as verify-hostile-mismatch, which is a `when` the
+        # law was missing or a real boundary bug, and a case that runs past its
+        # step budget on an Int extreme fails as verify-declined. Two minutes
+        # for the whole graph.
+        run: |
+          aver verify main.av --module-root . --hostile | tee verify-hostile.log
+          tail -1 verify-hostile.log | grep -E "\| 0 failed" | grep -vE "not answered" \
+            || { echo "the hostile lane reported failures or unanswered cases"; exit 1; }
 
   verify-corpus:
     name: aver verify (Core corpus, ${{ matrix.shard }})
@@ -311,6 +322,71 @@ jobs:
         with:
           name: proof-summary
           path: proof.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  proof-laws:
+    name: aver proof (the laws outside the engine, in Lean)
+    # The second proof entry (n1bor/btc-listener#349): domain/laws.av is a leaf
+    # that depends on every law-carrying module outside the engine's cone --
+    # Chainwork, Segment, Target, Subsidy, HeaderTree, Watchdog, UtxoStore,
+    # Block -- so their laws are kernel-checked and ratcheted the same way the
+    # engine's are, against proof/laws.declined and proof/laws.manifest.json.
+    # Same shape as the job above in every other respect.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out the Aver source at the pinned revision, at the dev path
+        run: |
+          sudo mkdir -p /home/owensr/aver/aver
+          sudo chown -R "$USER" /home/owensr/aver
+          git -C /home/owensr/aver/aver init --quiet
+          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
+          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
+      - name: Cache the aver toolchain
+        id: aver-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/aver
+          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Install aver from that source
+        if: steps.aver-cache.outputs.cache-hit != 'true'
+        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
+      - name: Install elan, with no default toolchain yet
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Cache the Lean toolchain, which the pinned aver chooses
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: elan-toolchains-${{ hashFiles('.aver-version') }}-${{ runner.os }}
+      - name: Cache the lake build of the export
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/proof-laws/.lake
+          key: proof-laws-lake-${{ hashFiles('.aver-version', 'domain/**', 'infra/kv.av') }}-${{ runner.os }}
+      - name: Export, then install the toolchain it names
+        run: |
+          aver proof domain/laws.av --module-root . -o "$RUNNER_TEMP/proof-laws"
+          elan toolchain install "$(cat "$RUNNER_TEMP/proof-laws/lean-toolchain")"
+          elan show
+      - name: Check against the committed budgets and baseline
+        run: |
+          aver proof domain/laws.av --module-root . -o "$RUNNER_TEMP/proof-laws" \
+            --check-json \
+            --declined-budget "$(cat proof/laws.declined)" \
+            --sorry-budget 0 \
+            --gate proof/laws.manifest.json | tee proof-laws.json
+          exit "${PIPESTATUS[0]}"
+      - name: Keep the summary, so a red run says which claim moved
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-laws-summary
+          path: proof-laws.json
           if-no-files-found: ignore
           retention-days: 14
 

@@ -128,14 +128,29 @@ verify possibleSupply
 
 fn minted(network: Network, height: Int, acc: Int) -> Int
     ? "The subsidy of every era from this Height up, times the Blocks in each."
-      "Walked one era at a time rather than one Block at a time -- every Block"
-      "of an era pays the same, so thirty-three multiplications answer what"
-      "would otherwise be thirteen million additions."
-    match atHeight(network, height) == 0
-        true -> acc
-        false -> minted(network, height + halvingInterval(network), acc + atHeight(network, height) * halvingInterval(network))
+      "The eras are walked by a countdown (#349): from this Height's era there"
+      "are at most 33 more that pay anything, since 50 BTC in satoshis is"
+      "below 2^33, so the count is what remains of those and the walk stops"
+      "early where the subsidy is already zero."
+    mintedEras(network, eras(network, height) * halvingInterval(network), 33 - eras(network, height), acc)
 
 verify minted
     minted(Network.Mainnet, 0, 0) => 2099999997690000
     minted(Network.Mainnet, 13440000, 0) => 0
     minted(Network.Mainnet, 0, 7) => 2099999997690007
+    minted(Network.Mainnet, 210000, 0) => 1049999997690000
+    minted(Network.Mainnet, 209999, 0) => 2099999997690000
+
+fn mintedEras(network: Network, height: Int, remaining: Int, acc: Int) -> Int
+    ? "The paying eras from this era's first Height, at most remaining of them."
+      "Walked one era at a time rather than one Block at a time -- every Block"
+      "of an era pays the same, so thirty-three multiplications answer what"
+      "would otherwise be thirteen million additions."
+    match Bool.or(remaining <= 0, atHeight(network, height) == 0)
+        true -> acc
+        false -> mintedEras(network, height + halvingInterval(network), remaining - 1, acc + atHeight(network, height) * halvingInterval(network))
+
+verify mintedEras
+    mintedEras(Network.Mainnet, 0, 33, 0) => 2099999997690000
+    mintedEras(Network.Mainnet, 0, 0, 5) => 5
+    mintedEras(Network.Mainnet, 0, 1, 0) => 1050000000000000
