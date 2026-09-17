@@ -34,6 +34,33 @@ aver proof domain/interp.av --module-root . -o ../btc-listener-proof \
   --gate proof/interp.manifest.json
 ```
 
+## The second entry: the laws outside the engine
+
+The engine's cone is 34 modules; the chain, the stores and the codecs are
+outside it, and Chainwork's laws were gated by nothing but `aver verify` from
+the day they were written. Since n1bor/btc-listener#349 a leaf module,
+`domain/laws.av`, depends on every law-carrying module outside that cone —
+Block, Chainwork, Segment, Subsidy, Target, HeaderTree, Watchdog, UtxoStore —
+and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
+it with the same flags against `proof/laws.declined` and
+`proof/laws.manifest.json`. A law added to a module the leaf does not yet
+name is added to its `depends` in the same PR. Measured at pin `c4b08179`:
+**59 universal, 1 bounded, 0 open, 66 declined** (the bounded one is
+`Segment.nameOf.sortsWithSegment`, over `String` order; the pin move from
+`600b3551` promoted two `when`-guarded laws to universal, which the gate at
+this pin reads as grown axiom sets, so the baseline was regenerated with the
+diff showing exactly those two moving up). Four recursions were reshaped
+for it (a countdown in `Bech32.checksumDigits` and `foldGenerators`, a
+countdown over eras in `Subsidy.minted`, a fuel of the tree's size in
+`HeaderTree.ancestryOf`, one function on a fuel in `UtxoStore.eachUndo`), no
+value changing. `aver proof main.av` would be the whole program and panics
+on a resource inside a sum type (n1bor/btc-listener#350); the leaf reaches no
+`infra/` module and sidesteps it.
+
+```bash
+aver proof domain/laws.av --module-root . -o ../btc-listener-proof-laws --check-json --declined-budget $(cat proof/laws.declined) --sorry-budget 0 --gate proof/laws.manifest.json
+```
+
 ## What green means
 
 Three numbers in the summary, and a manifest.
