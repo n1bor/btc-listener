@@ -130,20 +130,24 @@ verify flush
 fn checksum(prefix: String, data: List<Int>, constant: Int) -> List<Int>
     ? "Six five-bit values proving the rest of the address arrived intact."
     residue = Bits.xor(polymod(List.concat(List.concat(expandPrefix(prefix), data), [0, 0, 0, 0, 0, 0]), 1), constant)
-    checksumDigits(residue, 0, [])
+    checksumDigits(residue, 6, [])
 
 verify checksum
     List.len(checksum("bc", [0], bech32Constant())) => 6
 
-fn checksumDigits(residue: Int, index: Int, acc: List<Int>) -> List<Int>
+fn checksumDigits(residue: Int, remaining: Int, acc: List<Int>) -> List<Int>
     ? "Split the residue into its six five-bit values, most significant first."
-    match index >= 6
+      "Counted down from six rather than up to it, so the recursion is the"
+      "Int countdown the proof exporter admits (n1bor/btc-listener#349); the"
+      "digit taken is the one remaining - 1 places from the low end."
+    match remaining <= 0
         true -> acc
-        false -> checksumDigits(residue, index + 1, List.concat(acc, [Bits.low(shiftedRight(residue, 5 * (5 - index)), 5)]))
+        false -> checksumDigits(residue, remaining - 1, List.concat(acc, [Bits.low(shiftedRight(residue, 5 * (remaining - 1)), 5)]))
 
 verify checksumDigits
-    List.len(checksumDigits(0, 0, [])) => 6
-    checksumDigits(0, 6, [9]) => [9]
+    List.len(checksumDigits(0, 6, [])) => 6
+    checksumDigits(0, 0, [9]) => [9]
+    checksumDigits(33, 6, []) => [0, 0, 0, 0, 1, 1]
 
 fn expandPrefix(prefix: String) -> List<Int>
     ? "The prefix contributes its high bits, a zero, then its low bits."
@@ -196,20 +200,22 @@ verify polymod
 fn foldValue(acc: Int, value: Int) -> Int
     ? "Shift the accumulator up, mix the value in, then fold the generators."
     top = Bits.shiftRight(acc, 25)
-    foldGenerators(Bits.xor(Bits.shiftLeft(Bits.low(acc, 25), 5), value), top, 0)
+    foldGenerators(Bits.xor(Bits.shiftLeft(Bits.low(acc, 25), 5), value), top, 5)
 
 verify foldValue
     foldValue(1, 0) => 32
 
-fn foldGenerators(acc: Int, top: Int, index: Int) -> Int
+fn foldGenerators(acc: Int, top: Int, remaining: Int) -> Int
     ? "Fold in each generator whose corresponding bit is set."
-    match index >= 5
+      "Counted down from five (#349); the generator applied is the one at"
+      "5 - remaining, so the order is the one the specification folds in."
+    match remaining <= 0
         true -> acc
-        false -> foldGenerators(applyGenerator(acc, top, index), top, index + 1)
+        false -> foldGenerators(applyGenerator(acc, top, 5 - remaining), top, remaining - 1)
 
 verify foldGenerators
-    foldGenerators(7, 0, 0) => 7
     foldGenerators(7, 0, 5) => 7
+    foldGenerators(7, 0, 0) => 7
 
 fn applyGenerator(acc: Int, top: Int, index: Int) -> Int
     ? "One generator, applied only when its bit is set."
