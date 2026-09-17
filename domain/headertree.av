@@ -198,9 +198,7 @@ fn ancestryOf(known: Map<String, Placement>, blockId: String, acc: List<Placemen
       "which is the genesis Header's zero parent on a complete branch and the"
       "join to an unfetched range on a partial one. Headers are hash-linked,"
       "so the walk cannot cycle."
-    match Map.get(known, blockId)
-        Option.None -> acc
-        Option.Some(placement) -> ancestryOf(known, placement.parentId, List.prepend(placement, acc))
+    ancestryFuelled(known, blockId, acc, Map.len(known))
 
 verify ancestryOf
     ancestryOf(sample(), "absent", []) => []
@@ -209,6 +207,23 @@ verify ancestryOf
     List.len(ancestryOf(sample(), "f", [])) => 4
     idsOf(ancestryOf(sample(), "c", []), []) => ["a", "b", "c"]
     idsOf(ancestryOf(sample(), "f", []), []) => ["a", "d", "e", "f"]
+
+fn ancestryFuelled(known: Map<String, Placement>, blockId: String, acc: List<Placement>, fuel: Int) -> List<Placement>
+    ? "The walk, with a step for every Placement the tree holds and no more."
+      "Headers are hash-linked, so the walk cannot cycle and never needs the"
+      "fuel; the fuel is what lets the proof exporter see that it ends"
+      "(#349), and it is the size of the tree because a branch cannot be"
+      "longer than the tree that holds it."
+    match fuel <= 0
+        true -> acc
+        false -> match Map.get(known, blockId)
+            Option.None -> acc
+            Option.Some(placement) -> ancestryFuelled(known, placement.parentId, List.prepend(placement, acc), fuel - 1)
+
+verify ancestryFuelled
+    ancestryFuelled(sample(), "c", [], 0) => []
+    List.len(ancestryFuelled(sample(), "c", [], 2)) => 2
+    List.len(ancestryFuelled(sample(), "c", [], 99)) => 3
 
 fn idsOf(placements: List<Placement>, acc: List<String>) -> List<String>
     ? "The Block Ids of a branch, in the order it was given."
