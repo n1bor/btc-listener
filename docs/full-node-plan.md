@@ -76,12 +76,16 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ask | upstream | gates |
 |---|---|---|
 | a concurrency direction | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) — **answered**: independent products plus poll-shaped effects; see [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md) | nothing any more |
-| ~~a configurable TCP read deadline~~ | **delivered** as [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads have no deadline mid-frame | **wired** (n1bor/btc-listener#55): `Infra.Peer` polls at every Message boundary, so a silent Peer ends the session; the loop over many Peers stays with #27 |
-| a readiness poll over connections | **delivered and closed** as `Tcp.poll` over a caller-keyed `Map<Int, Tcp.Connection>` | **wired** (n1bor/btc-listener#27): `Infra.Peers` polls every socket at once and reads with `Tcp.readSome` |
+| ~~a configurable TCP read deadline~~ | **original delivery**: [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads lost their mid-frame deadline | **current branch**: `Wait.poll` plus incremental `Tcp.readNow` buffers and owner deadlines, across single- and multi-Peer commands |
+| a readiness poll over connections | **original delivery**: `Tcp.poll` over caller-keyed connections | **current branch**: `Wait.poll` watches read/write interests; the Work owner also waits on its typed job |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
 | ~~a bounded dial~~ | **delivered**: `connect_timeout_secs` is deployment policy (aver.toml), and [jasisz/aver#1122](https://github.com/jasisz/aver/pull/1122) made the deadline observable — [#1118](https://github.com/jasisz/aver/issues/1118) closed | **wired**: the 5 s deadline still ends a dead dial, but since [#1125](https://github.com/jasisz/aver/issues/1125) it ends only that dial |
-| ~~a connect that reports through the poll~~ | **delivered and closed** as [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125): `Tcp.beginConnect`, `Tcp.dialled`, `Tcp.closeDial`, and `Tcp.Socket.Dialing` as one more key in `Tcp.poll` | **wired**: `Infra.Peers.joined` holds the dial as a local and polls it beside every Peer, so a dead Candidate is read time for the others rather than a stall |
+| ~~a connect that reports through the poll~~ | **delivered and closed** as [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125): `Tcp.beginConnect`, `Tcp.dialled`, `Tcp.closeDial`, and `Tcp.Socket.Dialing` as one more key in `Tcp.poll` | **current branch**: `Infra.Peers.dialling`/`advanced` retain the dial and then a pending greeting across turns; `joined` remains the startup facade |
 | ~~`Tcp.listen` / `Tcp.accept`~~ | **delivered and closed**: filed 24 August 2026 as [jasisz/aver#1131](https://github.com/jasisz/aver/issues/1131), answered the next day by [#1138](https://github.com/jasisz/aver/pull/1138) with exactly what was asked — a non-blocking `accept` the existing poll can see, an accepted socket that is an ordinary `Tcp.Connection`, and `Tcp.peerAddress` | **wired**: Stage 8 shipped on it |
+
+The [Work/Wait migration acceptance](work-wait-migration.md) records current
+compiler requirements, native validation and remaining wasm-host work. The
+upstream delivery column retains historical API names.
 
 ## The disciplines that carry over
 

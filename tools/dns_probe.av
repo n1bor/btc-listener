@@ -1,0 +1,122 @@
+module DnsProbe
+    intent =
+        "Exercise the rewritten DNS exchange in Infra.Resolver against a"
+        "resolver named on the command line, so the bounded dial, the partial"
+        "write and the fragmented length-prefixed answer have automated"
+        "coverage."
+        "Seed discovery is the one part of this migration no other test"
+        "reaches. A regtest network has no DNS seeds, the real seeds are on"
+        "the internet, and CI has neither. Infra.Resolver.lookupAt takes the"
+        "server as an argument so that a resolver on loopback can stand in"
+        "for a seed, and this probe is what that argument is for."
+        "The exchange is the subject here, not the answer: what the fake"
+        "resolver replies with is whatever the scenario needs it to be, and"
+        "reading addresses out of it is Domain.Dns' work, already covered by"
+        "its own captured fixture."
+    depends [Domain.Address, Infra.Resolver]
+    effects [
+        Args.get,
+        Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+
+fn main() -> Result<Unit, String>
+    ? "One lookup through one named resolver."
+    ! [
+        Args.get,
+        Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Args.get()
+        [host, ..rest] -> match rest
+            [port, ..names] -> asking(host, port, wanted(names))
+            [] -> Result.Err("usage: dns-probe HOST PORT [NAME]")
+        _ -> Result.Err("usage: dns-probe HOST PORT [NAME]")
+
+fn asking(host: String, portText: String, name: String) -> Result<Unit, String>
+    ? "The production lookup, with nothing between it and the socket."
+      "This calls Infra.Resolver.lookupAt itself rather than a copy of it, so"
+      "a change to the deadline, to the write loop or to the reassembly is a"
+      "change this probe sees."
+    ! [
+        Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Int.fromString(portText)
+        Result.Err(why) -> Result.Err("port must be a whole number, got '{portText}'")
+        Result.Ok(port) -> reported(Infra.Resolver.lookupAt(name, host, port))
+
+fn wanted(names: List<String>) -> String
+    ? "The name to ask about, defaulting to a real mainnet seed hostname so"
+      "the question on the wire has the length a seed question has."
+    match names
+        [] -> "seed.bitcoin.sipa.be"
+        [head, ..tail] -> head
+
+verify wanted
+    wanted([]) => "seed.bitcoin.sipa.be"
+    wanted(["a.example"]) => "a.example"
+    wanted(["a.example", "ignored"]) => "a.example"
+
+fn reported(answer: Result<List<List<Int>>, String>) -> Result<Unit, String>
+    ? "Print the outcome and finish successfully whichever way it went."
+      "A lookup that fails is a result this probe is asked to produce rather"
+      "than a failure of the probe, and a harness that reads the verdict off"
+      "one printed line can tell a refusal apart from a hang. The exit code"
+      "is left to say whether the probe itself ran."
+    ! [Console.print]
+    Console.print(outcome(answer))
+    Result.Ok(Unit)
+
+fn outcome(answer: Result<List<List<Int>>, String>) -> String
+    ? "The one line a harness asserts on: how many addresses came back and"
+      "which, or the message the exchange refused with."
+    match answer
+        Result.Err(why) -> "error {why}"
+        Result.Ok(addresses) -> "answer {List.len(addresses)}{listed(addresses)}"
+
+verify outcome
+    outcome(Result.Err("DNS exchange deadline expired")) => "error DNS exchange deadline expired"
+    outcome(Result.Ok([])) => "answer 0"
+    outcome(Result.Ok([[1, 2, 3, 4]])) => "answer 1 1.2.3.4"
+    outcome(Result.Ok([[1, 2, 3, 4], [5, 6, 7, 8]])) => "answer 2 1.2.3.4 5.6.7.8"
+
+fn listed(addresses: List<List<Int>>) -> String
+    ? "Every address, each behind the space that separates it from the last."
+    match addresses
+        [] -> ""
+        [head, ..tail] -> " {dotted(head)}{listed(tail)}"
+
+verify listed
+    listed([]) => ""
+    listed([[1, 2, 3, 4]]) => " 1.2.3.4"
+    listed([[1, 2, 3, 4], [5, 6, 7, 8]]) => " 1.2.3.4 5.6.7.8"
+
+fn dotted(octets: List<Int>) -> String
+    ? "One address, rendered by the same code the rest of the program renders"
+      "addresses with."
+      "Domain.Dns.addressesOf keeps only A records, which are four bytes by"
+      "definition, so the refusal below cannot be reached from a lookup. It"
+      "is named rather than asserted away because a probe that printed a"
+      "silent fallback would be harder to read than one that says what it"
+      "could not render."
+    match Domain.Address.fromOctets(octets)
+        Result.Err(why) -> "unreadable({why})"
+        Result.Ok(address) -> Domain.Address.hostOf(address)
+
+verify dotted
+    dotted([1, 2, 3, 4]) => "1.2.3.4"
+    dotted([192, 168, 1, 10]) => "192.168.1.10"
+    dotted([1, 2, 3]) => "unreadable(expected four octets, got 3)"

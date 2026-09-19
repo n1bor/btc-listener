@@ -6,6 +6,9 @@ Aver's concurrency would be real threading or a poll-shaped event loop; the
 maintainer's answer was a third thing that was already partly shipped, and the
 full-node plan's open decision D2 closes around it.
 
+The original decision below records the primitives available in August.
+For the current implementation, see the September update at the end.
+
 ## What Aver gives us
 
 **Independent products.** `(a, b)!` declares two computations independent of
@@ -99,3 +102,21 @@ is the shape `infra/download.av` and `infra/txindex.av` already have.
 Aver growing a construct for work that outlives a call would reopen rule 1.
 Rule 3 stands on its own: even with such a construct, shared state written
 from one place is the version of this node whose claims stay checkable.
+
+## Update: Work/Wait migration, 16 September 2026
+
+The application now uses `Wait.poll` for readiness, `readNow`/`writeNow`
+for partial socket I/O, and retained greeting state for active peer admission.
+The listener/accept primitives discussed above have also shipped and are used.
+
+Rule 2 now has a second form: one typed Work job can span owner turns. Block
+decoding and pure UTXO connection run from supplied values while the owner
+serves peers and the dashboard. The owner resolves store inputs and applies
+the result; rule 3 still holds. Cancelling a native job discards its result,
+without preempting the worker thread. Independent products remain useful for
+work that joins inside one call.
+
+This is an explicit CLI owner, not a generated coordinator. Startup facades
+still wait for their answers, and storage operations remain synchronous.
+See [migration acceptance](../work-wait-migration.md) for the compiler
+requirement, measured native behavior and remaining validation.

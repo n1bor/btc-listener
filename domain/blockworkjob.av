@@ -1,0 +1,336 @@
+module BlockWorkJob
+    intent =
+        "The translation between the block domain and the job contract."
+        "A capability's operations may only name types the capability"
+        "itself declares, so Infra.BlockJobs cannot take a"
+        "Domain.Transaction or hand back a Domain.Connect.Change. It"
+        "declares a Transaction, a Coin, a Fee and a Change of its own,"
+        "shaped the same, and this is where a value crosses between the"
+        "two."
+        "That is the whole cost of putting the calculation behind a"
+        "capability: one record per domain type and a pair of functions"
+        "per record. Nothing here decides anything. run calls"
+        "Domain.Block.transactionsOf and Domain.Connect.connected, which"
+        "are the functions the walk called when it did the work itself,"
+        "and applying the answer stays with the owner."
+        "The fixtures at the bottom are built to lose things noisily. No"
+        "two fields hold the same value, the lists have more than one"
+        "element and read differently backwards, and the cases send a"
+        "value out and back. A field this module forgets to carry shows up"
+        "as a round trip that does not come back the same."
+    depends [Bytes, Infra.BlockJobs, Domain.Block, Domain.Connect, Domain.Network, Domain.Transaction, Domain.UtxoStore]
+    exposes [run, connectionTask, connection, transactions]
+    effects []
+
+fn run(task: Infra.BlockJobs.Task) -> Infra.BlockJobs.Reply
+    ? "The Task carried out, by the same functions the walk used to call"
+      "for itself: Domain.Block.transactionsOf for a decode,"
+      "Domain.Connect.connected for a connection. This is the only"
+      "function here that does anything; everything else carries values"
+      "across."
+    match task
+        Infra.BlockJobs.Task.Decode(payload) -> decoded(Domain.Block.transactionsOf(payload))
+        Infra.BlockJobs.Task.Connect(chain, height, txs, coins) -> connected(Domain.Connect.connected(network(chain), height, transactions(txs, []), coinMap(coins, {})))
+
+verify run
+    run(Infra.BlockJobs.Task.Decode(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?)) => Infra.BlockJobs.Reply.Refused("Transaction ends before its lock time")
+    run(Infra.BlockJobs.Task.Decode(Bytes.empty())) => Infra.BlockJobs.Reply.Decoded([])
+
+fn decoded(answer: Result<List<Domain.Transaction.Transaction>, String>) -> Infra.BlockJobs.Reply
+    ? "The decoded Transactions on their way out, or the reason the"
+      "body would not decode. A refusal is a String on both sides, so"
+      "only the Transactions have to be rebuilt."
+    match answer
+        Result.Err(why) -> Infra.BlockJobs.Reply.Refused(why)
+        Result.Ok(txs) -> Infra.BlockJobs.Reply.Decoded(toTransactions(txs, []))
+
+verify decoded
+    decoded(Result.Err("broken")) => Infra.BlockJobs.Reply.Refused("broken")
+    decoded(Result.Ok([])) => Infra.BlockJobs.Reply.Decoded([])
+
+fn connected(answer: Domain.Connect.Connecting) -> Infra.BlockJobs.Reply
+    ? "The connection's outcome on its way out."
+    match answer
+        Domain.Connect.Connecting.Refused(why) -> Infra.BlockJobs.Reply.Refused(why)
+        Domain.Connect.Connecting.Applied(change) -> Infra.BlockJobs.Reply.Connected(toChange(change))
+
+verify connected
+    connection(connected(Domain.Connect.Connecting.Applied(fixtureChange()))) => Domain.Connect.Connecting.Applied(fixtureChange())
+    connected(Domain.Connect.Connecting.Refused("bad spend")) => Infra.BlockJobs.Reply.Refused("bad spend")
+
+fn connection(answer: Infra.BlockJobs.Reply) -> Domain.Connect.Connecting
+    ? "A reply read back as a connection outcome."
+      "Reply is one type for both kinds of job, so a Decoded can reach"
+      "this function and nothing about the types will stop it. It leaves"
+      "as a refusal that says what it was, because the alternative is a"
+      "connect that reports no coins added and none spent, and a walk"
+      "that carries on from a Block it never connected."
+    match answer
+        Infra.BlockJobs.Reply.Refused(why) -> Domain.Connect.Connecting.Refused(why)
+        Infra.BlockJobs.Reply.Connected(change) -> Domain.Connect.Connecting.Applied(fromChange(change))
+        Infra.BlockJobs.Reply.Decoded(_) -> Domain.Connect.Connecting.Refused("a decode result cannot settle a connection job")
+
+verify connection
+    connection(Infra.BlockJobs.Reply.Refused("invalid")) => Domain.Connect.Connecting.Refused("invalid")
+    connection(Infra.BlockJobs.Reply.Decoded([])) => Domain.Connect.Connecting.Refused("a decode result cannot settle a connection job")
+
+verify connection
+    connection(Infra.BlockJobs.Reply.Connected(toChange(fixtureChange()))) => Domain.Connect.Connecting.Applied(fixtureChange())
+
+fn connectionTask(chain: Domain.Network.Network, height: Int, txs: List<Domain.Transaction.Transaction>, coins: Map<Bytes, Domain.UtxoStore.Unspent>) -> Infra.BlockJobs.Task
+    ? "A connection job: the Network, the Transactions and the coins"
+      "they spend, in the contract's own types."
+      "The coins go as a list rather than as the Map they were looked"
+      "up in. A Map needs a key both sides agree on and the key is"
+      "Domain.UtxoStore's, so it is built again on the other side from"
+      "the txid and index each Coin already carries."
+    Infra.BlockJobs.Task.Connect(toNetwork(chain), height, toTransactions(txs, []), toCoins(Map.values(coins), []))
+
+fn coinMap(coins: List<Infra.BlockJobs.Coin>, acc: Map<Bytes, Domain.UtxoStore.Unspent>) -> Map<Bytes, Domain.UtxoStore.Unspent>
+    ? "The coins keyed the way Domain.UtxoStore keys them, which is"
+      "how the connecting looks a spend up. Rebuilt rather than"
+      "carried, for the reason connectionTask gives."
+    match coins
+        [] -> acc
+        [coin, ..rest] -> coinMap(rest, Map.set(acc, Domain.UtxoStore.keyAt(coin.txid, coin.index), fromCoin(coin)))
+
+verify coinMap
+    Map.get(coinMap(toCoins([fixtureCoin()], []), {}), Domain.UtxoStore.keyAt(fixtureCoin().txid, fixtureCoin().index)) => Option.Some(fixtureCoin())
+
+fn network(chain: Infra.BlockJobs.Chain) -> Domain.Network.Network
+    ? "The contract's Chain read back as a Network."
+    match chain
+        Infra.BlockJobs.Chain.Mainnet -> Domain.Network.Network.Mainnet
+        Infra.BlockJobs.Chain.Testnet -> Domain.Network.Network.Testnet
+        Infra.BlockJobs.Chain.Signet -> Domain.Network.Network.Signet
+        Infra.BlockJobs.Chain.Regtest -> Domain.Network.Network.Regtest
+
+verify network law roundTrip
+    given chain: Domain.Network.Network = [Domain.Network.Network.Mainnet, Domain.Network.Network.Testnet, Domain.Network.Network.Signet, Domain.Network.Network.Regtest]
+    network(toNetwork(chain)) => chain
+
+fn toNetwork(chain: Domain.Network.Network) -> Infra.BlockJobs.Chain
+    ? "A Network as the contract's Chain. Four cases each way, and"
+      "the law below is what keeps them the same four."
+    match chain
+        Domain.Network.Network.Mainnet -> Infra.BlockJobs.Chain.Mainnet
+        Domain.Network.Network.Testnet -> Infra.BlockJobs.Chain.Testnet
+        Domain.Network.Network.Signet -> Infra.BlockJobs.Chain.Signet
+        Domain.Network.Network.Regtest -> Infra.BlockJobs.Chain.Regtest
+
+verify toNetwork
+    toNetwork(Domain.Network.Network.Mainnet) => Infra.BlockJobs.Chain.Mainnet
+    toNetwork(Domain.Network.Network.Testnet) => Infra.BlockJobs.Chain.Testnet
+    toNetwork(Domain.Network.Network.Signet) => Infra.BlockJobs.Chain.Signet
+    toNetwork(Domain.Network.Network.Regtest) => Infra.BlockJobs.Chain.Regtest
+
+fn toInput(value: Domain.Transaction.Input) -> Infra.BlockJobs.Input
+    ? "An Input. previousTxid and previousIndex are the pair the far side"
+      "keys a spend on, and the witness travels as the list it is, empty"
+      "for an Input that has none."
+    Infra.BlockJobs.Input(previousTxid = value.previousTxid, previousIndex = value.previousIndex, script = value.script, sequence = value.sequence, witness = value.witness)
+
+fn toInputs(values: List<Domain.Transaction.Input>, acc: List<Infra.BlockJobs.Input>) -> List<Infra.BlockJobs.Input>
+    ? "Every Input of one Transaction, in the order it was decoded in."
+      "Built by prepending to an accumulator and reversing at the end,"
+      "which is one pass. Appending to the back of a growing list is a"
+      "walk of that list per element, and a Transaction may have"
+      "thousands of Inputs. Every list in this module is built the same"
+      "way for the same reason."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> toInputs(rest, List.prepend(toInput(head), acc))
+
+verify toInputs
+    fromInputs(toInputs(fixtureTransaction().inputs, []), []) => fixtureTransaction().inputs
+    toInputs([], []) => []
+
+fn fromInput(value: Infra.BlockJobs.Input) -> Domain.Transaction.Input
+    ? "An Input on its way home. The txid of the Transaction it belongs to"
+      "was settled when the Block was decoded and travels beside it, so a"
+      "field lost here disagrees with a txid rather than changing one."
+    Domain.Transaction.Input(previousTxid = value.previousTxid, previousIndex = value.previousIndex, script = value.script, sequence = value.sequence, witness = value.witness)
+
+fn fromInputs(values: List<Infra.BlockJobs.Input>, acc: List<Domain.Transaction.Input>) -> List<Domain.Transaction.Input>
+    ? "The same list home. An Input is named by where it sits in its"
+      "Transaction, so the order here is the value and not a way of"
+      "showing it, and the reverse at the end is what keeps it."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> fromInputs(rest, List.prepend(fromInput(head), acc))
+
+verify fromInputs
+    fromInputs(toInputs(fixtureTransaction().inputs, []), []) => fixtureTransaction().inputs
+    fromInputs([], []) => []
+
+fn toOutput(value: Domain.Transaction.Output) -> Infra.BlockJobs.Output
+    ? "An Output, which is an amount in satoshis and the script that locks"
+      "it. The connecting weighs the amount and the Set keeps the script,"
+      "so neither is read or rewritten on the way."
+    Infra.BlockJobs.Output(value = value.value, script = value.script)
+
+fn toOutputs(values: List<Domain.Transaction.Output>, acc: List<Infra.BlockJobs.Output>) -> List<Infra.BlockJobs.Output>
+    ? "Every Output of one Transaction. previousIndex counts into this"
+      "list, so a spend that finds the wrong one finds it here."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> toOutputs(rest, List.prepend(toOutput(head), acc))
+
+verify toOutputs
+    fromOutputs(toOutputs(fixtureTransaction().outputs, []), []) => fixtureTransaction().outputs
+    toOutputs([], []) => []
+
+fn fromOutput(value: Infra.BlockJobs.Output) -> Domain.Transaction.Output
+    ? "An Output on its way home, as part of a Transaction a decode reply"
+      "carried. Nothing has spent it yet; it becomes a coin only when the"
+      "owner connects the Block."
+    Domain.Transaction.Output(value = value.value, script = value.script)
+
+fn fromOutputs(values: List<Infra.BlockJobs.Output>, acc: List<Domain.Transaction.Output>) -> List<Domain.Transaction.Output>
+    ? "The same list home, with the positions previousIndex counts kept."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> fromOutputs(rest, List.prepend(fromOutput(head), acc))
+
+verify fromOutputs
+    fromOutputs(toOutputs(fixtureTransaction().outputs, []), []) => fixtureTransaction().outputs
+    fromOutputs([], []) => []
+
+fn toTransaction(value: Domain.Transaction.Transaction) -> Infra.BlockJobs.Transaction
+    ? "One Transaction across, with its Inputs and Outputs."
+      "The txid, the size and the SegWit flag are carried rather than"
+      "worked out again: they were settled when the Block was decoded,"
+      "and recomputing them on the far side would be a second opinion"
+      "about what the bytes said."
+    Infra.BlockJobs.Transaction(version = value.version, inputs = toInputs(value.inputs, []), outputs = toOutputs(value.outputs, []), lockTime = value.lockTime, txid = value.txid, size = value.size, isSegWit = value.isSegWit)
+
+fn toTransactions(values: List<Domain.Transaction.Transaction>, acc: List<Infra.BlockJobs.Transaction>) -> List<Infra.BlockJobs.Transaction>
+    ? "Every Transaction of one Block, in the order the Block holds them."
+      "That order is the coinbase first and then the rest, which is what"
+      "Domain.Connect.connected takes the Block apart by."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> toTransactions(rest, List.prepend(toTransaction(head), acc))
+
+verify toTransactions
+    transactions(toTransactions([fixtureTransaction(), Domain.Transaction.Transaction.update(fixtureTransaction(), version = 1, isSegWit = false)], []), []) => [fixtureTransaction(), Domain.Transaction.Transaction.update(fixtureTransaction(), version = 1, isSegWit = false)]
+    toTransactions([], []) => []
+
+fn fromTransaction(value: Infra.BlockJobs.Transaction) -> Domain.Transaction.Transaction
+    ? "A Transaction on its way home. Its Inputs and Outputs come back"
+      "through their own pairs, so what is left here is the five fields"
+      "that are not lists, txid and size and the SegWit flag among them."
+    Domain.Transaction.Transaction(version = value.version, inputs = fromInputs(value.inputs, []), outputs = fromOutputs(value.outputs, []), lockTime = value.lockTime, txid = value.txid, size = value.size, isSegWit = value.isSegWit)
+
+fn transactions(values: List<Infra.BlockJobs.Transaction>, acc: List<Domain.Transaction.Transaction>) -> List<Domain.Transaction.Transaction>
+    ? "A list of Transactions back. This is what the owner reads a"
+      "decode reply into, so it is the one direction that is exposed."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> transactions(rest, List.prepend(fromTransaction(head), acc))
+
+verify transactions
+    transactions(toTransactions([fixtureTransaction(), Domain.Transaction.Transaction.update(fixtureTransaction(), version = 1, isSegWit = false)], []), []) => [fixtureTransaction(), Domain.Transaction.Transaction.update(fixtureTransaction(), version = 1, isSegWit = false)]
+    transactions([], []) => []
+
+fn toCoin(value: Domain.UtxoStore.Unspent) -> Infra.BlockJobs.Coin
+    ? "A coin the Block's spends were looked up in. height and coinbase go"
+      "with it because the far side has no Set to ask: without them it"
+      "cannot tell that an Output is a coinbase from Height 1 and not"
+      "spendable until 101."
+    Infra.BlockJobs.Coin(txid = value.txid, index = value.index, value = value.value, script = value.script, height = value.height, coinbase = value.coinbase)
+
+fn toCoins(values: List<Domain.UtxoStore.Unspent>, acc: List<Infra.BlockJobs.Coin>) -> List<Infra.BlockJobs.Coin>
+    ? "The coins as a list, which is the shape a Map takes to cross and"
+      "the reason connectionTask gives for sending one."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> toCoins(rest, List.prepend(toCoin(head), acc))
+
+verify toCoins
+    fromCoins(toCoins([fixtureCoin(), Domain.UtxoStore.Unspent.update(fixtureCoin(), coinbase = false)], []), []) => [fixtureCoin(), Domain.UtxoStore.Unspent.update(fixtureCoin(), coinbase = false)]
+    toCoins([], []) => []
+
+fn fromCoin(value: Infra.BlockJobs.Coin) -> Domain.UtxoStore.Unspent
+    ? "A coin on its way home, either into the key coinMap builds for it"
+      "or into one of the two lists a Change carries."
+    Domain.UtxoStore.Unspent(txid = value.txid, index = value.index, value = value.value, script = value.script, height = value.height, coinbase = value.coinbase)
+
+fn fromCoins(values: List<Infra.BlockJobs.Coin>, acc: List<Domain.UtxoStore.Unspent>) -> List<Domain.UtxoStore.Unspent>
+    ? "One of a Change's two lists home: what the Block put into the Set,"
+      "or what it took out."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> fromCoins(rest, List.prepend(fromCoin(head), acc))
+
+verify fromCoins
+    fromCoins(toCoins([fixtureCoin(), Domain.UtxoStore.Unspent.update(fixtureCoin(), coinbase = false)], []), []) => [fixtureCoin(), Domain.UtxoStore.Unspent.update(fixtureCoin(), coinbase = false)]
+    fromCoins([], []) => []
+
+fn toFee(value: Domain.Connect.TxFee) -> Infra.BlockJobs.Fee
+    ? "What one Transaction paid, on the answer's way out. Domain.Connect"
+      "puts the coinbase at the front of that list with a fee of zero and"
+      "the flag set, so the flag is what tells that zero apart from a"
+      "Transaction that worked out to nothing."
+    Infra.BlockJobs.Fee(txid = value.txid, fee = value.fee, coinbase = value.coinbase)
+
+fn toFees(values: List<Domain.Connect.TxFee>, acc: List<Infra.BlockJobs.Fee>) -> List<Infra.BlockJobs.Fee>
+    ? "The fees of a connected Block, coinbase first as Domain.Connect"
+      "left them."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> toFees(rest, List.prepend(toFee(head), acc))
+
+verify toFees
+    fromFees(toFees(fixtureChange().confirmed, []), []) => fixtureChange().confirmed
+    toFees([], []) => []
+
+fn fromFee(value: Infra.BlockJobs.Fee) -> Domain.Connect.TxFee
+    ? "One of those fees on its way home, to be counted against the Block"
+      "the owner is about to record."
+    Domain.Connect.TxFee(txid = value.txid, fee = value.fee, coinbase = value.coinbase)
+
+fn fromFees(values: List<Infra.BlockJobs.Fee>, acc: List<Domain.Connect.TxFee>) -> List<Domain.Connect.TxFee>
+    ? "All of them home, still coinbase first."
+    match values
+        [] -> List.reverse(acc)
+        [head, ..rest] -> fromFees(rest, List.prepend(fromFee(head), acc))
+
+verify fromFees
+    fromFees(toFees(fixtureChange().confirmed, []), []) => fixtureChange().confirmed
+    fromFees([], []) => []
+
+fn toChange(value: Domain.Connect.Change) -> Infra.BlockJobs.Change
+    ? "What a connected Block did to the Set, on its way out: the"
+      "coins it made, the coins it spent, the fees and their owners."
+    Infra.BlockJobs.Change(added = toCoins(value.added, []), removed = toCoins(value.removed, []), fees = value.fees, confirmed = toFees(value.confirmed, []))
+
+fn fromChange(value: Infra.BlockJobs.Change) -> Domain.Connect.Change
+    ? "The same, read back, so the owner can absorb it into the window"
+      "exactly as if it had connected the Block itself."
+    Domain.Connect.Change(added = fromCoins(value.added, []), removed = fromCoins(value.removed, []), fees = value.fees, confirmed = fromFees(value.confirmed, []))
+
+fn fixtureTransaction() -> Domain.Transaction.Transaction
+    ? "A Transaction with nothing in it repeated."
+      "Two Inputs that differ in every field, one of them with a witness"
+      "and one without, two Outputs of different sizes, and a version and"
+      "a lock time that are not each other. A copy that dropped a field,"
+      "swapped two, or reversed a list has to change this value, and the"
+      "round trips above then fail."
+    Domain.Transaction.Transaction(version = 2, inputs = [Domain.Transaction.Input(previousTxid = "01", previousIndex = 3, script = "aa", sequence = 4294967295, witness = ["bb", "cc"]), Domain.Transaction.Input(previousTxid = "02", previousIndex = 7, script = "dd", sequence = 9, witness = [])], outputs = [Domain.Transaction.Output(value = 5000000000, script = "0014"), Domain.Transaction.Output(value = 123, script = "5120")], lockTime = 42, txid = "abcd", size = 311, isSegWit = true)
+
+fn fixtureCoin() -> Domain.UtxoStore.Unspent
+    ? "A coin whose origin, amount, script and maturity all differ from"
+      "each other, so that a field carried into the wrong one is visible."
+      "coinbase is true here and false in the second coin fixtureChange"
+      "builds, because a maturity rule read off the wrong flag is the"
+      "kind of mistake that only shows up a hundred Blocks later."
+    Domain.UtxoStore.Unspent(txid = Bytes.fromList([1, 2]), index = 4, value = 5000000000, script = Bytes.fromList([81]), height = 123, coinbase = true)
+
+fn fixtureChange() -> Domain.Connect.Change
+    ? "A Change with something in every list, so both directions of every"
+      "list function are exercised by the cases above."
+      "The two fees differ in all three fields, and one of them is the"
+      "coinbase, which is the Transaction whose fee is nothing and whose"
+      "flag is the only thing saying so."
+    Domain.Connect.Change(added = [fixtureCoin()], removed = [Domain.UtxoStore.Unspent.update(fixtureCoin(), height = 2, coinbase = false)], fees = 19, confirmed = [Domain.Connect.TxFee(txid = "a", fee = 19, coinbase = false), Domain.Connect.TxFee(txid = "b", fee = 0, coinbase = true)])

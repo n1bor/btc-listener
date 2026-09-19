@@ -50,7 +50,7 @@ reason     = "one entry of script_assets_test.json is a 406 KB tapscript spend w
 # arrived with jasisz/aver#1118, which is closed; this setting is not its
 # workaround and does not retire with it, which is why it is still here now
 # that jasisz/aver#1125 has closed too. What changed with #1125 is who waits:
-# the dial is a key in Tcp.poll (Infra.Peers.joined), so this deadline ends
+# the dial is now a key in Wait.poll (Infra.Peers.dialling/advanced), so it ends
 # one Candidate rather than holding up every Peer for five seconds.
 # Five again: the walk tends its company once a second now (#275), so a dial
 # begun while walking is asked about within a second of connecting. The
@@ -60,3 +60,18 @@ reason     = "one entry of script_assets_test.json is a 406 KB tapscript spend w
 # at between chunks.
 [effects.Tcp]
 connect_timeout_secs = 5
+
+[[providers.bindings]]
+capability = "Infra.BlockJobs"
+work = "Domain.BlockWorkJob.run"
+
+# The walk asks for two jobs at once, a lookahead decode and a connect, and a
+# limit of exactly two leaves no room for the slot a job on its way out has not
+# released yet. The runtime refuses `begin` at the limit, and a cancelled native
+# job keeps its slot until its body finishes, so a retry after an owner-side
+# error could be refused with `work: job limit 2 reached` and the refusal
+# charged to whichever Peer happened to be answering. Four is that headroom and
+# nothing else. What bounds the overlap is the walk, which settles both jobs
+# before every commit, so raising the limit does not put a third job in flight.
+[work]
+max-jobs = 4

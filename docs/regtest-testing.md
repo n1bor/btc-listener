@@ -10,6 +10,64 @@ This document is the standing end-to-end test. **Run it before you commit a
 change**, and when you find something it does not cover, add the new test here
 so the next person inherits it. The point is that coverage only ever grows.
 
+
+## Automated acceptance
+
+The Work/Wait regression suite below creates three isolated Bitcoin Core nodes
+on loopback, fresh data directories and dynamically allocated ports. It stops
+every process it starts, including after a failure, and retains the report and
+logs. Pass a new output directory each time.
+
+```sh
+python3 tools/regtest/suite.py --binary /path/to/main --core-bin /path/to/bitcoin-31.1/bin --output /tmp/btc-regtest-acceptance
+```
+
+It covers the command baseline and four script types; five-block undo;
+transaction relay, confirmation and restoration from an abandoned branch;
+compact reconstruction without fetched transactions; serving Core from zero
+and from an old fork; a single announcement during a 2,000-block catch-up with
+a peer disconnect; hostile wire data, header/address floods and admission caps;
+a real PTY Screen; a corrupt local body; prune boundaries and assumevalid; and
+one getdata naming more Blocks than a Peer's outbox holds. The fresh catch-up
+directory needs `txindex` before `audit`, just like the manual command sequence
+below.
+
+The CI `regtest` job runs the release binary from the `compile` artifact.
+It downloads official Core 31.1 with a pinned checksum and uploads its JSON
+report, binary hash and logs on success or failure.
+
+The Node wasm CI job runs the complete CLI's checksum test plus Work delivery/cancellation:
+
+```sh
+aver compile tools/working_probe.av --module-root . --target wasm-gc -o /tmp/btc-work-wasm
+python3 tools/regtest/work-wait.py --payload /tmp/work-payload.bin --count 2000
+node wasm/host.mjs /tmp/btc-work-wasm/working_probe.wasm --work-probe /tmp/work-payload.bin 2000
+node wasm/host.mjs /tmp/btc-work-wasm/working_probe.wasm --work-probe /tmp/work-payload.bin 2000 cancel
+```
+
+The CI `compile` job builds the DNS probe beside the release binary and runs
+the rewritten seed exchange against a fake TCP resolver on loopback, which is
+the one network path a regtest network cannot reach:
+
+```sh
+aver compile tools/dns_probe.av --module-root . -o /tmp/btc-dns-probe
+cargo build --manifest-path /tmp/btc-dns-probe/Cargo.toml --profile iteration
+python3 tools/regtest/dns-probe.py /tmp/btc-dns-probe/target/iteration/dns_probe
+```
+
+Seven scenarios in about nineteen seconds: a whole answer, an answer followed
+by a close, a length prefix and body split across five sends, a connection
+closed before the announced body is complete, a 64 KB answer no single read
+holds, a cooperative stop and the fifteen-second deadline. See [the DNS
+exchange probe](work-wait-migration.md#dns-exchange-probe) for what each one
+has to produce and why it does not run under the Node host.
+
+The automated suite is not a claim to reproduce every historical manual
+measurement below: sustained hostile-peer soak, external-network dial timing,
+memory/RSS comparisons and Linux syscall-trace durability inspection remain
+separate recipes. The 20-minute deadline is not shortened or counted as covered
+by the fast CI job.
+
 ## Why regtest, and not signet
 
 Signet is real data and worth using, but two things it cannot do:
@@ -1699,8 +1757,9 @@ $BIN regtest follow $PEERS $D log:/tmp/m.log # somewhere else
 **`polledMs` and `workedMs` are the pair worth having.** Everything else is
 already on the Overview or recoverable from the store afterwards; the split
 between waiting for a Peer and working on what it sent exists only while it is
-happening. `Tcp.poll` is bracketed by two clock readings, so `polledMs` is
-wall clock inside the poll and `workedMs` is the rest of the window.
+happening. The Peers `Wait.poll` is bracketed by two clock readings, so
+`polledMs` is wall clock inside that poll and `workedMs` is the rest of the
+window. This does not aggregate the separate Work-owner and dashboard waits.
 
 Read the shape of a regtest run and you can see what it is telling you:
 
@@ -2136,6 +2195,49 @@ The second change has no honest Peer to show it with here — a regtest node
 with nobody to dial ends by the other rule, `no Candidate answered`, as it
 should — so the law and the mainnet log are its evidence.
 
+The writes have since moved off the loop: every peer Message now waits in a
+per-Peer queue and each turn writes at most 64 KiB of it, so `Tcp.writeBytes`
+is gone from the application and no Peer can hold a turn by not reading. What
+that bought, and what it cost until the next section's test was written, is
+[one getdata larger than a Peer's outbox](#a-getdata-larger-than-a-peers-outbox).
+
+### A getdata larger than a Peer's outbox
+
+The queue that replaced the blocking write is bounded — 8 MiB and 256 Messages
+per Peer — and a Peer that fills it is dropped, which is the point of it. What
+was not the point is that this node could fill it on the Peer's behalf: a
+getdata for Blocks was answered by framing every Block it named, one after
+another, in the turn the Message arrived on. Bitcoin Core in initial block
+download asks one Peer for sixteen Blocks at a time. A mainnet Block is one to
+four megabytes, so the queue is full somewhere between the third and the sixth
+of them and the Peer syncing from us is dropped for having asked. Regtest
+Blocks are a few hundred bytes, so nothing else in this document notices.
+
+`tools/regtest/suite_serving.py` mines Blocks large enough to notice. A regtest
+Block cannot be made large by mining many ordinary Transactions — consensus
+weighs every non-witness byte four times, so a Block whose bytes are output
+scripts stops at about a megabyte — so it mines twelve of them, with
+`generateblock` and a raw Transaction of 120 large `OP_RETURN` outputs each.
+`generateblock` validates under consensus rules alone, so no standardness rule
+about data carriers applies, and the whole input value becomes fee, which
+nothing minds on a chain whose coinbases are worth nothing. Eleven mebibytes in
+twelve Blocks, asked for newest first in one getdata, from a Python Peer that
+reads at an ordinary speed:
+
+```
+served a Block of 962209 bytes to peer 1
+...
+peer 1 went while being sent a block: peer outbox is full
+```
+
+That is the log before the fix: nine Blocks framed, then the Peer gone. After
+it, all twelve arrive in the order the getdata gave, and the Peer that asked is
+still seated and still answering pings. The fix is a bounded queue of the
+requested identifiers and a watermark. A Block is read off the disk for a Peer
+only while that Peer has less than 4 MiB waiting, which is a Block's worth of
+room short of the limit, so what this node puts on a wire can no longer be what
+fills it.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
@@ -2315,10 +2417,9 @@ peer 1 dialled us from 127.0.0.1:49810
 refused an inbound Peer from 127.0.0.1:52690: already holding one from that host
 ```
 
-The first caller has to be a Peer, not merely connected: the greeting runs
-inline (#30), so a second caller that arrives while the first is still being
-greeted is accepted only after the first was dropped, and by then the host
-holds nothing.
+In the Work/Wait branch, a pending greeting already reserves the host's slot.
+The first caller can therefore be silent while the second is refused; it no
+longer needs to finish its Handshake before the host cap can be tested.
 
 ### A fault in the chain directory is nobody's fault
 
@@ -2387,18 +2488,23 @@ dropping inbound peer 1 from 127.0.0.1:58086: Peer 1 did not answer before its d
 dropping inbound peer 1 from 127.0.0.1:54576: Peer 1 did not answer before its deadline
 ```
 
-The callers say how long they were held — `early` 0.0 s, `chatty` 1.0 s,
+The original deadline-fix run measured — `early` 0.0 s, `chatty` 1.0 s,
 `silent` 11.0 s, `pinger` 15.0 s (the deadline is ten; the loop accepts on a
 quiet turn, and the pinger only learns it was dropped on its next send) —
 where before it was up to 150 s and for ever.
-What this does not change: the greeting still runs inline, so those ten
-seconds are still the loop's — #30 is the loop-driven Handshake that ends
-that.
+That run still used an inline greeting. The Work/Wait branch now retains
+pending greeting state between bounded turns: ten seconds occupies the
+caller's slot while other Peers and the dashboard remain serviceable. The
+[current network probes](work-wait-migration.md#remaining-network-waits-removed)
+cover silent inbound/outbound callers, the non-renewing deadline and partial
+writes; those measurements are separate from the historical numbers above.
 
 ### A caller that will not finish its Handshake, while another Peer goes
 
-The one above costs the caller its slot. This one costs the node, and it is
-[#304](https://github.com/n1bor/btc-listener/issues/304). It needs two things
+The original failure below cost the node, and was tracked as
+[#304](https://github.com/n1bor/btc-listener/issues/304). The recorded logs
+retain the old `Tcp.poll` name. The scenario remains a useful resource-ownership
+regression for the Work/Wait branch. It needs two things
 at once and neither on its own does anything: a caller whose Handshake does not
 complete, and another Peer disconnecting while that Handshake waits. The
 Handshake reads every Peer while it waits, so the second Peer is closed and
@@ -2442,8 +2548,10 @@ following. Give it a minute before believing it.
 Run it a second time against one node only (`follow 127.0.0.1:18454`), so that
 the disconnect empties the pool. Before, that died the same way; now the node
 carries on and goes back to dialling the Book. What would be a fail either way
-is `Tcp.poll: unknown connection` — the node blaming the runtime for its own
-bookkeeping.
+is an unknown-connection failure escaping the owner (historically
+`Tcp.poll: unknown connection`) — the node blaming the runtime for its own
+bookkeeping. The complete standing suite, including this scenario, has not
+yet been rerun for the Work/Wait migration; see its acceptance document.
 
 Underneath the Handshake, a poll that names a released Connection now sheds
 those Peers, says so, and asks again:
@@ -2746,7 +2854,7 @@ The language gates come first, and none of them is optional:
 
 ```bash
 aver format .
-aver check   . --module-root .
+aver check . --module-root .
 aver verify  . --module-root .
 aver compile main.av --module-root . -o ../btc-listener-build
 cd ../btc-listener-build && cargo build --release

@@ -7,15 +7,17 @@ module Screen
         "purpose: restore is the last thing done on every way out, and a"
         "restore that fails has nowhere better to send its complaint than"
         "the terminal it failed to restore (#130)."
-    exposes [keeping, chunking, chunkDone, blockWatched, stopAskedAt, Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing, logging, counting]
+    exposes [attended, keeping, chunking, chunkDone, blockWatched, stopAskedAt, Eye, entered, restored, shown, drainedKeys, unwatched, watchedBy, glanced, eyeing, logging, counting]
     depends [Domain.AddressBook, Domain.Network, Domain.Screen, Domain.Snapshot, Domain.Watchdog, Infra.Board, Infra.Metrics, Infra.Peers, Infra.Tending]
     effects [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.unixMs,
+        Wait.poll,
     ]
 
 record Eye
@@ -87,10 +89,12 @@ fn glanced(eye: Eye, nowMs: Int) -> Result<Eye, String>
     ! [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
     ]
     boarded = answeredBoard(chunkWatched(tendedCompany(eye, nowMs)?, nowMs)?, nowMs)
     match boarded.view
@@ -188,9 +192,11 @@ fn tendedCompany(eye: Eye, nowMs: Int) -> Result<Eye, String>
     ! [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match eye.company
         Option.None -> Result.Ok(eye)
@@ -201,9 +207,11 @@ fn tendedCompanyDue(eye: Eye, company: Kept, nowMs: Int, due: Bool) -> Result<Ey
     ! [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match due
         false -> Result.Ok(eye)
@@ -216,38 +224,22 @@ fn tendedAt(eye: Eye, company: Kept, nowMs: Int) -> Eye
 verify tendedAt
     tendedAt(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), Infra.Tending.kept(Infra.Peers.opened(Network.Regtest), Domain.AddressBook.noBook(), 3, Infra.Metrics.none()), 500).tendedMs => 500
 
-fn boardEveryMs() -> Int
-    ? "How often a walk answers the Board: once a second, the loop's own"
-      "cadence, so a page asked for during a catch-up is a second away"
-      "rather than a chunk away (#261)."
-    1000
-
-verify boardEveryMs
-    boardEveryMs() => 1000
-
 fn answeredBoard(eye: Eye, nowMs: Int) -> Eye
-    ? "The Board answered from inside a walk, once a second, from the"
-      "Snapshot the Eye holds; a walk with no Board glances for free."
-    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
+    ? "The Board answered from inside a walk, from the Snapshot the Eye"
+      "holds; a walk with no Board glances for free."
+      "It used to be answered once a second, so that a page asked for"
+      "during a catch-up was a second away rather than a chunk away"
+      "(#261). The second was the cost of doing a Reader's whole exchange"
+      "in one turn, and there is no whole exchange left to do: a Reader is"
+      "kept between turns now and every operation on it is bounded, so the"
+      "cadence is simply the walk's own turn."
+      "Nothing the Board did comes back here, because Infra.Board hands"
+      "back a Board rather than a Result. A Reader is its own business,"
+      "never the walk's."
+    ! [Tcp.accept, Tcp.close, Tcp.readNow, Tcp.writeNow]
     match eye.board
         Option.None -> eye
-        Option.Some(board) -> answeredBoardDue(eye, board, nowMs, nowMs - eye.boardMs >= boardEveryMs())
-
-fn answeredBoardDue(eye: Eye, board: Board, nowMs: Int, due: Bool) -> Eye
-    ? "Only when a second has passed since the last answer."
-    ! [Tcp.accept, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes]
-    match due
-        false -> eye
-        true -> answeredBoardNow(eye, nowMs, Infra.Board.served(board, eye.snapshot, nowMs))
-
-fn answeredBoardNow(eye: Eye, nowMs: Int, served: Result<Unit, String>) -> Eye
-    ? "The clock moved on whatever the Board did: a Reader is its own"
-      "business, never the walk's."
-    Eye(view = eye.view, snapshot = eye.snapshot, shownMs = eye.shownMs, stopped = eye.stopped, log = eye.log, candidates = eye.candidates, board = eye.board, boardMs = nowMs, chunkFrom = eye.chunkFrom, chunkTo = eye.chunkTo, chunkStartedMs = eye.chunkStartedMs, chunkBudgetMs = eye.chunkBudgetMs, chunkSaid = eye.chunkSaid, blockEndedMs = eye.blockEndedMs, stopAskedMs = eye.stopAskedMs, company = eye.company, tendedMs = eye.tendedMs)
-
-verify answeredBoardNow
-    answeredBoardNow(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 5000, Result.Ok(Unit)).boardMs => 5000
-    answeredBoardNow(unwatched(Domain.Snapshot.started(0), Infra.Metrics.none()), 5000, Result.Err("x")).boardMs => 5000
+        Option.Some(board) -> Eye.update(eye, board = Option.Some(Infra.Board.served(board, eye.snapshot, nowMs)), boardMs = nowMs)
 
 fn glancedAt(eye: Eye, view: View, nowMs: Int) -> Result<Eye, String>
     ? "Keys folded, then the redraw decision."
@@ -343,3 +335,29 @@ fn drainedOne(budget: Int, acc: List<String>, got: Option<String>) -> Result<Lis
     match got
         Option.None -> Result.Ok(List.reverse(acc))
         Option.Some(key) -> draining(budget - 1, List.prepend(key, acc))
+
+fn attended(eye: Eye, nowMs: Int) -> Result<Eye, String>
+    ? "One serving turn taken while a Block is being decoded or connected"
+      "somewhere else: the company tended, then the ordinary glance."
+      "tendedCompany waits a second between tendings because it is called"
+      "from inside a walk that is doing the work itself and has a reason"
+      "to get back to it. This is called from Infra.Working between polls,"
+      "where the loop has nothing else to do and the job it is waiting on"
+      "holds only the values it was handed, so the company is tended every"
+      "time round instead."
+      "The pool and the log that come back stay on the Eye the owner"
+      "carries. Nothing the job did reaches them, which is how this keeps"
+      "to the one writer ADR 0008 asks for."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match eye.company
+        Option.None -> glanced(eye, nowMs)
+        Option.Some(company) -> glanced(tendedAt(eye, Infra.Tending.tended(Infra.Tending.kept(company.pool, company.book, company.nextKey, eye.log))?, nowMs), nowMs)

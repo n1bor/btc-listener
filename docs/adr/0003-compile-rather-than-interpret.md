@@ -306,9 +306,10 @@ like a paragraph that says "closed".
 [#782](https://github.com/jasisz/aver/issues/782), the 30-second TCP read
 deadline, was answered by **removing** the deadline rather than making it
 configurable — timing out part way through a frame leaves the stream silently
-desynchronised — and every frame now starts with `Tcp.poll` at the message
-boundary, which is the one place a timeout abandons nothing. The README has
-said so correctly all along; only this section was stale.
+desynchronised. At that stage each frame started with `Tcp.poll` at the message
+boundary, where a timeout abandoned nothing. The README described that fix;
+only this section was stale. The September [Work/Wait migration](../work-wait-migration.md)
+now uses `Wait.poll` and incremental `readNow` buffers throughout the application.
 
 [#890](https://github.com/jasisz/aver/issues/890), a `Map` returned from a
 function being copied, closed too. **It retires no code here**, which is worth

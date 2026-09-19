@@ -155,6 +155,18 @@ jobs:
           aver verify main.av --module-root . | tee verify.log
           tail -1 verify.log | grep -E "\| 0 failed" \
             || { echo "verify reported failures"; exit 1; }
+      # The probes under tools/ are entries of their own and nothing in main
+      # reaches them, so the step above walks past their cases. Their own
+      # helpers are small, but a verify block nobody runs is worse than no
+      # verify block: it reads as covered.
+      - name: Verify the probes, which are not in the program graph
+        run: |
+          for probe in tools/dns_probe.av tools/working_probe.av; do
+            echo "== $probe"
+            aver verify "$probe" --module-root . | tee verify.log
+            tail -1 verify.log | grep -E "\| 0 failed" \
+              || { echo "verify reported failures in $probe"; exit 1; }
+          done
 
   verify-corpus:
     name: aver verify (Core corpus, ${{ matrix.shard }})
@@ -294,11 +306,13 @@ jobs:
           key: proof-lake-${{ hashFiles('.aver-version', 'domain/**', 'infra/kv.av') }}-${{ runner.os }}
       - name: Export, then install the toolchain it names
         run: |
+          export AVER_SPECULATIVE_LOG="$RUNNER_TEMP/proof-speculative.log"
           aver proof domain/interp.av --module-root . -o "$RUNNER_TEMP/proof"
           elan toolchain install "$(cat "$RUNNER_TEMP/proof/lean-toolchain")"
           elan show
       - name: Check against the committed budgets and baseline
         run: |
+          export AVER_SPECULATIVE_LOG="$RUNNER_TEMP/proof-speculative.log"
           aver proof domain/interp.av --module-root . -o "$RUNNER_TEMP/proof" \
             --check-json \
             --declined-budget "$(cat proof/interp.declined)" \
@@ -310,7 +324,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proof-summary
-          path: proof.json
+          path: |
+            proof.json
+            ${{ runner.temp }}/proof-speculative.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -363,6 +379,26 @@ jobs:
         run: |
           ldd --version | head -1
           objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+      # Seed discovery is here rather than in wasm-node, where the Work probe
+      # lives, because the Node host cannot run this program. That host serves
+      # Wait.poll through the Work host's codec, which reads the aver:work/v1
+      # descriptor and the __cap_abi_ helpers the compiler emits for a program
+      # that binds a Work capability. The resolver binds none, so the module
+      # carries no descriptor and createWorkHost refuses it. Giving the probe
+      # a Work capability it has no use for, to make a host accept it, would
+      # be a worse test than this one.
+      #
+      # So it runs natively, in the job that has already paid for everything
+      # it needs: the same CARGO_TARGET_DIR this job's cache holds, so only
+      # the probe's own crate is new. It runs before the artifact is uploaded
+      # because a resolver that hangs is a reason not to publish a binary.
+      - name: Build the DNS resolver probe beside the release binary
+        run: |
+          aver compile tools/dns_probe.av --module-root . -o "$RUNNER_TEMP/btc-dns-probe"
+          CARGO_TARGET_DIR=build/target cargo build --release \
+            --manifest-path "$RUNNER_TEMP/btc-dns-probe/Cargo.toml"
+      - name: Whole, fragmented, truncated and oversized DNS answers
+        run: python3 tools/regtest/dns-probe.py build/target/release/dns_probe
       # Kept so the release publishes the exact binary this job built and
       # this runner image ran, rather than a second build of it (#219).
       - name: Keep the built binary for the release
@@ -478,6 +514,18 @@ jobs:
         run: aver compile main.av --module-root . --target wasm-gc -o "$RUNNER_TEMP/btc-listener-wasm"
       - name: Run the complete listener against a local Bitcoin Peer
         run: node wasm/host.mjs "$RUNNER_TEMP/btc-listener-wasm/main.wasm"
+      - name: Check the Work adapter against the pinned Aver source
+        run: |
+          for file in host.mjs codec.mjs worker.mjs; do
+            cmp "wasm/aver-work/$file" "/home/owensr/aver/aver/tools/wasm-work/$file"
+          done
+      - name: Compile the production Work owner probe
+        run: aver compile tools/working_probe.av --module-root . --target wasm-gc -o "$RUNNER_TEMP/btc-work-wasm"
+      - name: Decode while serving peers, then cancel while serving peers
+        run: |
+          python3 tools/regtest/work-wait.py --payload "$RUNNER_TEMP/work-payload.bin" --count 2000
+          node wasm/host.mjs "$RUNNER_TEMP/btc-work-wasm/working_probe.wasm" --work-probe "$RUNNER_TEMP/work-payload.bin" 2000
+          node wasm/host.mjs "$RUNNER_TEMP/btc-work-wasm/working_probe.wasm" --work-probe "$RUNNER_TEMP/work-payload.bin" 2000 cancel
       # Kept so the release publishes the exact module this job proved, rather
       # than a second build of it. The binary job installs aver without
       # --features wasm and could not produce one anyway.
@@ -488,6 +536,36 @@ jobs:
           path: ${{ runner.temp }}/btc-listener-wasm/main.wasm
           if-no-files-found: error
           retention-days: 1
+
+  regtest:
+    name: isolated Bitcoin Core acceptance
+    needs: [compile]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: main-binary
+          path: build
+      - name: Install the pinned official Bitcoin Core
+        run: |
+          curl --fail --location --retry 3 https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz -o "$RUNNER_TEMP/core.tar.gz"
+          echo "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e  $RUNNER_TEMP/core.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/core.tar.gz" -C "$RUNNER_TEMP"
+          chmod +x build/main
+      - name: Reorg, relay, compact blocks, catch-up, hostile peers and pruning
+        run: python3 tools/regtest/suite.py --binary build/main --core-bin "$RUNNER_TEMP/bitcoin-31.1/bin" --output "$RUNNER_TEMP/regtest"
+      - name: Keep the report and listener logs, including on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regtest-report
+          path: |
+            ${{ runner.temp }}/regtest/*.json
+            ${{ runner.temp }}/regtest/*.log
+            ${{ runner.temp }}/regtest/core-*/process.log
+          retention-days: 7
 
   binary:
     name: publish the binary for main
@@ -502,7 +580,7 @@ jobs:
     # job outlasts the ones this used to wait on, so without it in `needs` the
     # artefact would usually not exist yet and every release would quietly
     # lack it.
-    needs: [format, check, verify, verify-corpus, provider-tests, compile, wasm-node, windows]
+    needs: [format, check, verify, verify-corpus, provider-tests, compile, wasm-node, regtest, windows]
     if: >-
       always() && github.ref == 'refs/heads/main'
       && needs.format.result == 'success'
@@ -512,6 +590,7 @@ jobs:
       && needs['provider-tests'].result == 'success'
       && needs.compile.result == 'success'
       && needs['wasm-node'].result == 'success'
+      && needs.regtest.result == 'success'
     runs-on: ubuntu-22.04
     permissions:
       contents: write

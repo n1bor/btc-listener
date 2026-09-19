@@ -19,7 +19,7 @@ module Utxo
         "stands written in the same batch so a crash lands on a whole one."
         "The read half (prepared) is kept apart from the write half (written)"
         "so the walk can run the reads beside the next Block's fetch (#233)."
-    exposes [Applied, Window, Absorbed, Split, connectBlock, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
+    exposes [Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
     effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
@@ -47,7 +47,7 @@ fn prepared(network: Network, store: Store, split: Split, height: Int, transacti
       "never enter the product, so nothing else owns them when the Block is"
       "absorbed and every Map.set stays in place."
     ! [Infra.Kv.getAll]
-    fromStore = resolved(store, List.reverse(split.misses), split.hits)?
+    fromStore = resolvedFor(store, split)?
     Result.Ok(Domain.Connect.connected(network, height, transactions, fromStore))
 
 record Split
@@ -632,3 +632,14 @@ fn swindowTx(txid: String, index: Int) -> Transaction
 
 verify swindowTx
     swindowTx("aa", 0).txid => "t1"
+
+fn resolvedFor(store: Store, split: Split) -> Result<Map<Bytes, Unspent>, String>
+    ? "Every Output this Block spends, looked up before the connecting"
+      "starts."
+      "The job that connects the Block is handed these coins rather than"
+      "the Store they came out of. It has to be: Infra.BlockJobs is a"
+      "capability and a Store is not something that crosses one. The"
+      "window stays here too, because the coins a recent Block made are"
+      "the owner's to remember and not the job's."
+    ! [Infra.Kv.getAll]
+    resolved(store, List.reverse(split.misses), split.hits)

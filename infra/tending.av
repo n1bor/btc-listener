@@ -17,15 +17,17 @@ module Tending
         "do. Nothing here decides anything about the chain. What a Peer sent"
         "while the walk was busy is kept by the pool (spare, bounded) for"
         "the loop to sort out afterwards, as it always was; a ping is"
-        "answered by the pool itself."
+        "answered where it is read, for the reason drainedOne gives."
     depends [Bytes, Domain.AddressBook, Domain.Network, Infra.Metrics, Infra.Peers]
     exposes [Kept, kept, tended, drainBudget]
     effects [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
 
 record Kept
@@ -57,9 +59,11 @@ fn tended(held: Kept) -> Result<Kept, String>
     ! [
         Console.error, Console.print,
         Disk.appendText,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     drained = drainedPool(held.pool, drainBudget())?
     advanced = Infra.Peers.advanced(drained)?
@@ -74,7 +78,7 @@ fn acceptedInto(held: Kept, taken: Infra.Peers.Accepted) -> Result<Kept, String>
     ! [Disk.appendText, Time.unixMs]
     match taken.seated
         Option.None -> Result.Ok(Kept(pool = taken.pool, book = held.book, nextKey = held.nextKey, log = held.log))
-        Option.Some(key) -> Result.Ok(Kept(pool = taken.pool, book = held.book, nextKey = key + 1, log = Infra.Metrics.noting(held.log, "peer", "inbound {key} seated while walking, {List.len(Infra.Peers.peerKeys(taken.pool))} held")?))
+        Option.Some(key) -> Result.Ok(Kept(pool = taken.pool, book = held.book, nextKey = key + 1, log = Infra.Metrics.noting(held.log, "peer", "inbound {key} admitted for handshake while walking, {List.len(Infra.Peers.peerKeys(taken.pool))} held")?))
 
 fn advertisedInto(held: Kept, advertised: Infra.Peers.Advertised) -> Result<Kept, String>
     ? "Where we told the Network we are, if this tending was the one to"
@@ -86,21 +90,43 @@ fn advertisedInto(held: Kept, advertised: Infra.Peers.Advertised) -> Result<Kept
 
 fn drainedPool(pool: Pool, budget: Int) -> Result<Pool, String>
     ? "Read what is already there, Message by Message, up to the budget."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match budget <= 0
         true -> Result.Ok(pool)
         false -> drainedOne(Infra.Peers.awaitTick(pool, 0)?, budget)
 
 fn drainedOne(ticked: Tick, budget: Int) -> Result<Pool, String>
-    ? "Nothing there ends the drain; a Message is kept for the loop."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ? "Nothing there ends the drain; a ping is answered and every other"
+      "Message is kept for the loop."
+      "The ping is answered here rather than put by with the rest. The"
+      "spare is bounded and keeps the newest, so a ping left in it can be"
+      "pushed out before the loop has its turn back, and a Peer that asked"
+      "and heard nothing drops us. Answering costs one write on a wire the"
+      "walk is draining anyway."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match ticked.arrived
         Option.None -> Result.Ok(ticked.pool)
-        Option.Some(one) -> drainedPool(Infra.Peers.spared(ticked.pool, one.key, one.frame), budget - 1)
+        Option.Some(one) -> match one.frame.command
+            "ping" -> drainedPool(Infra.Peers.tell(ticked.pool, one.key, "pong", Bytes.fromList(one.frame.body)?)?, budget - 1)
+            _ -> drainedPool(Infra.Peers.spared(ticked.pool, one.key, one.frame), budget - 1)
 
 fn saidAll(held: Kept, outcomes: List<Outcome>) -> Result<Kept, String>
     ? "Every dial that settled, oldest first."
-    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeNow, Time.unixMs]
     match outcomes
         [] -> Result.Ok(held)
         [head, ..tail] -> saidAll(said(held, head)?, tail)
@@ -110,14 +136,14 @@ fn said(held: Kept, one: Outcome) -> Result<Kept, String>
       "one that did not is noted and stays marked as tried. The same two"
       "lines the loop writes, so debug.log reads the same whoever seated"
       "the Peer."
-    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeNow, Time.unixMs]
     match one.seated
         false -> Result.Ok(withLog(held, Infra.Metrics.noting(held.log, "peer", "candidate {one.address} did not answer: {one.why}")?))
         true -> seated(held, one.address, one.key)
 
 fn seated(held: Kept, address: String, key: Int) -> Result<Kept, String>
     ? "Noted with the pool's size, then a getaddr, as the loop does."
-    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeBytes, Time.unixMs]
+    ! [Console.error, Disk.appendText, Tcp.close, Tcp.writeNow, Time.unixMs]
     noted = Infra.Metrics.noting(held.log, "peer", "seated {key} at {address} from the Book while walking, {List.len(Infra.Peers.peerKeys(held.pool))} held")?
     asked = Infra.Peers.tell(held.pool, key, "getaddr", Bytes.fromList([]))?
     Result.Ok(Kept(pool = asked, book = held.book, nextKey = held.nextKey, log = noted))

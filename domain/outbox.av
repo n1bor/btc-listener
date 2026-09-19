@@ -1,0 +1,98 @@
+module Outbox
+    intent =
+        "What one Peer has been told and has not taken yet."
+        "Tcp.writeBytes wrote a whole Message or failed. Tcp.writeNow takes"
+        "whatever the socket will accept at that moment and says how much,"
+        "so the rest of a frame has to be kept somewhere, and it has to be"
+        "kept in front of everything said since: half a frame with another"
+        "frame behind it is a Peer that drops us for talking nonsense. That"
+        "is the whole of this record -- the framed Messages in the order"
+        "they were said, an offset into the one at the front, and the bytes"
+        "still owed."
+        "The queue is bounded twice, by bytes and by Messages, because it"
+        "is memory that a Peer decides how much of we use. A Peer that asks"
+        "for more while reading nothing fills it, and what gives way is the"
+        "Peer's seat rather than this node's memory."
+    depends [Bytes]
+    exposes [Queued, empty, enqueue, front, consumed, byteLimit, messageLimit]
+
+record Queued
+    chunks: List<Bytes>
+    offset: Int
+    bytes: Int
+
+fn byteLimit() -> Int
+    ? "How many bytes may be waiting for one Peer: eight mebibytes."
+      "Room for the largest Block anybody may ask for, four million bytes,"
+      "and as much again for everything else. Infra.Peers.blockWatermark"
+      "is where that division is actually made."
+    8388608
+
+fn messageLimit() -> Int
+    ? "How many Messages may be waiting for one Peer: two hundred and"
+      "fifty-six. The byte count alone does not catch a Peer that asks for"
+      "thousands of small things, and a list that long is already a Peer"
+      "we are not keeping up with."
+    256
+
+fn empty() -> Queued
+    ? "A wire with nothing on it."
+    Queued(chunks = [], offset = 0, bytes = 0)
+
+fn enqueue(queue: Queued, bytes: Bytes) -> Result<Queued, String>
+    ? "One framed Message at the back, if both bounds leave room for it."
+      "The Err is not a retry. Whoever is holding this queue drops the"
+      "Peer that filled it, because a Peer that has not taken eight"
+      "mebibytes is not about to take the next byte either."
+    match Bool.or(queue.bytes + Bytes.len(bytes) > byteLimit(), List.len(queue.chunks) >= messageLimit())
+        true -> Result.Err("peer outbox is full")
+        false -> Result.Ok(Queued(chunks = List.concat(queue.chunks, [bytes]), offset = queue.offset, bytes = queue.bytes + Bytes.len(bytes)))
+
+verify enqueue
+    enqueue(Queued(chunks = [], offset = 0, bytes = byteLimit()), Bytes.fromList([1])) => Result.Err("peer outbox is full")
+
+fn front(queue: Queued, budget: Int) -> Bytes
+    ? "What to offer the socket now: the front Message from wherever the"
+      "last write stopped inside it, and no more than the budget. It never"
+      "reaches into the Message behind, which is the ordering this whole"
+      "record exists to keep."
+    match queue.chunks
+        [] -> Bytes.empty()
+        [head, ..rest] -> Bytes.take(Bytes.drop(head, queue.offset), budget)
+
+verify front
+    Bytes.octets(front(sample(), 2)) => [1, 2]
+
+fn consumed(queue: Queued, count: Int) -> Queued
+    ? "The queue after a write of that many bytes."
+      "A write takes at most what front offered it, so the count is"
+      "clamped to the front Message and can never eat into the next one."
+      "Zero is a socket that would take nothing this turn and leaves the"
+      "queue exactly where it was, which is what backpressure looks like"
+      "from in here."
+    match queue.chunks
+        [] -> empty()
+        [head, ..rest] -> consumedHead(queue, head, rest, Int.min(Int.max(count, 0), Bytes.len(head) - queue.offset))
+
+verify consumed
+    Bytes.octets(front(consumed(sample(), 2), 10)) => [3]
+    Bytes.octets(front(consumed(consumed(sample(), 2), 1), 10)) => [4, 5]
+    consumed(sample(), 0) => sample()
+    consumed(sample(), 2).bytes => 3
+    consumed(consumed(sample(), 3), 2) => empty()
+
+fn consumedHead(queue: Queued, head: Bytes, rest: List<Bytes>, count: Int) -> Queued
+    ? "The front Message finished and dropped, or its offset moved along."
+    match queue.offset + count == Bytes.len(head)
+        true -> Queued(chunks = rest, offset = 0, bytes = queue.bytes - count)
+        false -> Queued(chunks = queue.chunks, offset = queue.offset + count, bytes = queue.bytes - count)
+
+verify consumedHead
+    consumedHead(sample(), Bytes.fromList([1, 2, 3]), [Bytes.fromList([4, 5])], 3).bytes => 2
+    Bytes.octets(front(consumedHead(sample(), Bytes.fromList([1, 2, 3]), [Bytes.fromList([4, 5])], 3), 9)) => [4, 5]
+
+fn sample() -> Queued
+    ? "Two Messages on a wire, [1, 2, 3] and then [4, 5], for the cases"
+      "here. Two of them rather than one, so a case can tell a finished"
+      "Message from a moved offset."
+    Result.withDefault(enqueue(Result.withDefault(enqueue(empty(), Bytes.fromList([1, 2, 3])), empty()), Bytes.fromList([4, 5])), empty())

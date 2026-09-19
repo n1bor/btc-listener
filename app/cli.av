@@ -4,17 +4,19 @@ module Cli
         "Argument handling lives here so that address parsing in the domain stays"
         "pure and verifiable, and so the entrypoint has one thing to call."
     exposes [runCli]
-    depends [App.Lookup, App.Maintain, App.Node, App.Show, App.Usage, Domain.Index, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Bodies, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
+    depends [App.Lookup, App.Maintain, App.Node, App.Show, App.Usage, Domain.Index, Domain.BlockWorkJob, Infra.Lock, Domain.Address, Domain.Network, Infra.Blocks, Infra.Chain, Infra.Bodies, Infra.Download, Infra.Peer, Infra.Prune, Infra.Resolver, Infra.Store]
     effects [
         Args.get,
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
 
 record Span
@@ -35,12 +37,14 @@ fn runCli() -> Result<Unit, String>
         Args.get,
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     run(Args.get())
 
@@ -49,12 +53,14 @@ fn run(args: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match args
         [] -> discover(Network.Mainnet)
@@ -70,12 +76,14 @@ fn maybeNetwork(head: String, rest: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match head
         "signet" -> onNetwork(Network.Signet, rest)
@@ -87,12 +95,14 @@ fn onNetwork(network: Network, args: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match args
         [] -> discover(network)
@@ -103,12 +113,14 @@ fn dispatch(network: Network, command: String, rest: List<String>) -> Result<Uni
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.disableRawMode, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
         Time.now, Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match command
         "headers" -> needTwo(network, rest)
@@ -132,12 +144,14 @@ fn needTwo(network: Network, rest: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match rest
         [] -> Result.Ok(App.Usage.print())
@@ -148,12 +162,14 @@ fn withDir(network: Network, address: String, more: List<String>) -> Result<Unit
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
@@ -164,12 +180,14 @@ fn startHeaders(network: Network, parsed: Result<PeerAddress, String>, dir: Stri
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match parsed
         Result.Err(message) -> Result.Err("error: {message}")
@@ -183,12 +201,14 @@ fn headerRun(network: Network, address: PeerAddress, dir: String) -> Result<Stri
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.makeDir, Disk.readText, Disk.size, Disk.writeText,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     _claimed = Infra.Lock.claim(dir, "headers")?
     Infra.Lock.releasingAfter(dir, headersDone(network, address, dir))
@@ -198,12 +218,14 @@ fn headersDone(network: Network, address: PeerAddress, dir: String) -> Result<St
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.exists, Disk.makeDir, Disk.size,
-        Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.count, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     store = Infra.Store.open(dir)?
     grown = Infra.Download.headers(network, address, store)?
@@ -215,12 +237,14 @@ fn needFour(network: Network, rest: List<String>) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match rest
         [] -> Result.Ok(App.Usage.print())
@@ -231,12 +255,14 @@ fn bodyDir(network: Network, address: String, more: List<String>) -> Result<Unit
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match more
         [] -> Result.Ok(App.Usage.print())
@@ -247,12 +273,14 @@ fn bodyRange(network: Network, address: String, dir: String, range: List<String>
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match heights(range)
         Option.None -> Result.Ok(App.Usage.print())
@@ -305,12 +333,14 @@ fn startBodies(network: Network, parsed: Result<PeerAddress, String>, dir: Strin
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     match parsed
         Result.Err(message) -> Result.Err("error: {message}")
@@ -321,12 +351,14 @@ fn bodyRun(network: Network, address: PeerAddress, dir: String, span: Span) -> R
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.delete, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.readText, Disk.size, Disk.sync, Disk.writeBytes, Disk.writeText,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     _claimed = Infra.Lock.claim(dir, "bodies")?
     Infra.Lock.releasingAfter(dir, bodiesDone(network, address, dir, span))
@@ -336,12 +368,14 @@ fn bodiesDone(network: Network, address: PeerAddress, dir: String, span: Span) -
     ! [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.sync, Disk.writeBytes,
-        Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.open, Infra.Kv.putAll,
         Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
         Time.unixMs,
+        Wait.poll,
+        Work.cancel,
     ]
     store = Infra.Store.open(dir)?
     blocks = Infra.Blocks.open(blocksPath(dir))?
@@ -457,15 +491,21 @@ fn said(outcome: Result<String, String>) -> Result<Unit, String>
 
 fn discover(network: Network) -> Result<Unit, String>
     ? "With no address given, ask a DNS seed of the chosen Network for one."
-      "Tcp.connect and not the dial trio: a resolver is one question to one"
-      "server with nothing else to keep alive while it is asked, which is the"
-      "shape blocking suits and the shape a Peer never had."
+      "The dial trio and a poll, the same as everything else here that opens"
+      "a socket. It was Tcp.connect, on the grounds that a resolver is one"
+      "question to one server with nothing else to keep alive while it is"
+      "asked. The company was the part with nothing to keep alive. The"
+      "process was not: while the question was out nothing else in this"
+      "program ran, a stop included. Infra.Resolver waits with a deadline of"
+      "its own now and looks for a stop between waits."
     ! [
         Console.error, Console.print,
         Infra.Kv.getAll,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.connect, Tcp.dialled, Tcp.poll, Tcp.readBytes, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     _searching = Console.print("no peer given; asking a {Domain.Network.nameOf(network)} DNS seed")
     report(network, Infra.Resolver.discover(network))
@@ -475,9 +515,11 @@ fn runWithAddress(network: Network, address: String, rest: List<String>) -> Resu
     ! [
         Console.error, Console.print,
         Infra.Kv.getAll,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match rest
         [] -> report(network, Domain.Address.fromPeerText(address, Domain.Network.portOf(network)))
@@ -488,9 +530,11 @@ fn runWithPort(network: Network, address: String, port: String, extra: List<Stri
     ! [
         Console.error, Console.print,
         Infra.Kv.getAll,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match extra
         [] -> report(network, Domain.Address.fromParts(address, port))
@@ -501,9 +545,11 @@ fn report(network: Network, parsed: Result<PeerAddress, String>) -> Result<Unit,
     ! [
         Console.error, Console.print,
         Infra.Kv.getAll,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match parsed
         Result.Ok(address) -> connectTo(network, address)
@@ -514,9 +560,11 @@ fn connectTo(network: Network, address: PeerAddress) -> Result<Unit, String>
     ! [
         Console.error, Console.print,
         Infra.Kv.getAll,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     _announced = Console.print(describe(address))
     announce(Infra.Peer.run(network, address))

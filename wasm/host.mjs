@@ -19,6 +19,8 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { createWorkHost } from "./aver-work/host.mjs";
+
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 
 const PRIMITIVES_MODULE =
@@ -37,6 +39,9 @@ const output = [];
 const errors = [];
 let nextResource = 1;
 let guest = null;
+let workHost = null;
+let stopping = false;
+let onLine = () => {};
 let args = [];
 let stopAt = Number.POSITIVE_INFINITY;
 let wireBytesRead = 0;
@@ -300,6 +305,7 @@ function attachSocket(id, host, port, socket, kind) {
     state.connected = true;
     notify(state);
   });
+  socket.on("drain", () => notify(state));
   socket.on("data", (chunk) => {
     wireBytesRead += chunk.length;
     state.chunks.push(Buffer.from(chunk));
@@ -387,18 +393,17 @@ async function readExactly(state, count) {
   return Uint8Array.from(Buffer.concat(chunks));
 }
 
-function pollEntries(waitset) {
-  const entries = [];
-  const capacity = guest.__rt_tcp_poll_capacity(waitset);
-  for (let index = 0; index < capacity; index += 1) {
-    const socketRef = guest.__rt_tcp_poll_socket_at(waitset, index);
-    if (socketRef === null) continue;
-    const keyRef = guest.__rt_tcp_poll_key_at(waitset, index);
-    const id = averToJs(guest.__rt_tcp_socket_id(socketRef));
-    const kind = guest.__rt_tcp_socket_kind(socketRef);
-    entries.push({ keyRef, key: averIntToBigInt(keyRef), id, kind });
-  }
-  return entries;
+// The pinned Work ABI decodes socket handles to their host-owned id records.
+// Look up that token in this instance's socket table; workers never receive it.
+function socketEntries(items) {
+  return items.map(([key, item]) => {
+    const socket = item.fields[0];
+    const kinds = { Listening: 0, Dialing: 1, Connected: 2, Sending: 3 };
+    const name = socket.variant.split(".").at(-1);
+    if (!(name in kinds)) throw new Error(`unknown Tcp.Socket variant ${socket.variant}`);
+    const id = socket.fields[0].id;
+    return { key, id, kind: kinds[name] };
+  });
 }
 
 function entryReady(entry) {
@@ -414,40 +419,43 @@ function entryReady(entry) {
       && (state.chunks.length > 0 || state.ended || state.error !== null);
   }
   if (entry.kind === 3) {
-    // Sending: the same connection registered for write readiness
-    // (jasisz/aver#1331). Ready when the next writeNow would take at least
-    // one byte, or would fail. Nothing in this program registers one yet, so
-    // the only wake for a Sending-only waitset is the timeout; a drain event
-    // does not wake waiters here.
+    // A drain event wakes the combined socket/job wait after backpressure.
     return state.kind === "connection"
       && ((state.connected && !state.socket.writableNeedDrain) || state.ended || state.error !== null);
   }
   throw new Error(`unknown Tcp.Socket kind ${entry.kind}`);
 }
 
-async function waitForAny(entries, milliseconds) {
+async function waitForAny(entries, milliseconds, signal) {
+  const states = entries.map(entry => resourceById(entry.id, "Socket"));
   await new Promise((resolve) => {
     let timer = null;
     const wake = () => {
       if (timer !== null) clearTimeout(timer);
-      for (const entry of entries) resources.get(entry.id)?.waiters.delete(wake);
+      for (const state of states) state.waiters.delete(wake);
+      signal.removeEventListener("abort", wake);
       resolve();
     };
-    for (const entry of entries) resourceById(entry.id, "Socket").waiters.add(wake);
-    timer = setTimeout(wake, milliseconds);
+    if (signal.aborted) return resolve();
+    for (const state of states) state.waiters.add(wake);
+    signal.addEventListener("abort", wake, { once: true });
+    timer = setTimeout(wake, Math.min(milliseconds, 2147483647));
   });
 }
 
-async function readyEntries(waitset, timeoutMs) {
-  const entries = pollEntries(waitset);
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    const ready = entries.filter(entryReady);
-    if (ready.length > 0) return ready.sort((left, right) => (left.key < right.key ? -1 : 1));
-    const remaining = deadline - Date.now();
-    if (remaining <= 0 || entries.length === 0) return [];
-    await waitForAny(entries, remaining);
+// A job completion can win the race; abort removes every socket subscription.
+// Zero timeout still probes current readiness without registering a waiter.
+async function pollSockets(items, timeoutMs, signal) {
+  const entries = socketEntries(items);
+  const deadline = performance.now() + timeoutMs;
+  while (!signal.aborted) {
+    const ready = entries.filter(entryReady).map(entry => entry.key);
+    if (ready.length > 0) return ready;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return [];
+    await waitForAny(entries, remaining, signal);
   }
+  return [];
 }
 
 function intArgument(value, operationName) {
@@ -499,8 +507,20 @@ function versionPayload() {
   return Buffer.concat([fixed, Buffer.from([agent.length]), agent, height, Buffer.from([0])]);
 }
 
-async function startFakePeer() {
-  const state = { commands: [], handshake: false, corruptSent: false, sockets: new Set() };
+async function startFakePeer(workProbe = false, cancel = false) {
+  const state = { commands: [], handshake: false, corruptSent: false, sockets: new Set(), pong: false, delivered: false };
+  state.startWork = () => {
+    const socket = [...state.sockets][0];
+    const nonce = Buffer.alloc(8);
+    nonce.writeBigUInt64LE(7n);
+    const ping = bitcoinMessage("ping", nonce);
+    socket.write(ping.subarray(0, 7));
+    setTimeout(() => {
+      if (socket.destroyed) return;
+      const inv = Buffer.concat([Buffer.from([1, 2, 0, 0, 0]), Buffer.alloc(32, 0x42)]);
+      socket.write(Buffer.concat([ping.subarray(7), bitcoinMessage("inv", inv)]));
+    }, 20);
+  };
   const server = net.createServer((socket) => {
     state.sockets.add(socket);
     let buffered = Buffer.alloc(0);
@@ -521,6 +541,7 @@ async function startFakePeer() {
           ]));
         } else if (command === "verack" && !state.handshake) {
           state.handshake = true;
+          if (workProbe) continue;
           setTimeout(() => {
             if (!socket.destroyed) {
               const nonce = Buffer.alloc(FAKE_FRAME_BYTES);
@@ -529,6 +550,13 @@ async function startFakePeer() {
               state.corruptSent = true;
             }
           }, 25);
+        } else if (workProbe && command === "pong") {
+          const expected = Buffer.alloc(8);
+          expected.writeBigUInt64LE(7n);
+          if (!frame.equals(bitcoinMessage("pong", expected))) throw new Error("incorrect pong");
+          if (state.delivered) throw new Error("work finished before its peer was serviced");
+          state.pong = true;
+          if (cancel) { stopping = true; workHost.stop(); }
         }
       }
     });
@@ -637,6 +665,7 @@ function standardImports() {
     console_print: (message, _caller) => {
       const text = averToJs(message);
       output.push(text);
+      onLine(text);
       console.log(text);
     },
     console_error: (message, _caller) => {
@@ -650,7 +679,7 @@ function standardImports() {
     provider_contract_violation: (message, _caller) => {
       throw new Error(`provider contract violated: ${averToJs(message)}`);
     },
-    process_stop_requested: (_caller) => Date.now() >= stopAt ? 1 : 0,
+    process_stop_requested: (_caller) => stopping || Date.now() >= stopAt ? 1 : 0,
     time_unix_ms: (_caller) => BigInt(Date.now()),
     time_now: (_caller) => jsToAver(new Date().toISOString()),
     random_int: (minimumRef, maximumRef, _caller) => {
@@ -702,6 +731,13 @@ function standardImports() {
         return guest.__rt_result_int_string_ok(bigIntToAver(size));
       } catch (error) {
         return guest.__rt_result_int_string_err(jsToAver(`Disk.size: ${error.message}`));
+      }
+    },
+    disk_read_bytes: (pathRef, _caller) => {
+      try {
+        return resultBytesOk(readFileSync(safeDiskPath(averToJs(pathRef))));
+      } catch (error) {
+        return resultErr("Bytes", `Disk.readBytes: ${error.message}`);
       }
     },
     disk_read_bytes_at: (pathRef, offsetRef, countRef, _caller) => {
@@ -886,20 +922,43 @@ function standardImports() {
         return guest.__rt_result_string_string_err(jsToAver(`Tcp.peerAddress: ${error.message}`));
       }
     },
-    tcp_poll: suspending(async (waitset, timeoutRef, _caller) => {
+    wait_poll: suspending(async (waitset, timeoutRef, _caller) => {
       try {
-        const timeoutMs = intArgument(timeoutRef, "Tcp.poll");
-        if (timeoutMs < 0) throw new Error(`timeoutMs ${timeoutMs} must be non-negative`);
-        const ready = await readyEntries(waitset, timeoutMs);
-        let list = guest.__rt_list_int_nil();
-        for (let index = ready.length - 1; index >= 0; index -= 1) {
-          list = guest.__rt_list_int_cons(ready[index].keyRef, list);
-        }
-        return guest.__rt_result_list_int_string_ok(list);
+        return guest.__rt_result_wait_keys_ok(await workHost.wait(waitset, timeoutRef));
       } catch (error) {
-        return guest.__rt_result_list_int_string_err(jsToAver(`Tcp.poll: ${error.message}`));
+        return guest.__rt_result_wait_keys_err(jsToAver(`Wait.poll: ${error.message}`));
       }
     }),
+    tcp_write_now: (connectionRef, bytesRef, _caller) => {
+      try {
+        const state = connectionState(connectionRef);
+        if (state.error !== null) throw state.error;
+        if (state.ended || state.socket.destroyed) throw new Error("connection closed");
+        const bytes = averBytesToJs(bytesRef);
+        const accepted = state.socket.writableNeedDrain ? 0 : bytes.length;
+        if (accepted > 0) state.socket.write(bytes);
+        wireBytesWritten += accepted;
+        return guest.__rt_result_int_string_ok(bigIntToAver(BigInt(accepted)));
+      } catch (error) {
+        return guest.__rt_result_int_string_err(jsToAver(`Tcp.writeNow: ${error.message}`));
+      }
+    },
+    tcp_read_now: (connectionRef, maximumRef, _caller) => {
+      try {
+        const maximum = intArgument(maximumRef, "Tcp.readNow");
+        if (maximum <= 0 || maximum > TCP_BODY_LIMIT) {
+          throw new Error(`maxBytes ${maximum} must be within 1..=${TCP_BODY_LIMIT}`);
+        }
+        const state = connectionState(connectionRef);
+        if (state.error !== null) throw state.error;
+        if (state.chunks.length === 0 && !state.ended) {
+          return guest.__rt_result_option_bytes_string_none();
+        }
+        return guest.__rt_result_option_bytes_string_some(jsBytesToAver(takeAvailable(state, maximum)));
+      } catch (error) {
+        return guest.__rt_result_option_bytes_string_err(jsToAver(`Tcp.readNow: ${error.message}`));
+      }
+    },
     tcp_write_bytes: suspending(async (connectionRef, bytesRef, _caller) => {
       try {
         const state = connectionState(connectionRef);
@@ -991,26 +1050,53 @@ async function main() {
   if (typeof WebAssembly.Suspending !== "function" || typeof WebAssembly.promising !== "function") {
     throw new Error("Node.js with WebAssembly JSPI support is required");
   }
-  const requestedArgs = process.argv.slice(3).filter((argument) => argument !== "--");
-  const fake = requestedArgs.length === 0 ? await startFakePeer() : null;
-  args = fake === null ? requestedArgs : ["regtest", "127.0.0.1", String(fake.port)];
-  const sampleMs = Number(process.env.BTC_LISTENER_SAMPLE_MS ?? 20000);
+  let fake = null;
   const startedAt = Date.now();
-  if (fake === null) stopAt = Date.now() + sampleMs;
+  const requestStop = () => { stopping = true; workHost?.stop(); };
   try {
+    process.on("SIGINT", requestStop);
+    process.on("SIGTERM", requestStop);
+    const requestedArgs = process.argv.slice(3).filter((argument) => argument !== "--");
+    const workProbe = requestedArgs[0] === "--work-probe";
+    const cancel = workProbe && requestedArgs[3] === "cancel";
+    fake = requestedArgs.length === 0 || workProbe ? await startFakePeer(workProbe, cancel) : null;
+    args = fake === null ? requestedArgs : ["regtest", "127.0.0.1", String(fake.port)];
+    if (workProbe) {
+      if (!requestedArgs[1] || !/^[1-9][0-9]*$/.test(requestedArgs[2] ?? "")) {
+        throw new Error("--work-probe requires PAYLOAD EXPECTED_COUNT [cancel]");
+      }
+      writeFileSync(path.join(scratch, "payload.bin"), readFileSync(requestedArgs[1]));
+      args = [`127.0.0.1:${fake.port}`, "payload.bin"];
+      onLine = line => {
+        if (line === "work starting") fake.state.startWork();
+        if (line.startsWith("decoded ")) fake.state.delivered = true;
+      };
+    }
+    const sampleMs = Number(process.env.BTC_LISTENER_SAMPLE_MS ?? 20000);
+    if (fake === null) stopAt = Date.now() + sampleMs;
     const wasm = readFileSync(process.argv[2]);
     const imports = { aver: standardImports(), ...providerImports() };
-    const instantiated = await WebAssembly.instantiate(wasm, imports);
-    guest = instantiated.instance.exports;
+    const module = await WebAssembly.compile(wasm);
+    workHost = await createWorkHost(module, { maxJobs: 2, imports, pollSockets });
+    guest = workHost.instance.exports;
     const run = WebAssembly.promising(guest.main);
     let timeout = null;
     const deadline = new Promise((_, reject) => {
-      const timeoutMs = fake === null ? sampleMs + 120000 : 15000;
+      const timeoutMs = fake === null ? sampleMs + 120000 : workProbe ? 60000 : 15000;
       timeout = setTimeout(() => reject(new Error("listener path timed out")), timeoutMs);
     });
     const result = await Promise.race([run(), deadline]).finally(() => clearTimeout(timeout));
     const resultType = "Result<Unit, String>";
     const succeeded = helper(resultType, "tag")(result) === 1;
+    if (workProbe) {
+      if (!succeeded) throw new Error(averToJs(helper(resultType, "err_value")(result)));
+      const expected = cancel ? "cancelled" : `decoded ${requestedArgs[2]}`;
+      if (!output.includes(expected) || !output.some(line => line.startsWith("deferred 0:inv:37")) || !fake.state.pong || (cancel && fake.state.delivered)) {
+        throw new Error(`Work probe did not preserve delivery/cancellation, pong and deferred inv: ${output.join("; ")}`);
+      }
+      console.log(`btc-listener wasm Work ${cancel ? "cancellation" : "delivery"}: ok`);
+      return;
+    }
     if (fake === null) {
       if (!succeeded) {
         throw new Error(averToJs(helper(resultType, "err_value")(result)));
@@ -1033,6 +1119,9 @@ async function main() {
     }
     console.log(`full btc-listener listener path: ok (${failure})`);
   } finally {
+    process.off("SIGINT", requestStop);
+    process.off("SIGTERM", requestStop);
+    await workHost?.close();
     const seconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
     console.log(
       `Node host wire sample: ${wireBytesRead} B read, ${wireBytesWritten} B written in ${seconds.toFixed(1)} s`,

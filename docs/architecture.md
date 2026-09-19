@@ -189,89 +189,90 @@ Index. Reads are positional: a Location names its bytes and
 
 ```mermaid
 sequenceDiagram
-    participant L as the loop (Infra.Follow / Peer / Download)
+    participant O as Owner (Follow / Working)
     participant P as Infra.Peers (Pool)
-    participant I as Domain.Inbox
-    participant S as sockets (Tcp.poll / readSome)
-    L->>P: awaitTick(pool, tickMs)
-    P->>S: Tcp.poll over every connection + dials + listener
-    S-->>P: which keys are readable
-    P->>S: Tcp.readSome on each ready key
-    S-->>P: bytes (whatever arrived)
-    P->>I: firstOf(network, buffer)
-    I-->>P: a whole Message cut off the front, or "not yet"
-    P-->>L: Tick: messages by Peer key, joins, drops, polled ms
-    L->>P: send(pool, key, message) / awaitFrom(pool, key, "headers")
+    participant S as Sockets
+    participant W as Wait / Work
+    O->>P: serve a bounded network turn
+    P->>S: writeNow queued prefixes / readNow available bytes
+    S-->>P: progress, no progress, or peer-local failure
+    P->>P: buffer frames and advance pending greetings
+    P-->>O: updated Pool and messages
+    O->>W: poll socket interests + job, deadline 100 ms
+    W-->>O: readiness hints
+    O->>W: take job result (may still be None)
+    W-->>O: typed result when ready
+    O->>O: apply completed work to chain state
 ```
 
-[`Infra.Peers`](../infra/peers.av) (1,772 lines) owns every socket. The
-design decisions, each written in its intent block:
+[`Infra.Peers`](../infra/peers.av) owns peer sockets, inboxes, pending
+greetings and outboxes. [`Infra.Working`](../infra/working.av) retains the
+current owner state while a block calculation runs. The important boundaries:
 
-- **Bytes arrive on their schedule, not ours.** The single-Peer code asked a
-  socket for exactly 24 bytes and then exactly the announced payload. With
-  several Peers an exact-length read holds the whole loop until it completes.
-  So the pool reads whatever is there with `Tcp.readSome`, keeps a buffer per
-  Peer, and [`Domain.Inbox.firstOf`](../domain/inbox.av#L74) cuts a whole
-  Message off the front when one is present — verifying magic and checksum
-  as it goes, which nothing did before #27.
-- **Readiness is one `Tcp.poll`** over every connection, every in-flight dial
-  and the listener, keyed by `Int`s the caller owns
-  ([`awaitTick`](../infra/peers.av#L1501)). Since #202/#214 a dial is a key
-  in that poll rather than a five-second stall
-  ([`dialling`](../infra/peers.av#L905)).
-- **A straight-line conversation on a shared loop.**
-  [`awaitFrom(pool, key, wanted)`](../infra/peers.av#L1380) waits for one
-  named command from one Peer while every other Peer is still read and
-  pinged — the Header phase can be written as "send getheaders, await
-  headers" without owning the loop. Messages nobody asked for are kept
-  (bounded at 64) because Core answers a `getaddr` while we are waiting for
-  `headers`, and draining them later is how the Address Book fills.
-- **Two deadlines, not one.** 150 s of silence from the whole pool, and 60 s
-  for a Peer to answer the question it was asked; with several Peers those
-  stopped being the same fact.
-- **A Peer that misbehaves costs itself.** A bad checksum, a body that does
-  not hash to the Id it was asked under, a broken Handshake: the Peer is
-  dropped and the node carries on. No banscore, because every fault
-  detectable here is one Core disconnects on outright.
-- **A failure that happened holding the pool carries the pool (#304).** A
-  wait reads every Peer while it waits, so one that resets during a
-  Handshake is closed and forgotten in the pool that wait is building. A
-  Handshake that then fails reports it as a `Joined` that did not seat,
-  carrying that pool; handing back only a reason let the caller fall back to
-  the pool it held before the Handshake, which still named a socket the
-  runtime had released, and the next `Tcp.poll` ended the node with nobody at
-  fault — mainnet stopped that way twice in a day. Underneath it, a poll that
-  names a released Connection sheds those Peers and asks again rather than
-  failing the run: a socket the runtime does not know is one Peer's, like a
-  failed read (#203), accept (#227) or write (#244). The catch-up path still
-  rewinds this way ([`caughtUp`](../infra/follow.av)); the shedding is what
-  keeps that from ending a run until it is threaded through too.
+- **Reads and writes retain partial progress.** `Tcp.readNow` returns available
+  bytes or no progress; [`Domain.Inbox`](../domain/inbox.av) keeps incomplete
+  frames and checks whole Messages. [`Domain.Outbox`](../domain/outbox.av)
+  retains FIFO order across short `Tcp.writeNow` calls. A flush offers at most
+  64 KiB per Peer; each outbox is capped at 8 MiB and 256 Messages.
+- **Wait sets reflect their caller.** `Peers.awaitTick` watches peer reads and
+  pending writes, excluding the listener to avoid spinning on an unaccepted
+  caller. It returns an updated Pool and an optional Message. The Work owner
+  combines those interests with the listener, pending dial, job and retained
+  dashboard connections, using disjoint integer keys and a 100 ms stop-check
+  deadline. Readiness is a hint: a subsequent read or job take may find nothing.
+- **Admission does not await a Handshake.** Accepted callers and completed
+  active dials reserve a slot with pending greeting state. Each turn handles
+  at most four frames per pending Peer. The absolute ten-second deadline
+  never renews; at most eight early Messages are retained, and ordinary
+  dispatch sees the Peer only after `verack`. The startup `joined` facade
+  still waits for its result, with stop checks.
+- **A conversation can remain straight-line.** `awaitFrom(pool, key, wanted)`
+  waits for a named command while pumping the pool and answering pings.
+  Other Messages enter the existing 64-message spare queue. During Work,
+  address gossip updates the Book; remaining deferred Messages later pass
+  through normal dispatch in FIFO order.
+- **Deadlines describe different failures.** The pool can be silent for 150 s;
+  a Peer has 60 s to answer a question. A Handshake has its own ten-second
+  deadline. A malformed Message, reset, failed write or full outbox drops the
+  responsible Peer rather than stopping the node.
+- **Work returns values to one writer.** Block decoding and pure UTXO
+  connection run as one typed job, without sockets or Store access. The owner
+  resolves inputs, retains the chain context, and applies the completed
+  result. Stop or failure cancels the pending answer. Native cancellation
+  does not preempt the worker thread; database and filesystem work remains
+  synchronous on the owner.
 
-- **The company is kept while the node walks (#275).** The loop tends its
-  Peers every turn; a Set catch-up used to tend them only between chunks,
-  ten seconds apart, and a dial begun between two chunks was first looked at
-  after the next — past its deadline — so a catching-up node gained no Peers.
-  [`Infra.Tending`](../infra/tending.av) bundles the pool, the Address Book
-  and the next key as **Kept** and tends them from the same Pool-level
-  operations the loop uses: drain what arrived (kept as spare for the loop,
-  pings answered by the pool), ask the dial what it became, seat and greet a
-  Candidate that answered, top up, admit a caller off the listener, tell the
-  Network where we are. The walk's Eye carries a `Kept` and tends it once a
-  second ([`tendedCompany`](../infra/screen.av)); the chunk driver folds it
-  back after every chunk. A Peer is a Peer within a second of answering,
-  walking or listening.
-- **A pool that empties re-seeds (#272).** Nobody left to dial is the normal
-  state a minute after a restart; [`reseeded`](../infra/follow.av) asks the
-  DNS seeds again rather than ending the run.
+Resource ownership also explains the older #304 fix: a failed synchronous
+Handshake must return the updated Pool, not a snapshot naming a socket that
+was already closed. Active greetings now advance in the current Pool.
+The defensive poll path still sheds released connections; the inherited
+catch-up error path can still return an older snapshot
+([`caughtUp`](../infra/follow.av)), so that broader limitation is not claimed
+fixed here.
 
-The Handshake and wire formats are pure: [`Domain.Version`](../domain/version.av),
-[`Domain.Addr`](../domain/addr.av), [`Domain.Message`](../domain/message.av),
-[`Domain.Inventory`](../domain/inventory.av), [`Domain.CompactBlock`](../domain/compactblock.av).
-[`Domain.AddressBook`](../domain/addressbook.av) holds **Candidates** — Peer
-Addresses heard about and not yet connected — which become Peers only on a
-completed Handshake; CONTEXT.md is binding on both words. When no Peer is
-named, [`Infra.Resolver`](../infra/resolver.av) asks a DNS seed over TCP, with
-the question and answer built and read in pure [`Domain.Dns`](../domain/dns.av).
+[`Infra.Tending`](../infra/tending.av) carries the Pool, Address Book and
+next key as `Kept`: it answers pings, advances dials and greetings, tops up,
+accepts callers and advertises the node. The Work owner tends this company
+on each serving turn. Existing walks also retain their periodic tending
+through [`Infra.Screen`](../infra/screen.av). A pool that empties can reseed
+from DNS rather than ending the run.
+
+The Handshake and wire formats are pure:
+[`Domain.Handshake`](../domain/handshake.av),
+[`Domain.Version`](../domain/version.av), [`Domain.Addr`](../domain/addr.av),
+[`Domain.Message`](../domain/message.av), [`Domain.Inventory`](../domain/inventory.av)
+and [`Domain.CompactBlock`](../domain/compactblock.av).
+[`Domain.AddressBook`](../domain/addressbook.av) holds **Candidates** which
+become Peers only after a completed Handshake; CONTEXT.md is binding on both
+words. [`Infra.Resolver`](../infra/resolver.av) builds and parses DNS through
+pure [`Domain.Dns`](../domain/dns.av). Its TCP exchange has one 15 s deadline
+covering dial, write, length prefix and answer, with 100 ms stop checks.
+Discovery remains a sequential startup/empty-pool facade; it does not serve
+the dashboard concurrently while waiting for DNS.
+
+See [Work/Wait migration acceptance](work-wait-migration.md) for the required
+compiler, native responsiveness and replay probes, and remaining wasm-host
+and soak validation.
 
 ## 5. The chain: Headers, work and reorganisation
 

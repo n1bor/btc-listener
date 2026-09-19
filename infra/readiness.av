@@ -1,0 +1,32 @@
+module Readiness
+    intent =
+        "Socket keys as items a shared wait will take."
+        "Wait.poll takes a Map of Wait.Item, and Infra.Peers and"
+        "Infra.Board each keep a Map of Tcp.Socket keyed their own way."
+        "This is the one line that turns one into the other, so neither of"
+        "them has to know what else is in the wait, and so the readiness"
+        "and the timeout stay exactly what Wait says they are."
+    depends [Tcp, Wait]
+    exposes [items]
+    effects []
+
+fn items(sockets: Map<Int, Tcp.Socket>) -> Map<Int, Wait.Item>
+    ? "The same keys and socket interests, ready to share one wait with jobs."
+    fromKeys(sockets, Map.keys(sockets), {})
+
+verify items
+    items({}) => {}
+
+fn fromKeys(sockets: Map<Int, Tcp.Socket>, keys: List<Int>, acc: Map<Int, Wait.Item>) -> Map<Int, Wait.Item>
+    ? "One item per key that still names a socket, carrying whatever the"
+      "socket itself says it is waiting for: a Connected key waits to be"
+      "read, a Sending key waits to be written to."
+    match keys
+        [] -> acc
+        [key, ..rest] -> match Map.get(sockets, key)
+            Option.None -> fromKeys(sockets, rest, acc)
+            Option.Some(socket) -> fromKeys(sockets, rest, Map.set(acc, key, Wait.Item.Socket(socket)))
+
+verify fromKeys
+    fromKeys({}, [], {}) => {}
+    fromKeys({}, [1], {}) => {}

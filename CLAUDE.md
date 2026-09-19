@@ -64,7 +64,7 @@ recording *where something came from* looks identical to one recording *what
 is worked around*, and only the second retires with its issue —
 `connect_timeout_secs` in `aver.toml` cites #1118 and #1125, both now closed,
 and stays: it is a dial's deadline, which the dial still needs now that the
-dial is a key in `Tcp.poll` rather than a five-second stall.
+dial is a key in `Wait.poll` rather than a five-second stall.
 
 **Test against a real node before you commit.** `aver verify` checks this
 program against fixtures its own authors wrote, and a fixture cannot disagree
@@ -283,20 +283,20 @@ the two-hour future bound (#281) — and `Infra.Headers` is the only part that
 touches a Store. A batch with one failing Header is refused whole before any
 write, and the caller drops the Peer.
 
-**Several Peers on one loop** (#27, Stage 5): `infra/peers.av` owns every
-socket. Bytes are read as they arrive with `Tcp.readSome`, kept per Peer, and
-Messages cut off the front of the buffer by `domain/inbox.av` — exact-length
-reads are gone, because one of them holds the whole loop until it completes.
-Readiness is one `Tcp.poll` over every connection; the caller owns the `Int`
-keys, so they key the standing too. `awaitFrom(pool, key, wanted)` keeps a
-conversation straight-line while every other Peer is read and pinged. Every
-phase is a pool — `headers`, `bodies` and `listen` are pools of one. Two
-deadlines, not one: 150s of silence from the whole pool, and 60s for a Peer to
-answer the question it was asked, because with several Peers those stopped
-being the same fact. A Handshake has a third, 10s for the whole greeting fixed
-at seating (#284): it runs inline, so it is what a hostile caller costs the
-loop, and it does not reset per frame. `Domain.Handshake` says what a frame
-before `verack` is — nothing before `version`, at most eight kept after it.
+**Several Peers on one loop** (#27, Stage 5): `infra/peers.av` owns peer
+sockets and per-Peer buffers. `Tcp.readNow` takes available bytes;
+`domain/inbox.av` extracts whole Messages. `Tcp.writeNow` consumes a bounded
+prefix of the FIFO outbox, preserving the remainder for a later turn.
+`Wait.poll` watches read/write interests; the Work owner also watches the job,
+listener, dial and retained dashboard connections. `awaitFrom` remains the
+straight-line conversation facade. Every phase is a pool — `headers`, `bodies`
+and `listen` are pools of one. The pool idle deadline is 150s; an answer has
+60s. A pending Handshake has one non-renewing 10s deadline and handles at most
+four frames per turn. Admission and active dials no longer wait inline for
+`verack`; the startup `joined` facade still waits, with stop checks.
+`Domain.Handshake` rejects frames before `version` and permits at most eight
+kept Messages before `verack`. See [migration acceptance](docs/work-wait-migration.md)
+for compiler requirements, native and wasm tests and remaining synchronous storage work.
 
 **A Peer that misbehaves costs itself** (#27, Stage 5): every frame's magic
 bytes and checksum are verified in `domain/inbox.av` — neither was checked

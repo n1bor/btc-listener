@@ -118,16 +118,15 @@ citations, see `docs/script-laws.md`), each of which is also a millisecond
 test under `aver verify`. A proven helper law is a rewrite rule for every law
 below it.
 
-## The pin sits below jasisz/aver#1368 for now
+## The pinned proof-composition fix
 
-Moving the pin past `600b3551` turns every heavy `because` law red with
-`(deterministic) timeout at whnf, maximum number of heartbeats (200000)` — the
-CompactSize round trip, the ScriptParse byte-preservation family, one StackItem
-sign law — on Lean 4.33.1 and 4.34.0 alike. Bisected on 17 September 2026 to
-`6edc28b3` (#1368, the certificate-wall change) and filed as jasisz/aver#1386.
-`600b3551` is the newest upstream commit whose export is green (117 universal,
-3 bounded, 0 open, 134 declined), so that is the pin until #1386 closes; the
-canary will say when the tip is green again.
+Aver’s certificate-wall change (#1368) exposed default-heartbeat timeouts in
+this project’s heavy `because` laws, tracked in
+[jasisz/aver#1386](https://github.com/jasisz/aver/issues/1386).
+The pin includes [jasisz/aver#1387](https://github.com/jasisz/aver/pull/1387),
+which composes checked equations and citations before expanding helpers.
+The existing gate passes with **117 universal, 3 bounded, 0 open and 134 declined**,
+without increasing the heartbeat or admission budgets.
 
 ## The elan default, a closed chapter
 

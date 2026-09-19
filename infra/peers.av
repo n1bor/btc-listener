@@ -10,22 +10,34 @@ module Peers
         "pings, which go unanswered until they drop us."
         "So bytes are taken as they come, kept per Peer, and Messages cut out"
         "of what has accumulated (Domain.Inbox). Readiness comes from one"
-        "Tcp.poll over every socket, which is the primitive this stage was"
-        "waiting for (jasisz/aver#1013)."
+        "Wait.poll over every socket, which is the primitive this stage was"
+        "waiting for (jasisz/aver#1013). It carries write interests beside"
+        "the read ones, because a socket that would not take a whole"
+        "Message is also a thing worth being woken for; and while a Block"
+        "is being worked out elsewhere, the owner puts its own dial, its"
+        "listener and the job itself into the same wait."
+        "A Handshake is no longer a conversation this module stands in. A"
+        "caller is seated at once with a greeting pending against it, and"
+        "the greeting is moved along a few frames at a time on the turns"
+        "the loop takes anyway. n1bor/btc-listener#30 asked for exactly"
+        "that, and greetingTurn is where it landed."
         "The conversation is still written as straight-line code. A caller"
         "that wants an answer from one Peer says so, and while it waits every"
         "other Peer is read, buffered and kept alive. That is the whole trick:"
         "the schedule is the loop's, the question is the caller's, and neither"
         "has to be written in terms of the other."
         "Per ADR 0008 this module is the only thing here that touches a"
-        "socket, and it hands values back rather than writing anything down."
-    exposes [Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, opened, listening, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, peerIdleDeadlineMs, quietInbound, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers, claimsOf]
-    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
+        "Peer's socket, and it hands values back rather than writing"
+        "anything down."
+    exposes [watchSockets, popSpare, Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, Wanted, opened, listening, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, peerIdleDeadlineMs, quietInbound, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, wanting, blockServed, nextBlockWanted, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers, claimsOf]
+    depends [Domain.Outbox, Infra.Readiness, Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.listen, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
 
 record Spare
@@ -49,6 +61,9 @@ record Pool
     seenAs: Map<String, Int>
     toldMs: Int
     inboundCap: Int
+    greetings: Map<Int, Greeting>
+    outboxes: Map<Int, Queued>
+    pending: Map<Int, List<List<Int>>>
 
 record Dialing
     key: Int
@@ -89,10 +104,14 @@ record Polled
     pool: Pool
     ready: List<Int>
 
+record Wanted
+    key: Int
+    hash: List<Int>
+
 fn readChunk() -> Int
     ? "How many bytes to take off a ready socket at once."
-      "A ceiling rather than a target: Tcp.readSome returns as soon as"
-      "anything is there, so this only bounds how much one Peer can hand over"
+      "A ceiling rather than a target: Tcp.readNow takes available bytes"
+      "or reports no progress, bounding how much one Peer can hand over"
       "before the loop looks at the others. Sixty-four kilobytes is about"
       "what a socket buffer holds, so a bigger number would rarely be filled"
       "and a much smaller one would cut a Block into needless pieces."
@@ -135,7 +154,7 @@ fn pollable(pool: Pool) -> Map<Int, Tcp.Socket>
       "makes accepting a thing the loop does on its own schedule rather than"
       "a thing readiness drags it into, at the cost of a caller waiting one"
       "tick to be greeted."
-    pollableIn(pool.sockets, peerKeys(pool), Map.fromList([]))
+    pollableIn(pool.sockets, peerKeysIn(Map.keys(pool.sockets), []), Map.fromList([]))
 
 fn pollableIn(sockets: Map<Int, Tcp.Socket>, keys: List<Int>, acc: Map<Int, Tcp.Socket>) -> Map<Int, Tcp.Socket>
     ? "The named sockets, gathered into a map of their own."
@@ -156,11 +175,11 @@ fn withSocket(acc: Map<Int, Tcp.Socket>, key: Int, socket: Option<Tcp.Socket>) -
 verify withSocket
     Map.len(withSocket(Map.fromList([]), 1, Option.None)) => 0
 
-fn polling(pool: Pool, timeoutMs: Int) -> Result<Polled, String>
+fn pollingReady(pool: Pool, timeoutMs: Int) -> Result<Polled, String>
     ? "Which Peers have something to say, and the pool that could be asked."
       "A poll that names a Connection the runtime has already released fails"
       "as a whole rather than for that one socket, and it took the node with"
-      "it (#304): mainnet stopped twice in a day with Tcp.poll: unknown"
+      "it (#304): mainnet stopped twice in a day with Wait.poll: unknown"
       "connection and no Peer at fault, once ten hours into a Set walk and"
       "once twenty-three minutes into the restart. The runtime forgets a"
       "Connection on close and on any failed read or write alike, so a handle"
@@ -171,9 +190,9 @@ fn polling(pool: Pool, timeoutMs: Int) -> Result<Polled, String>
       "failed accept and #244 for a failed write, arriving at the operation"
       "every turn begins with. A second failure over sockets the runtime has"
       "just confirmed is not a stale handle, and is handed on."
-    ! [Console.error, Tcp.poll]
-    held = peerKeys(pool)
-    match Tcp.poll(pollable(pool), timeoutMs)
+    ! [Console.error, Process.stopRequested, Wait.poll]
+    held = peerKeysIn(Map.keys(pool.sockets), [])
+    match Wait.poll(Infra.Readiness.items(watchSockets(pool)), timeoutMs)
         Result.Ok(ready) -> Result.Ok(Polled(pool = pool, ready = ready))
         Result.Err(why) -> polledAgain(withoutGone(pool, held), List.len(held), timeoutMs)
 
@@ -181,17 +200,17 @@ fn polledAgain(pool: Pool, held: Int, timeoutMs: Int) -> Result<Polled, String>
     ? "The same question, over the Peers the runtime still knows, and a word"
       "about how many it did not: a Peer shed here is a Peer gone, and every"
       "other way of losing one says so."
-    ! [Console.error, Tcp.poll]
+    ! [Console.error, Wait.poll]
     _said = shedding(pool, held)
-    ready = Tcp.poll(pollable(pool), timeoutMs)?
+    ready = Wait.poll(Infra.Readiness.items(watchSockets(pool)), timeoutMs)?
     Result.Ok(Polled(pool = pool, ready = ready))
 
 fn pollingDial(pool: Pool, key: Int, dial: Tcp.Dial, timeoutMs: Int) -> Result<Polled, String>
     ? "The same, with a dial among the sockets: a Peer that went while a"
       "Candidate was being dialled must not cost the dial (#304)."
-    ! [Console.error, Tcp.poll]
-    held = peerKeys(pool)
-    match Tcp.poll(dialledWith(pool, key, dial), timeoutMs)
+    ! [Console.error, Process.stopRequested, Wait.poll]
+    held = peerKeysIn(Map.keys(pool.sockets), [])
+    match Wait.poll(Infra.Readiness.items(dialledWith(pool, key, dial)), timeoutMs)
         Result.Ok(ready) -> Result.Ok(Polled(pool = pool, ready = ready))
         Result.Err(why) -> polledDialAgain(withoutGone(pool, held), List.len(held), key, dial, timeoutMs)
 
@@ -199,9 +218,9 @@ fn polledDialAgain(pool: Pool, held: Int, key: Int, dial: Tcp.Dial, timeoutMs: I
     ? "The same question, over the Peers the runtime still knows, and the"
       "dial. A dial the runtime does not know is not a Peer's fault and is"
       "handed on."
-    ! [Console.error, Tcp.poll]
+    ! [Console.error, Wait.poll]
     _said = shedding(pool, held)
-    ready = Tcp.poll(dialledWith(pool, key, dial), timeoutMs)?
+    ready = Wait.poll(Infra.Readiness.items(dialledWith(pool, key, dial)), timeoutMs)?
     Result.Ok(Polled(pool = pool, ready = ready))
 
 fn shedding(pool: Pool, held: Int) -> Unit
@@ -212,7 +231,7 @@ fn shedding(pool: Pool, held: Int) -> Unit
 
 fn withoutGone(pool: Pool, keys: List<Int>) -> Pool
     ? "Every Peer whose socket the runtime no longer knows, forgotten."
-    ! [Tcp.poll]
+    ! [Process.stopRequested, Wait.poll]
     match keys
         [] -> pool
         [head, ..tail] -> withoutGone(withoutGoneOne(pool, head), tail)
@@ -220,10 +239,10 @@ fn withoutGone(pool: Pool, keys: List<Int>) -> Pool
 fn withoutGoneOne(pool: Pool, key: Int) -> Pool
     ? "One Peer, asked about on its own: a poll of a single socket that"
       "fails is a socket the runtime has released."
-    ! [Tcp.poll]
+    ! [Wait.poll]
     match Map.get(pool.sockets, key)
         Option.None -> pool
-        Option.Some(socket) -> forgottenIfGone(pool, key, Tcp.poll(Map.fromList([(key, socket)]), 0))
+        Option.Some(socket) -> forgottenIfGone(pool, key, Wait.poll(Infra.Readiness.items(Map.fromList([(key, socket)])), 0))
 
 fn forgottenIfGone(pool: Pool, key: Int, answer: Result<List<Int>, String>) -> Pool
     ? "Forgotten rather than closed: whoever released the handle closed it"
@@ -291,7 +310,7 @@ fn drawnElsewhere(pool: Pool) -> Pool
       "to know is whether a line it prints reaches a reader or lands in the"
       "middle of somebody's frame. In raw mode the second one has no carriage"
       "return after it, so the frame becomes a staircase."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = false, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, plain = false)
 
 fn saidIfPlain(pool: Pool, line: String) -> Unit
     ? "One line, unless something else owns the terminal."
@@ -353,21 +372,21 @@ fn told(pool: Pool, nowMs: Int) -> Result<Advertised, String>
       "a node that never reached agreement and a node that advertised and"
       "has not been dialled yet looked exactly alike, and they need"
       "different fixes."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match tellingDue(pool, nowMs)
         false -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
         true -> telling(pool, nowMs, selfAddress(pool))
 
 fn telling(pool: Pool, nowMs: Int, address: Option<String>) -> Result<Advertised, String>
     ? "The address agreed, turned back into one and sent to everybody."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match address
         Option.None -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
         Option.Some(one) -> sending(pool, nowMs, one, Domain.Address.fromPeerText(one, pool.port))
 
 fn sending(pool: Pool, nowMs: Int, text: String, parsed: Result<PeerAddress, String>) -> Result<Advertised, String>
     ? "An address of our own that will not parse is not one to send."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match parsed
         Result.Err(why) -> Result.Ok(Advertised(pool = pool, address = Option.None, peers = 0))
         Result.Ok(address) -> announcing(pool, nowMs, text, Domain.Addr.payload([address], Int.div(nowMs, 1000), servicesOf(pool))?)
@@ -375,19 +394,19 @@ fn sending(pool: Pool, nowMs: Int, text: String, parsed: Result<PeerAddress, Str
 fn announcing(pool: Pool, nowMs: Int, text: String, body: Bytes) -> Result<Advertised, String>
     ? "The same Message to every Peer, and the clock moved on whether or not"
       "each of them took it."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     Result.Ok(Advertised(pool = toldAt(sendingEach(pool, peerKeys(pool), body)?, nowMs), address = Option.Some(text), peers = List.len(peerKeys(pool))))
 
 fn sendingEach(pool: Pool, keys: List<Int>, body: Bytes) -> Result<Pool, String>
     ? "One Peer at a time."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match keys
         [] -> Result.Ok(pool)
         [head, ..tail] -> sendingEach(send(pool, head, "addr", body)?, tail, body)
 
 fn toldAt(pool: Pool, nowMs: Int) -> Pool
     ? "The pool, with the advertising clock moved on."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = nowMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, toldMs = nowMs)
 
 verify toldAt
     tellingDue(toldAt(twiceSeen(), 5), 5) => false
@@ -430,7 +449,7 @@ verify privateVersionBody
 
 fn listeningAt(pool: Pool, port: Int) -> Pool
     ? "A pool that has bound a port, for the cases here."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, port = port)
 
 verify listeningAt
     servingPort(listeningAt(opened(Network.Regtest), 8333)) => 8333
@@ -471,7 +490,7 @@ verify countedIfRoutable
 
 fn tallied(pool: Pool, address: String) -> Pool
     ? "The pool, with one more Peer having named that address."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = Map.set(pool.seenAs, address, timesSeen(pool, address) + 1), toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, seenAs = Map.set(pool.seenAs, address, timesSeen(pool, address) + 1))
 
 verify tallied
     timesSeen(tallied(opened(Network.Regtest), "1.2.3.4:8333"), "1.2.3.4:8333") => 1
@@ -546,7 +565,11 @@ fn peerKeys(pool: Pool) -> List<Int>
       "by key rather than by matching the socket, because the key is a plain"
       "Int a case can be written about and a Tcp.Socket is a capability"
       "resource that nothing outside the provider can build."
-    peerKeysIn(Map.keys(pool.sockets), [])
+      "A Peer still greeting is left out too. Its key is held and its"
+      "socket is real, but it has not said what it is yet, and a getaddr"
+      "or an addr sent to it before its verack is a Message Bitcoin Core"
+      "disconnects for. readyKeys is where that line is drawn."
+    readyKeys(pool, peerKeysIn(Map.keys(pool.sockets), []), [])
 
 fn peerKeysIn(keys: List<Int>, acc: List<Int>) -> List<Int>
     ? "One key at a time, keeping the ones that are Peers."
@@ -616,9 +639,11 @@ fn accepting(pool: Pool, key: Int) -> Result<Accepted, String>
       "costs a caller a second and costs a flood its whole point."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match Map.get(pool.sockets, listenerKey())
         Option.None -> Result.Ok(Accepted(pool = pool, seated = Option.None))
@@ -629,9 +654,11 @@ fn acceptingOn(pool: Pool, key: Int, socket: Tcp.Socket) -> Result<Accepted, Str
       "errors here, just nothing to do."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.accept, Tcp.close, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match socket
         Tcp.Socket.Listening(listener) -> acceptedOrNot(pool, key, Tcp.accept(listener))
@@ -650,9 +677,11 @@ fn acceptedOrNot(pool: Pool, key: Int, taken: Result<Option<Tcp.Connection>, Str
       "following the chain over it is a node anybody can stop."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match taken
         Result.Err(why) -> refusedAccept(pool, why)
@@ -668,9 +697,11 @@ fn acceptedFrom(pool: Pool, key: Int, taken: Option<Tcp.Connection>) -> Result<A
     ? "Nobody was waiting, or somebody was."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match taken
         Option.None -> Result.Ok(Accepted(pool = pool, seated = Option.None))
@@ -683,9 +714,11 @@ fn admitting(pool: Pool, key: Int, connection: Tcp.Connection) -> Result<Accepte
       "no by hanging up."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.peerAddress, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match inboundHeld(pool) >= inboundLimit(pool)
         true -> refusedInbound(pool, connection)
@@ -702,9 +735,11 @@ fn seatingIfNamed(pool: Pool, key: Int, connection: Tcp.Connection, named: Resul
       "further along. It costs the caller and nothing else."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match named
         Result.Err(why) -> hungUp(pool, connection, why)
@@ -782,9 +817,11 @@ fn seating(pool: Pool, key: Int, connection: Tcp.Connection, address: String) ->
       "unless its host already holds an inbound slot (#291)."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match inboundFromHost(pool.standing, Map.keys(pool.standing), hostText(address), 0) >= hostLimit()
         true -> refusedHost(pool, connection, address)
@@ -798,64 +835,28 @@ fn refusedHost(pool: Pool, connection: Tcp.Connection, address: String) -> Resul
     Result.Ok(Accepted(pool = pool, seated = Option.None))
 
 fn seatingIn(pool: Pool, key: Int, connection: Tcp.Connection, address: String) -> Result<Accepted, String>
-    ? "The caller into the pool, then the Handshake from the answering side."
-
+    ? "The caller into the pool, with its Handshake left pending against it."
       "It goes in exactly where a dialled Peer goes -- same map, same key"
       "space, same standing -- so everything downstream that counts bytes,"
       "reads Messages or drops a misbehaving Peer works on it without"
       "knowing which side dialled. The one thing that differs is recorded"
       "rather than implied: inbound is true."
-    ! [
-        Console.error, Console.print,
-        Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
-        Time.unixMs,
-    ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+      "What is new is that nothing is waited for here. The greeting used"
+      "to run inline, and a caller that connected and said nothing held"
+      "the whole loop for the answer deadline before it could be dropped:"
+      "the easiest denial of service imaginable, connect, stay silent,"
+      "watch the node stop following the chain. n1bor/btc-listener#30"
+      "wanted the greeting driven by the loop instead, and greetingTurn is"
+      "it. A caller now costs one entry in greetings and four frames a"
+      "turn until its ten seconds are up."
+      "The key is reserved the moment the caller is seated, so nothing"
+      "else can be given it, but peerKeys leaves it out until the verack"
+      "lands: a Peer that has not greeted is not one to fan a Message out"
+      "to."
+    ! [Console.error, Console.print, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs, Wait.poll]
+    seated = Pool.update(pool, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, address, true))
     _said = saidIfPlain(pool, "peer {key} dialled us from {address}")
-    greetedOrDropped(seated, key, address, greeting(seated, key, 0, "", 0, true, Time.unixMs() + handshakeDeadlineMs(), 0))
-
-fn greetedOrDropped(pool: Pool, key: Int, address: String, greeted: Result<Joined, String>) -> Result<Accepted, String>
-    ? "A caller that will not complete a Handshake costs itself its slot, and"
-      "costs this node nothing else."
-      "Never an error upward. Anybody at all may dial us, so a caller that"
-      "sends nonsense, or nothing, or hangs up mid-greeting is an ordinary"
-      "event -- and one that took the whole loop down with it would be the"
-      "easiest denial of service imaginable: connect, stay silent, watch the"
-      "node stop following the chain."
-      "The Err arm is what is left over: a fact about the whole pool rather"
-      "than about this caller, which ends the run wherever it is caught. The"
-      "pool it falls back to is stale for the reason #304 gives, and it is"
-      "the pool of a node that is stopping."
-      "What this does not yet defend against is the same caller doing it"
-      "slowly and repeatedly: the Handshake runs inline, so a silent caller"
-      "holds the loop for the answer deadline before this line is reached."
-      "n1bor/btc-listener#30 wants the greeting driven by the loop instead,"
-      "which is the real fix and a larger one."
-    ! [Console.error, Tcp.close]
-    match greeted
-        Result.Ok(landed) -> seatedCaller(landed, key, address)
-        Result.Err(why) -> droppedCaller(pool, key, address, why)
-
-fn seatedCaller(landed: Joined, key: Int, address: String) -> Result<Accepted, String>
-    ? "A caller that completed the Handshake is a Peer; one that did not is"
-      "dropped from the pool the Handshake handed back (#304)."
-      "That pool, and not the one held before the Handshake, is the whole"
-      "fix. A Handshake reads every other Peer while it waits, and one that"
-      "reset in the meantime has already been closed and forgotten -- in"
-      "this pool. Dropping the caller from the older one put that closed"
-      "socket back among the Peers, and the next Tcp.poll ended the node."
-    ! [Console.error, Tcp.close]
-    match landed.seated
-        true -> Result.Ok(Accepted(pool = landed.pool, seated = Option.Some(key)))
-        false -> droppedCaller(landed.pool, key, address, landed.why)
-
-fn droppedCaller(pool: Pool, key: Int, address: String, why: String) -> Result<Accepted, String>
-    ? "Close it, forget it, say why, and carry on."
-    ! [Console.error, Tcp.close]
-    _said = complainedIfPlain(pool, "dropping inbound peer {key} from {address}: {why}")
-    without = dropOne(pool, key)?
-    Result.Ok(Accepted(pool = without, seated = Option.None))
+    Result.Ok(Accepted(pool = awaitingGreeting(seated, key, address, true), seated = Option.Some(key)))
 
 fn peerIdleDeadlineMs() -> Int
     ? "How long one inbound Peer may say nothing before its slot is taken"
@@ -998,7 +999,7 @@ fn listenerKey() -> Int
     ? "The key the listening socket sits under in the pool."
       "Negative, so it cannot collide with a Peer: Peer keys start at zero"
       "and only ever count up. One map holds all three socket states now"
-      "(jasisz/aver#1138), which is what lets a single Tcp.poll wait on"
+      "(jasisz/aver#1138), which is what lets a single Wait.poll wait on"
       "Peers and on callers at once -- an accept loop that needed its own"
       "wait would need its own thread, and ADR 0008 has one writer."
     0 - 1
@@ -1040,7 +1041,7 @@ verify inboundLimit
 
 fn withInboundCap(pool: Pool, cap: Int) -> Pool
     ? "The pool, holding a cap the deployment chose."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = cap)
+    Pool.update(pool, inboundCap = cap)
 
 verify withInboundCap
     withInboundCap(opened(Network.Regtest), 40).inboundCap => 40
@@ -1103,18 +1104,24 @@ fn listening(pool: Pool, port: Int, services: Int, height: Int) -> Result<Pool, 
       "is not its own memory to fill."
     ! [Tcp.listen]
     listener = Tcp.listen(port, 16)?
-    Result.Ok(Pool(network = pool.network, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), standing = pool.standing, spare = pool.spare, serves = services, height = height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap))
+    Result.Ok(Pool.update(pool, sockets = Map.set(pool.sockets, listenerKey(), Tcp.Socket.Listening(listener)), serves = services, height = height, port = port))
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0, inboundCap = inboundDefault())
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0, inboundCap = inboundDefault(), greetings = {}, outboxes = {}, pending = {})
 
 fn withStanding(pool: Pool, standing: Map<Int, Standing>) -> Pool
     ? "The pool, with what is known about the Peers moved on."
       "The sockets and the standing are kept in step by only ever changing"
       "one of them here: the pure half is Domain.Inbox's and this is the one"
       "place it is folded back in."
-    Pool(network = pool.network, sockets = pool.sockets, standing = standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+      "A Peer still greeting is hidden from most of Domain.Inbox's work,"
+      "so a standing map worked out from what was visible has a hole where"
+      "that Peer was. restoredPending puts it back, and only where the new"
+      "map does not name it: the buffers of a Peer part way through its"
+      "Handshake would otherwise be dropped by whichever caller happened"
+      "to pop a Message from somebody else."
+    Pool.update(pool, standing = restoredPending(pool, standing, Map.keys(pool.greetings)))
 
 fn spareLimit() -> Int
     ? "How many unasked-for Messages to keep for the caller."
@@ -1132,9 +1139,26 @@ fn spareOf(pool: Pool) -> List<Spare>
     ? "The Messages that arrived while something else was being waited for."
     pool.spare
 
+fn popSpare(pool: Pool) -> Tick
+    ? "The oldest kept Message, handed over and forgotten, with the rest"
+      "left in the order they arrived."
+      "withoutSpare hands the whole list over at once, which suits a"
+      "caller that is going to look at every one of them. This suits the"
+      "loop, which takes one Message a turn and has to be able to stop"
+      "between two of them."
+    match pool.spare
+        [] -> Tick(pool = pool, arrived = Option.None)
+        [one, ..rest] -> Tick(pool = Pool.update(pool, spare = rest), arrived = Option.Some(one))
+
+verify popSpare
+    popSpare(opened(Network.Regtest)).arrived => Option.None
+    popSpare(spared(opened(Network.Regtest), 7, Frame(command = "inv", body = [1]))).arrived => Option.Some(Spare(key = 7, frame = Frame(command = "inv", body = [1])))
+    popSpare(popSpare(spared(opened(Network.Regtest), 7, Frame(command = "inv", body = [1]))).pool).arrived => Option.None
+    popSpare(popSpare(spared(spared(opened(Network.Regtest), 7, Frame(command = "inv", body = [1])), 8, Frame(command = "headers", body = [2]))).pool).arrived => Option.Some(Spare(key = 8, frame = Frame(command = "headers", body = [2])))
+
 fn withoutSpare(pool: Pool) -> Pool
     ? "The pool, with the kept Messages handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = [], serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, spare = [])
 
 fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept for whoever wants it later (#168)."
@@ -1147,7 +1171,7 @@ fn spared(pool: Pool, key: Int, frame: Frame) -> Pool
 
 fn sparing(pool: Pool, key: Int, frame: Frame) -> Pool
     ? "One unasked-for Message kept, oldest dropped once the bound is reached."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])), serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, spare = bounded(List.concat(pool.spare, [Spare(key = key, frame = frame)])))
 
 fn bounded(spare: List<Spare>) -> List<Spare>
     ? "Keep the newest, because an address heard a minute ago is worth more"
@@ -1182,7 +1206,7 @@ verify manySpare
 fn dialBudgetMs() -> Int
     ? "How long a dial may stay in flight before this loop gives up on it."
       "Normally nothing here ends a dead dial: the runtime has a deadline of"
-      "its own (connect_timeout_secs, in aver.toml), Tcp.poll clips its wait"
+      "its own (connect_timeout_secs, in aver.toml), Wait.poll clips its wait"
       "to that deadline so an expiring attempt cannot sleep behind a longer"
       "one, and Tcp.dialled then says what went wrong. This is the backstop"
       "for the case that never arrives -- a dial that keeps waking the poll"
@@ -1211,7 +1235,7 @@ record Joined
 fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
     ? "Dial a Peer and complete the Handshake, keeping the rest alive while"
       "it happens."
-      "The dial is one more key in the same Tcp.poll (jasisz/aver#1125), so"
+      "The dial is one more key in the same Wait.poll (jasisz/aver#1125), so"
       "a Candidate that never answers costs this pool nothing but the key it"
       "was going to have. It used to cost every Peer five seconds of"
       "silence, because Tcp.connect blocked -- and blocking is not something"
@@ -1228,9 +1252,11 @@ fn joined(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
       "poll itself failing, which is the loop and not one Candidate."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match Tcp.beginConnect(Domain.Address.hostOf(address), Domain.Address.portOf(address))
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
@@ -1307,18 +1333,41 @@ fn topParsed(pool: Pool, book: Map<String, Candidate>, nextKey: Int, parsed: Res
         Result.Ok(peer) -> Result.Ok(Topped(pool = dialling(pool, nextKey, peer), book = book, nextKey = nextKey + 1))
 
 fn dialingNow(pool: Pool) -> Bool
-    ? "Whether a dial is already in flight."
+    ? "Whether an outbound attempt is already under way."
       "One at a time, for the reason toppedUp gives: a Handshake is a"
       "conversation and this pool is the only thing that can have one. What"
       "changed with #202 is only that the conversation is no longer waited"
       "for -- the rate is still one."
+      "An attempt is two stages now rather than one, because the greeting"
+      "outlives the dial. A dial that becomes a Connection clears"
+      "pool.dialing and leaves a pending outbound greeting behind it, so"
+      "both have to be counted or a second Candidate would be dialled into"
+      "the gap between them every time."
     match pool.dialing
-        Option.None -> false
+        Option.None -> outboundGreeting(pool.greetings, Map.keys(pool.greetings))
         Option.Some(one) -> true
 
 verify dialingNow
     dialingNow(opened(Network.Regtest)) => false
     dialingNow(reported(opened(Network.Regtest), sampleOutcome())) => false
+
+fn outboundGreeting(greetings: Map<Int, Greeting>, keys: List<Int>) -> Bool
+    ? "Whether any greeting still pending is one this node started."
+      "A caller's greeting is not an attempt of ours and does not hold the"
+      "next dial back. A node with eight strangers half way through their"
+      "Handshakes should still be out looking for Peers of its own."
+    match keys
+        [] -> false
+        [key, ..rest] -> match Map.get(greetings, key)
+            Option.None -> outboundGreeting(greetings, rest)
+            Option.Some(one) -> match one.inbound
+                false -> true
+                true -> outboundGreeting(greetings, rest)
+
+verify outboundGreeting
+    outboundGreeting({}, []) => false
+    outboundGreeting({1 => sampleGreeting(true)}, [1]) => false
+    outboundGreeting({1 => sampleGreeting(false)}, [1]) => true
 
 fn dialling(pool: Pool, key: Int, address: PeerAddress) -> Pool
     ? "Start a dial and park it, without waiting for a single second of it."
@@ -1343,7 +1392,7 @@ fn began(pool: Pool, key: Int, address: PeerAddress, dial: Result<Tcp.Dial, Stri
     ! [Time.unixMs]
     match dial
         Result.Err(why) -> reported(pool, Outcome(key = key, address = Domain.Address.toString(address), seated = false, why = why))
-        Result.Ok(one) -> Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.Some(Dialing(key = key, address = address, dial = one, deadlineMs = Time.unixMs() + dialBudgetMs())), settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+        Result.Ok(one) -> Pool.update(pool, dialing = Option.Some(Dialing(key = key, address = address, dial = one, deadlineMs = Time.unixMs() + dialBudgetMs())))
 
 fn reported(pool: Pool, outcome: Outcome) -> Pool
     ? "The pool, with one more thing for the caller to say out loud."
@@ -1351,7 +1400,7 @@ fn reported(pool: Pool, outcome: Outcome) -> Pool
       "module does not know whether anybody may be spoken to. Kept rather"
       "than returned, so a dial that settles inside a walk is still reported"
       "when the walk ends -- the same shape as the spare Messages."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = List.concat(pool.settled, [outcome]), port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, dialing = Option.None, settled = List.concat(pool.settled, [outcome]))
 
 fn sampleOutcome() -> Outcome
     ? "One dial that came to nothing, for the cases here."
@@ -1371,7 +1420,7 @@ verify settledOf
 
 fn withoutSettled(pool: Pool) -> Pool
     ? "The pool, with those handed over and forgotten."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = [], port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, settled = [])
 
 verify withoutSettled
     settledOf(withoutSettled(reported(opened(Network.Regtest), sampleOutcome()))) => []
@@ -1385,9 +1434,11 @@ fn advanced(pool: Pool) -> Result<Pool, String>
       "difference between this and settling (#202)."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match pool.dialing
         Option.None -> Result.Ok(pool)
@@ -1397,9 +1448,11 @@ fn asked(pool: Pool, one: Dialing) -> Result<Pool, String>
     ? "What the runtime says the dial is now."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match Tcp.dialled(one.dial)
         Result.Err(why) -> Result.Ok(reported(pool, Outcome(key = one.key, address = Domain.Address.toString(one.address), seated = false, why = why)))
@@ -1410,9 +1463,11 @@ fn became(pool: Pool, one: Dialing, taken: Option<Tcp.Connection>) -> Result<Poo
       "for most of the seconds a dial takes."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.closeDial, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.closeDial, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match taken
         Option.None -> waiting(pool, one)
@@ -1439,19 +1494,30 @@ fn gaveUp(pool: Pool, one: Dialing) -> Pool
     reported(pool, Outcome(key = one.key, address = Domain.Address.toString(one.address), seated = false, why = "dial did not settle within {Int.div(dialBudgetMs(), 1000)} seconds"))
 
 fn arrivedAt(pool: Pool, one: Dialing, connection: Tcp.Connection) -> Result<Pool, String>
-    ? "A dial that became a Connection is a Peer to greet, which is the one"
-      "part of this that is still a conversation and still straight-line."
-      "It is a conversation with somebody who has just answered, so it takes"
-      "a round trip rather than a deadline -- and a Peer that completes a"
-      "TCP handshake and then says nothing is bounded by the answer deadline"
-      "like any other."
+    ? "A dial that became a Connection is a Peer to greet, and the greeting"
+      "is left pending on the pool rather than had here and now."
+      "This was the last conversation on the loop's own path: a round trip"
+      "with somebody who had just answered, which is instant when it works"
+      "and was the loop standing still when it did not. Our version goes"
+      "out at once, because there is no reason to make the Peer wait a"
+      "turn for it, and everything after it is greetingTurn's. A Peer that"
+      "completes a TCP handshake and then says nothing costs the ten"
+      "seconds handshakeDeadlineMs allows, and costs them to itself."
+      "That write can fail against a Peer that has already gone, which is"
+      "the attempt failing rather than the loop: greetingFailed closes it,"
+      "forgets it, and files the outcome for the caller to say out loud."
     ! [
         Console.error, Console.print,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
-    afterGreeting(pool, one.key, Domain.Address.toString(one.address), seatedOut(pool, one.key, one.address, connection))
+    seated = Pool.update(pool, dialing = Option.None, sockets = Map.set(pool.sockets, one.key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, one.key, Domain.Address.toString(one.address), false))
+    pending = awaitingGreeting(seated, one.key, Domain.Address.toString(one.address), false)
+    match ourVersionOut(pending, one.key, one.address)
+        Result.Ok(sent) -> Result.Ok(sent)
+        Result.Err(why) -> greetingFailed(pending, one.key, why)
 
 fn afterGreeting(pool: Pool, key: Int, address: String, outcome: Result<Joined, String>) -> Result<Pool, String>
     ? "Seated or dropped, the pool that comes back is the one to carry on"
@@ -1471,9 +1537,11 @@ fn joinedOnly(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String
       "the end of the run rather than one Candidate out of eight."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     outcome = joined(pool, key, address)?
     match outcome.seated
@@ -1484,11 +1552,13 @@ fn settling(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadline
     ? "Wait for the dial to settle, reading every other Peer while it does."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
-    match Time.unixMs() > deadlineMs
+    match Bool.or(Process.stopRequested(), Time.unixMs() > deadlineMs)
         true -> abandoned(pool, dial, "dial did not settle within {Int.div(dialBudgetMs(), 1000)} seconds")
         false -> settlingOn(pool, key, address, dial, deadlineMs)
 
@@ -1504,12 +1574,14 @@ fn settlingOn(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadli
       "minutes spent asleep on dead Candidates read as 739,535 ms of it."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     before = Time.unixMs()
-    polled = pollingDial(pool, key, dial, dialTickMs())?
+    polled = pollingDial(pool, key, dial, Int.min(100, dialTickMs()))?
     waited = polledFor(polled.pool, Time.unixMs() - before)
     settlingAfter(reading(waited, polled.ready)?, key, address, dial, deadlineMs, List.contains(polled.ready, key))
 
@@ -1518,15 +1590,17 @@ fn dialledWith(pool: Pool, key: Int, dial: Tcp.Dial) -> Map<Int, Tcp.Socket>
       "The listener is left out for the reason pollable gives: a queued"
       "caller keeps it ready, and a key that is always ready would spin this"
       "loop rather than let it wait."
-    Map.set(pollable(pool), key, Tcp.Socket.Dialing(dial))
+    Map.set(watchSockets(pool), key, Tcp.Socket.Dialing(dial))
 
 fn settlingAfter(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlineMs: Int, arrived: Bool) -> Result<Joined, String>
     ? "The dial woke the poll, or one of the Peers did."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match arrived
         false -> settling(pool, key, address, dial, deadlineMs)
@@ -1539,9 +1613,11 @@ fn promoting(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadlin
       "a reason to stop."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match Tcp.dialled(dial)
         Result.Err(why) -> abandoned(pool, dial, why)
@@ -1552,9 +1628,11 @@ fn promoted(pool: Pool, key: Int, address: PeerAddress, dial: Tcp.Dial, deadline
       "report; Some is a Peer."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match taken
         Option.None -> settling(pool, key, address, dial, deadlineMs)
@@ -1575,11 +1653,13 @@ fn seatedOut(pool: Pool, key: Int, address: PeerAddress, connection: Tcp.Connect
       "outbound and then introduced."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
-    seated = Pool(network = pool.network, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    seated = Pool.update(pool, sockets = Map.set(pool.sockets, key, Tcp.Socket.Connected(connection)), standing = Domain.Inbox.seated(pool.standing, key, Domain.Address.toString(address), false))
     introducedOrDropped(seated, key, address)
 
 fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, String>
@@ -1589,9 +1669,11 @@ fn introducedOrDropped(pool: Pool, key: Int, address: PeerAddress) -> Result<Joi
       "reason: whoever opened it closes it."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match introduced(pool, key, address)
         Result.Ok(landed) -> settledDial(landed, key)
@@ -1619,9 +1701,11 @@ fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, Stri
       "is a Joined that did not seat rather than an Err (#304)."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match ourVersionOut(pool, key, address)
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
@@ -1629,7 +1713,7 @@ fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, Stri
 
 fn ourVersionOut(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
     ? "Our version, addressed to the Candidate we dialled."
-    ! [Random.int, Tcp.writeBytes, Time.unixMs]
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
     body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
     send(pool, key, "version", body)
 
@@ -1639,9 +1723,14 @@ fn handshakeDeadlineMs() -> Int
       "caller that sent a ping every fifty-nine seconds and never a verack"
       "bought itself another answer deadline with each, and held the loop"
       "for ever. Ten seconds is generous for two Messages a Peer sends the"
-      "moment it connects, and it is what a silent caller now costs at most"
-      "-- the loop still waits here inline, which n1bor/btc-listener#30"
-      "wants driven by the loop instead."
+      "moment it connects, and it is what a silent caller costs at most."
+      "The caveat that used to be here is closed. The loop no longer waits"
+      "out this deadline inline: it is fixed when the caller is seated,"
+      "kept on that Peer's Greeting, and looked at on the turns the loop"
+      "takes anyway, so ten seconds is ten seconds of one Peer's patience"
+      "rather than ten seconds of the node's. n1bor/btc-listener#30 is"
+      "what asked for that. joined still waits, because startup has"
+      "nothing else to do until it has a Peer."
     10000
 
 verify handshakeDeadlineMs
@@ -1651,18 +1740,20 @@ fn greeting(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, seenHeigh
     ? "Read this Peer's Messages until its verack arrives, or the one deadline does."
       "A Handshake that does not complete is a fact about the other side, so"
       "it comes back as a Joined that did not seat, carrying the pool as it"
-      "stands (#304). It was an Err carrying a String, and both callers that"
-      "catch it -- greetedOrDropped and introducedOrDropped -- then fell back"
-      "to the pool they had held before the Handshake. Every Peer this wait"
-      "had closed and forgotten in the meantime was still named in that pool,"
-      "so the next Tcp.poll asked the runtime about a Connection it had"
-      "already released and ended the node with no Peer at fault: mainnet"
-      "stopped that way twice in a day, at Height 779373 and again at 780365."
+      "stands (#304). It was an Err carrying a String, and the callers that"
+      "catch it then fell back to the pool they had held before the"
+      "Handshake. Every Peer this wait had closed and forgotten in the"
+      "meantime was still named in that pool, so the next Wait.poll asked"
+      "the runtime about a Connection it had already released and ended the"
+      "node with no Peer at fault: mainnet stopped that way twice in a day,"
+      "at Height 779373 and again at 780365."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     heard = awaitAny(pool, key, deadlineMs)?
     handshaking(heard, key, seenVersion, seenAgent, seenHeight, inbound, deadlineMs, kept)
@@ -1671,9 +1762,11 @@ fn handshaking(heard: Heard, key: Int, seenVersion: Int, seenAgent: String, seen
     ? "A Message to sort, or a Peer that stopped answering mid-Handshake."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match heard.frame
         Option.None -> Result.Ok(Joined(pool = heard.pool, seated = false, why = heard.why))
@@ -1688,9 +1781,11 @@ fn handshakingOn(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, seen
       "Domain.Handshake says which of those this frame is."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match Domain.Handshake.stepOf(frame.command, seenVersion > 0, kept)
         Step.Done -> Result.Ok(Joined(pool = withStanding(pool, Domain.Inbox.greeted(pool.standing, key, seenVersion, seenAgent, seenHeight)), seated = true, why = ""))
@@ -1710,9 +1805,11 @@ fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool, deadlineMs
       "write that failed, so the one held here is the one to hand back."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match presenting(pool, key, inbound)
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
@@ -1720,13 +1817,13 @@ fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool, deadlineMs
 
 fn presenting(pool: Pool, key: Int, inbound: Bool) -> Result<Pool, String>
     ? "Our version if this Peer dialled us, then the verack that answers its."
-    ! [Random.int, Tcp.writeBytes, Time.unixMs]
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
     presented = ourVersionIfInbound(pool, key, inbound)?
     send(presented, key, "verack", Bytes.fromList([]))
 
 fn ourVersionIfInbound(pool: Pool, key: Int, inbound: Bool) -> Result<Pool, String>
     ? "Our own version, but only to a Peer that dialled us."
-    ! [Random.int, Tcp.writeBytes, Time.unixMs]
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
     match inbound
         false -> Result.Ok(pool)
         true -> ourVersionTo(pool, key)
@@ -1746,7 +1843,7 @@ fn ourVersionTo(pool: Pool, key: Int) -> Result<Pool, String>
       "four octets and a port, and Tcp.peerAddress spells an IPv6 endpoint in"
       "brackets. Refusing is the honest answer to a caller this node cannot"
       "represent, and it says so rather than failing further away."
-    ! [Random.int, Tcp.writeBytes, Time.unixMs]
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
     address = Domain.Address.fromPeerText(addressTextOf(Domain.Inbox.standingAt(pool.standing, key)), Domain.Network.portOf(pool.network))?
     body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
     send(pool, key, "version", body)
@@ -1778,9 +1875,11 @@ fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, seenHeigh
     ? "Answer a ping that arrived mid-Handshake, then carry on."
     ! [
         Console.error, Console.print,
+        Process.stopRequested,
         Random.int,
-        Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
         Time.unixMs,
+        Wait.poll,
     ]
     match ponged(pool, key, frame)
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
@@ -1788,13 +1887,13 @@ fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, seenHeigh
 
 fn ponged(pool: Pool, key: Int, frame: Frame) -> Result<Pool, String>
     ? "The nonce echoed back to whoever sent it."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     payload = Bytes.fromList(frame.body)?
     send(pool, key, "pong", payload)
 
 fn send(pool: Pool, key: Int, command: String, payload: Bytes) -> Result<Pool, String>
     ? "Frame a payload for this Network and put it on one Peer's wire."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match Map.get(pool.sockets, key)
         Option.None -> Result.Err("no Peer is held under identifier {key}")
         Option.Some(socket) -> sendingTo(pool, key, socket, command, payload)
@@ -1812,7 +1911,7 @@ fn tell(pool: Pool, key: Int, command: String, payload: Bytes) -> Result<Pool, S
       "accept, arriving at last at the operation the loop does most: one"
       "Peer's fault costs one Peer. send keeps the strict contract, because"
       "the Handshake genuinely needs to know."
-    ! [Console.error, Tcp.close, Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeNow]
     match Map.get(pool.sockets, key)
         Option.None -> Result.Ok(pool)
         Option.Some(socket) -> tellingOne(pool, key, socket, command, payload)
@@ -1822,7 +1921,7 @@ fn tellingOne(pool: Pool, key: Int, socket: Tcp.Socket, command: String, payload
       "saying so is all this can usefully do about it. A Sending key wraps a"
       "Connection too -- it is the same socket registered for write readiness"
       "-- so it is told the same way."
-    ! [Console.error, Tcp.close, Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeNow]
     match socket
         Tcp.Socket.Connected(connection) -> tookIt(pool, key, connection, command, payload)
         Tcp.Socket.Sending(connection) -> tookIt(pool, key, connection, command, payload)
@@ -1831,7 +1930,7 @@ fn tellingOne(pool: Pool, key: Int, socket: Tcp.Socket, command: String, payload
 
 fn tookIt(pool: Pool, key: Int, connection: Tcp.Connection, command: String, payload: Bytes) -> Result<Pool, String>
     ? "The Message written, or the Peer dropped for not taking it."
-    ! [Console.error, Tcp.close, Tcp.writeBytes]
+    ! [Console.error, Tcp.close, Tcp.writeNow]
     match written(pool, key, connection, command, payload)
         Result.Ok(after) -> Result.Ok(after)
         Result.Err(why) -> wentMidWrite(pool, key, command, why)
@@ -1839,7 +1938,7 @@ fn tookIt(pool: Pool, key: Int, connection: Tcp.Connection, command: String, pay
 fn wentMidWrite(pool: Pool, key: Int, command: String, why: String) -> Result<Pool, String>
     ? "Close the Peer that would not take it, say which and what, and carry"
       "on with the others."
-      "The command is named because the bare message -- Tcp.writeBytes:"
+      "The command is named because the bare message -- Tcp.writeNow:"
       "Broken pipe -- said neither who nor what, and a fault that costs one"
       "Peer should still say which Peer it cost."
     ! [Console.error, Tcp.close]
@@ -1856,7 +1955,7 @@ fn sendingTo(pool: Pool, key: Int, socket: Tcp.Socket, command: String, payload:
       "writeBytes on a Listener does not compile. The other two are answered"
       "rather than ignored, because a caller addressing a Message to a"
       "Listener has made a mistake worth naming."
-    ! [Tcp.writeBytes]
+    ! [Tcp.writeNow]
     match socket
         Tcp.Socket.Connected(connection) -> written(pool, key, connection, command, payload)
         Tcp.Socket.Sending(connection) -> written(pool, key, connection, command, payload)
@@ -1864,17 +1963,280 @@ fn sendingTo(pool: Pool, key: Int, socket: Tcp.Socket, command: String, payload:
         Tcp.Socket.Dialing(dial) -> Result.Err("identifier {key} is still dialling and cannot be sent to yet")
 
 fn written(pool: Pool, key: Int, connection: Tcp.Connection, command: String, payload: Bytes) -> Result<Pool, String>
-    ? "The framed Message onto the socket, and its bytes onto the Peer's"
-      "sent count (#131)."
-    ! [Tcp.writeBytes]
+    ? "The framed Message onto the Peer's wire, and one attempt at moving"
+      "that wire onto the socket."
+      "Tcp.writeBytes wrote the whole frame or failed, so there was nothing"
+      "to keep. Tcp.writeNow takes what the socket will accept and says how"
+      "much, so the Message goes to the back of this Peer's queue first and"
+      "the front of the queue is what is offered. Queueing before writing"
+      "is what keeps a frame whole: a Message written straight to a socket"
+      "that still owes half of an earlier one would arrive inside it, and a"
+      "Peer drops us for that."
+      "The bytes the socket took go onto the Peer's sent count (#131),"
+      "which is flushed's to do, because until the write comes back nobody"
+      "knows how many that was."
+    ! [Tcp.writeNow]
     framed = Domain.Message.frame(pool.network, command, payload)?
-    _sent = Tcp.writeBytes(connection, framed)?
-    Result.Ok(withStanding(pool, Domain.Inbox.saidBytes(pool.standing, key, List.len(Bytes.octets(framed)))))
+    queued = Domain.Outbox.enqueue(Option.withDefault(Map.get(pool.outboxes, key), Domain.Outbox.empty()), framed)?
+    flushConnection(Pool.update(pool, outboxes = Map.set(pool.outboxes, key, queued)), key, connection, queued)
+
+fn blockWatermark() -> Int
+    ? "How many bytes may already be waiting on a Peer's wire before another"
+      "Block is read off the disk for it."
+      "A Block is at most four million bytes, and Domain.Outbox refuses"
+      "anything that would take one Peer's queue past eight mebibytes. So a"
+      "Block read while four mebibytes are waiting still fits. That is the"
+      "whole of the arithmetic: the watermark is one Block's worth of room"
+      "short of the limit, rather than a number chosen for how it performed."
+      "What it leaves is 194,281 bytes, which is the limit less a queue one"
+      "byte below the watermark and the largest framed Block behind it. That"
+      "holds one headers reply of two thousand Headers and not two of them"
+      "(largestOtherMessage). So serving a Block is never itself the enqueue"
+      "that fails, which is what this bound is for. It is still serving that"
+      "leaves the invs, pings and headers sharing the queue with that much"
+      "room and no more, and a queue that fills costs a Peer its seat."
+    4194304
+
+verify blockWatermark
+    blockWatermark() => 4194304
+    Domain.Outbox.byteLimit() - blockWatermark() > 4000000 => true
+    Domain.Outbox.byteLimit() - (blockWatermark() - 1 + 4000024) => 194281
+    Domain.Outbox.byteLimit() - (blockWatermark() - 1 + 4000024) > largestOtherMessage() => true
+    Domain.Outbox.byteLimit() - (blockWatermark() - 1 + 4000024) > largestOtherMessage() * 2 => false
+
+fn largestOtherMessage() -> Int
+    ? "The largest Message this node puts on a wire that is not a Block: a"
+      "headers reply carrying Domain.Block.headersCap() Headers."
+      "Eighty-one bytes for each Header, three for the count in front of"
+      "them and twenty-four for the frame, which is 162,027 bytes. It is"
+      "written down so that the room blockWatermark leaves can be compared"
+      "against the thing most likely to want it, rather than described."
+    162027
+
+verify largestOtherMessage
+    largestOtherMessage() => 2000 * 81 + 3 + 24
+
+fn blockMessageWatermark() -> Int
+    ? "How many Messages may already be waiting on a Peer's wire before"
+      "another Block is read off the disk for it."
+      "Domain.Outbox bounds a queue by Messages as well as by bytes, and"
+      "the byte bound is reached first only while the Blocks being asked"
+      "for are large. Early mainnet Blocks are a couple of hundred"
+      "bytes each, so a Peer asking for the first thousand of them reaches"
+      "two hundred and fifty-six Messages with sixty kilobytes waiting,"
+      "and the enqueue that fails there is a Block this node chose to read."
+      "Half of what the queue is allowed goes to Blocks. The other half is"
+      "for the invs, pings and headers that share it."
+    128
+
+verify blockMessageWatermark
+    blockMessageWatermark() => 128
+    Domain.Outbox.messageLimit() - blockMessageWatermark() => 128
+
+fn wanting(pool: Pool, key: Int, hashes: List<List<Int>>, cap: Int) -> Pool
+    ? "Remember the Blocks a Peer has asked for, rather than answering them"
+      "all where it asked."
+      "One getdata may name a thousand Blocks and this node may hold every"
+      "one of them. Framing them all in one turn puts gigabytes into a queue"
+      "that is allowed eight mebibytes, and the Peer that asked politely is"
+      "the one dropped for it. Identifiers cost thirty-two bytes each, so"
+      "they are kept here and the bytes are read one Block at a time as the"
+      "wire empties."
+      "The cap counts what is already waiting rather than what this Message"
+      "named, so a Peer cannot lift it by asking twice."
+    wantingRoom(pool, key, Option.withDefault(Map.get(pool.pending, key), []), hashes, cap)
+
+verify wanting
+    Map.len(wanting(opened(Network.Regtest), 1, [], 1000).pending) => 0
+    Map.get(wanting(opened(Network.Regtest), 1, [sampleHash()], 1000).pending, 1) => Option.Some([sampleHash()])
+    Map.get(wanting(wanting(opened(Network.Regtest), 1, [sampleHash()], 1000), 1, [otherHash()], 1000).pending, 1) => Option.Some([sampleHash(), otherHash()])
+    Map.get(wanting(wanting(opened(Network.Regtest), 1, [sampleHash()], 1), 1, [otherHash()], 1).pending, 1) => Option.Some([sampleHash()])
+
+fn wantingRoom(pool: Pool, key: Int, held: List<List<Int>>, hashes: List<List<Int>>, cap: Int) -> Pool
+    ? "As many as the cap leaves room for, behind whatever is already waiting."
+    wantingKept(pool, key, List.concat(held, List.take(hashes, Int.max(cap - List.len(held), 0))))
+
+verify wantingRoom
+    Map.get(wantingRoom(opened(Network.Regtest), 1, [sampleHash()], [otherHash()], 2).pending, 1) => Option.Some([sampleHash(), otherHash()])
+    Map.get(wantingRoom(opened(Network.Regtest), 1, [sampleHash()], [otherHash()], 1).pending, 1) => Option.Some([sampleHash()])
+
+fn wantingKept(pool: Pool, key: Int, queue: List<List<Int>>) -> Pool
+    ? "An empty queue is no entry at all. A key that mapped to nothing would"
+      "shorten every poll on behalf of a Peer with nothing left to send."
+    match queue
+        [] -> Pool.update(pool, pending = Map.remove(pool.pending, key))
+        [head, ..rest] -> Pool.update(pool, pending = Map.set(pool.pending, key, queue))
+
+verify wantingKept
+    Map.len(wantingKept(opened(Network.Regtest), 1, []).pending) => 0
+    Map.len(wantingKept(wanting(opened(Network.Regtest), 1, [sampleHash()], 1000), 1, []).pending) => 0
+    Map.get(wantingKept(opened(Network.Regtest), 1, [sampleHash(), otherHash()]).pending, 1) => Option.Some([sampleHash(), otherHash()])
+
+fn blockServed(pool: Pool, key: Int) -> Pool
+    ? "The Block at the head of this Peer's queue has been dealt with, whether"
+      "it went onto the wire or was passed over for not being held."
+      "Taken before the write rather than after it, so a Peer that goes while"
+      "being sent the Block it asked for cannot be sent it again."
+    wantingKept(pool, key, List.drop(Option.withDefault(Map.get(pool.pending, key), []), 1))
+
+verify blockServed
+    Map.len(blockServed(opened(Network.Regtest), 1).pending) => 0
+    Map.len(blockServed(wanting(opened(Network.Regtest), 1, [sampleHash()], 1000), 1).pending) => 0
+    Map.get(blockServed(wanting(opened(Network.Regtest), 1, [sampleHash(), otherHash()], 1000), 1).pending, 1) => Option.Some([otherHash()])
+
+fn nextBlockWanted(pool: Pool) -> Option<Wanted>
+    ? "Which Peer, if any, should have a Block read off the disk for it now."
+      "Who is still seated is the one thing the decision cannot be written a"
+      "case about -- a Tcp.Socket is a capability resource nothing outside"
+      "the provider can build -- so it is read here, and the choice itself is"
+      "made over plain values in wantedIn."
+    wantedIn(pool, peerKeys(pool), Map.keys(pool.pending))
+
+verify nextBlockWanted
+    nextBlockWanted(opened(Network.Regtest)) => Option.None
+    nextBlockWanted(wanting(opened(Network.Regtest), 1, [sampleHash()], 1000)) => Option.None
+
+fn wantedIn(pool: Pool, seated: List<Int>, keys: List<Int>) -> Option<Wanted>
+    ? "The lowest-numbered Peer that has a Block waiting and room on its wire."
+      "Lowest first is arbitrary and bounded rather than unfair: a Peer holds"
+      "the turn only until its wire reaches the watermark, so a Peer asking"
+      "for a thousand Blocks cannot hold the one behind it for longer than a"
+      "queue takes to fill."
+    match keys
+        [] -> Option.None
+        [key, ..rest] -> wantedFor(pool, seated, key, rest, Option.withDefault(Map.get(pool.pending, key), []))
+
+verify wantedIn
+    wantedIn(opened(Network.Regtest), [1], []) => Option.None
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => List.drop([sampleHash()], 1)}), [1], [1]) => Option.None
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()]}), [1], [1]) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()]}), [], [1]) => Option.None
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()]}, outboxes = {1 => wireAt(blockWatermark())}), [1], [1]) => Option.None
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()]}, outboxes = {1 => wireAt(blockWatermark() - 1)}), [1], [1]) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()], 2 => [otherHash()]}, outboxes = {1 => wireAt(blockWatermark())}), [1, 2], [1, 2]) => Option.Some(Wanted(key = 2, hash = otherHash()))
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()], 2 => [otherHash()]}), [2], [1, 2]) => Option.Some(Wanted(key = 2, hash = otherHash()))
+    wantedIn(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()], 2 => [otherHash()]}), [1, 2], [1, 2]) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+
+fn wantedFor(pool: Pool, seated: List<Int>, key: Int, rest: List<Int>, queue: List<List<Int>>) -> Option<Wanted>
+    ? "A Peer with nothing waiting is passed over for the next one."
+    match queue
+        [] -> wantedIn(pool, seated, rest)
+        [hash, ..more] -> wantedIfRoom(pool, seated, key, rest, hash)
+
+verify wantedFor
+    wantedFor(opened(Network.Regtest), [1], 1, [], []) => Option.None
+    wantedFor(opened(Network.Regtest), [1], 1, [], [sampleHash(), otherHash()]) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+
+fn wantedIfRoom(pool: Pool, seated: List<Int>, key: Int, rest: List<Int>, hash: List<Int>) -> Option<Wanted>
+    ? "A Peer whose wire is already at either watermark waits its turn; one"
+      "that has gone since it asked is passed over here and loses its queue"
+      "with its key in forgotten."
+    match Bool.and(List.contains(seated, key), roomForBlock(queuedBytes(pool, key), queuedMessages(pool, key)))
+        true -> Option.Some(Wanted(key = key, hash = hash))
+        false -> wantedIn(pool, seated, rest)
+
+verify wantedIfRoom
+    wantedIfRoom(opened(Network.Regtest), [1], 1, [], sampleHash()) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+    wantedIfRoom(opened(Network.Regtest), [], 1, [], sampleHash()) => Option.None
+    wantedIfRoom(Pool.update(opened(Network.Regtest), outboxes = {1 => wireAt(blockWatermark())}), [1], 1, [], sampleHash()) => Option.None
+    wantedIfRoom(Pool.update(opened(Network.Regtest), outboxes = {1 => wireHolding(blockMessageWatermark())}), [1], 1, [], sampleHash()) => Option.None
+    wantedIfRoom(Pool.update(opened(Network.Regtest), outboxes = {1 => wireHolding(blockMessageWatermark() - 1)}), [1], 1, [], sampleHash()) => Option.Some(Wanted(key = 1, hash = sampleHash()))
+
+fn queuedBytes(pool: Pool, key: Int) -> Int
+    ? "How many bytes are already waiting on one Peer's wire."
+    match Map.get(pool.outboxes, key)
+        Option.None -> 0
+        Option.Some(queue) -> queue.bytes
+
+verify queuedBytes
+    queuedBytes(opened(Network.Regtest), 1) => 0
+    queuedBytes(Pool.update(opened(Network.Regtest), outboxes = {1 => wireAt(7)}), 1) => 7
+
+fn roomForBlock(bytes: Int, messages: Int) -> Bool
+    ? "Whether a wire already carrying that much has room for another Block"
+      "read off the disk for it."
+      "Both bounds rather than either, because Domain.Outbox refuses on"
+      "whichever of the two it reaches first, and which one that is depends"
+      "on how large the Blocks a Peer is asking for happen to be. The byte"
+      "bound is reached first from about sixteen kilobytes a Block upward,"
+      "which is four mebibytes divided by two hundred and fifty-six, and"
+      "the Message bound below that."
+    Bool.and(bytes < blockWatermark(), messages < blockMessageWatermark())
+
+verify roomForBlock
+    roomForBlock(0, 0) => true
+    roomForBlock(blockWatermark() - 1, 0) => true
+    roomForBlock(blockWatermark(), 0) => false
+    roomForBlock(0, blockMessageWatermark() - 1) => true
+    roomForBlock(0, blockMessageWatermark()) => false
+    roomForBlock(blockWatermark(), blockMessageWatermark()) => false
+
+fn queuedMessages(pool: Pool, key: Int) -> Int
+    ? "How many Messages are already waiting on one Peer's wire."
+    match Map.get(pool.outboxes, key)
+        Option.None -> 0
+        Option.Some(queue) -> List.len(queue.chunks)
+
+verify queuedMessages
+    queuedMessages(opened(Network.Regtest), 1) => 0
+    queuedMessages(Pool.update(opened(Network.Regtest), outboxes = {1 => wireHolding(3)}), 1) => 3
+
+fn wireAt(bytes: Int) -> Queued
+    ? "A wire carrying that many bytes, for the cases here. Only the count is"
+      "read by the decision, so a case says the count rather than building"
+      "four mebibytes to say it."
+    Queued(chunks = [], offset = 0, bytes = bytes)
+
+verify wireAt
+    wireAt(7).bytes => 7
+
+fn wireHolding(count: Int) -> Queued
+    ? "A wire carrying that many Messages and no bytes, for the cases here."
+      "The Message count is the thing being said something about, so the"
+      "frames on it are empty and its byte count stays where an empty wire"
+      "leaves it."
+    Queued(chunks = framesOf(count, []), offset = 0, bytes = 0)
+
+verify wireHolding
+    List.len(wireHolding(3).chunks) => 3
+    wireHolding(3).bytes => 0
+
+fn framesOf(count: Int, acc: List<Bytes>) -> List<Bytes>
+    ? "That many empty frames."
+    match count > 0
+        true -> framesOf(count - 1, List.prepend(Bytes.empty(), acc))
+        false -> acc
+
+verify framesOf
+    List.len(framesOf(0, [])) => 0
+    List.len(framesOf(5, [])) => 5
+
+fn sampleHash() -> List<Int>
+    ? "A stand-in Block identifier for the cases here, the length a real one is."
+    [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]
+
+verify sampleHash
+    List.len(sampleHash()) => 32
+
+fn otherHash() -> List<Int>
+    ? "A second identifier, so a case can tell order from coincidence."
+    List.prepend(9, List.drop(sampleHash(), 1))
+
+verify otherHash
+    List.len(otherHash()) => 32
+    otherHash() == sampleHash() => false
 
 fn awaitFrom(pool: Pool, key: Int, wanted: String) -> Result<Waited, String>
     ? "The next Message of this command from this Peer, with the deadline"
       "measured from now."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     awaitingFrom(pool, key, wanted, Time.unixMs() + answerDeadlineMs())
 
 fn awaitingFrom(pool: Pool, key: Int, wanted: String, deadlineMs: Int) -> Result<Waited, String>
@@ -1884,7 +2246,14 @@ fn awaitingFrom(pool: Pool, key: Int, wanted: String, deadlineMs: Int) -> Result
       "so nothing arrives while we are not listening, and asking one Peer a"
       "question costs the others nothing -- including their pings, which is"
       "what the single-Peer shape could not manage."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     heard = awaitAny(pool, key, deadlineMs)?
     matchingHeard(heard, key, wanted, deadlineMs)
 
@@ -1900,28 +2269,56 @@ fn matchingHeard(heard: Heard, key: Int, wanted: String, deadlineMs: Int) -> Res
       "Infra.Download, Infra.Bodies and Infra.ChainState to carry it too."
       "Until then the shedding in polling is what keeps that from ending the"
       "run."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match heard.frame
         Option.None -> Result.Err(heard.why)
         Option.Some(frame) -> matching(heard.pool, key, wanted, deadlineMs, frame)
 
 fn matching(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Frame) -> Result<Waited, String>
     ? "The Message asked for, a ping answered, or one put by and another wait."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match frame.command == wanted
         true -> Result.Ok(Waited(pool = pool, frame = frame))
         false -> skipped(pool, key, wanted, deadlineMs, frame)
 
 fn skipped(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Frame) -> Result<Waited, String>
     ? "A ping has to be answered even while waiting for something else."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match frame.command
         "ping" -> answeredPing(pool, key, wanted, deadlineMs, frame)
         _ -> awaitingFrom(sparing(pool, key, frame), key, wanted, deadlineMs)
 
 fn answeredPing(pool: Pool, key: Int, wanted: String, deadlineMs: Int, frame: Frame) -> Result<Waited, String>
     ? "Echo the nonce back, then carry on waiting."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     payload = Bytes.fromList(frame.body)?
     sent = send(pool, key, "pong", payload)?
     awaitingFrom(sent, key, wanted, deadlineMs)
@@ -1961,21 +2358,42 @@ fn awaitAny(pool: Pool, key: Int, deadlineMs: Int) -> Result<Heard, String>
       "Err (#304), so the pool the waiting built comes back either way. An"
       "Err here is now only what it always meant to be: a fact about the"
       "whole pool, which is a node that has stopped being connected."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match Map.has(pool.sockets, key)
         false -> Result.Ok(heardNothing(pool, "peer {key} closed the connection before answering"))
         true -> awaitHeld(pool, key, deadlineMs)
 
 fn awaitHeld(pool: Pool, key: Int, deadlineMs: Int) -> Result<Heard, String>
     ? "The next Message from a Peer the pool still holds."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match Domain.Inbox.popped(pool.network, pool.standing, key)
         Result.Err(why) -> Result.Ok(heardNothing(pool, "peer {key}: {why}"))
         Result.Ok(found) -> orPump(pool, key, deadlineMs, found)
 
 fn orPump(pool: Pool, key: Int, deadlineMs: Int, found: Option<Popped>) -> Result<Heard, String>
     ? "A Message already read, or another turn of the loop."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match found
         Option.Some(one) -> Result.Ok(heardOne(withStanding(pool, one.standing), one.frame))
         Option.None -> pumpedFor(pool, key, deadlineMs)
@@ -1986,8 +2404,15 @@ fn pumpedFor(pool: Pool, key: Int, deadlineMs: Int) -> Result<Heard, String>
       "and silence from the Peer were the same fact; with several they are"
       "not, and a chatty Peer would otherwise keep the loop from ever noticing"
       "that the one being waited on had stopped answering."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Tcp.writeBytes, Time.unixMs]
-    match Time.unixMs() > deadlineMs
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Bool.or(Process.stopRequested(), Time.unixMs() > deadlineMs)
         true -> Result.Ok(heardNothing(pool, "Peer {key} did not answer before its deadline"))
         false -> awaitAny(pumpedUntil(pool, deadlineMs)?, key, deadlineMs)
 
@@ -1999,12 +2424,19 @@ fn pumpedUntil(pool: Pool, deadlineMs: Int) -> Result<Pool, String>
       "until some other Peer happened to speak, up to the idle deadline"
       "(#284). The poll is bounded by whichever comes first; when it is this"
       "Peer's deadline the turn ends quietly and the caller says so."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     before = Time.unixMs()
-    polled = polling(pool, Int.max(0, Int.min(idleDeadlineMs(), deadlineMs - before)))?
+    polled = polling(pool, Int.max(0, Int.min(100, deadlineMs - before)))?
     waited = polledFor(polled.pool, Time.unixMs() - before)
     match polled.ready
-        [] -> quietUntil(waited, deadlineMs - before)
+        [] -> quietUntil(waited, Time.unixMs() - before)
         [head, ..tail] -> reading(waited, polled.ready)
 
 fn quietUntil(pool: Pool, leftMs: Int) -> Result<Pool, String>
@@ -2023,8 +2455,15 @@ fn awaitAnyPeer(pool: Pool) -> Result<WaitedFrom, String>
       "waited for, so nothing is put back and nothing is skipped. The only"
       "deadline is the pool's own -- silence from everybody, which is a node"
       "that is no longer connected to the Network."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
-    match Domain.Inbox.poppedAny(pool.network, pool.standing)
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Domain.Inbox.poppedAny(pool.network, availableStanding(pool))
         Result.Err(why) -> misbehaving(pool, why)
         Result.Ok(found) -> orPumpAny(pool, found)
 
@@ -2038,28 +2477,65 @@ fn misbehaving(pool: Pool, why: String) -> Result<WaitedFrom, String>
       "payload that does not match its own checksum, a length no Message may"
       "have -- is one Bitcoin Core disconnects on outright rather than"
       "scoring, so there is nothing here a counter would usefully count."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match Domain.Inbox.faultyIn(pool.network, pool.standing)
         Option.None -> Result.Err(why)
         Option.Some(key) -> dropped(pool, key, why)
 
 fn dropped(pool: Pool, key: Int, why: String) -> Result<WaitedFrom, String>
     ? "Close the offender and go back to listening to everybody else."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     _said = complainedIfPlain(pool, "dropping peer {key}: {why}")
     awaitAnyPeer(dropOne(pool, key)?)
 
 fn orPumpAny(pool: Pool, found: Option<PoppedAt>) -> Result<WaitedFrom, String>
     ? "A Message already read from somebody, or another turn of the loop."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match found
         Option.Some(one) -> Result.Ok(WaitedFrom(pool = withStanding(pool, one.standing), key = one.key, frame = one.frame))
         Option.None -> pumpedAny(pool)
 
 fn pumpedAny(pool: Pool) -> Result<WaitedFrom, String>
     ? "Nothing queued anywhere, so read from every Peer and look again."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
-    awaitAnyPeer(pumped(pool)?)
+      "An empty pool is answered here rather than gone round on. This"
+      "waits for somebody to speak and nobody can, so without this arm it"
+      "would be a loop that polls an empty set for ever; the caller wants"
+      "to hear that it has no Peers left, which is a node to restart."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Map.len(pollable(pool)) == 0
+        true -> Result.Err("every Peer is gone")
+        false -> awaitAnyPeer(pumped(pool)?)
+
+verify pumpedAny
+    pumpedAny(opened(Network.Regtest)) => Result.Err("every Peer is gone")
 
 fn awaitTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
     ? "The next Message from whichever Peer speaks first, or a tick of"
@@ -2071,27 +2547,71 @@ fn awaitTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
       "an answer, never an error: what silence means is the caller's to"
       "judge, because only the caller knows how long each Peer has been"
       "quiet."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
-    match Domain.Inbox.poppedAny(pool.network, pool.standing)
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    tickReady(networkTurn(pool)?, tickMs)
+
+fn tickReady(pool: Pool, tickMs: Int) -> Result<Tick, String>
+    ? "The tick proper, over the Peers that have finished greeting."
+      "A Peer part way through its Handshake has a buffer like any other,"
+      "and the frames in it are the greeting's to read. Handing one to the"
+      "caller would be the loop answering a version, and greetingTurn"
+      "would then find its own Message gone."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match Domain.Inbox.poppedAny(pool.network, availableStanding(pool))
         Result.Err(why) -> misbehavingTick(pool, tickMs, why)
         Result.Ok(found) -> orPumpTick(pool, tickMs, found)
 
 fn misbehavingTick(pool: Pool, tickMs: Int, why: String) -> Result<Tick, String>
     ? "A Peer that broke the protocol costs itself here too."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match Domain.Inbox.faultyIn(pool.network, pool.standing)
         Option.None -> Result.Err(why)
         Option.Some(key) -> droppedTick(pool, tickMs, key, why)
 
 fn droppedTick(pool: Pool, tickMs: Int, key: Int, why: String) -> Result<Tick, String>
     ? "Close the offender and go back to listening to everybody else."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     _said = complainedIfPlain(pool, "dropping peer {key}: {why}")
     awaitTick(dropOne(pool, key)?, tickMs)
 
 fn orPumpTick(pool: Pool, tickMs: Int, found: Option<PoppedAt>) -> Result<Tick, String>
     ? "A Message already read from somebody, or one bounded poll."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     match found
         Option.Some(one) -> Result.Ok(Tick(pool = withStanding(pool, one.standing), arrived = Option.Some(Spare(key = one.key, frame = one.frame))))
         Option.None -> pumpedTick(pool, tickMs)
@@ -2100,16 +2620,58 @@ fn pumpedTick(pool: Pool, tickMs: Int) -> Result<Tick, String>
     ? "Ask which Peers have something, waiting at most one tick."
       "A poll that reports nobody is the tick itself, handed back with"
       "nothing in it."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     before = Time.unixMs()
     polled = polling(pool, tickMs)?
     waited = polledFor(polled.pool, Time.unixMs() - before)
     match polled.ready
         [] -> Result.Ok(Tick(pool = waited, arrived = Option.None))
-        [head, ..tail] -> awaitTick(reading(waited, polled.ready)?, tickMs)
+        [head, ..tail] -> bufferedTick(reading(waited, polled.ready)?)
+
+fn bufferedTick(pool: Pool) -> Result<Tick, String>
+    ? "One read from the ready Peers ends the tick, whether or not a whole"
+      "Message came out of it."
+      "It used to go round again, which was right while a tick was only a"
+      "clock: nothing arrived and the loop asked once more. With a Work"
+      "owner waiting on the other side it is not, because a Peer sending"
+      "a frame a byte at a time would keep this turn alive indefinitely"
+      "and the owner would not get back to take the answer or to notice a"
+      "stop. What was read stays in the Inbox and is cut up on the next"
+      "turn."
+    ! [Console.error, Tcp.close]
+    match Domain.Inbox.poppedAny(pool.network, availableStanding(pool))
+        Result.Ok(found) -> Result.Ok(tickFrom(pool, found))
+        Result.Err(why) -> match Domain.Inbox.faultyIn(pool.network, pool.standing)
+            Option.None -> Result.Err(why)
+            Option.Some(key) -> droppedPartial(pool, key, why)
+
+fn tickFrom(pool: Pool, found: Option<PoppedAt>) -> Tick
+    ? "A whole Message if the read produced one, and an empty tick if it"
+      "produced only part of one."
+    match found
+        Option.None -> Tick(pool = pool, arrived = Option.None)
+        Option.Some(one) -> Tick(pool = withStanding(pool, one.standing), arrived = Option.Some(Spare(key = one.key, frame = one.frame)))
+
+verify tickFrom
+    tickFrom(opened(Network.Regtest), Option.None).arrived => Option.None
+    tickFrom(opened(Network.Regtest), Option.None).pool => opened(Network.Regtest)
+
+fn droppedPartial(pool: Pool, key: Int, why: String) -> Result<Tick, String>
+    ? "A Peer that broke the protocol costs itself, and the tick ends there"
+      "rather than going round over the Peers that are left."
+    ! [Console.error, Tcp.close]
+    _said = complainedIfPlain(pool, "dropping peer {key}: {why}")
+    Result.Ok(Tick(pool = dropOne(pool, key)?, arrived = Option.None))
 
 fn polledFor(pool: Pool, elapsedMs: Int) -> Pool
-    ? "The wall clock spent inside one Tcp.poll, added to the pool's running"
+    ? "The wall clock spent inside one Wait.poll, added to the pool's running"
       "total (#180)."
       "This is the only number a catch-up cannot work out afterwards. Every"
       "other thing worth knowing -- Heights, bytes, Peers -- is on disk or on"
@@ -2118,7 +2680,7 @@ fn polledFor(pool: Pool, elapsedMs: Int) -> Pool
       "Wall clock is what Aver can offer, and here it is the better measure"
       "anyway: it attributes the wait to the Peer rather than to the"
       "scheduler."
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs + elapsedMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, polledMs = pool.polledMs + elapsedMs)
 
 verify polledFor
     polledMsOf(polledFor(opened(Network.Regtest), 40)) => 40
@@ -2126,31 +2688,42 @@ verify polledFor
     polledMsOf(polledFor(opened(Network.Regtest), 0)) => 0
 
 fn polledMsOf(pool: Pool) -> Int
-    ? "How long this pool has waited inside Tcp.poll, in total."
+    ? "How long this pool has waited inside Wait.poll, in total."
     pool.polledMs
 
 fn pumped(pool: Pool) -> Result<Pool, String>
     ? "One turn of the loop: ask which Peers have something, and read them."
-      "A poll that reports nobody is the whole pool silent for the idle"
-      "deadline, which is not a slow Peer but a connection that is gone."
-    ! [Console.error, Console.print, Tcp.close, Tcp.poll, Tcp.readSome, Time.unixMs]
+      "A poll that reports nobody is no longer the idle deadline spent,"
+      "because polling clips its own wait whenever there is work this node"
+      "owes. So the silence is measured against when anybody last spoke"
+      "rather than against how long this one poll waited, and quietUntil"
+      "is what decides whether that is a quiet minute or a node that is no"
+      "longer connected to anything."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
     before = Time.unixMs()
     polled = polling(pool, idleDeadlineMs())?
     waited = polledFor(polled.pool, Time.unixMs() - before)
     match polled.ready
-        [] -> Result.Err("no Peer said anything for {Int.div(idleDeadlineMs(), 1000)} seconds")
+        [] -> quietUntil(waited, Time.unixMs() - waited.anyHeardMs)
         [head, ..tail] -> reading(waited, polled.ready)
 
 fn reading(pool: Pool, ready: List<Int>) -> Result<Pool, String>
     ? "Take what each ready Peer has said, one after another."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     match ready
-        [] -> Result.Ok(pool)
+        [] -> networkTurn(pool)
         [head, ..tail] -> readingOne(pool, head, tail)
 
 fn readingOne(pool: Pool, key: Int, rest: List<Int>) -> Result<Pool, String>
     ? "One Peer's bytes into its buffer, and the Messages out of it."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     match Map.get(pool.sockets, key)
         Option.None -> reading(pool, rest)
         Option.Some(socket) -> readingFrom(pool, key, socket, rest)
@@ -2162,7 +2735,7 @@ fn readingFrom(pool: Pool, key: Int, socket: Tcp.Socket, rest: List<Int>) -> Res
       "are passed over rather than treated as a Peer that said nothing. So is"
       "a Sending key: it polled ready because the socket will take bytes, which"
       "says nothing about whether there are any to read."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     match socket
         Tcp.Socket.Connected(connection) -> readingInto(pool, key, connection, rest)
         Tcp.Socket.Sending(connection) -> reading(pool, rest)
@@ -2170,21 +2743,28 @@ fn readingFrom(pool: Pool, key: Int, socket: Tcp.Socket, rest: List<Int>) -> Res
         Tcp.Socket.Dialing(dial) -> reading(pool, rest)
 
 fn readingInto(pool: Pool, key: Int, connection: Tcp.Connection, rest: List<Int>) -> Result<Pool, String>
-    ? "An empty read is a clean close, and a Peer closing is not an error."
+    ? "Whatever this Peer has said since the last turn, or nothing at all."
+      "Readiness is a hint and it can race: a socket named as ready may"
+      "have been emptied by the time it is read. Nothing there is an"
+      "ordinary answer, leaves the Peer where it is, and is neither"
+      "silence nor a close."
+      "An empty read that succeeded is a clean close."
       "It is one Peer gone, which with several is a fact about the pool and"
       "not the end of the run. What ends the run is the pool emptying, which"
       "the caller notices rather than this."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
-    match Tcp.readSome(connection, readChunk())
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
+    match Tcp.readNow(connection, readChunk())
         Result.Err(why) -> resetBy(pool, key, rest, why)
-        Result.Ok(bytes) -> readingBytes(pool, key, rest, bytes)
+        Result.Ok(arrived) -> match arrived
+            Option.None -> reading(pool, rest)
+            Option.Some(bytes) -> readingBytes(pool, key, rest, bytes)
 
 fn readingBytes(pool: Pool, key: Int, rest: List<Int>, arrived: Bytes) -> Result<Pool, String>
     ? "An empty read is a clean close; anything else is bytes to keep."
       "Bytes rather than List<Int>: the read stays packed from here through"
       "buffering, framing and the checksum, and becomes a list once, at the"
       "Frame.body the decoders take."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     match Bytes.len(arrived) == 0
         true -> closedBy(pool, key, rest)
         false -> buffered(pool, key, rest, arrived)
@@ -2204,18 +2784,18 @@ fn resetBy(pool: Pool, key: Int, rest: List<Int>, why: String) -> Result<Pool, S
       "table filled at the rate Peers churn: signet reached the runtime's"
       "256 after eight hours holding eight Peers, and the next Tcp.accept"
       "ended the node."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     _said = complainedIfPlain(pool, "peer {key} went: {why}")
-    reading(dropOne(pool, key)?, rest)
+    reading(greetingOrWriteFailed(pool, key, "connection closed or reset")?, rest)
 
 fn closedBy(pool: Pool, key: Int, rest: List<Int>) -> Result<Pool, String>
     ? "Say which Peer went, then carry on with the others."
       "Closed rather than merely forgotten, for the reason resetBy gives"
       "(#227). A clean close is the far side sending FIN; this side still"
       "holds its half and has to give it back."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     _said = complainedIfPlain(pool, "peer {key} closed the connection")
-    reading(dropOne(pool, key)?, rest)
+    reading(greetingOrWriteFailed(pool, key, "connection closed or reset")?, rest)
 
 fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: Bytes) -> Result<Pool, String>
     ? "Cut whole Messages out of what this Peer has sent so far, and mark"
@@ -2226,14 +2806,17 @@ fn buffered(pool: Pool, key: Int, rest: List<Int>, arrived: Bytes) -> Result<Poo
       "the catch-up walks hold the pool and do not hold the loop's own"
       "bookkeeping -- and they are the hours when somebody is most likely to"
       "be looking at the Peers Panel."
-    ! [Console.error, Console.print, Tcp.close, Tcp.readSome, Time.unixMs]
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.readNow, Tcp.writeNow, Time.unixMs]
     heard = Time.unixMs()
-    marked = Pool(network = pool.network, sockets = pool.sockets, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    marked = Pool.update(pool, standing = Domain.Inbox.absorbedInto(pool.standing, key, arrived), heardMs = Map.set(pool.heardMs, key, heard), anyHeardMs = heard)
     reading(marked, rest)
 
 fn forgotten(pool: Pool, key: Int) -> Pool
     ? "Forget a Peer, without closing anything."
-    Pool(network = pool.network, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = pool.dialing, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+      "Everything held under the key goes with it, the Blocks it asked for"
+      "included: a queue left behind would name a Peer that is not there, and"
+      "the key it names is handed out again to whoever dials next."
+    Pool.update(pool, sockets = Map.remove(pool.sockets, key), standing = Domain.Inbox.forgotten(pool.standing, key), heardMs = Map.remove(pool.heardMs, key), greetings = Map.remove(pool.greetings, key), outboxes = Map.remove(pool.outboxes, key), pending = Map.remove(pool.pending, key), spare = withoutPeerSpare(pool.spare, key))
 
 fn dropOne(pool: Pool, key: Int) -> Result<Pool, String>
     ? "Close one Peer's socket and forget it."
@@ -2293,7 +2876,7 @@ fn cancelled(pool: Pool, one: Dialing) -> Pool
       "release anyway."
     ! [Tcp.closeDial]
     _released = Tcp.closeDial(one.dial)
-    Pool(network = pool.network, sockets = pool.sockets, standing = pool.standing, spare = pool.spare, serves = pool.serves, height = pool.height, heardMs = pool.heardMs, anyHeardMs = pool.anyHeardMs, polledMs = pool.polledMs, plain = pool.plain, dialing = Option.None, settled = pool.settled, port = pool.port, seenAs = pool.seenAs, toldMs = pool.toldMs, inboundCap = pool.inboundCap)
+    Pool.update(pool, dialing = Option.None)
 
 fn closingEach(pool: Pool, keys: List<Int>) -> Result<Pool, String>
     ? "One at a time, so one failure does not strand the rest."
@@ -2339,3 +2922,390 @@ fn closedDialing(pool: Pool, key: Int, dial: Tcp.Dial) -> Result<Pool, String>
     ! [Tcp.closeDial]
     _closed = Tcp.closeDial(dial)
     Result.Ok(forgotten(pool, key))
+
+fn polling(pool: Pool, timeoutMs: Int) -> Result<Polled, String>
+    ? "The work this node owes done first, then the question of who has"
+      "something to say."
+      "Parking before flushing a wire or moving a greeting along would be"
+      "waiting for a Peer to answer a Message it has not been sent. So"
+      "every path into a poll comes through here: pollingReady is the poll"
+      "itself and is not called from anywhere else that waits."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    ready = networkTurn(pool)?
+    pollingReady(ready, pollBudget(ready, timeoutMs))
+
+fn pollBudget(pool: Pool, requested: Int) -> Int
+    ? "A tenth of a second at most while there is work this loop owes rather"
+      "than work a Peer owes it."
+      "Bytes waiting to be written and a Handshake half done are both work"
+      "that finishes without anybody saying anything, and so is a Block a"
+      "Peer has asked for and this node has not read off the disk yet: none"
+      "of the three wakes a poll of its own, so a full tick of silence would"
+      "be a tick of nothing happening."
+    match Bool.or(Map.len(pool.greetings) > 0, Bool.or(Map.len(pool.outboxes) > 0, Map.len(pool.pending) > 0))
+        true -> Int.min(requested, 100)
+        false -> requested
+
+verify pollBudget
+    pollBudget(opened(Network.Regtest), 1000) => 1000
+    pollBudget(Pool.update(opened(Network.Regtest), greetings = {1 => sampleGreeting(true)}), 1000) => 100
+    pollBudget(Pool.update(opened(Network.Regtest), greetings = {1 => sampleGreeting(true)}), 0) => 0
+    pollBudget(Pool.update(opened(Network.Regtest), pending = {1 => [sampleHash()]}), 1000) => 100
+
+record Greeting
+    address: String
+    inbound: Bool
+    version: Int
+    agent: String
+    height: Int
+    deadlineMs: Int
+    early: List<Frame>
+
+fn awaitingGreeting(pool: Pool, key: Int, address: String, inbound: Bool) -> Pool
+    ? "A Peer put down as greeting, with the one deadline its Handshake"
+      "gets (#284) fixed here and never moved again."
+      "Fixed at seating rather than per frame, because a caller that sends"
+      "something every few seconds and never a verack would otherwise buy"
+      "itself another deadline with each one. What it now holds between"
+      "seating and its verack is an entry in this map, four frames a turn,"
+      "and its key."
+    ! [Time.unixMs]
+    Pool.update(pool, greetings = Map.set(pool.greetings, key, Greeting(address = address, inbound = inbound, version = 0, agent = "", height = 0, deadlineMs = Time.unixMs() + handshakeDeadlineMs(), early = [])))
+
+fn readyKeys(pool: Pool, keys: List<Int>, acc: List<Int>) -> List<Int>
+    ? "The keys with nothing pending against them, in the order they came."
+      "This is the line between a Peer that is seated and a Peer that has"
+      "greeted. Everything that fans a Message out, counts the company or"
+      "reports the pool asks peerKeys, and none of those should reach a"
+      "Peer that has not said what it is yet."
+    match keys
+        [] -> List.reverse(acc)
+        [key, ..rest] -> match Map.has(pool.greetings, key)
+            true -> readyKeys(pool, rest, acc)
+            false -> readyKeys(pool, rest, List.prepend(key, acc))
+
+verify readyKeys
+    readyKeys(Pool.update(opened(Network.Regtest), greetings = {1 => sampleGreeting(true)}), [0, 1, 2], []) => [0, 2]
+    readyKeys(opened(Network.Regtest), [], []) => []
+
+fn availableStanding(pool: Pool) -> Map<Int, Standing>
+    ? "What Domain.Inbox may pop Messages out of: everybody but the Peers"
+      "still greeting."
+    withoutPending(pool.standing, Map.keys(pool.greetings))
+
+fn withoutPending(standing: Map<Int, Standing>, keys: List<Int>) -> Map<Int, Standing>
+    ? "The standing of the Peers that have greeted."
+      "Hidden rather than marked, so that every existing caller of"
+      "Domain.Inbox.poppedAny goes on being written as though a Peer that"
+      "is still greeting were not there at all. The buffers are untouched"
+      "and come back through restoredPending."
+    match keys
+        [] -> standing
+        [key, ..rest] -> withoutPending(Map.remove(standing, key), rest)
+
+verify withoutPending
+    Map.len(withoutPending(Domain.Inbox.seated({}, 1, "pending", true), [1])) => 0
+    Map.len(withoutPending(Domain.Inbox.seated({}, 1, "ready", false), [])) => 1
+
+fn restoredPending(pool: Pool, standing: Map<Int, Standing>, keys: List<Int>) -> Map<Int, Standing>
+    ? "The greeting Peers put back into a standing map that was worked out"
+      "without them."
+      "Only where the new map does not name the key. greetingRead pops a"
+      "Message from a Peer that is greeting and hands the new standing"
+      "through withStanding like everything else, so the new map is"
+      "sometimes the authority on that Peer and sometimes silent about it."
+      "Taking the older entry when the newer one exists would put the"
+      "bytes that Message was cut out of back in the buffer, and the"
+      "greeting would read it twice."
+    match keys
+        [] -> standing
+        [key, ..rest] -> match Map.has(standing, key)
+            true -> restoredPending(pool, standing, rest)
+            false -> match Map.get(pool.standing, key)
+                Option.None -> restoredPending(pool, standing, rest)
+                Option.Some(one) -> restoredPending(pool, Map.set(standing, key, one), rest)
+
+verify restoredPending
+    Map.len(restoredPending(Pool.update(opened(Network.Regtest), standing = Domain.Inbox.seated({}, 1, "pending", true)), {}, [1])) => 1
+    addressTextOf(Map.get(restoredPending(Pool.update(opened(Network.Regtest), standing = Domain.Inbox.seated({}, 1, "old", true)), Domain.Inbox.seated({}, 1, "new", true), [1]), 1)) => "new"
+
+fn withoutPeerSpare(spare: List<Spare>, key: Int) -> List<Spare>
+    ? "The kept Messages of one Peer dropped, and everything else left in"
+      "the order it arrived."
+      "A Spare carries the key it came from, and the key is handed out"
+      "again to whoever dials next. A Message left behind by a Peer that"
+      "is gone would be answered as though the new Peer had sent it."
+    match spare
+        [] -> []
+        [head, ..rest] -> match head.key == key
+            true -> withoutPeerSpare(rest, key)
+            false -> List.prepend(head, withoutPeerSpare(rest, key))
+
+verify withoutPeerSpare
+    withoutPeerSpare([Spare(key = 1, frame = Frame(command = "inv", body = [])), Spare(key = 2, frame = Frame(command = "ping", body = [3]))], 1) => [Spare(key = 2, frame = Frame(command = "ping", body = [3]))]
+
+fn watchSockets(pool: Pool) -> Map<Int, Tcp.Socket>
+    ? "Everything worth waking this pool for: the Peers that may have"
+      "something to say, and the Peers this node still owes bytes to."
+      "A socket wanted both ways needs two entries, because one key names"
+      "one interest. The write entry goes in at a negative key of its own"
+      "so the two cannot displace each other, and the arithmetic steps"
+      "over the listener at -1: a Peer key of zero would otherwise write"
+      "itself onto the listener's key."
+    writesWatched(pool, Map.keys(pool.outboxes), pollable(pool))
+
+fn writesWatched(pool: Pool, keys: List<Int>, acc: Map<Int, Tcp.Socket>) -> Map<Int, Tcp.Socket>
+    ? "One write interest per Peer with bytes still owed to it. A key that"
+      "names a dial or a listener is passed over, because neither of those"
+      "has an outbox to empty."
+    match keys
+        [] -> acc
+        [key, ..rest] -> match Map.get(pool.sockets, key)
+            Option.None -> writesWatched(pool, rest, acc)
+            Option.Some(socket) -> match socket
+                Tcp.Socket.Connected(connection) -> writesWatched(pool, rest, Map.set(acc, 0 - key - 2, Tcp.Socket.Sending(connection)))
+                _ -> writesWatched(pool, rest, acc)
+
+verify writesWatched
+    Map.len(writesWatched(opened(Network.Regtest), [1], {})) => 0
+
+fn flushConnection(pool: Pool, key: Int, connection: Tcp.Connection, queue: Queued) -> Result<Pool, String>
+    ? "One attempt at a Peer's wire: at most sixty-four kilobytes of the"
+      "frame at the front, and the queue moved on by however much the"
+      "socket took."
+      "Sixty-four kilobytes for the reason readChunk gives, from the other"
+      "direction: it is about what a socket buffer holds, so offering more"
+      "would only give the runtime a longer list to refuse. An empty queue"
+      "is dropped from the map rather than kept at zero, so that a Peer"
+      "with nothing owed to it is not watched for write readiness it does"
+      "not need."
+    ! [Tcp.writeNow]
+    match queue.bytes == 0
+        true -> Result.Ok(Pool.update(pool, outboxes = Map.remove(pool.outboxes, key)))
+        false -> flushed(pool, key, queue, Tcp.writeNow(connection, Domain.Outbox.front(queue, 65536))?)
+
+fn flushed(pool: Pool, key: Int, queue: Queued, count: Int) -> Result<Pool, String>
+    ? "The bytes the socket took, off the queue and onto the Peer's sent"
+      "count (#131)."
+      "A write that succeeded with a count of zero is a socket that will"
+      "not take anything this turn, which is the Peer reading slowly and"
+      "not the Peer being gone. The queue is left where it was and the"
+      "write interest keeps it in the next poll."
+    remaining = Domain.Outbox.consumed(queue, count)
+    marked = withStanding(pool, Domain.Inbox.saidBytes(pool.standing, key, count))
+    match remaining.bytes == 0
+        true -> Result.Ok(Pool.update(marked, outboxes = Map.remove(marked.outboxes, key)))
+        false -> Result.Ok(Pool.update(marked, outboxes = Map.set(marked.outboxes, key, remaining)))
+
+verify flushed
+    Map.len(Result.withDefault(flushed(opened(Network.Regtest), 1, Domain.Outbox.empty(), 0), opened(Network.Regtest)).outboxes) => 0
+
+fn flushing(pool: Pool, keys: List<Int>) -> Result<Pool, String>
+    ? "One attempt each, over every Peer that is owed bytes."
+      "One attempt rather than as many as it takes: a Peer that is reading"
+      "must not be able to hold the turn by reading fast. A failure costs"
+      "that Peer and the others behind it still get their turn, which is"
+      "the rule the whole loop keeps (#227)."
+    ! [Console.error, Tcp.close, Tcp.writeNow]
+    match keys
+        [] -> Result.Ok(pool)
+        [key, ..rest] -> flushing(flushOne(pool, key)?, rest)
+
+fn flushOne(pool: Pool, key: Int) -> Result<Pool, String>
+    ? "One Peer's wire, if the key still names a Connection to put it on."
+      "A key that names nothing has its queue thrown away with it: the"
+      "Peer is gone and the bytes are owed to nobody. A key that names a"
+      "listener or a dial is left alone, because neither can be written"
+      "to and neither has a queue of its own."
+    ! [Console.error, Tcp.close, Tcp.writeNow]
+    match Map.get(pool.sockets, key)
+        Option.None -> Result.Ok(Pool.update(pool, outboxes = Map.remove(pool.outboxes, key)))
+        Option.Some(socket) -> match socket
+            Tcp.Socket.Connected(connection) -> match flushConnection(pool, key, connection, Option.withDefault(Map.get(pool.outboxes, key), Domain.Outbox.empty()))
+                Result.Ok(sent) -> Result.Ok(sent)
+                Result.Err(why) -> greetingOrWriteFailed(pool, key, why)
+            _ -> Result.Ok(pool)
+
+fn greetingOrWriteFailed(pool: Pool, key: Int, why: String) -> Result<Pool, String>
+    ? "A write that failed, charged to the right kind of Peer."
+      "A Peer that has greeted loses its seat and a line is said about it."
+      "A Peer that was still greeting loses its seat too, but the attempt"
+      "also has to be settled: an outbound greeting that dies here is a"
+      "Candidate that did not answer, and something is waiting to be told"
+      "so before it dials another."
+    ! [Console.error, Tcp.close]
+    match Map.has(pool.greetings, key)
+        true -> greetingFailed(pool, key, why)
+        false -> wentMidWrite(pool, key, "queued message", why)
+
+fn networkTurn(pool: Pool) -> Result<Pool, String>
+    ? "Everything the loop owes its Peers, done once: the wires flushed"
+      "and every pending greeting moved along."
+      "This is what replaced the inline Handshake. It is bounded in both"
+      "directions -- one write attempt per Peer, four frames per greeting"
+      "-- and it never waits for anything, so it can be run before every"
+      "poll without any caller having to decide whether it is due."
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.writeNow, Time.unixMs]
+    sent = flushing(pool, Map.keys(pool.outboxes))?
+    greetingTurns(sent, Map.keys(sent.greetings), Time.unixMs())
+
+fn greetingTurns(pool: Pool, keys: List<Int>, nowMs: Int) -> Result<Pool, String>
+    ? "Each greeting in turn, with an allowance of its own."
+      "Four frames each rather than four between them, so a caller that"
+      "floods cannot spend the allowance a quiet Peer needed to finish."
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.writeNow, Time.unixMs]
+    match keys
+        [] -> Result.Ok(pool)
+        [key, ..rest] -> greetingTurns(greetingTurn(pool, key, nowMs, 4)?, rest, nowMs)
+
+fn greetingTurn(pool: Pool, key: Int, nowMs: Int, budget: Int) -> Result<Pool, String>
+    ? "One greeting moved along by up to four frames, and its deadline"
+      "looked at first."
+      "First, because a Peer that has said nothing at all is exactly the"
+      "one the deadline is for and it would otherwise never be reached."
+      "Nothing in here moves the deadline: a partial frame does not, and"
+      "neither does a ping, which is the whole point of #284."
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.writeNow, Time.unixMs]
+    match Map.get(pool.greetings, key)
+        Option.None -> Result.Ok(pool)
+        Option.Some(pending) -> match nowMs >= pending.deadlineMs
+            true -> greetingFailed(pool, key, "handshake deadline expired")
+            false -> match budget <= 0
+                true -> Result.Ok(pool)
+                false -> greetingRead(pool, key, pending, nowMs, budget)
+
+fn greetingRead(pool: Pool, key: Int, pending: Greeting, nowMs: Int, budget: Int) -> Result<Pool, String>
+    ? "One whole Message out of what this Peer has already sent, if there"
+      "is one."
+      "Nothing there ends this Peer's turn rather than waiting for the"
+      "rest of a frame. The bytes stay in the buffer and the next turn"
+      "looks again, which is what makes a greeting cost turns rather than"
+      "seconds."
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.writeNow, Time.unixMs]
+    match Domain.Inbox.popped(pool.network, pool.standing, key)
+        Result.Err(why) -> greetingFailed(pool, key, why)
+        Result.Ok(found) -> match found
+            Option.None -> Result.Ok(pool)
+            Option.Some(one) -> greetingNext(withStanding(pool, one.standing), key, pending, one.frame, nowMs, budget)
+
+fn greetingNext(pool: Pool, key: Int, pending: Greeting, frame: Frame, nowMs: Int, budget: Int) -> Result<Pool, String>
+    ? "One frame acted on, then the next, and the pool that comes out is"
+      "the pool that carries on."
+      "This is #304 again, in the shape it takes here. The pool handed to"
+      "greetingFailed is the one the read built, never the one held before"
+      "it: the read can have closed and forgotten a Peer, and dropping"
+      "this caller out of the older pool would put that closed socket back"
+      "among the Peers for the next poll to fail on."
+    ! [Console.error, Console.print, Random.int, Tcp.close, Tcp.writeNow, Time.unixMs]
+    match greetingFrame(pool, key, pending, frame)
+        Result.Err(why) -> greetingFailed(pool, key, why)
+        Result.Ok(after) -> greetingTurn(after, key, nowMs, budget - 1)
+
+fn greetingFrame(pool: Pool, key: Int, pending: Greeting, frame: Frame) -> Result<Pool, String>
+    ? "What one frame of a Handshake means, decided by Domain.Handshake."
+      "The same decision the startup Handshake makes, so there is one"
+      "answer to what a frame before verack is: nothing before version, a"
+      "ping answered, at most eight others kept, and anything else"
+      "refused. Only where the answer is acted on differs."
+    ! [Console.print, Random.int, Tcp.writeNow, Time.unixMs]
+    match Domain.Handshake.stepOf(frame.command, pending.version > 0, List.len(pending.early))
+        Step.Done -> Result.Ok(greetingDone(pool, key, pending))
+        Step.Version -> greetingVersion(pool, key, pending, frame.body)
+        Step.Ping -> ponged(pool, key, frame)
+        Step.Spared -> Result.Ok(Pool.update(pool, greetings = Map.set(pool.greetings, key, Greeting.update(pending, early = List.concat(pending.early, [frame])))))
+        Step.Refused(why) -> Result.Err(why)
+
+fn greetingVersion(pool: Pool, key: Int, pending: Greeting, body: List<Int>) -> Result<Pool, String>
+    ? "Their version answered and remembered, without waiting for the"
+      "verack that follows it."
+      "What the Peer said about itself is kept on the Greeting rather than"
+      "written into its standing, because a Peer that never sends its"
+      "verack is not a Peer and should leave nothing behind. greetingDone"
+      "is where it is folded in."
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
+    sent = presenting(pool, key, pending.inbound)?
+    noticed = noticedSelf(sent, body)
+    Result.Ok(Pool.update(noticed, greetings = Map.set(noticed.greetings, key, Greeting.update(pending, version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body), height = Domain.Version.peerStartHeightOf(body)))))
+
+fn greetingDone(pool: Pool, key: Int, pending: Greeting) -> Pool
+    ? "The verack: the Peer becomes a Peer, and whatever it said early is"
+      "handed to the loop in the order it said it."
+      "What it said before its verack was kept rather than answered,"
+      "because nothing was seated to answer it on behalf of. Now that it"
+      "is, those frames go into the spare like any other Message that"
+      "arrived while something else was being waited for."
+      "An outbound greeting that completes files its own Outcome. It does"
+      "not touch pool.dialing, which by now belongs to whatever dial was"
+      "started after this one settled."
+    ! [Console.print]
+    ready = Pool.update(pool, greetings = Map.remove(pool.greetings, key), standing = Domain.Inbox.greeted(pool.standing, key, pending.version, pending.agent, pending.height))
+    released = releaseEarly(ready, key, pending.early)
+    match pending.inbound
+        true -> inboundGreeted(released, key)
+        false -> Pool.update(released, settled = List.concat(released.settled, [Outcome(key = key, address = pending.address, seated = true, why = "")]))
+
+fn inboundGreeted(pool: Pool, key: Int) -> Pool
+    ? "A caller that finished its Handshake, said out loud."
+      "A caller is admitted long before it is a Peer now, so the line that"
+      "used to be said at seating would have been said about strangers"
+      "that never greeted. This is the moment worth a line."
+    ! [Console.print]
+    _said = saidIfPlain(pool, "inbound peer {key} completed its handshake")
+    pool
+
+fn releaseEarly(pool: Pool, key: Int, frames: List<Frame>) -> Pool
+    ? "The kept frames into the spare, oldest first, so the loop sees them"
+      "in the order the Peer sent them."
+    match frames
+        [] -> pool
+        [head, ..rest] -> releaseEarly(sparing(pool, key, head), key, rest)
+
+verify releaseEarly
+    spareOf(releaseEarly(opened(Network.Regtest), 1, [Frame(command = "a", body = []), Frame(command = "b", body = [])])) => [Spare(key = 1, frame = Frame(command = "a", body = [])), Spare(key = 1, frame = Frame(command = "b", body = []))]
+
+fn greetingFailed(pool: Pool, key: Int, why: String) -> Result<Pool, String>
+    ? "A greeting that came to nothing: the socket closed, the key"
+      "forgotten, a line said, and the attempt reported if it was ours."
+      "Never an error upward. Anybody at all may dial us, so a caller that"
+      "sends nonsense, or nothing, or hangs up mid-greeting is an ordinary"
+      "event, and one that took the whole loop down with it would be worse"
+      "than the thing it was trying to report."
+      "The Greeting is read before the drop, because dropOne is what"
+      "forgets it and the Outcome needs the address it held."
+    ! [Console.error, Tcp.close]
+    pending = Map.get(pool.greetings, key)
+    _said = complainedIfPlain(pool, "peer {key} handshake failed: {why}")
+    after = dropOne(pool, key)?
+    Result.Ok(greetingOutcome(after, key, pending, why))
+
+fn greetingOutcome(pool: Pool, key: Int, pending: Option<Greeting>, why: String) -> Pool
+    ? "A dial of ours that failed, filed for whoever will say it out loud."
+      "A caller that failed is not filed at all. The settled list is what"
+      "the Address Book learns from, and a stranger that could not greet"
+      "says nothing about a Candidate we chose to try."
+    match pending
+        Option.None -> pool
+        Option.Some(one) -> match one.inbound
+            true -> pool
+            false -> Pool.update(pool, settled = List.concat(pool.settled, [Outcome(key = key, address = one.address, seated = false, why = why)]))
+
+verify greetingOutcome
+    settledOf(greetingOutcome(opened(Network.Regtest), 1, Option.Some(sampleGreeting(true)), "timeout")) => []
+    settledOf(greetingOutcome(opened(Network.Regtest), 1, Option.Some(sampleGreeting(false)), "timeout")) => [Outcome(key = 1, address = "127.0.0.1:18444", seated = false, why = "timeout")]
+
+fn sampleGreeting(inbound: Bool) -> Greeting
+    ? "One greeting part way through, for the cases here. It takes the side"
+      "that dialled as a parameter, because that is the field every case"
+      "about it turns on."
+    Greeting(address = "127.0.0.1:18444", inbound = inbound, version = 70016, agent = "/test/", height = 179, deadlineMs = 10000, early = [])
+
+verify sampleGreeting
+    sampleGreeting(true).inbound => true
+    sampleGreeting(false).deadlineMs => 10000

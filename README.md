@@ -73,11 +73,13 @@ because anything that opens the Index is several times faster that way. See
 
 ## Requirements
 
-- **Aver at the commit in [`.aver-version`](.aver-version).** The version
-  string does not move between upstream commits, so the project pins a SHA
-  rather than a number, and CI builds exactly that one. Anything older than
-  0.29 lacks what this program needs (byte-clean `Disk`, `Tcp.poll`, the
-  automatic provider host). See [Moving the Aver pin](#moving-the-aver-pin).
+- **Aver at the commit in [`.aver-version`](.aver-version)**. It includes the
+  Work/Wait compiler and host fixes, plus the native optimizations
+  [#1384](https://github.com/jasisz/aver/pull/1384) and
+  [#1388](https://github.com/jasisz/aver/pull/1388), and the Lean proof fix
+  [#1387](https://github.com/jasisz/aver/pull/1387).
+  Follow the [migration build instructions](docs/work-wait-migration.md#compiler-requirement-and-build).
+  See [Moving the Aver pin](#moving-the-aver-pin).
 - `clang` and `libclang-dev`, for the RocksDB bindings.
 - A reachable Bitcoin node. Any peer will do; one you run yourself is easier to
   debug against.
@@ -133,17 +135,15 @@ read still has no deadline of its own —
 [jasisz/aver#782](https://github.com/jasisz/aver/issues/782) was answered by
 removing one rather than making it configurable, on the grounds that timing
 out part way through a frame leaves the stream silently desynchronised — but
-every frame now starts with `Tcp.poll` at the message boundary, the one place
-a timeout abandons nothing
-([#55](https://github.com/n1bor/btc-listener/issues/55)). Bitcoin Core pings
+the application now waits with `Wait.poll` and reads available bytes with
+`Tcp.readNow`, retaining incomplete frames in per-Peer buffers. Bitcoin Core pings
 an otherwise-quiet connection every two minutes, so a Peer that has said
 nothing for two and a half is gone, and the session ends with `Peer said
 nothing for 150 seconds` instead of blocking while looking like it is
-working. Nothing blocks mid-frame any more either: since #27 every socket,
-the listener included, is read as bytes arrive (`Tcp.readSome`) and Messages
-are cut off the front of a per-Peer buffer, so a Peer that stalls part way
-through a frame costs only itself. The listener is a pool of one on the same
-machinery `follow` runs eight Peers on.
+working. A read after readiness can still find nothing; it returns to the
+loop without losing the buffered prefix. The single-Peer listening command is
+a pool of one on the same machinery `follow` runs eight Peers on. A bound
+listener socket is accepted from, not read for Message bytes.
 
 `aver compile` used to print one warning per dependency module — 45 lines
 saying the module's verify blocks were not sampled — and the README carried a
@@ -889,10 +889,12 @@ their pings, which go unanswered until they drop us. A body download takes
 hours, so this is not a corner case.
 
 So bytes are taken as they come and kept per Peer, and Messages are cut off the
-front of what has accumulated. Readiness comes from one `Tcp.poll` over every
-connection at once. A caller still writes its half of a conversation as
-straight-line code — ask this Peer for Headers, wait for them — and every other
-Peer is read, buffered and answered while it waits.
+front of what has accumulated. `Wait.poll` watches peer reads and pending
+writes. During block work, the owner combines these with the job, dial,
+listener and dashboard connections. Handshakes and partial writes retain
+their state between bounded turns; callers can still ask one Peer for Headers
+and wait while the pool reads and answers pings from the others. See the
+[Work/Wait migration and acceptance results](docs/work-wait-migration.md).
 
 A header announcing more than **4,000,000 bytes** — Bitcoin Core's
 `MAX_PROTOCOL_MESSAGE_LENGTH` — ends the connection. Reading exactly what a
@@ -944,9 +946,10 @@ assumed:
   addresses it controls cannot choose who you connect to next. That is
   [#118](https://github.com/n1bor/btc-listener/issues/118).
 - ~~**A Candidate that does not answer stalls the loop for five seconds.**~~
-  **Fixed.** A dial is now one more key in the same `Tcp.poll` as the Peers
+  **Fixed.** A dial is now one more key in the same `Wait.poll` as the Peers
   ([jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125),
-  `Tcp.beginConnect`/`Tcp.dialled`, wired in `Infra.Peers.joined`), so the
+  `Tcp.beginConnect`/`Tcp.dialled`, driven by `Infra.Peers.dialling` and
+  `advanced`; `joined` remains a startup facade), so the
   five seconds a dead address costs are five seconds every other Peer spends
   being read rather than five seconds nobody spends. The deadline itself has
   not moved and does not need to: `[effects.Tcp] connect_timeout_secs` in
@@ -1043,19 +1046,16 @@ was three, and a crash between the second and the third left the Set standing
 on a Block whose Undo Data had just been deleted — which nothing could take
 back off, so the Set had to be rebuilt.
 
-A Handshake gets one deadline, not one per frame
-([#284](https://github.com/n1bor/btc-listener/issues/284)). The greeting
-still runs inline — the loop waits on it, which
-[#30](https://github.com/n1bor/btc-listener/issues/30) wants driven by the
-loop instead — but the wait is now ten seconds for the whole Handshake, fixed
-when the caller is seated, where before every frame that was not a `verack`
-bought another sixty. A caller that sent a `ping` every fifty-nine seconds and
-never a `verack` held the loop for ever, and a silent one held it until some
-other Peer happened to speak, up to the 150-second idle deadline. Now a
-silent caller costs ten seconds, nothing at all is accepted before `version`
-(Core's rule), and [Domain.Handshake](domain/handshake.av) allows eight kept
-Messages between `version` and `verack` — Core sends three there — before
-the caller is dropped. `tools/regtest/caller.py` is the caller, four ways.
+A Handshake gets one ten-second deadline, fixed when its slot is reserved,
+not renewed by each frame ([#284](https://github.com/n1bor/btc-listener/issues/284)).
+Inbound admission and active outbound dials now park a pending greeting in
+the Pool. Each turn handles at most four frames per pending Peer; a silent
+caller holds its slot, not the loop. The Peer becomes available to the normal
+dispatcher only after `verack`. [Domain.Handshake](domain/handshake.av)
+rejects messages before `version` and allows eight kept Messages between
+`version` and `verack`. The startup `joined` facade still waits for its result,
+with stop checks. See the [network probes](docs/work-wait-migration.md#remaining-network-waits-removed)
+for silent inbound/outbound callers, deadline expiry and partial writes.
 
 A Block body has to be the Block before it is kept
 ([#283](https://github.com/n1bor/btc-listener/issues/283)). Hashing its first
@@ -1216,7 +1216,7 @@ touches a terminal.
 A Screen run leaves nothing behind, so `log` writes what it would have said
 where it survives: `<dir>/metrics.log` (`log:PATH` puts it elsewhere) gets one
 line a minute and one at every phase boundary — timestamp, phase, Height,
-target, Blocks, bytes, milliseconds inside `Tcp.poll` and outside it, Peers,
+target, Blocks, bytes, milliseconds inside the Peers `Wait.poll` and outside it, Peers,
 Candidates — in a fixed order that `awk` reads without a parser. The same word
 turns on `<dir>/debug.log`, one line per *decision* — a phase started, a Peer
 seated or dropped and why, a fault and what it was charged to — so a run that
@@ -1318,7 +1318,13 @@ sha256sum -c --ignore-missing SHA256SUMS
 chmod +x main && ./main help
 ```
 
-### The same program as wasm-gc
+### The wasm-gc conformance harness
+
+The Work/Wait owner also runs through the Node host. `Wait.poll` combines
+socket readiness with jobs executed in isolated Node workers; JSPI suspends the
+main wasm call while the Node event loop handles sockets. The harness tests
+fragmented pings, deferred announcements, result delivery and cancellation.
+Its in-memory KV and temporary Disk still make it a conformance harness.
 
 The same release carries `main.wasm`: the whole listener compiled to
 WebAssembly, and **the exact module CI ran a Peer handshake through** rather
@@ -1905,9 +1911,10 @@ directory, `Infra.Kv` uses an in-memory Map, and `Tcp` implements the full
 listener/dial/connection reactor over Node sockets and JSPI. The ABI carries
 `Bytes`, `Result`, `Option`, lists, tuples and opaque resources without JSON.
 
-CI starts a local regtest Bitcoin Peer and invokes the real CLI as
+The wasm CI harness starts a local regtest Bitcoin Peer and invokes the real CLI as
 `regtest 127.0.0.1 <port>`. The actual program performs its non-blocking dial,
-`Tcp.poll` loop and `version`/`verack` handshake. The Peer then sends a `ping`
+`Wait.poll` loop and `version`/`verack` handshake.
+The Peer then sends a `ping`
 whose checksum is deliberately wrong; the test succeeds only after the real
 framing and inbox code diagnoses it, drops the Peer, closes the connection and
 returns through `main`. This exercises the application graph rather than a

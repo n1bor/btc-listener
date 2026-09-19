@@ -1,0 +1,215 @@
+module Working
+    intent =
+        "Waiting for one owned calculation without the node standing still"
+        "for it."
+        "Decoding a Block and working out what it spends is arithmetic, and"
+        "Infra.BlockJobs runs it somewhere this loop is not. Between"
+        "beginning a job and taking its answer there is real time, and the"
+        "node still has Peers expecting their pings answered and a"
+        "dashboard somebody may be looking at. So the waiting is itself a"
+        "loop: serve a turn, park on one Wait.poll that covers every socket"
+        "and the job together, ask again."
+        "Every way out that is not an answer cancels the job. A job left"
+        "running holds its slot and would hand its result to nobody."
+        "Nothing here writes anything down. The answer goes back to the"
+        "caller and the caller applies it, which is the single writer ADR"
+        "0008 asks for."
+    depends [Work, Wait, Tcp, Infra.BlockJobs, Domain.BlockWorkJob, Infra.Board, Infra.Screen, Infra.Tending, Infra.Peers, Infra.Readiness]
+    exposes [Completed, run, join]
+    effects [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+
+record Completed
+    eye: Infra.Screen.Eye
+    answer: Option<Infra.BlockJobs.Reply>
+
+fn run(eye: Infra.Screen.Eye, task: Infra.BlockJobs.Task) -> Result<Completed, String>
+    ? "One job begun, and its handle held until the answer is taken, the"
+      "job is cancelled, or something fails."
+      "A stop already asked for begins nothing. There would be nobody left"
+      "to apply the answer to, and the caller is on its way out."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    match Bool.or(eye.stopped, Process.stopRequested())
+        true -> Result.Ok(Completed(eye = eye, answer = Option.None))
+        false -> join(eye, Infra.BlockJobs.begin(task)?)
+
+fn join(eye: Infra.Screen.Eye, job: Work.Job) -> Result<Completed, String>
+    ? "The waiting, with the job released whatever ends it."
+      "Serving and polling can both fail, and such a failure is about the"
+      "loop rather than about the job. The job still has to be cancelled"
+      "here, because the caller that would have taken its answer is"
+      "unwinding and nothing further down will remember it."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.BlockJobs.take,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    match waiting(eye, job)
+        Result.Err(why) -> failed(job, why)
+        Result.Ok(done) -> Result.Ok(done)
+
+fn waiting(eye: Infra.Screen.Eye, job: Work.Job) -> Result<Completed, String>
+    ? "Ask for the answer, and serve a turn if it is not there yet."
+      "A poll naming the job is a hint and not a promise, so take is"
+      "allowed to answer None to a job the poll had just named. That is an"
+      "ordinary turn and goes round again. A stop asked for while waiting"
+      "leaves the answer where it is rather than applying it late."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.BlockJobs.take,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    match Bool.or(eye.stopped, Process.stopRequested())
+        true -> stopped(eye, job)
+        false -> match Infra.BlockJobs.take(job)?
+            Option.Some(answer) -> Result.Ok(Completed(eye = eye, answer = Option.Some(answer)))
+            Option.None -> serving(eye, job)
+
+fn interests(eye: Infra.Screen.Eye, job: Work.Job) -> Map<Int, Wait.Item>
+    ? "Everything one wait has to cover: the Peers, the listener, a dial in"
+      "flight, the dashboard's Readers, and the job."
+      "Three owners number their keys from zero and none of them knows"
+      "about the others, so the keys are spread apart rather than trusted"
+      "to differ. The sockets take the even numbers, the job takes 1, and"
+      "the Board takes odd numbers of its own. A collision would quietly"
+      "drop one socket out of the wait, and the node would look as though"
+      "it had simply stopped hearing somebody."
+    Map.set(boardItems(eye.board, companyItems(eye.company)), 1, Wait.Item.Job(job))
+
+fn companyItems(company: Option<Infra.Tending.Kept>) -> Map<Int, Wait.Item>
+    ? "The pool's read interests, its write interests, and the key it has"
+      "set aside for a dial in flight. A walk keeping no company puts"
+      "nothing in and waits on the job alone."
+    match company
+        Option.None -> {}
+        Option.Some(held) -> withDial(socketItems(held.pool.sockets, Map.keys(held.pool.sockets), socketItems(Infra.Peers.watchSockets(held.pool), Map.keys(Infra.Peers.watchSockets(held.pool)), {})), held.pool.dialing)
+
+verify companyItems
+    companyItems(Option.None) => {}
+
+fn socketItems(sockets: Map<Int, Tcp.Socket>, keys: List<Int>, acc: Map<Int, Wait.Item>) -> Map<Int, Wait.Item>
+    ? "One entry per socket, at twice the key its owner filed it under."
+      "Doubling is what keeps these clear of the job and the Board, and"
+      "the keys are the caller's own, so a Peer key and a Board key that"
+      "happen to be the same number stay apart in the one wait. A key that"
+      "names nothing is passed over, as it is in Infra.Peers.withSocket."
+    match keys
+        [] -> acc
+        [key, ..rest] -> match Map.get(sockets, key)
+            Option.None -> socketItems(sockets, rest, acc)
+            Option.Some(socket) -> socketItems(sockets, rest, Map.set(acc, key * 2, Wait.Item.Socket(socket)))
+
+verify socketItems
+    socketItems({}, [], {}) => {}
+    socketItems({}, [0, -1, 1], {}) => {}
+
+fn withDial(items: Map<Int, Wait.Item>, dialing: Option<Infra.Peers.Dialing>) -> Map<Int, Wait.Item>
+    ? "The dial in flight, under the key it has already been promised."
+      "Infra.Peers hands a key out when the dial begins and gives it to a"
+      "Peer only once the dial settles, so nothing connected can be"
+      "holding that key while this entry exists."
+    match dialing
+        Option.None -> items
+        Option.Some(pending) -> Map.set(items, pending.key * 2, Wait.Item.Socket(Tcp.Socket.Dialing(pending.dial)))
+
+verify withDial
+    withDial({}, Option.None) => {}
+
+fn failed(job: Work.Job, why: String) -> Result<Completed, String>
+    ? "Cancel the job, then hand the failure on. The failure is the loop's"
+      "and the job knows nothing about it; it only has to stop."
+    ! [Work.cancel]
+    Work.cancel(job)
+    Result.Err(why)
+
+fn stopped(eye: Infra.Screen.Eye, job: Work.Job) -> Result<Completed, String>
+    ? "A stop while the job was running: whatever it had worked out is let"
+      "go and the Eye goes back with no answer on it, so the caller"
+      "flushes what it had already committed and ends at a whole Block."
+    ! [Work.cancel]
+    Work.cancel(job)
+    Result.Ok(Completed(eye = eye, answer = Option.None))
+
+fn serving(eye: Infra.Screen.Eye, job: Work.Job) -> Result<Completed, String>
+    ? "One serving turn, then a park of at most a tenth of a second."
+      "The park is bounded rather than open-ended for two reasons. A stop"
+      "is asked for through a flag that wakes nothing, so the loop has to"
+      "come back and look. And a frame half written or a Handshake half"
+      "done finishes without anybody saying anything, so silence is not"
+      "the same as nothing to do. Both of those keep their place between"
+      "turns, which is what makes a turn that does part of the work worth"
+      "taking."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.BlockJobs.take,
+        Process.stopRequested,
+        Random.int,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.peerAddress, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    served = Infra.Screen.attended(eye, Time.unixMs())?
+    _ready = Wait.poll(interests(served, job), 100)?
+    waiting(served, job)
+
+fn boardItems(board: Option<Infra.Board.Board>, items: Map<Int, Wait.Item>) -> Map<Int, Wait.Item>
+    ? "The dashboard's Readers, lifted into odd keys of their own: the job"
+      "holds 1 and the sockets hold the even numbers, so doubling a"
+      "Reader's key and adding three can collide with neither. A walk with"
+      "no Board contributes nothing."
+    match board
+        Option.None -> items
+        Option.Some(one) -> boardSockets(Infra.Board.watchSockets(one), Map.keys(Infra.Board.watchSockets(one)), items)
+
+verify boardItems
+    boardItems(Option.None, {}) => {}
+
+fn boardSockets(sockets: Map<Int, Tcp.Socket>, keys: List<Int>, items: Map<Int, Wait.Item>) -> Map<Int, Wait.Item>
+    ? "One entry per Reader the Board still holds, at twice its key plus"
+      "three."
+    match keys
+        [] -> items
+        [key, ..rest] -> match Map.get(sockets, key)
+            Option.None -> boardSockets(sockets, rest, items)
+            Option.Some(socket) -> boardSockets(sockets, rest, Map.set(items, key * 2 + 3, Wait.Item.Socket(socket)))
+
+verify boardSockets
+    boardSockets({}, [], {}) => {}
