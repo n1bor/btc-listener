@@ -395,6 +395,21 @@ as new. The implication law needed stating through `onOrStays` with
 `using [onOrStays.isImplication]`; written as a bare `Bool.or` over the two
 projections it opened at the implication and landed on `sorry`.
 
+## CLTV and CSV against Core (n1bor/btc-listener#352)
+
+Four laws over `Domain.LockTime`, all universal at pin `c4b08179` (**123
+universal, 1 bounded, 0 open, 134 declined** for the cone, 0 regressions):
+
+| law | pins | tier |
+|---|---|---|
+| `LockTime.lockTimeChecked.agreesWithCoreCheckLockTime` | `Continue` exactly when `cltvSpec`: same side of 500,000,000, `value <= lockTime`, sequence not final (Core's `CheckLockTime`) | universal |
+| `LockTime.sequenceChecked.agreesWithCoreCheckSequence` | `Continue` exactly when `csvSpec`: disable bit on the value passes; else version >= 2 as uint32, Input's disable bit clear, same type bit, masked value <= masked sequence (Core's `CheckSequence`, BIP68/112) | universal |
+| `LockTime.checked.isANopBelowTheFork` | under rules where `stillNop`, the opcode is `Continue(state)` even on an empty stack | universal |
+| `LockTime.checked.neverPops` | a `Continue` carries the State untouched (BIP65: the top item is not popped) | universal |
+
+The five-byte operand width is pinned by cases either side of five: stated as
+a law over the whole Step for any item, the export landed on `sorry`.
+
 ## The two truthiness laws (n1bor/btc-listener#344)
 
 Both #337 proposals that did not land the first time now close universally,

@@ -24,6 +24,32 @@ verify checked
     checked(177, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 0))) => Step.Continue(Domain.ScriptState.empty())
     checked(178, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, 0))) => Step.Continue(Domain.ScriptState.empty())
 
+verify checked law isANopBelowTheFork
+    given code: Int = [177, 178]
+    given state: State = [Domain.ScriptState.empty(), Domain.ScriptState.holding([[1]]), Domain.ScriptState.holding([[1, 2, 3, 4, 5, 6]])]
+    given height: Int = [0, 163685, 388380]
+    when Domain.Rules.stillNop(Domain.Rules.at(Network.Mainnet, height), code)
+    checked(code, state, Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, height))) => Step.Continue(state)
+
+verify checked law neverPops
+    given code: Int = [177, 178]
+    given state: State = [Domain.ScriptState.empty(), Domain.ScriptState.holding([[1]]), Domain.ScriptState.holding([[], [7]]), Domain.ScriptState.holding([[1, 2, 3, 4, 5, 6]])]
+    given height: Int = [0, 388381, 419328, 900000]
+    keepsOrStops(state, checked(code, state, Domain.SpendContext.bare(Domain.Rules.at(Network.Mainnet, height)))) => true
+
+fn keepsOrStops(state: State, step: Step) -> Bool
+    ? "Whether a Step either stopped the Script or carried the State on"
+      "untouched: BIP65 and BIP112 say the top item is not popped, so a"
+      "Continue that changed the stack would be a wrong port of both."
+    match step
+        Step.Stop(outcome) -> true
+        Step.Continue(after) -> after == state
+
+verify keepsOrStops
+    keepsOrStops(Domain.ScriptState.empty(), Step.Continue(Domain.ScriptState.empty())) => true
+    keepsOrStops(Domain.ScriptState.empty(), Step.Continue(Domain.ScriptState.holding([[1]]))) => false
+    keepsOrStops(Domain.ScriptState.empty(), Step.Stop(Outcome.Undecided("x"))) => true
+
 fn enforced(code: Int, state: State, context: Context) -> Step
     ? "An empty stack fails before the Transaction is looked at, which is the"
       "order the reference client checks in and the reason a Script with no"
@@ -36,7 +62,9 @@ verify enforced
     enforced(177, Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs an item")))
 
 fn withTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
-    ? "Five bytes, not four."
+    ? "Five bytes, not four: Core's CScriptNum(stacktop(-1), fRequireMinimal, 5)."
+      "Pinned by cases either side of five rather than a law: stated over"
+      "the whole Step for any item, the export lands on sorry (#352)."
       "Core says why in as many words: a four byte lock time would give"
       "Bitcoin a year 2038 problem, and the field it is compared against is a"
       "uint32 that only runs out in 2106."
@@ -46,6 +74,12 @@ fn withTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
 
 verify withTop
     withTop(177, [1, 2, 3, 4, 5, 6], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs a number of five bytes or fewer")))
+
+verify withTop
+    withTop(178, [1, 2, 3, 4, 5, 6], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKSEQUENCEVERIFY needs a number of five bytes or fewer")))
+    withTop(177, [0, 0, 0, 0, 0, 0, 0], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY needs a number of five bytes or fewer")))
+    withTop(177, [1, 2, 3, 4, 5], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"))
+    withTop(177, [1, 2, 3, 4], Domain.ScriptState.empty(), Domain.SpendContext.bare(Domain.Rules.latest())) => Step.Stop(Outcome.Undecided("OP_CHECKLOCKTIMEVERIFY needs the transaction it locks"))
 
 fn withMinimalTop(code: Int, top: List<Int>, state: State, context: Context) -> Step
     ? "MINIMALDATA reaches the lock time too, because Core builds this number"
@@ -103,8 +137,37 @@ fn lockTimeChecked(value: Int, locking: Locking, state: State) -> Step
         false -> refused(177, "compares a Height with a time")
         true -> reached(value, locking, state)
 
+verify lockTimeChecked law agreesWithCoreCheckLockTime
+    given value: Int = [0, 1, 499999999, 500000000, 500000001, 600000000]
+    given lockTime: Int = [0, 1, 499999999, 500000000, 500000001, 600000000]
+    given sequence: Int = [0, 1, 4294967294, 4294967295]
+    continued(lockTimeChecked(value, Domain.SpendContext.Locking(version = 1, lockTime = lockTime, sequence = sequence), Domain.ScriptState.empty())) => cltvSpec(value, lockTime, sequence)
+
 verify lockTimeChecked
     lockTimeChecked(500000001, Domain.SpendContext.Locking(version = 1, lockTime = 5, sequence = 0), Domain.ScriptState.empty()) => Step.Stop(Outcome.Decided(Ending.Failed("OP_CHECKLOCKTIMEVERIFY compares a Height with a time")))
+
+fn cltvSpec(value: Int, lockTime: Int, sequence: Int) -> Bool
+    ? "Core's CheckLockTime, in one line: both sides on the same side of the"
+      "500,000,000 threshold, the Script's lock not past the Transaction's,"
+      "and the Input's sequence not final. Written apart from the code so"
+      "the law reads the rule and the code reads the refusals."
+    Bool.and(Bool.and(sameKind(value, lockTime), value <= lockTime), sequence != 4294967295)
+
+verify cltvSpec
+    cltvSpec(5, 9, 0) => true
+    cltvSpec(9, 5, 0) => false
+    cltvSpec(5, 500000000, 0) => false
+    cltvSpec(5, 9, 4294967295) => false
+
+fn continued(step: Step) -> Bool
+    ? "Whether the Step carried on, for the laws here."
+    match step
+        Step.Continue(state) -> true
+        Step.Stop(outcome) -> false
+
+verify continued
+    continued(Step.Continue(Domain.ScriptState.empty())) => true
+    continued(Step.Stop(Outcome.Undecided("x"))) => false
 
 fn sameKind(a: Int, b: Int) -> Bool
     ? "Both Heights, or both times."
@@ -167,8 +230,30 @@ fn sequenceChecked(value: Int, locking: Locking, state: State) -> Step
         true -> Step.Continue(state)
         false -> versioned(value, locking, state)
 
+verify sequenceChecked law agreesWithCoreCheckSequence
+    given value: Int = [0, 5, 65535, 65536, 4194304, 4194309, 4259839, 2147483648, 2147483653, 4294967295]
+    given version: Int = [0, 1, 2, 4294967295]
+    given sequence: Int = [0, 5, 65535, 65536, 4194304, 4194309, 2147483648, 4294967295]
+    continued(sequenceChecked(value, Domain.SpendContext.Locking(version = version, lockTime = 0, sequence = sequence), Domain.ScriptState.empty())) => csvSpec(value, version, sequence)
+
 verify sequenceChecked
     sequenceChecked(2147483648, Domain.SpendContext.Locking(version = 1, lockTime = 0, sequence = 0), Domain.ScriptState.empty()) => Step.Continue(Domain.ScriptState.empty())
+
+fn csvSpec(value: Int, version: Int, sequence: Int) -> Bool
+    ? "Core's CheckSequence, in one line: a Script value with the disable"
+      "bit set passes whatever the Input says; otherwise the Transaction is"
+      "version two or later, the Input's own disable bit is clear, both"
+      "masked values count the same thing, and the Input has waited at"
+      "least as long as asked. The version compares as Core's uint32 does."
+    Bool.or(Bits.and(value, disableFlag()) != 0, Bool.and(Bool.and(version >= 2, Bits.and(sequence, disableFlag()) == 0), Bool.and((Bits.and(value, compared()) < typeFlag()) == (Bits.and(sequence, compared()) < typeFlag()), Bits.and(value, compared()) <= Bits.and(sequence, compared()))))
+
+verify csvSpec
+    csvSpec(2147483648, 1, 0) => true
+    csvSpec(5, 1, 9) => false
+    csvSpec(5, 2, 2147483648) => false
+    csvSpec(4194305, 2, 5) => false
+    csvSpec(5, 2, 9) => true
+    csvSpec(9, 2, 5) => false
 
 fn versioned(value: Int, locking: Locking, state: State) -> Step
     ? "Relative lock times are a version two rule and a version one"
