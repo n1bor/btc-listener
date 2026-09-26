@@ -80,7 +80,7 @@ def trial(binary, count, cancel=False, record=False):
             with listener.accept()[0] as peer:
                 peer.settimeout(20)
                 assert receive(peer)[0] == "version"
-                version = struct.pack("<iQq", 70016, 0, int(time.time())) + bytes(52) + struct.pack("<Q", 4242) + b"\x0a/worktest/" + struct.pack("<i", 0) + b"\0"
+                version = struct.pack("<iQq", 70016, 9, int(time.time())) + bytes(52) + struct.pack("<Q", 4242) + b"\x0a/worktest/" + struct.pack("<i", 0) + b"\0"
                 peer.sendall(frame("version", version) + frame("verack", b""))
                 while receive(peer)[0] != "verack":
                     pass
