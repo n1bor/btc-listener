@@ -231,6 +231,37 @@ def header_flood(conn):
             pass
         time.sleep(0.5)
     print('liar: sent', sent, 'claims', file=sys.stderr, flush=True)
+def inv_flood_late(conn, pieces=False):
+    # The same inv, sent after the node has been in its listen loop for a
+    # while rather than on the getaddr it sends on joining (#381).
+    count = 50001
+    payload = bytes([0xfd]) + struct.pack('<H', count) + (struct.pack('<I', 2) + b'\0' * 32) * count
+    frame = msg('inv', payload)
+    conn.sendall(msg('headers', headers_payload([])))
+    conn.settimeout(120)
+    deadline = time.time() + 15
+    try:
+        while time.time() < deadline:
+            conn.settimeout(max(0.1, deadline - time.time()))
+            try:
+                for f in frames(conn):
+                    print('liar: got', command_of(f), file=sys.stderr, flush=True)
+                    if command_of(f) == 'getheaders': conn.sendall(msg('headers', headers_payload([])))
+                    if time.time() >= deadline: break
+            except socket.timeout:
+                break
+        if pieces:
+            for at in range(0, len(frame), 4096):
+                conn.sendall(frame[at:at+4096]); time.sleep(0.02)
+        else:
+            conn.sendall(frame)
+        print('liar: sent the lie (%d bytes%s)' % (len(frame), ', in pieces' if pieces else ''), file=sys.stderr, flush=True)
+        conn.settimeout(120)
+        for f in frames(conn):
+            print('liar: got', command_of(f), file=sys.stderr, flush=True)
+            if command_of(f) == 'getheaders': conn.sendall(msg('headers', headers_payload([])))
+    except (socket.timeout, OSError):
+        return
 def inv_flood(conn):
     # An inv naming 50,001 Blocks -- one over Core's MAX_INV_SZ -- of all-zero
     # Ids (#358). Core disconnects a Peer for the count alone, before reading
@@ -302,6 +333,12 @@ def serve(port, mode):
         return
     elif mode == 'invflood':
         inv_flood(conn)
+        return
+    elif mode == 'invflood-late':
+        inv_flood_late(conn)
+        return
+    elif mode == 'invflood-pieces':
+        inv_flood_late(conn, pieces=True)
         return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))

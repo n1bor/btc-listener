@@ -3050,9 +3050,27 @@ following at Height 190: 0 connected, 0 disconnected, set +0 -0
 The liar prints `liar: sent the lie` after `got getaddr`. A run that instead
 prints `peer 0 did not send the compact Block for 0000…0000 within 10
 seconds` is the node having read the entries and asked for the first of
-them, which is what this section exists to refuse — it happened once in five
-runs while this section was written and is
-[#381](https://github.com/n1bor/btc-listener/issues/381).
+them, which is what this section exists to refuse. It happened once in the
+five runs made while this section was written and never again:
+[#381](https://github.com/n1bor/btc-listener/issues/381) records the run and
+the nine that followed it under `log`, three per delivery shape, all dropped
+for the count. The other two shapes are modes of their own, so the matrix can
+be run again if it ever recurs: `invflood-late` sends the same `inv` fifteen
+seconds into the listen loop rather than on the `getaddr`, and
+`invflood-pieces` sends it 4 KiB at a time, 20 ms apart, so the inbox
+assembles it across many turns.
+
+```bash
+for m in invflood invflood-late invflood-pieces; do
+  python3 tools/regtest/liar.py 18455 $m &
+  timeout -s INT 50 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D log | grep -E "dropping|compact Block for 0000"
+done
+```
+
+Each must print the `dropping peer 0` line and nothing about a compact Block;
+`debug.log` will also carry `fault ignoring 0 unasked-for Header(s) from peer 0`
+for the late shapes, which is the liar's empty `headers` being weighed (#300)
+and not a fault of the test.
 
 ## Before you commit
 

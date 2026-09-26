@@ -84,7 +84,7 @@ an unproven Header or a body that is not the Block — so the paths that exist
 for hostile Peers are exercised by two scripts. `tools/regtest/liar.py` is a
 Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
 `wrongbody`, `witnessflag`, `emptywitness`, `addrflood`, `escape`, `headerflood`,
-`bip30`, `invflood`); `tools/regtest/caller.py`
+`bip30`, `invflood`, `invflood-late`, `invflood-pieces`); `tools/regtest/caller.py`
 is a caller that dials the node's served port (`early`, `chatty`, `silent`,
 `pinger`, `polite`, `lurker`, `locator`, `deaf`). Each security fix in this repo (#281–#284, #291, #293,
 #300, #347, #354, #358) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
