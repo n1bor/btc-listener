@@ -6,7 +6,7 @@ def msg(cmd, payload, corrupt=False):
     return MAGIC + cmd.encode().ljust(12, b'\0') + struct.pack('<I', len(payload)) + c + payload
 AGENT = b'/liar:1/'
 def version_payload():
-    return (struct.pack('<iQq', 70016, 0, int(time.time())) + b'\0'*26 + b'\0'*26
+    return (struct.pack('<iQq', 70016, 9, int(time.time())) + b'\0'*26 + b'\0'*26   # NODE_NETWORK|NODE_WITNESS: a dialled Peer without the bit is refused (#280 item 16)
             + struct.pack('<Q', 12345) + bytes([len(AGENT)]) + AGENT + struct.pack('<i', 0) + b'\0')
 REGTEST_GENESIS = bytes.fromhex('0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206')[::-1]
 def low_bits_header():
