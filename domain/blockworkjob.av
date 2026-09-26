@@ -17,7 +17,7 @@ fn run(task: Infra.BlockJobs.Task) -> Infra.BlockJobs.Reply
       "Domain.Connect.connected for a connection."
     match task
         Infra.BlockJobs.Task.Decode(payload) -> decoded(Domain.Block.transactionsOf(payload))
-        Infra.BlockJobs.Task.Connect(chain, height, txs, coins) -> connected(Domain.Connect.connected(chain, height, txs, coins))
+        Infra.BlockJobs.Task.Connect(chain, height, txs, coins, held) -> connected(Domain.Connect.connectedUnless(chain, height, txs, coins, held))
 
 verify run
     run(Infra.BlockJobs.Task.Decode(Bytes.fromHex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c01")?)) => Infra.BlockJobs.Reply.Refused("Transaction ends before its lock time")
@@ -58,9 +58,9 @@ verify connection
     connection(Infra.BlockJobs.Reply.Refused("invalid")) => Domain.Connect.Connecting.Refused("invalid")
     connection(Infra.BlockJobs.Reply.Decoded([])) => Domain.Connect.Connecting.Refused("a decode result cannot settle a connection job")
 
-fn connectionTask(chain: Domain.Network.Network, height: Int, txs: List<Domain.Transaction.Transaction>, coins: Map<Bytes, Domain.UtxoStore.Unspent>) -> Infra.BlockJobs.Task
+fn connectionTask(chain: Domain.Network.Network, height: Int, txs: List<Domain.Transaction.Transaction>, coins: Map<Bytes, Domain.UtxoStore.Unspent>, held: List<Bytes>) -> Infra.BlockJobs.Task
     ? "A connection job: the Network, the Transactions and the coins they spend."
-    Infra.BlockJobs.Task.Connect(chain, height, txs, coins)
+    Infra.BlockJobs.Task.Connect(chain, height, txs, coins, held)
 
 verify connectionTask
-    connectionTask(Domain.Network.Network.Regtest, 1, [], {}) => Infra.BlockJobs.Task.Connect(Domain.Network.Network.Regtest, 1, [], {})
+    connectionTask(Domain.Network.Network.Regtest, 1, [], {}, []) => Infra.BlockJobs.Task.Connect(Domain.Network.Network.Regtest, 1, [], {}, [])

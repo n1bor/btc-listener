@@ -150,6 +150,54 @@ def flag_body(cli, block_hash):
     return lying_body(cli, block_hash, 'witnessflag')
 def empty_witness_body(cli, block_hash):
     return lying_body(cli, block_hash, 'emptywitness')
+def duplicate_coinbase_block(cli):
+    # A Block that proves regtest's work on Core's tip and carries one
+    # Transaction: the tip's own coinbase, byte for byte (#354). Its Header
+    # is honest about everything a Header can be asked -- parent, Merkle
+    # Root (a one-Transaction tree's Root is that Transaction's Id), time
+    # past the median, the Network's bits, a nonce that meets them -- and
+    # the body is the Block the Header commits to, so `Domain.Body.fault`
+    # has nothing to refuse. What it would do is write an Output the Set
+    # already holds, which is what BIP30 forbids: connected, it would
+    # overwrite `u:` and its Undo Data would later delete the original.
+    import json
+    tip = rpc(cli, 'getbestblockhash')
+    info = json.loads(rpc(cli, 'getblockheader', tip, 'true'))
+    block = bytes.fromhex(rpc(cli, 'getblock', tip, '0'))
+    count, at = compact(block, 80)
+    end = tx_extent(block, at)[0]
+    coinbase = block[at:end]
+    txid = bytes.fromhex(json.loads(rpc(cli, 'getblock', tip, '1'))['tx'][0])[::-1]
+    when = max(int(time.time()), info['mediantime'] + 1)
+    prefix = struct.pack('<i', 0x20000000) + bytes.fromhex(tip)[::-1] + txid + struct.pack('<II', when, 0x207fffff)
+    for nonce in range(1 << 32):
+        header = prefix + struct.pack('<I', nonce)
+        digest = hashlib.sha256(hashlib.sha256(header).digest()).digest()
+        if digest[31] < 0x7f: break                   # under regtest's limit, 0x7fffff << 232
+    print('liar: mined', digest[::-1].hex(), 'at Height', info['height'] + 1, 'duplicating coinbase', txid[::-1].hex(), file=sys.stderr, flush=True)
+    return header, header + b'\x01' + coinbase, digest
+def serve_block(conn, header, body, block_id):
+    # Announce one Header unasked, answer every getheaders with it, and hand
+    # over its body when asked. The node hears that the chain moved, asks
+    # this Peer for the Headers and then the body, and connects it -- or
+    # refuses to.
+    conn.sendall(msg('headers', headers_payload([header])))
+    conn.settimeout(120)
+    try:
+        for frame in frames(conn):
+            cmd = command_of(frame)
+            print('liar: got', cmd, file=sys.stderr, flush=True)
+            if cmd == 'getheaders':
+                conn.sendall(msg('headers', headers_payload([header])))
+            if cmd == 'getdata':
+                payload = frame[24:]
+                count = payload[0]; at = 1
+                for _ in range(count):
+                    kind = struct.unpack('<I', payload[at:at+4])[0]; h = payload[at+4:at+36]; at += 36
+                    if kind & 2 and h == block_id:
+                        conn.sendall(msg('block', body)); print('liar: sent the body', file=sys.stderr, flush=True)
+    except (socket.timeout, OSError):
+        return
 REGTEST_GENESIS_HEADER = bytes.fromhex(
     '0100000000000000000000000000000000000000000000000000000000000000000000003b'
     'a3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff'
@@ -237,6 +285,10 @@ def serve(port, mode):
         return
     elif mode == 'emptywitness':
         serve_bodies(conn, sys.argv[3], empty_witness_body)
+        return
+    elif mode == 'bip30':
+        header, body, block_id = duplicate_coinbase_block(sys.argv[3])
+        serve_block(conn, header, body, block_id)
         return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))

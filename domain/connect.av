@@ -31,7 +31,7 @@ module Connect
         "answer. It must not be left in the Set, and it must not be in the"
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
-    exposes [Change, Connecting, TxFee, connected, paidBy, createdBy, outpointKey]
+    exposes [Change, Connecting, TxFee, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
     depends [Bytes, Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
@@ -146,6 +146,211 @@ verify connected
     connected(Network.Mainnet, 1, [minting(5000000001)], Map.fromList([])) => Connecting.Refused("coinbase claims 5000000001 with 5000000000 allowed")
     connected(Network.Mainnet, 1, [minting(4000000000)], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = Bytes.fromList([203]), index = 0, value = 4000000000, script = Bytes.empty(), height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
 
+verify connected law valueIsConserved
+    given transactions: List<Transaction> = [[minting(50)], [minting(50), paying("a1", "aa", 0, 90)], [minting(70), paying("a1", "aa", 0, 90), paying("a2", "a1", 0, 80)], [minting(5000000000)], [minting(50), paying("a1", "cc", 0, 90)]]
+    given height: Int = [1, 101, 210000]
+    given fromStore: Map<Bytes, Unspent> = [Map.fromList([]), holding()?]
+    when Bool.and(height >= 0, height <= 13440000)
+    conservedIn(connected(Network.Mainnet, height, transactions, fromStore), Domain.Subsidy.atHeight(Network.Mainnet, height)) => true
+
+verify connected law noOutputSpentTwice
+    given transactions: List<Transaction> = [[minting(50)], [minting(50), paying("a1", "aa", 0, 90)], [minting(70), paying("a1", "aa", 0, 90), paying("a2", "a1", 0, 80)], [minting(50), paying("a1", "aa", 0, 90), paying("a2", "aa", 0, 80)]]
+    given fromStore: Map<Bytes, Unspent> = [Map.fromList([]), holding()?]
+    spentOnce(connected(Network.Mainnet, 1, transactions, fromStore)) => true
+
+verify connected law feesAgreeWithConfirmed
+    given transactions: List<Transaction> = [[minting(50)], [minting(50), paying("a1", "aa", 0, 90)], [minting(70), paying("a1", "aa", 0, 90), paying("a2", "a1", 0, 80)], [minting(5000000000)], [minting(50), paying("a1", "cc", 0, 90)]]
+    given height: Int = [1, 101]
+    given fromStore: Map<Bytes, Unspent> = [Map.fromList([]), holding()?]
+    when Bool.and(height >= 0, height <= 13440000)
+    feesAgree(connected(Network.Mainnet, height, transactions, fromStore)) => true
+
+fn feesAgree(connection: Connecting) -> Bool
+    ? "The Block's fees are the sum of its confirmed fees, and the confirmed"
+      "list leads with the coinbase at fee 0 and holds no other coinbase."
+      "A refused Block has no Change to disagree with itself."
+    match connection
+        Connecting.Refused(_) -> true
+        Connecting.Applied(change) -> Bool.and(change.fees == feesIn(change.confirmed, 0), coinbaseLeads(change.confirmed))
+
+verify feesAgree
+    feesAgree(Connecting.Refused("no")) => true
+    feesAgree(Connecting.Applied(Change(added = [], removed = [], fees = 7, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "a1", fee = 7, coinbase = false)]))) => true
+    feesAgree(Connecting.Applied(Change(added = [], removed = [], fees = 8, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "a1", fee = 7, coinbase = false)]))) => false
+    feesAgree(Connecting.Applied(Change(added = [], removed = [], fees = 7, confirmed = [TxFee(txid = "a1", fee = 7, coinbase = false)]))) => false
+
+fn feesIn(confirmed: List<TxFee>, acc: Int) -> Int
+    ? "The confirmed fees added up."
+    match confirmed
+        [] -> acc
+        [head, ..tail] -> feesIn(tail, acc + head.fee)
+
+verify feesIn
+    feesIn([], 0) => 0
+    feesIn([TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "a1", fee = 7, coinbase = false)], 0) => 7
+
+fn coinbaseLeads(confirmed: List<TxFee>) -> Bool
+    ? "The head is the coinbase at fee 0, and nothing behind it is one."
+    match confirmed
+        [] -> false
+        [head, ..tail] -> Bool.and(Bool.and(head.coinbase, head.fee == 0), noCoinbaseIn(tail))
+
+verify coinbaseLeads
+    coinbaseLeads([]) => false
+    coinbaseLeads([TxFee(txid = "cb", fee = 0, coinbase = true)]) => true
+    coinbaseLeads([TxFee(txid = "cb", fee = 1, coinbase = true)]) => false
+    coinbaseLeads([TxFee(txid = "a1", fee = 0, coinbase = false)]) => false
+    coinbaseLeads([TxFee(txid = "cb", fee = 0, coinbase = true), TxFee(txid = "c2", fee = 0, coinbase = true)]) => false
+
+fn noCoinbaseIn(confirmed: List<TxFee>) -> Bool
+    ? "None of these is a coinbase."
+    match confirmed
+        [] -> true
+        [head, ..tail] -> Bool.and(Bool.not(head.coinbase), noCoinbaseIn(tail))
+
+verify noCoinbaseIn
+    noCoinbaseIn([]) => true
+    noCoinbaseIn([TxFee(txid = "a1", fee = 7, coinbase = false)]) => true
+    noCoinbaseIn([TxFee(txid = "a1", fee = 7, coinbase = false), TxFee(txid = "cb", fee = 0, coinbase = true)]) => false
+
+fn isApplied(connection: Connecting) -> Bool
+    ? "Whether the Block was taken."
+    match connection
+        Connecting.Applied(change) -> true
+        Connecting.Refused(why) -> false
+
+verify isApplied
+    isApplied(Connecting.Refused("no")) => false
+    isApplied(connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))) => true
+
+fn conservedIn(connection: Connecting, subsidy: Int) -> Bool
+    ? "The supply rule as a law: what a Block puts into the Set is at most"
+      "what it took out plus the subsidy, so the coinbase is the only place"
+      "value enters. A refusal conserves trivially."
+    match connection
+        Connecting.Refused(why) -> true
+        Connecting.Applied(change) -> valueOf(change.added, 0) <= valueOf(change.removed, 0) + subsidy
+
+verify conservedIn
+    conservedIn(Connecting.Refused("no"), 0) => true
+    conservedIn(connected(Network.Mainnet, 1, [minting(50)], Map.fromList([])), 5000000000) => true
+    conservedIn(Connecting.Applied(Change(added = [Unspent(txid = Bytes.fromList([1]), index = 0, value = 7, script = Bytes.empty(), height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [])), 6) => false
+
+fn valueOf(unspents: List<Unspent>, acc: Int) -> Int
+    ? "The satoshis a list of Outputs holds."
+    match unspents
+        [] -> acc
+        [head, ..tail] -> valueOf(tail, acc + head.value)
+
+verify valueOf
+    valueOf([], 5) => 5
+    valueOf([Unspent(txid = Bytes.fromList([1]), index = 0, value = 7, script = Bytes.empty(), height = 1, coinbase = true)], 1) => 8
+
+fn spentOnce(connection: Connecting) -> Bool
+    ? "No Output leaves the Set twice, and nothing is both added and removed"
+      "by one Block: the two paths an Input can resolve by, the Block's own"
+      "Outputs and the Store's, must not both take the same key."
+    match connection
+        Connecting.Refused(why) -> true
+        Connecting.Applied(change) -> Bool.and(distinctKeys(keysIn(change.removed, []), []), disjoint(keysIn(change.added, []), keysIn(change.removed, [])))
+
+verify spentOnce
+    spentOnce(Connecting.Refused("no")) => true
+    spentOnce(connected(Network.Mainnet, 1, [minting(50), paying("a1", "aa", 0, 90)], holding()?)) => true
+
+fn keysIn(unspents: List<Unspent>, acc: List<Bytes>) -> List<Bytes>
+    ? "The Set keys of these Outputs."
+    match unspents
+        [] -> List.reverse(acc)
+        [head, ..tail] -> keysIn(tail, List.prepend(Domain.UtxoStore.keyAt(head.txid, head.index), acc))
+
+verify keysIn
+    keysIn([], []) => []
+    List.len(keysIn([Unspent(txid = Bytes.fromList([1]), index = 0, value = 7, script = Bytes.empty(), height = 1, coinbase = true)], [])) => 1
+
+fn distinctKeys(keys: List<Bytes>, seen: List<Bytes>) -> Bool
+    ? "No key twice."
+    match keys
+        [] -> true
+        [head, ..tail] -> Bool.and(List.contains(seen, head) == false, distinctKeys(tail, List.prepend(head, seen)))
+
+verify distinctKeys
+    distinctKeys([], []) => true
+    distinctKeys([Bytes.fromList([1]), Bytes.fromList([2])], []) => true
+    distinctKeys([Bytes.fromList([1]), Bytes.fromList([1])], []) => false
+
+fn disjoint(left: List<Bytes>, right: List<Bytes>) -> Bool
+    ? "No key in both."
+    match left
+        [] -> true
+        [head, ..tail] -> Bool.and(List.contains(right, head) == false, disjoint(tail, right))
+
+verify disjoint
+    disjoint([], [Bytes.fromList([1])]) => true
+    disjoint([Bytes.fromList([1])], [Bytes.fromList([1])]) => false
+
+fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>) -> Connecting
+    ? "connected, after BIP30: a Block that would write an Output the Set"
+      "already holds is refused whole, before its walk."
+      "held is every key this Block's Outputs would be written under that the"
+      "Set holds already -- the caller looks them up, because the walk only"
+      "fetches what the Inputs spend. Without this, a duplicate txid overwrote"
+      "the older Output, wrote no Undo Data for it, and a later Reorganisation"
+      "deleted the key outright and lost the original (n1bor/btc-listener#354)."
+    match duplicateOutputs(network, height, held)
+        Option.Some(why) -> Connecting.Refused(why)
+        Option.None -> connected(network, height, transactions, fromStore)
+
+verify connectedUnless
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), []) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])]) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])])) => true
+
+fn duplicateOutputs(network: Network, height: Int, held: List<Bytes>) -> Option<String>
+    ? "BIP30: why a Block whose Outputs the Set already holds is refused, or"
+      "None. Core enforces it on every Block except two on mainnet, 91842 and"
+      "91880, whose coinbases repeat 91812's and 91722's and overwrote them"
+      "before the rule existed; Core excuses those two by Height and Block Id"
+      "(validation.cpp, fEnforceBIP30) and so does this node, by Height."
+    match held
+        [] -> Option.None
+        [head, ..tail] -> match excusedByCore(network, height)
+            true -> Option.None
+            false -> Option.Some("Block would write {List.len(held)} Output(s) the Set already holds (BIP30)")
+
+verify duplicateOutputs
+    duplicateOutputs(Network.Mainnet, 500000, []) => Option.None
+    duplicateOutputs(Network.Mainnet, 500000, [Bytes.fromList([1])]) => Option.Some("Block would write 1 Output(s) the Set already holds (BIP30)")
+    duplicateOutputs(Network.Mainnet, 91842, [Bytes.fromList([1])]) => Option.None
+    duplicateOutputs(Network.Mainnet, 91880, [Bytes.fromList([1]), Bytes.fromList([2])]) => Option.None
+    duplicateOutputs(Network.Regtest, 91842, [Bytes.fromList([1])]) => Option.Some("Block would write 1 Output(s) the Set already holds (BIP30)")
+
+verify duplicateOutputs law nothingHeldIsNeverRefused
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 91842, 91880, 500000]
+    duplicateOutputs(network, height, []) => Option.None
+
+verify duplicateOutputs law heldIsRefusedExceptCoreTwo
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 91841, 91842, 91843, 91880, 500000]
+    given held: List<Bytes> = [[Bytes.fromList([1])], [Bytes.fromList([1]), Bytes.fromList([2])]]
+    when held != []
+    (duplicateOutputs(network, height, held) == Option.None) => excusedByCore(network, height)
+
+fn excusedByCore(network: Network, height: Int) -> Bool
+    ? "The two mainnet Blocks Core excuses from BIP30."
+    match network
+        Network.Mainnet -> Bool.or(height == 91842, height == 91880)
+        Network.Testnet -> false
+        Network.Signet -> false
+        Network.Regtest -> false
+
+verify excusedByCore
+    excusedByCore(Network.Mainnet, 91842) => true
+    excusedByCore(Network.Mainnet, 91880) => true
+    excusedByCore(Network.Mainnet, 91843) => false
+    excusedByCore(Network.Regtest, 91842) => false
+
 fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Connecting
     ? "The rest of the Block first, then what the coinbase is owed."
     settled(network, height, coinbase, walkedFrom(seeded(coinbase, height), rest, height, fromStore))
@@ -182,7 +387,7 @@ fn intoMap(unspents: List<Unspent>, acc: Map<Bytes, Unspent>) -> Result<Map<Byte
       "under something no Input could ask for."
     match unspents
         [] -> Result.Ok(acc)
-        [head, ..tail] -> intoMap(tail, Map.set(acc, Domain.UtxoStore.keyOf(head)?, head))
+        [head, ..tail] -> intoMap(tail, Map.set(acc, Domain.UtxoStore.keyAt(head.txid, head.index), head))
 
 verify intoMap
     Map.len(intoMap([], Map.fromList([]))?) => 0

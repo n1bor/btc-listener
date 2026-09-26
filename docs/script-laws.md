@@ -435,3 +435,46 @@ The remaining #337 proposal, that `minimalPush` is `isMinimalPush`-minimal, is f
 `CScript() << vch` writes `[1]` as a one-byte push, which MINIMALDATA refuses
 in favour of OP_1, and `isMinimalPush.directPushIsMinimalUnlessSmallNumber`
 already pins exactly that.
+
+## Connect, Undo and BIP30 (n1bor/btc-listener#354)
+
+Nine laws over `Domain.Connect` and `Domain.Disconnect`, gathered by the
+second proof entry `domain/laws.av`, which now depends on both. Writing the
+round-trip law found that BIP30 was not enforced — a Block re-creating an
+Output the Set held overwrote it and its Undo Data later deleted the original
+— so `connectedUnless` refuses such a Block first, with Core's two mainnet
+exceptions at 91842 and 91880 excused, and the law is stated without a
+`when` for it. Measured at pin `c4b08179`: the entry goes from **59
+universal, 1 bounded, 0 open, 66 declined** to **62 universal, 2 bounded, 0
+open, 95 declined**; `--gate` reports four new laws and no regression, and
+`proof/laws.declined` rises from 66 to 95 for a written reason (below).
+
+| law | pins | tier |
+|---|---|---|
+| `Connect.connected.valueIsConserved` | an applied Block adds at most the subsidy plus what it removed (`conservedIn`); `when` bounds the Height to the subsidy's last halving | declined |
+| `Connect.connected.noOutputSpentTwice` | `removed` has distinct keys and is disjoint from `added`, across the store and in-Block paths | declined |
+| `Connect.connected.feesAgreeWithConfirmed` | `fees` is the sum of the confirmed fees, and `confirmed` leads with the coinbase at fee 0 and holds no other coinbase | declined |
+| `Connect.duplicateOutputs.nothingHeldIsNeverRefused` | a Block whose created keys the Set does not hold is never refused for BIP30 | universal |
+| `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo` | any held key is refused, unless the Block is mainnet 91842 or 91880 | bounded (`when held != []`) |
+| `Disconnect.reversal.undoesConnected` | applying a Block's Change and then its Reversal is the identity on the Set (`roundTrip`) | declined |
+| `Disconnect.reversal.deletesEverythingConnectAdds` | every key `connected` adds is in the Reversal's `deleted` (one direction: an Output created and spent in-Block is deleted and never added) | declined |
+| `Disconnect.undoable.windowIsExactly288Deep` | a fork is reversible against `windowFrom(tip)` exactly when it disconnects at most `windowSize()` Blocks | universal |
+| `Disconnect.prunable.neverTakesUndoData` | pruning below `h` is permitted exactly when `h <= windowFrom(standing)` | universal |
+
+**Why the budget rose.** Five of the nine are declined, not open: the Lean
+call cone of `connected` reaches the Block walk (`conserving`, `found`,
+`fromTheStore`, `notYetSpent`, `resolving`, `spentBy`, `takenFromBlock`,
+`takenFromStore`, `walked`), a mutual recursion whose seed is not a proven
+recursion bound, and the two round-trip laws also iterate a `Map` with
+`Bytes` keys, whose order the proof model does not carry. Bringing
+`Domain.Connect` and `Domain.Disconnect` into the entry brings their cones'
+non-law claims with them — 86 declined cases, 29 more than before, all
+under the same recursions and `Domain.Transaction`'s decoder — which is
+what the budget now counts. Every one of the nine passes both verify lanes
+(`aver verify domain/connect.av --hostile`, `domain/disconnect.av` likewise),
+which is the evidence the declined five stand on until the walk is reshaped
+into a proven recursion, as #349 did for four others. The `when` guards on
+the Height come from the hostile lane: at `2^63` the subsidy's halving walk
+exhausts the step budget, and a `forkHeight` below zero is not a fork. The
+regtest run for the refusal is the `bip30` liar section of
+`docs/regtest-testing.md`.

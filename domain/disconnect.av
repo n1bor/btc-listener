@@ -17,8 +17,8 @@ module Disconnect
         "node has to say so and stop -- guessing would mean a UTXO Set that"
         "silently disagrees with the chain it claims to be following, which is"
         "the one failure a validating node must never have."
-    exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize, prunable]
-    depends [Bytes, Domain.Transaction, Domain.UtxoStore]
+    exposes [Reversal, Undoable, reversal, undoable, windowFrom, windowSize, prunable, madeBy]
+    depends [Bytes, Domain.Connect, Domain.Network, Domain.Transaction, Domain.UtxoStore]
     effects []
 
 record Reversal
@@ -85,6 +85,22 @@ verify undoable
     undoable(711, 713) => Undoable.TooDeep(712, 713)
     undoable(500, 713) => Undoable.TooDeep(501, 713)
 
+verify undoable law windowIsExactly288Deep
+    given forkHeight: Int = [0, 1, 711, 712, 713, 999, 1000]
+    given tipHeight: Int = [0, 287, 288, 1000, 13440000]
+    when forkHeight >= 0
+    isReversible(undoable(forkHeight, windowFrom(tipHeight))) => tipHeight - forkHeight <= windowSize()
+
+fn isReversible(answer: Undoable) -> Bool
+    ? "Whether the reorganisation may go ahead."
+    match answer
+        Undoable.Reversible -> true
+        Undoable.TooDeep(_, _) -> false
+
+verify isReversible
+    isReversible(Undoable.Reversible) => true
+    isReversible(Undoable.TooDeep(712, 713)) => false
+
 fn reversal(transactions: List<Transaction>, undo: List<Unspent>) -> Result<Reversal, String>
     ? "What taking this Block back out does to the Set."
     Result.Ok(Reversal(deleted = madeBy(transactions, [])?, restored = undo))
@@ -93,6 +109,127 @@ verify reversal
     reversal([], []) => Result.Ok(Reversal(deleted = [], restored = []))
     List.len(reversal([paying("a1", 2)], [])?.deleted) => 2
     List.len(reversal([], [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 0, coinbase = false)])?.restored) => 1
+
+verify reversal law undoesConnected
+    given transactions: List<Transaction> = [[Domain.Connect.minting(50)], [Domain.Connect.minting(50), Domain.Connect.paying("a1", "aa", 0, 90)], [Domain.Connect.minting(70), Domain.Connect.paying("a1", "aa", 0, 90), Domain.Connect.paying("a2", "a1", 0, 80)], [Domain.Connect.minting(50), Domain.Connect.paying("a1", "cc", 0, 90)]]
+    given set: Map<Bytes, Unspent> = [Map.fromList([]), Domain.Connect.holding()?]
+    given height: Int = [1, 101]
+    when Bool.and(height >= 0, height <= 13440000)
+    roundTrip(set, transactions, height) => true
+
+verify reversal law deletesEverythingConnectAdds
+    given transactions: List<Transaction> = [[Domain.Connect.minting(50)], [Domain.Connect.minting(50), Domain.Connect.paying("a1", "aa", 0, 90)], [Domain.Connect.minting(70), Domain.Connect.paying("a1", "aa", 0, 90), Domain.Connect.paying("a2", "a1", 0, 80)]]
+    given height: Int = [1, 101]
+    when Bool.and(height >= 0, height <= 13440000)
+    deletesWhatWasAdded(Domain.Connect.holding()?, transactions, height) => true
+
+fn roundTrip(set: Map<Bytes, Unspent>, transactions: List<Transaction>, height: Int) -> Bool
+    ? "The law the Undo Data exists for: connecting a Block and then taking"
+      "it back out leaves the Set exactly as it was. A Block the Set refuses"
+      "changes nothing and so holds trivially."
+    match Domain.Connect.connected(Network.Mainnet, height, transactions, set)
+        Connecting.Refused(why) -> true
+        Connecting.Applied(change) -> undone(set, change, reversal(transactions, change.removed))
+
+verify roundTrip
+    roundTrip(Map.fromList([]), [Domain.Connect.minting(50)], 1) => true
+    roundTrip(Domain.Connect.holding()?, [Domain.Connect.minting(50), Domain.Connect.paying("a1", "aa", 0, 90)], 1) => true
+    roundTrip(Domain.Connect.holding()?, [], 1) => true
+
+fn undone(set: Map<Bytes, Unspent>, change: Change, taken: Result<Reversal, String>) -> Bool
+    ? "Apply the Change, then the Reversal, and compare with where we started."
+    match taken
+        Result.Err(why) -> false
+        Result.Ok(back) -> reversedFrom(appliedTo(set, change), back) == set
+
+verify undone
+    undone(Map.fromList([]), Change(added = [], removed = [], fees = 0, confirmed = []), Result.Err("no")) => false
+    undone(Map.fromList([]), Change(added = [], removed = [], fees = 0, confirmed = []), Result.Ok(Reversal(deleted = [], restored = []))) => true
+
+fn appliedTo(set: Map<Bytes, Unspent>, change: Change) -> Map<Bytes, Unspent>
+    ? "The Set after a Block: its Outputs in, what it spent out."
+    withoutKeys(withAll(set, change.added), setKeysOf(change.removed, []))
+
+verify appliedTo
+    Map.len(appliedTo(Map.fromList([]), Change(added = [sampleUnspent()], removed = [], fees = 0, confirmed = []))) => 1
+
+fn reversedFrom(set: Map<Bytes, Unspent>, back: Reversal) -> Map<Bytes, Unspent>
+    ? "The Set after the Block is taken out: its Outputs deleted, what it spent restored."
+    withAll(withoutKeys(set, back.deleted), back.restored)
+
+verify reversedFrom
+    Map.len(reversedFrom(Map.fromList([]), Reversal(deleted = [], restored = [sampleUnspent()]))) => 1
+
+fn withAll(set: Map<Bytes, Unspent>, unspents: List<Unspent>) -> Map<Bytes, Unspent>
+    ? "These Outputs put in under their keys."
+    match unspents
+        [] -> set
+        [head, ..tail] -> withAll(Map.set(set, Domain.UtxoStore.keyAt(head.txid, head.index), head), tail)
+
+verify withAll
+    Map.len(withAll(Map.fromList([]), [sampleUnspent()])) => 1
+
+fn withoutKeys(set: Map<Bytes, Unspent>, keys: List<Bytes>) -> Map<Bytes, Unspent>
+    ? "These keys taken out."
+    match keys
+        [] -> set
+        [head, ..tail] -> withoutKeys(Map.remove(set, head), tail)
+
+verify withoutKeys
+    Map.len(withoutKeys(withAll(Map.fromList([]), [sampleUnspent()]), [Domain.UtxoStore.keyAt(sampleUnspent().txid, sampleUnspent().index)])) => 0
+
+fn setKeysOf(unspents: List<Unspent>, acc: List<Bytes>) -> List<Bytes>
+    ? "The Set keys of these Outputs."
+    match unspents
+        [] -> List.reverse(acc)
+        [head, ..tail] -> setKeysOf(tail, List.prepend(Domain.UtxoStore.keyAt(head.txid, head.index), acc))
+
+verify setKeysOf
+    setKeysOf([], []) => []
+    List.len(setKeysOf([sampleUnspent()], [])) => 1
+
+fn sampleUnspent() -> Unspent
+    ? "An Output for the cases here."
+    Unspent(txid = Bytes.fromList([203]), index = 0, value = 50, script = Bytes.empty(), height = 1, coinbase = true)
+
+verify sampleUnspent
+    sampleUnspent().index => 0
+
+fn deletesWhatWasAdded(set: Map<Bytes, Unspent>, transactions: List<Transaction>, height: Int) -> Bool
+    ? "Every key connecting added is one the Reversal deletes (#111 as a law):"
+      "both sides filter unspendable Outputs the same way, so nothing a Block"
+      "put into the Set survives taking the Block out. The Reversal may delete"
+      "more -- an Output created and spent inside the same Block is in the"
+      "Set at no point and in neither added nor the Undo Data, and deleting"
+      "its key deletes nothing -- which is why the law is one direction."
+    match Domain.Connect.connected(Network.Mainnet, height, transactions, set)
+        Connecting.Refused(why) -> true
+        Connecting.Applied(change) -> coversAdded(reversal(transactions, change.removed), setKeysOf(change.added, []))
+
+verify deletesWhatWasAdded
+    deletesWhatWasAdded(Map.fromList([]), [Domain.Connect.minting(50)], 1) => true
+    deletesWhatWasAdded(Domain.Connect.holding()?, [], 1) => true
+
+fn coversAdded(taken: Result<Reversal, String>, added: List<Bytes>) -> Bool
+    ? "Every added key is among the deleted."
+    match taken
+        Result.Err(why) -> false
+        Result.Ok(back) -> eachIn(added, back.deleted)
+
+verify coversAdded
+    coversAdded(Result.Ok(Reversal(deleted = [Bytes.fromList([1])], restored = [])), [Bytes.fromList([1])]) => true
+    coversAdded(Result.Ok(Reversal(deleted = [], restored = [])), [Bytes.fromList([1])]) => false
+    coversAdded(Result.Ok(Reversal(deleted = [Bytes.fromList([1]), Bytes.fromList([2])], restored = [])), [Bytes.fromList([1])]) => true
+
+fn eachIn(keys: List<Bytes>, among: List<Bytes>) -> Bool
+    ? "Every key on the left is somewhere on the right."
+    match keys
+        [] -> true
+        [head, ..tail] -> Bool.and(List.contains(among, head), eachIn(tail, among))
+
+verify eachIn
+    eachIn([], []) => true
+    eachIn([Bytes.fromList([1])], []) => false
 
 fn madeBy(transactions: List<Transaction>, acc: List<Bytes>) -> Result<List<Bytes>, String>
     ? "Every key the Block's Outputs were written under."
@@ -177,6 +314,22 @@ verify prunable
     prunable(1001, Option.Some(1000)) => Option.Some("pruning below Height 1001 would take a body the Set walk has not reached: the Set stands at Height 1000, and nothing above 713 may be pruned")
     prunable(1, Option.Some(0)) => Option.Some("pruning below Height 1 would take a body the Set walk has not reached: the Set stands at Height 0, and nothing above 0 may be pruned")
     prunable(0, Option.Some(0)) => Option.None
+
+verify prunable law neverTakesUndoData
+    given below: Int = [0, 1, 100, 712, 713, 714, 1000, 1001]
+    given height: Int = [0, 287, 288, 1000, 13440000]
+    when height >= 0
+    permitted(prunable(below, Option.Some(height))) => below <= windowFrom(height)
+
+fn permitted(refusal: Option<String>) -> Bool
+    ? "No reason to refuse is permission."
+    match refusal
+        Option.None -> true
+        Option.Some(_) -> false
+
+verify permitted
+    permitted(Option.None) => true
+    permitted(Option.Some("no")) => false
 
 fn beneathStanding(below: Int, height: Int) -> Option<String>
     ? "Above the Set, or into its Undo window, or neither."

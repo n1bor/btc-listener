@@ -317,8 +317,10 @@ is deliberate and none of it is a claim the node makes.
 `Domain.Connect` has no Script dependency and never has, so a Block's
 signatures are not checked when it is connected to the UTXO Set. The Set phase
 enforces input existence, no intra-Block double-spend, coinbase maturity, value
-out ≤ value in, coinbase claim ≤ subsidy plus fees, and unspendable Outputs
-kept out of `u:`; the body gate adds the Merkle Root, coinbase first-and-only,
+out ≤ value in, coinbase claim ≤ subsidy plus fees, unspendable Outputs
+kept out of `u:`, and BIP30 — a Block that would write an Output the Set
+already holds is refused, with Core's two mainnet exceptions at 91842 and
+91880 (#354); the body gate adds the Merkle Root, coinbase first-and-only,
 no repeated txid, CVE-2012-2459 and `TxCheck`. Signatures are `audit`'s work.
 [ADR 0007](docs/adr/0007-two-claims-two-tools.md) is the reasoning: this engine
 walks Scripts single-threaded, so a sync gated on them would be measured in

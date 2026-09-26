@@ -19,7 +19,7 @@ module Utxo
         "stands written in the same batch so a crash lands on a whole one."
         "The read half (prepared) is kept apart from the write half (written)"
         "so the walk can run the reads beside the next Block's fetch (#233)."
-    exposes [Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
+    exposes [alreadyHeld, Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
     depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
     effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
@@ -48,7 +48,56 @@ fn prepared(network: Network, store: Store, split: Split, height: Int, transacti
       "absorbed and every Map.set stays in place."
     ! [Infra.Kv.getAll]
     fromStore = resolvedFor(store, split)?
-    Result.Ok(Domain.Connect.connected(network, height, transactions, fromStore))
+    held = alreadyHeld(store, Map.fromList([]), transactions)?
+    Result.Ok(Domain.Connect.connectedUnless(network, height, transactions, fromStore, held))
+
+fn alreadyHeld(store: Store, created: Map<Bytes, Unspent>, transactions: List<Transaction>) -> Result<List<Bytes>, String>
+    ? "Every key this Block's Outputs would be written under that the Set"
+      "holds already, in the window not yet flushed or in the Store: BIP30's"
+      "question (n1bor/btc-listener#354). One round trip for the Store's part,"
+      "the same way the Inputs are resolved; a Block that creates nothing the"
+      "Set holds -- every Block since BIP34 -- costs one getAll of misses."
+    ! [Infra.Kv.getAll]
+    keys = Domain.Disconnect.madeBy(transactions, [])?
+    inWindow = heldInWindow(keys, created, [])
+    inStore = resolved(store, notInWindow(keys, created, []), Map.fromList([]))?
+    Result.Ok(List.concat(inWindow, Map.keys(inStore)))
+
+verify alreadyHeld
+    alreadyHeld(Infra.Store.fixture([]), Map.fromList([]), []) => Result.Ok([])
+    List.len(alreadyHeld(Infra.Store.fixture([]), Map.fromList([]), [Domain.Connect.minting(50)])?) => 0
+    List.len(alreadyHeld(Infra.Store.fixture([]), Map.fromList([(Domain.UtxoStore.keyAt(Bytes.fromList([203]), 0), sampleUnspent())]), [Domain.Connect.minting(50)])?) => 1
+
+fn sampleUnspent() -> Unspent
+    ? "An Output for the cases here."
+    Unspent(txid = Bytes.fromList([203]), index = 0, value = 50, script = Bytes.empty(), height = 1, coinbase = true)
+
+verify sampleUnspent
+    sampleUnspent().value => 50
+
+fn heldInWindow(keys: List<Bytes>, created: Map<Bytes, Unspent>, acc: List<Bytes>) -> List<Bytes>
+    ? "The keys among these the window already created."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> match Map.has(created, head)
+            true -> heldInWindow(tail, created, List.prepend(head, acc))
+            false -> heldInWindow(tail, created, acc)
+
+verify heldInWindow
+    heldInWindow([], Map.fromList([]), []) => []
+    heldInWindow([Bytes.fromList([1])], Map.fromList([(Bytes.fromList([1]), sampleUnspent())]), []) => [Bytes.fromList([1])]
+    heldInWindow([Bytes.fromList([2])], Map.fromList([(Bytes.fromList([1]), sampleUnspent())]), []) => []
+
+fn notInWindow(keys: List<Bytes>, created: Map<Bytes, Unspent>, acc: List<Bytes>) -> List<Bytes>
+    ? "The keys among these the window does not hold, to ask the Store about."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> match Map.has(created, head)
+            true -> notInWindow(tail, created, acc)
+            false -> notInWindow(tail, created, List.prepend(head, acc))
+
+verify notInWindow
+    notInWindow([Bytes.fromList([1]), Bytes.fromList([2])], Map.fromList([(Bytes.fromList([1]), sampleUnspent())]), []) => [Bytes.fromList([2])]
 
 record Split
     hits: Map<Bytes, Unspent>

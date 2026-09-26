@@ -2848,6 +2848,76 @@ is the run where that happens. Watch that the node still reaches Core's tip
 — the filter sits directly on the tip-following path, and a mistake there
 costs Blocks rather than only work.
 
+### A Block that writes an Output the Set already holds
+
+[#354](https://github.com/n1bor/btc-listener/issues/354). BIP30 forbids a
+Block from creating an Output the Set already holds, and until #354 nothing
+here checked it: `Domain.Body.fault` refuses a repeated Transaction Id
+*within* a Block, not against the Set. A duplicate connected — `u:` for the
+Output was overwritten with the new Height, and the Undo Data written for the
+duplicate said only that the Output was added, so taking that Block back out
+later deleted the original coin from the Set with nothing to restore it. The
+two mainnet Blocks that did this, 91842 and 91880, are Core's own exceptions
+and stay excused; regtest has none, so the liar has to make one.
+
+The `bip30` mode takes the `bitcoin-cli` command as its third argument and
+mines a Block on Core's tip whose only Transaction is the tip's own coinbase,
+byte for byte. Everything a Header can be asked is honest — parent, Merkle
+Root (a one-Transaction tree's Root is that Transaction's Id), a time past
+the median, the Network's bits and a nonce that meets them — and the body is
+the Block the Header commits to, so the fault check has nothing to refuse;
+what the Block would do is write the coinbase's Output a second time. The
+liar announces the Header, answers `getheaders` with it and hands the body
+over on `getdata`. Name it **first**, with the node caught up to Core:
+
+```bash
+python3 tools/regtest/liar.py 18455 bip30 "$C" &
+timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The Header is placed, the body fetched and stored, and the Block refused
+**when it is connected**, by name:
+
+```
+headers to 168
+headers complete: 169 known
+utxo    connecting 168..168 of 168
+the chain cannot be followed past here: Block 05821294…d392f7 cannot connect: Block would write 1 Output(s) the Set already holds (BIP30)
+error: the chain cannot be followed past here, and no Peer is at fault: Block 05821294…d392f7 cannot connect: Block would write 1 Output(s) the Set already holds (BIP30)
+```
+
+The liar prints `liar: mined <Block Id> at Height 168 duplicating coinbase
+<Transaction Id>` and then `liar: sent the body`; the Block Id in the
+refusal must be the one it mined. Run the honest sync first (section 2): a
+duplicate check that has never seen real Blocks would refuse every one of
+them, and only the honest run shows it does not.
+
+**Note the ending, and the ending is the part that is still owed.** The node
+stops rather than dropping the Peer: since #183 a refusal underneath
+`connected` is charged to the chain and not the company, which is right for a
+body this node read off its own disk and wrong for one a Peer just handed it
+— Core marks such a Block invalid and disconnects the Peer that sent it.
+That is [#376](https://github.com/n1bor/btc-listener/issues/376); when it
+lands, this section should show the liar dropped and the node carrying on at
+Core's tip. Until then the recovery is Core outgrowing the one Block:
+
+```bash
+$C generatetoaddress 2 "$($C getnewaddress)"
+timeout 60 $BIN regtest follow 127.0.0.1:18454 $D
+```
+
+```
+headers to 169  REORGANISED: 1 Height(s) re-pointed above 167
+following at Height 169: 2 connected, 0 disconnected, set +2 -0
+```
+
+The liar's Block was placed in the tree and never connected, so there is
+nothing to disconnect; `show $D 168 summary` must equal `$C getblockhash
+168`, and `audit $D 1 169` must be CLEAN with `coinbase 169`. A run that
+reorganised nothing left the node standing on the liar's Header, and a Set
+that had connected the duplicate would show it at 168 with `set -1` on the
+way back.
+
 ## Before you commit
 
 The language gates come first, and none of them is optional:
