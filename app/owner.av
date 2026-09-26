@@ -14,7 +14,7 @@ module Owner
         "fresh() and hands it nothing."
         "A run that ends in failure says why with Run.fail, which is what"
         "Run.all() answers main once the loop has returned."
-    depends [Tcp, Wait, Work, App.Cli, App.Node, Domain.Catchup, Infra.Catching, Infra.ChainState, Infra.Follow, Infra.Peers, Infra.Wire]
+    depends [Tcp, Wait, Work, App.Cli, App.Node, Domain.Catchup, Domain.Connect, Infra.Catching, Infra.ChainState, Infra.Follow, Infra.Peers, Infra.Wire]
     exposes [State, fresh, peers, started, heard, handled, ticked, accepted, drained, due, headers, aligned, fetched, begun, connected, ended, settled]
     effects [
         Args.get,
@@ -666,9 +666,9 @@ fn begun(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun,
 fn begunWith(state: State, outcome: Result<Chunking, String>) -> Tuple<State, Result<Infra.Catching.Begun, Run.Wake>>
     ? "Under way, or refused."
     match outcome
-        Result.Err(why) -> (state, Result.Ok(Infra.Catching.Begun.Refused(why)))
+        Result.Err(why) -> (state, Result.Ok(refusedBegun(why)))
         Result.Ok(Chunking.Begun(walked, height)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Begun.At(height)))
-        Result.Ok(Chunking.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Begun.Refused(why)))
+        Result.Ok(Chunking.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(refusedBegun(why)))
 
 verify begunWith
     begunWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Begun.Refused("no")))
@@ -727,11 +727,11 @@ verify settingHeight
 fn steppingWith(state: State, stepped: Result<Stepping, String>) -> Tuple<State, Result<Infra.Catching.Step, Run.Wake>>
     ? "Parked on a job, a Block connected, the chunk ended, or refused."
     match stepped
-        Result.Err(why) -> (state, Result.Ok(Infra.Catching.Step.Refused(why)))
+        Result.Err(why) -> (state, Result.Ok(refusedStep(why)))
         Result.Ok(Stepping.Parked(walked, job)) -> (fromWalked(state, walked), Result.Err(Run.Wake.Until([Wait.Item.Job(job)], Option.None)))
         Result.Ok(Stepping.Next(walked)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Step.Next))
         Result.Ok(Stepping.Ended(walked)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Step.Ended))
-        Result.Ok(Stepping.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Step.Refused(why)))
+        Result.Ok(Stepping.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(refusedStep(why)))
 
 verify steppingWith
     steppingWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Step.Refused("no")))
@@ -757,9 +757,9 @@ fn ended(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
 fn endedWith(state: State, outcome: Result<Chunked, String>) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
     ? "Built, or refused."
     match outcome
-        Result.Err(why) -> (state, Result.Ok(Infra.Catching.Chunk.Refused(why)))
+        Result.Err(why) -> (state, Result.Ok(refusedChunk(why)))
         Result.Ok(Chunked.Built(walked, atTip)) -> (fromWalked(state, walked), Result.Ok(chunkOf(atTip)))
-        Result.Ok(Chunked.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Chunk.Refused(why)))
+        Result.Ok(Chunked.Refused(walked, why)) -> (fromWalked(state, walked), Result.Ok(refusedChunk(why)))
 
 verify endedWith
     endedWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Chunk.Refused("no")))
@@ -809,7 +809,43 @@ fn settledWith(state: State, node: Following, catching: Catching, ending: Infra.
         Infra.Catching.Ending.Moved -> movedWith(state, node, Infra.Follow.caughtMoved(node, catching, Time.unixMs()))
         Infra.Catching.Ending.Faulted(why) -> faultedWith(state, node, Infra.Follow.faultedOn(node, catching, why))
         Infra.Catching.Ending.Stopped(why) -> (closing(state, node, unitOf(Infra.Follow.chainStopped(node, why))), Result.Ok(Infra.Catching.Settled.Over))
+        Infra.Catching.Ending.Invalid(blockId, why) -> faultedWith(state, node, Infra.Follow.blockInvalid(node, catching, blockId, why))
         Infra.Catching.Ending.Over -> (state, Result.Ok(Infra.Catching.Settled.Over))
+
+fn refusedChunk(why: String) -> Infra.Catching.Chunk
+    ? "A consensus refusal of a Block names the Block and costs the Peer that"
+      "served it (#376); anything else underneath connected -- a Store or Disk"
+      "error, the D8 stop -- is the chain's own and stops the node (#183)."
+    match Domain.Connect.refusalOf(why)
+        Option.Some(found) -> match found
+            (blockId, reason) -> Infra.Catching.Chunk.Invalid(blockId, reason)
+        Option.None -> Infra.Catching.Chunk.Refused(why)
+
+verify refusedChunk
+    refusedChunk("Block aa cannot connect: no") => Infra.Catching.Chunk.Invalid("aa", "no")
+    refusedChunk("Segment 0 holds 0 of the 250 bytes at offset 7560983") => Infra.Catching.Chunk.Refused("Segment 0 holds 0 of the 250 bytes at offset 7560983")
+
+fn refusedStep(why: String) -> Infra.Catching.Step
+    ? "The same distinction at the Block: a consensus refusal names it."
+    match Domain.Connect.refusalOf(why)
+        Option.Some(found) -> match found
+            (blockId, reason) -> Infra.Catching.Step.Invalid(blockId, reason)
+        Option.None -> Infra.Catching.Step.Refused(why)
+
+verify refusedStep
+    refusedStep("Block aa cannot connect: no") => Infra.Catching.Step.Invalid("aa", "no")
+    refusedStep("no") => Infra.Catching.Step.Refused("no")
+
+fn refusedBegun(why: String) -> Infra.Catching.Begun
+    ? "The same distinction where the chunk begins."
+    match Domain.Connect.refusalOf(why)
+        Option.Some(found) -> match found
+            (blockId, reason) -> Infra.Catching.Begun.Invalid(blockId, reason)
+        Option.None -> Infra.Catching.Begun.Refused(why)
+
+verify refusedBegun
+    refusedBegun("Block aa cannot connect: no") => Infra.Catching.Begun.Invalid("aa", "no")
+    refusedBegun("no") => Infra.Catching.Begun.Refused("no")
 
 fn chunkOf(atTip: Bool) -> Infra.Catching.Chunk
     ? "At the tip, or more of the Set to build."

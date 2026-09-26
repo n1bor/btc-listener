@@ -17,7 +17,7 @@ module TreeStore
         "Header already contains it. That is a deliberate 64 characters per"
         "Block: it lets a walk up the tree read a Placement without decoding a"
         "Header, and this keyspace is walked once per arriving Header."
-    exposes [sampleHeaderHex, sampleParentId, Held, headerKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
+    exposes [sampleHeaderHex, sampleParentId, Held, headerKey, invalidKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
     depends [Bytes, Domain.ByteField, Domain.HeaderTree, Domain.Index, Domain.IndexKeys]
     effects []
 
@@ -156,6 +156,22 @@ fn headerKey(blockId: String) -> Result<Bytes, String>
 verify headerKey
     Bytes.octets(headerKey("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?) => List.prepend(headerTag(), Bytes.octets(Bytes.fromHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")?))
     Bytes.octets(headerKey("")?) => [headerTag()]
+
+fn invalidTag() -> Int
+    ? "The byte that begins every invalid-Block mark: ASCII 'x'."
+    120
+
+verify invalidTag
+    invalidTag() => 120
+
+fn invalidKey(blockId: String) -> Result<Bytes, String>
+    ? "Where the mark lives that says this Block failed consensus when it was"
+      "connected (#376), Core's BLOCK_FAILED_VALID: the walk never chooses"
+      "it again and no Header is placed on it."
+    Domain.IndexKeys.tagged(invalidTag(), Domain.IndexKeys.idBytes(blockId)?)
+
+verify invalidKey
+    Bytes.octets(invalidKey("aa")?) => [120, 170]
 
 fn bestTipKey() -> Result<Bytes, String>
     ? "The single record naming the tip of the branch with the most work."

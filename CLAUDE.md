@@ -331,7 +331,14 @@ otherwise the first Peer named on the command line can end the node by lying
 once. A fault on this node's own side — `Infra.Rewind` refusing, a body on
 disk that will not read or hash to its Id — is `Caught.ChainStopped` (#183,
 #290): the run ends with the reason and no Peer is dropped, because asking
-another Peer cannot change what is on this disk. No banscore counter: every fault detectable here is one Core disconnects
+another Peer cannot change what is on this disk. **A Block that proved its
+work and fails consensus when connected is neither** (#376): it is marked
+invalid in the tree (`x:` Block Id, `Domain.TreeStore.invalidKey`), the tip
+goes back to its parent, no Header is ever placed on it, and the Peer whose
+Catch-up fetched it is dropped — Core's `BLOCK_FAILED_VALID` and disconnect.
+The refusal travels as the one sentence `Domain.Connect.cannotConnect`
+writes and `refusalOf` reads back, with a law that the reader inverts the
+writer; a message that is not that sentence is still the chain's own stop. No banscore counter: every fault detectable here is one Core disconnects
 on outright, so a threshold would only ever count to one.
 
 **The Address Book** (#27, Stage 5): `follow` sends `getaddr` on joining and

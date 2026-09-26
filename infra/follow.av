@@ -22,7 +22,7 @@ module Follow
         "and then serves the chain to (Stage 8, on the listen and accept that"
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
-    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, chainStopped, withPool, sampleFollowing, sampleCatching]
+    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, sampleCatching]
     depends [Bytes, Tcp, Work, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.Catchup, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Target, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Pace, Infra.Screen, Infra.Store, Domain.Watchdog]
     effects [
         Console.error, Console.print,
@@ -928,6 +928,28 @@ fn finishedWith(state: Following, built: Built, tipHeight: Int, unconfirmed: Lis
     swept = sweptOf(built.store, state.mempool, built.blocks, built.dropped)?
     restored = restoring(state.pool.network, built.store, swept, backOut, tipHeight, 0, List.len(backOut))?
     Result.Ok(withWatch(Following.update(state, store = built.store, watch = seen, mempool = restored, log = setLog), watchAfterBuild(seen, built.views)))
+
+fn blockInvalid(state: Following, catching: Catching, blockId: String, why: String) -> Result<Onward, String>
+    ? "A Block this Catch-up fetched proved its work and failed consensus"
+      "when connected (#376). It is marked invalid in the tree, the tip goes"
+      "back to its parent, and the Peer the Catch-up was on is dropped for"
+      "serving it -- Core marks BLOCK_FAILED_VALID and disconnects the same"
+      "way. Until now this was a chain-side stop (#183), which let a Peer"
+      "with one Block's worth of work end the run."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    marked = Infra.Headers.markedInvalid(state.store, blockId)?
+    noted = Infra.Metrics.noting(state.log, "chain", "Block {blockId} does not connect and is marked invalid: {why}; charged to peer {catching.key} (#376)")?
+    faultedOn(Following.update(state, store = marked, log = noted), catching, "served Block {blockId}, which does not connect: {why} (#376)")
 
 type Onward
     Next(Walked)

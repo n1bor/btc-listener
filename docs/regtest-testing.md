@@ -2976,47 +2976,48 @@ timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
 ```
 
 The Header is placed, the body fetched and stored, and the Block refused
-**when it is connected**, by name:
+**when it is connected**, by name — and since #376 the Peer that served it
+pays for it, the Block is marked invalid in the tree, the tip goes back to
+its parent, and the node carries on:
 
 ```
-headers to 168
-headers complete: 169 known
-utxo    connecting 168..168 of 168
-the chain cannot be followed past here: Block 05821294…d392f7 cannot connect: Block would write 1 Output(s) the Set already holds (BIP30)
-error: the chain cannot be followed past here, and no Peer is at fault: Block 05821294…d392f7 cannot connect: Block would write 1 Output(s) the Set already holds (BIP30)
+headers to 184
+headers complete: 185 known
+utxo    connecting 184..184 of 184
+dropping peer 0: served Block 06a6d0d1…2afc, which does not connect: Block would write 1 Output(s) the Set already holds (BIP30) (#376)
+following at Height 183: 0 connected, 0 disconnected, set +0 -0
 ```
 
-The liar prints `liar: mined <Block Id> at Height 168 duplicating coinbase
-<Transaction Id>` and then `liar: sent the body`; the Block Id in the
-refusal must be the one it mined. Run the honest sync first (section 2): a
-duplicate check that has never seen real Blocks would refuse every one of
-them, and only the honest run shows it does not.
+The liar prints `liar: mined <Block Id> at Height 184 duplicating coinbase
+<Transaction Id>` and then `liar: sent the body`; the Block Id in the drop
+must be the one it mined, and `debug.log` carries the chain line beside the
+fault: `Block 06a6d0d1…2afc does not connect and is marked invalid: … charged
+to peer 0 (#376)`. Run the honest sync first (section 2): a duplicate check
+that has never seen real Blocks would refuse every one of them, and only the
+honest run shows it does not.
 
-**Note the ending, and the ending is the part that is still owed.** The node
-stops rather than dropping the Peer: since #183 a refusal underneath
-`connected` is charged to the chain and not the company, which is right for a
-body this node read off its own disk and wrong for one a Peer just handed it
-— Core marks such a Block invalid and disconnects the Peer that sent it.
-That is [#376](https://github.com/n1bor/btc-listener/issues/376); when it
-lands, this section should show the liar dropped and the node carrying on at
-Core's tip. Until then the recovery is Core outgrowing the one Block:
+Then let Core mine past it **while the node is still up** — no restart, which
+is the whole point of #376:
 
 ```bash
 $C generatetoaddress 2 "$($C getnewaddress)"
-timeout 60 $BIN regtest follow 127.0.0.1:18454 $D
 ```
 
 ```
-headers to 169  REORGANISED: 1 Height(s) re-pointed above 167
-following at Height 169: 2 connected, 0 disconnected, set +2 -0
+headers to 185
+utxo    connecting 184..185 of 185
 ```
 
-The liar's Block was placed in the tree and never connected, so there is
-nothing to disconnect; `show $D 168 summary` must equal `$C getblockhash
-168`, and `audit $D 1 169` must be CLEAN with `coinbase 169`. A run that
-reorganised nothing left the node standing on the liar's Header, and a Set
-that had connected the duplicate would show it at 168 with `set -1` on the
-way back.
+Core's 184 is placed on 183 and wins, because the liar's 184 is marked and
+nothing is ever placed on it; `show $D 185 summary` must equal
+`$C getblockhash 185` and `audit $D 1 185` must be CLEAN with `coinbase 185`.
+Before #376 the same run ended the node with `the chain cannot be followed
+past here, and no Peer is at fault`, the rule #183 set for a body read off
+this node's own disk — right there, wrong for a body a Peer had just handed
+it, since a Peer with one Block's worth of work could end the run. A Store or
+Disk error under `connected` still stops the node the #183 way; only the
+sentence `Domain.Connect.cannotConnect` writes is read as a consensus
+refusal.
 
 ### An inv that names more Blocks than Core allows
 

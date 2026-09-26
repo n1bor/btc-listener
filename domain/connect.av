@@ -31,7 +31,7 @@ module Connect
         "answer. It must not be left in the Set, and it must not be in the"
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
-    exposes [Change, Connecting, TxFee, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
+    exposes [Change, Connecting, TxFee, cannotConnect, refusalOf, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
     depends [Bytes, Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
@@ -212,6 +212,49 @@ verify noCoinbaseIn
     noCoinbaseIn([]) => true
     noCoinbaseIn([TxFee(txid = "a1", fee = 7, coinbase = false)]) => true
     noCoinbaseIn([TxFee(txid = "a1", fee = 7, coinbase = false), TxFee(txid = "cb", fee = 0, coinbase = true)]) => false
+
+fn cannotConnect(blockId: String, why: String) -> String
+    ? "The one sentence a consensus refusal of a Block is carried in (#376)."
+      "Infra.Utxo writes it and Infra.Follow reads it back with refusalOf, so"
+      "that a Block a Peer served which fails consensus costs that Peer and"
+      "is marked invalid, where a Store or Disk error still stops the chain."
+      "The sentence is the encoding, and the law below is what makes reading"
+      "it back honest rather than a guess at a string."
+    "Block {blockId} cannot connect: {why}"
+
+verify cannotConnect
+    cannotConnect("aa", "no") => "Block aa cannot connect: no"
+
+fn refusalOf(message: String) -> Option<Tuple<String, String>>
+    ? "The Block Id and the reason out of a cannotConnect sentence, or None"
+      "for any other message."
+    match String.startsWith(message, "Block ")
+        false -> Option.None
+        true -> refusalIn(String.split(String.slice(message, 6, String.len(message)), " cannot connect: "))
+
+verify refusalOf
+    refusalOf("Block aa cannot connect: no") => Option.Some(("aa", "no"))
+    refusalOf("Segment 0 holds 0 of the 250 bytes at offset 7560983") => Option.None
+    refusalOf("Block aa") => Option.None
+    refusalOf("") => Option.None
+
+verify refusalOf law readsWhatCannotConnectWrote
+    given blockId: String = ["aa", "05821294ddfb540bf457da1a55ac4fa46f20a4e2ea65a6855705c1acbcd392f7", "zz"]
+    given why: String = ["no", "Block would write 1 Output(s) the Set already holds (BIP30)", "Input names Output 0 of aa, which this Block has already spent"]
+    when Bool.and(Bool.not(String.contains(blockId, " ")), Bool.not(String.contains(why, " cannot connect: ")))
+    refusalOf(cannotConnect(blockId, why)) => Option.Some((blockId, why))
+
+fn refusalIn(parts: List<String>) -> Option<Tuple<String, String>>
+    ? "The Id before the first separator, the reason after it."
+    match parts
+        [] -> Option.None
+        [alone] -> Option.None
+        [blockId, ..rest] -> Option.Some((blockId, String.join(rest, " cannot connect: ")))
+
+verify refusalIn
+    refusalIn([]) => Option.None
+    refusalIn(["aa"]) => Option.None
+    refusalIn(["aa", "no"]) => Option.Some(("aa", "no"))
 
 fn isApplied(connection: Connecting) -> Bool
     ? "Whether the Block was taken."

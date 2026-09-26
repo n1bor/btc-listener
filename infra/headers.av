@@ -25,7 +25,7 @@ module Headers
         "boundary walks 2015 Headers down, once per 2016. A Header that fails"
         "any of this refuses the whole batch, and nothing of it is written --"
         "the Peer that sent it is at fault, and the caller drops it."
-    exposes [Settled, Arrival, seeded, absorbed, tipOf]
+    exposes [Settled, Arrival, seeded, absorbed, tipOf, markedInvalid]
     depends [Bytes, Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Domain.Target, Domain.TreeStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
@@ -160,7 +160,7 @@ fn treeAfter(arrival: Arrival, header: BlockHeader, rest: List<BlockHeader>, kno
 fn withParent(arrival: Arrival, header: BlockHeader, rest: List<BlockHeader>, known: Map<String, Placement>) -> Result<Map<String, Placement>, String>
     ? "The parent is not in the batch, so ask the Store for it."
     ! [Infra.Kv.get]
-    text = Infra.Store.get(arrival.store, Domain.TreeStore.headerKey(header.previousBlockId)?)?
+    text = unlessInvalid(Infra.Store.get(arrival.store, Domain.TreeStore.headerKey(header.previousBlockId)?)?, Infra.Store.get(arrival.store, Domain.TreeStore.invalidKey(header.previousBlockId)?)?)
     seededWith = withFetched(known, header.previousBlockId, text)?
     match Map.has(seededWith, header.previousBlockId)
         true -> attached(arrival, header, rest, seededWith)
@@ -365,6 +365,19 @@ fn realOrBack(arrival: Arrival, known: Map<String, Placement>, found: Link, limi
         true -> Result.Ok(found.header.bits)
         false -> lastRealBits(arrival, known, found.header.previousBlockId, limit)
 
+fn unlessInvalid(text: Option<Bytes>, mark: Option<Bytes>) -> Option<Bytes>
+    ? "A parent marked invalid is a parent we do not have (#376): the Header"
+      "on it is an orphan, as Core's BLOCK_FAILED_CHILD leaves it, and the"
+      "walk cannot choose it."
+    match mark
+        Option.Some(_) -> Option.None
+        Option.None -> text
+
+verify unlessInvalid
+    unlessInvalid(Option.Some(Domain.Index.emptyBytes()), Option.None) => Option.Some(Domain.Index.emptyBytes())
+    unlessInvalid(Option.Some(Domain.Index.emptyBytes()), Option.Some(Domain.Index.emptyBytes())) => Option.None
+    unlessInvalid(Option.None, Option.None) => Option.None
+
 fn withFetched(known: Map<String, Placement>, parentId: String, text: Option<Bytes>) -> Result<Map<String, Placement>, String>
     ? "The fetched parent into the batch's Map, or the Map unchanged."
       "Unchanged means the parent is nowhere, so the Header placed against it"
@@ -433,6 +446,45 @@ fn bestAfter(store: Store, decoded: List<BlockHeader>, known: Map<String, Placem
     ! [Infra.Kv.get]
     standing = tipHeld(store)?
     Result.Ok(Domain.HeaderTree.bestOf(candidates(decoded, known, standing)))
+
+fn markedInvalid(store: Store, blockId: String) -> Result<Store, String>
+    ? "A Block that proved its work and failed consensus when connected"
+      "(#376): marked so the walk never chooses it again and no Header is"
+      "placed on it, and the tip re-pointed to its parent, where the Set"
+      "stands. Core marks BLOCK_FAILED_VALID and moves on the same way."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    held = Infra.Store.get(store, Domain.TreeStore.headerKey(blockId)?)?
+    match held
+        Option.None -> Result.Err("Block {blockId} is not in the Header tree, so it cannot be marked invalid")
+        Option.Some(value) -> markedUnder(store, blockId, Domain.TreeStore.decodeHeld(blockId, value)?.placement.parentId)
+
+verify markedInvalid
+    markedInvalid(Infra.Store.fixture([]), "aa") => Result.Err("Block aa is not in the Header tree, so it cannot be marked invalid")
+    Infra.Store.get(markedInvalid(Infra.Store.fixture(trunkPairs()?), headerC().blockId)?, Domain.TreeStore.invalidKey(headerC().blockId)?) => Result.Ok(Option.Some(Domain.Index.encodeBlockId(headerC().blockId)?))
+    tipHeightOr(tipOf(markedInvalid(Infra.Store.fixture(trunkPairs()?), headerC().blockId)?)?) => 1
+    Infra.Store.get(markedInvalid(Infra.Store.fixture(trunkPairs()?), headerC().blockId)?, Domain.IndexKeys.heightKey(2)?) => Result.Ok(Option.None)
+
+fn tipHeightOr(tip: Option<Placement>) -> Int
+    ? "The tip's Height, or -1 for no tip, for the cases here."
+    match tip
+        Option.None -> 0 - 1
+        Option.Some(placement) -> placement.height
+
+verify tipHeightOr
+    tipHeightOr(Option.None) => 0 - 1
+    tipHeightOr(Option.Some(Placement(blockId = "aa", parentId = "bb", height = 3, work = 1))) => 3
+
+fn markedUnder(store: Store, blockId: String, parentId: String) -> Result<Store, String>
+    ? "The mark written, then the tip moved to the parent."
+    ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
+    marked = Infra.Store.putAll(store, [Entry(key = Domain.TreeStore.invalidKey(blockId)?, value = Domain.Index.encodeBlockId(blockId)?)])?
+    parent = Infra.Store.get(marked, Domain.TreeStore.headerKey(parentId)?)?
+    match parent
+        Option.None -> Result.Err("Block {blockId} is marked invalid but its parent {parentId} is not in the Header tree")
+        Option.Some(value) -> Result.Ok(repointed(marked, Domain.TreeStore.decodeHeld(parentId, value)?.placement, 0, 0)?.store)
+
+verify markedUnder
+    markedUnder(Infra.Store.fixture(trunkPairs()?), headerC().blockId, "0000000000000000000000000000000000000000000000000000000000000000") => Result.Err("Block {headerC().blockId} is marked invalid but its parent 0000000000000000000000000000000000000000000000000000000000000000 is not in the Header tree")
 
 fn tipOf(store: Store) -> Result<Option<Placement>, String>
     ? "Where the branch with the most work now ends, if anything is planted."
