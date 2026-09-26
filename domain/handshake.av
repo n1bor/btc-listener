@@ -12,8 +12,8 @@ module Handshake
         "to hold the loop for ever, because every frame bought it another"
         "answer deadline. The deadline is now one per Handshake and lives"
         "with whoever waits; this module only says what each frame is."
-    exposes [Step, stepOf]
-    depends []
+    exposes [Step, stepOf, versionFault]
+    depends [Domain.Version]
     effects []
 
 type Step
@@ -85,3 +85,60 @@ verify sparedOrEnough
     sparedOrEnough(0) => Step.Spared
     sparedOrEnough(7) => Step.Spared
     sparedOrEnough(8) => Step.Refused("sent 8 Messages after its version and no verack")
+
+fn versionFault(version: Int, services: Int, ourNonce: Bool, inbound: Bool) -> Option<String>
+    ? "Why a version Message ends the Handshake, if it does (#280 item 16)."
+      "Our own nonce first: a node that dialled itself has nothing to say to"
+      "itself whatever else it offers. Then the protocol floor, then the"
+      "witness bit, which only an outbound Peer is refused for -- we dialled"
+      "it to ask for Blocks -- where an inbound one may be a light client we"
+      "will serve and never ask."
+    match ourNonce
+        true -> Option.Some("is this node: its version carries our own nonce")
+        false -> versionFaultOffering(version, services, inbound)
+
+verify versionFault
+    versionFault(70016, 9, false, false) => Option.None
+    versionFault(70016, 9, true, false) => Option.Some("is this node: its version carries our own nonce")
+    versionFault(70015, 9, false, false) => Option.Some("speaks protocol 70015, below the 70016 this node needs")
+    versionFault(70016, 1, false, false) => Option.Some("offers no NODE_WITNESS, and was dialled for Blocks it cannot serve")
+    versionFault(70016, 1, false, true) => Option.None
+    versionFault(0, 0, false, true) => Option.Some("speaks protocol 0, below the 70016 this node needs")
+
+verify versionFault law refusesExactlyTheThree
+    given version: Int = [0, 209, 70015, 70016, 70017]
+    given services: Int = [0, 1, 8, 9, 1033]
+    given ourNonce: Bool = [true, false]
+    given inbound: Bool = [true, false]
+    isNone(versionFault(version, services, ourNonce, inbound)) => Bool.and(Bool.not(ourNonce), Bool.and(version >= Domain.Version.minimumVersion(), Bool.or(inbound, Domain.Version.servesWitness(services))))
+
+fn versionFaultOffering(version: Int, services: Int, inbound: Bool) -> Option<String>
+    ? "The floor, then the bit."
+    match version < Domain.Version.minimumVersion()
+        true -> Option.Some("speaks protocol {version}, below the {Domain.Version.minimumVersion()} this node needs")
+        false -> witnessFault(services, inbound)
+
+verify versionFaultOffering
+    versionFaultOffering(70016, 9, false) => Option.None
+    versionFaultOffering(1, 9, false) => Option.Some("speaks protocol 1, below the 70016 this node needs")
+
+fn witnessFault(services: Int, inbound: Bool) -> Option<String>
+    ? "An outbound Peer without NODE_WITNESS."
+    match Bool.or(inbound, Domain.Version.servesWitness(services))
+        true -> Option.None
+        false -> Option.Some("offers no NODE_WITNESS, and was dialled for Blocks it cannot serve")
+
+verify witnessFault
+    witnessFault(8, false) => Option.None
+    witnessFault(0, true) => Option.None
+    witnessFault(0, false) => Option.Some("offers no NODE_WITNESS, and was dialled for Blocks it cannot serve")
+
+fn isNone(fault: Option<String>) -> Bool
+    ? "No fault."
+    match fault
+        Option.None -> true
+        Option.Some(_) -> false
+
+verify isNone
+    isNone(Option.None) => true
+    isNone(Option.Some("x")) => false

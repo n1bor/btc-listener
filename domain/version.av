@@ -5,7 +5,7 @@ module Version
         "Building it is pure — the caller supplies the clock reading and the nonce"
         "rather than this module reaching for them — so the exact bytes are"
         "checkable against a known-good vector instead of against a live Peer."
-    exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf, peerStartHeightOf, addrRecvOffset, addrRecvOf]
+    exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerServicesOf, peerNonceOf, servesWitness, minimumVersion, peerUserAgentOf, peerStartHeightOf, addrRecvOffset, addrRecvOf]
     depends [Bytes, Domain.Build, Domain.Message, Domain.Address, Domain.CompactSize, Domain.ScriptState]
     effects []
 
@@ -133,6 +133,47 @@ fn peerVersionOf(body: List<Int>) -> Int
 verify peerVersionOf
     peerVersionOf([128, 17, 1, 0, 9, 9]) => 70016
     peerVersionOf([]) => 0
+
+fn minimumVersion() -> Int
+    ? "The oldest protocol this node talks to (#280 item 16): 70016 is the"
+      "version that understands SegWit serialisation, and a Peer below it is"
+      "asked for witness Blocks it cannot serve. Core's MIN_PEER_PROTO_VERSION"
+      "is lower; this node has no use for a Peer that cannot serve it."
+    70016
+
+verify minimumVersion
+    minimumVersion() => 70016
+
+fn peerServicesOf(body: List<Int>) -> Int
+    ? "The service bits a Peer offered: eight bytes after the version."
+    Domain.Message.readLittleEndian(List.take(List.drop(body, 4), 8))
+
+verify peerServicesOf
+    peerServicesOf(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 9, 0)?)) => 9
+    peerServicesOf([128, 17, 1, 0]) => 0
+    peerServicesOf([]) => 0
+
+fn servesWitness(services: Int) -> Bool
+    ? "Whether NODE_WITNESS is among the bits: only such a Peer is asked for"
+      "Blocks, since a getdata here names witness Blocks."
+    Bits.and(services, nodeWitness()) != 0
+
+verify servesWitness
+    servesWitness(8) => true
+    servesWitness(9) => true
+    servesWitness(1) => false
+    servesWitness(0) => false
+
+fn peerNonceOf(body: List<Int>) -> Int
+    ? "The nonce a Peer put in its version: eight bytes after the two"
+      "addresses, at offset 72. Ours coming back is this node talking to"
+      "itself (#280 item 16)."
+    Domain.Message.readLittleEndian(List.take(List.drop(body, 72), 8))
+
+verify peerNonceOf
+    peerNonceOf(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 4242, 0, 0)?)) => 4242
+    peerNonceOf(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 9007199254740993, 0, 0)?)) => 9007199254740993
+    peerNonceOf([]) => 0
 
 fn addrRecvOffset() -> Int
     ? "Where addr_recv's sixteen address bytes begin in a version payload:"

@@ -288,6 +288,24 @@ def serve(port, mode):
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('127.0.0.1', port)); s.listen(1)
     conn, addr = s.accept()
+    if mode == 'echo':
+        # This node, apparently (#280 item 16): the node dialled us and sent
+        # its version first, so its nonce is in hand before we answer. Send
+        # it back in ours. Core drops such a connection as "connected to
+        # self"; so does this node. A caller cannot stage this -- the node
+        # sends its version to a caller only after reading the caller's.
+        for frame in frames(conn):
+            if command_of(frame) == 'version': break
+        nonce = struct.unpack('<Q', frame[24 + 72:24 + 80])[0]
+        print('liar: echoing the node\'s nonce %d' % nonce, file=sys.stderr, flush=True)
+        conn.sendall(msg('version', version_payload()[:72] + struct.pack('<Q', nonce) + version_payload()[80:]))
+        conn.sendall(msg('verack', b''))
+        conn.settimeout(30)
+        try:
+            for frame in frames(conn): print('liar: got', command_of(frame), file=sys.stderr, flush=True)
+        except socket.timeout:
+            print('liar: still connected after 30 s', file=sys.stderr, flush=True); return
+        print('liar: the node hung up', file=sys.stderr, flush=True); return
     conn.recv(4096)                                   # their version
     conn.sendall(msg('version', version_payload()))
     conn.sendall(msg('verack', b''))

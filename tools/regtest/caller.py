@@ -11,6 +11,9 @@ import socket, struct, hashlib, time, sys
 #     python3 tools/regtest/caller.py 18456 lurker    # a proper Handshake, then silence past the sweep (#330)
 #     python3 tools/regtest/caller.py 18456 locator   # a proper Handshake, then a getheaders of 102 Ids (#280)
 #     python3 tools/regtest/caller.py 18456 deaf 127.0.0.3 "$C"   # twenty getdata for a thousand Blocks, reads nothing for 45 s (#359)
+#     python3 tools/regtest/caller.py 18456 echo       # sends the node its own nonce back: this node talking to itself (#280 item 16)
+#     python3 tools/regtest/caller.py 18456 ancient    # protocol 209, below the 70016 floor (#280 item 16)
+#     python3 tools/regtest/caller.py 18456 unwitnessed  # a light client without NODE_WITNESS: seated, served, never asked (#280 item 16)
 #
 # A third argument binds the source address, which is how one machine seats
 # more than one inbound Peer (#333): hostLimit is one slot per host, and every
@@ -21,9 +24,24 @@ MAGIC = bytes([0xfa,0xbf,0xb5,0xda])           # regtest
 def msg(cmd, payload):
     c = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
     return MAGIC + cmd.encode().ljust(12, b'\0') + struct.pack('<I', len(payload)) + c + payload
-def version_payload():
-    return (struct.pack('<iQq', 70016, 0, int(time.time())) + b'\0'*26 + b'\0'*26
-            + struct.pack('<Q', 4242) + b'\x0a/caller:1/' + struct.pack('<i', 0) + b'\0')
+def version_payload(version=70016, services=0, nonce=4242):
+    return (struct.pack('<iQq', version, services, int(time.time())) + b'\0'*26 + b'\0'*26
+            + struct.pack('<Q', nonce) + b'\x0a/caller:1/' + struct.pack('<i', 0) + b'\0')
+def their_version(s):
+    # The node's version frame, read whole: header, then the payload it announces.
+    s.settimeout(10)
+    head = b''
+    while len(head) < 24:
+        got = s.recv(24 - len(head))
+        if not got: return b''                        # the node hung up first
+        head += got
+    length = struct.unpack('<I', head[16:20])[0]
+    body = b''
+    while len(body) < length:
+        got = s.recv(length - len(body))
+        if not got: return b''
+        body += got
+    return body
 def held(s, started, seconds):
     # Read until the node hangs up, which is the only way a caller that is
     # not sending can learn it has been dropped.
@@ -57,6 +75,32 @@ def dial(port, mode, source=None):
             s.settimeout(10); s.recv(65536)               # their version
             s.sendall(msg('verack', b''))
             return held(s, started, 1500)
+        elif mode == 'ancient':
+            # A version from 2012 (#280 item 16): protocol 209 cannot serve
+            # witness Blocks, and this node has nothing to ask it.
+            s.sendall(msg('version', version_payload(version=209)))
+            return held(s, started, 30)
+        elif mode == 'unwitnessed':
+            # A proper Handshake without NODE_WITNESS (#280 item 16): a light
+            # client. Kept and served, and never asked for a Block -- so this
+            # caller reports every command the node sends it for 40 s.
+            s.sendall(msg('version', version_payload(services=1, nonce=4243)))
+            their_version(s)
+            s.sendall(msg('verack', b''))
+            s.settimeout(40); buf = b''; seen = []
+            try:
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk: break
+                    buf += chunk
+                    while len(buf) >= 24:
+                        length = struct.unpack('<I', buf[16:20])[0]
+                        if len(buf) < 24 + length: break
+                        seen.append(buf[4:16].rstrip(b'\0').decode(errors='replace')); buf = buf[24 + length:]
+            except socket.timeout:
+                pass
+            print('caller: still connected after %.1f s; the node sent: %s' % (time.time() - started, ' '.join(seen) or 'nothing'), file=sys.stderr, flush=True)
+            return
         elif mode == 'locator':
             # A proper Handshake, then one getheaders whose Locator carries
             # 102 Ids -- one over Core's MAX_LOCATOR_SZ (#280, item 15). Every

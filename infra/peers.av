@@ -29,7 +29,7 @@ module Peers
         "Per ADR 0008 this module is the only thing here that touches a"
         "Peer's socket, and it hands values back rather than writing"
         "anything down."
-    exposes [watchSockets, popSpare, Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, Wanted, opened, listening, listenerOf, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, peerIdleDeadlineMs, quietInbound, listenerKey, peerKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, wanting, blockServed, nextBlockWanted, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, polledFor, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers, claimsOf, Hearing, hearing, seatedKeys, writesOwed, flushedAll, dialOf, greetingFailed]
+    exposes [watchSockets, popSpare, Pool, Spare, Tick, Waited, WaitedFrom, Heard, Accepted, Joined, Wanted, opened, listening, listenerOf, accepting, inboundLimit, inboundDefault, inboundCapFrom, withInboundCap, peerIdleDeadlineMs, quietInbound, listenerKey, peerKeys, askableKeys, awaitTick, idleDeadlineMs, joined, joinedOnly, awaitFrom, awaitAny, awaitAnyPeer, send, tell, wanting, blockServed, nextBlockWanted, closeAll, dropOne, pumped, answerDeadlineMs, spareOf, withoutSpare, company, spared, polledMsOf, polledFor, drawnElsewhere, Dialing, Outcome, dialingNow, dialling, advanced, settledOf, withoutSettled, selfAddress, servingPort, told, Advertised, Topped, toppedUp, targetPeers, claimsOf, Hearing, hearing, seatedKeys, writesOwed, flushedAll, dialOf, greetingFailed]
     depends [Domain.Outbox, Infra.Readiness, Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Handshake, Domain.Inbox, Domain.Message, Domain.Network, Domain.Snapshot, Domain.Version]
     effects [
         Console.error, Console.print,
@@ -64,6 +64,7 @@ record Pool
     greetings: Map<Int, Greeting>
     outboxes: Map<Int, Queued>
     pending: Map<Int, List<List<Int>>>
+    ourNonces: List<Int>
 
 record Dialing
     key: Int
@@ -300,8 +301,8 @@ fn viewOf(key: Int, standing: Option<Standing>, heardMs: Int) -> PeerView
 
 verify viewOf
     viewOf(2, Option.None, 7) => PeerView(key = 2, address = "unknown", version = 0, agent = "", lastHeardMs = 7, sent = 0, received = 0, inbound = false)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 120, received = 4096, inbound = false, height = 0)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096, inbound = false)
-    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = true, height = 0)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0, inbound = true)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 120, received = 4096, inbound = false, height = 0, services = 0)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 120, received = 4096, inbound = false)
+    viewOf(2, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = true, height = 0, services = 0)), 7) => PeerView(key = 2, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 7, sent = 0, received = 0, inbound = true)
 
 fn drawnElsewhere(pool: Pool) -> Pool
     ? "The pool told that something else owns the terminal, so its own lines"
@@ -625,7 +626,7 @@ fn claimedInto(key: Int, standing: Option<Standing>, acc: List<Tuple<Int, Int>>)
 
 verify claimedInto
     claimedInto(3, Option.None, []) => []
-    claimedInto(3, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false, height = 42)), []) => [(3, 42)]
+    claimedInto(3, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false, height = 42, services = 0)), []) => [(3, 42)]
 
 record Accepted
     pool: Pool
@@ -955,8 +956,8 @@ fn oneIfOutbound(standing: Option<Standing>) -> Int
 
 verify oneIfOutbound
     oneIfOutbound(Option.None) => 0
-    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0))) => 1
-    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0))) => 0
+    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0))) => 1
+    oneIfOutbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0))) => 0
 
 fn oneIfInbound(standing: Option<Standing>) -> Int
     ? "One for a Peer that dialled us, nothing for one we dialled."
@@ -966,8 +967,8 @@ fn oneIfInbound(standing: Option<Standing>) -> Int
 
 verify oneIfInbound
     oneIfInbound(Option.None) => 0
-    oneIfInbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0))) => 1
-    oneIfInbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0))) => 0
+    oneIfInbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0))) => 1
+    oneIfInbound(Option.Some(Standing(address = "", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0))) => 0
 
 fn countedDirection(inbound: Bool) -> Int
     ? "A Bool as the number it contributes to the count."
@@ -1099,7 +1100,7 @@ verify listenerOf
 
 fn opened(network: Network) -> Pool
     ? "A pool with nothing in it."
-    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0, inboundCap = inboundDefault(), greetings = {}, outboxes = {}, pending = {})
+    Pool(network = network, sockets = Map.fromList([]), standing = Domain.Inbox.noStanding(), spare = [], serves = 0, height = 0, heardMs = Map.fromList([]), anyHeardMs = 0, polledMs = 0, plain = true, dialing = Option.None, settled = [], port = 0, seenAs = Map.fromList([]), toldMs = 0, inboundCap = inboundDefault(), greetings = {}, outboxes = {}, pending = {}, ourNonces = [])
 
 fn withHeld(pool: Pool, key: Int, held: Standing) -> Pool
     ? "The pool, with what is known about one Peer moved on."
@@ -1676,8 +1677,9 @@ fn introduced(pool: Pool, key: Int, address: PeerAddress) -> Result<Joined, Stri
 fn ourVersionOut(pool: Pool, key: Int, address: PeerAddress) -> Result<Pool, String>
     ? "Our version, addressed to the Candidate we dialled."
     ! [Random.int, Tcp.writeNow, Time.unixMs]
-    body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
-    send(pool, key, "version", body)
+    nonce = freshNonce()
+    body = Domain.Version.payloadOffering(address, Time.unixMs(), nonce, servicesOf(pool), pool.height)?
+    send(remembering(pool, nonce), key, "version", body)
 
 fn handshakeDeadlineMs() -> Int
     ? "How long a whole Handshake may take, from the first wait to verack."
@@ -1775,7 +1777,26 @@ fn acknowledged(pool: Pool, key: Int, body: List<Int>, inbound: Bool, deadlineMs
     ]
     match presenting(pool, key, inbound)
         Result.Err(why) -> Result.Ok(Joined(pool = pool, seated = false, why = why))
-        Result.Ok(sent) -> greeting(noticedSelf(sent, body), key, Domain.Version.peerVersionOf(body), Domain.Version.peerUserAgentOf(body), Domain.Version.peerStartHeightOf(body), inbound, deadlineMs, kept)
+        Result.Ok(sent) -> greetingUnless(sent, key, body, inbound, deadlineMs, kept, Domain.Handshake.versionFault(Domain.Version.peerVersionOf(body), Domain.Version.peerServicesOf(body), List.contains(sent.ourNonces, Domain.Version.peerNonceOf(body)), inbound))
+
+fn greetingUnless(pool: Pool, key: Int, body: List<Int>, inbound: Bool, deadlineMs: Int, kept: Int, fault: Option<String>) -> Result<Joined, String>
+    ? "The version read for what it says about the Peer (#280 item 16): our"
+      "own nonce coming back is this node, a protocol below 70016 cannot"
+      "serve witness Blocks, and an outbound Peer without NODE_WITNESS is one"
+      "we dialled for Blocks it cannot give. Any of those ends the Handshake"
+      "here; otherwise the services are kept on the Standing and the greeting"
+      "goes on."
+    ! [
+        Console.error, Console.print,
+        Process.stopRequested,
+        Random.int,
+        Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    match fault
+        Option.Some(why) -> Result.Ok(Joined(pool = pool, seated = false, why = "peer {key} {why}"))
+        Option.None -> greeting(Pool.update(noticedSelf(pool, body), standing = Domain.Inbox.offered(pool.standing, key, Domain.Version.peerServicesOf(body))), key, Domain.Version.peerVersionOf(body), Domain.Version.peerUserAgentOf(body), Domain.Version.peerStartHeightOf(body), inbound, deadlineMs, kept)
 
 fn presenting(pool: Pool, key: Int, inbound: Bool) -> Result<Pool, String>
     ? "Our version if this Peer dialled us, then the verack that answers its."
@@ -1807,8 +1828,57 @@ fn ourVersionTo(pool: Pool, key: Int) -> Result<Pool, String>
       "represent, and it says so rather than failing further away."
     ! [Random.int, Tcp.writeNow, Time.unixMs]
     address = Domain.Address.fromPeerText(addressTextOf(Domain.Inbox.standingAt(pool.standing, key)), Domain.Network.portOf(pool.network))?
-    body = Domain.Version.payloadOffering(address, Time.unixMs(), Random.int(1, 2147483647), servicesOf(pool), pool.height)?
-    send(pool, key, "version", body)
+    nonce = freshNonce()
+    body = Domain.Version.payloadOffering(address, Time.unixMs(), nonce, servicesOf(pool), pool.height)?
+    send(remembering(pool, nonce), key, "version", body)
+
+fn freshNonce() -> Int
+    ? "A version nonce this node has not used before, sixty-two bits from"
+      "two draws (#280 item 16): wide enough that another node's nonce never"
+      "collides with ours, and remembered so ours coming back is recognised."
+    ! [Random.int]
+    Random.int(1, 2147483647) * 2147483648 + Random.int(0, 2147483647)
+
+fn remembering(pool: Pool, nonce: Int) -> Pool
+    ? "The nonces this node has sent, newest first, at most sixty-four."
+    Pool.update(pool, ourNonces = List.take(List.prepend(nonce, pool.ourNonces), 64))
+
+verify remembering
+    remembering(opened(Network.Regtest), 7).ourNonces => [7]
+    List.len(remembering(opened(Network.Regtest), 7).ourNonces) => 1
+
+fn askableKeys(pool: Pool) -> List<Int>
+    ? "The Peers a Block may be asked of (#280 item 16): every outbound Peer,"
+      "which was refused at its Handshake without NODE_WITNESS, and an inbound"
+      "one only when it offered the bit. A light client that dialled us is"
+      "kept and served and never asked."
+    askableIn(pool, peerKeys(pool), [])
+
+verify askableKeys
+    askableKeys(opened(Network.Regtest)) => []
+
+fn askableIn(pool: Pool, keys: List<Int>, acc: List<Int>) -> List<Int>
+    ? "Each key in turn against its Standing."
+    match keys
+        [] -> List.reverse(acc)
+        [head, ..tail] -> askableIn(pool, tail, keptIfAskable(head, Domain.Inbox.standingAt(pool.standing, head), acc))
+
+verify askableIn
+    askableIn(opened(Network.Regtest), [], []) => []
+
+fn keptIfAskable(key: Int, standing: Option<Standing>, acc: List<Int>) -> List<Int>
+    ? "Outbound, or inbound with NODE_WITNESS; a key without a Standing is not."
+    match standing
+        Option.None -> acc
+        Option.Some(held) -> match Bool.or(Bool.not(held.inbound), Domain.Version.servesWitness(held.services))
+            true -> List.prepend(key, acc)
+            false -> acc
+
+verify keptIfAskable
+    keptIfAskable(1, Option.None, []) => []
+    keptIfAskable(1, Option.Some(Standing(address = "a", buffer = Bytes.empty(), version = 70016, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0)), []) => [1]
+    keptIfAskable(1, Option.Some(Standing(address = "a", buffer = Bytes.empty(), version = 70016, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0)), []) => []
+    keptIfAskable(1, Option.Some(Standing(address = "a", buffer = Bytes.empty(), version = 70016, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 9)), []) => [1]
 
 fn servicesOf(pool: Pool) -> Int
     ? "What this node promises."
@@ -1831,7 +1901,7 @@ fn addressTextOf(standing: Option<Standing>) -> String
 
 verify addressTextOf
     addressTextOf(Option.None) => ""
-    addressTextOf(Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0))) => "1.2.3.4:8333"
+    addressTextOf(Option.Some(Standing(address = "1.2.3.4:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0))) => "1.2.3.4:8333"
 
 fn pongThen(pool: Pool, key: Int, seenVersion: Int, seenAgent: String, seenHeight: Int, frame: Frame, inbound: Bool, deadlineMs: Int, kept: Int) -> Result<Joined, String>
     ? "Answer a ping that arrived mid-Handshake, then carry on."
@@ -2906,6 +2976,7 @@ record Greeting
     version: Int
     agent: String
     height: Int
+    services: Int
     deadlineMs: Int
     early: List<Frame>
 
@@ -2918,7 +2989,7 @@ fn awaitingGreeting(pool: Pool, key: Int, address: String, inbound: Bool) -> Poo
       "seating and its verack is an entry in this map, four frames a turn,"
       "and its key."
     ! [Time.unixMs]
-    Pool.update(pool, greetings = Map.set(pool.greetings, key, Greeting(address = address, inbound = inbound, version = 0, agent = "", height = 0, deadlineMs = Time.unixMs() + handshakeDeadlineMs(), early = [])))
+    Pool.update(pool, greetings = Map.set(pool.greetings, key, Greeting(address = address, inbound = inbound, version = 0, agent = "", height = 0, services = 0, deadlineMs = Time.unixMs() + handshakeDeadlineMs(), early = [])))
 
 fn readyKeys(pool: Pool, keys: List<Int>, acc: List<Int>) -> List<Int>
     ? "The keys with nothing pending against them, in the order they came."
@@ -3142,10 +3213,23 @@ fn greetingVersion(pool: Pool, key: Int, pending: Greeting, body: List<Int>) -> 
       "written into its standing, because a Peer that never sends its"
       "verack is not a Peer and should leave nothing behind. greetingDone"
       "is where it is folded in."
+      "Read first for what ends a Handshake (#280 item 16): our own nonce"
+      "coming back, a protocol below 70016, or an outbound Peer without"
+      "NODE_WITNESS. The facade's acknowledged asks the same question of"
+      "Domain.Handshake.versionFault; under follow this is the only path a"
+      "version takes, and it used to seat every one of them."
+    ! [Random.int, Tcp.writeNow, Time.unixMs]
+    match Domain.Handshake.versionFault(Domain.Version.peerVersionOf(body), Domain.Version.peerServicesOf(body), List.contains(pool.ourNonces, Domain.Version.peerNonceOf(body)), pending.inbound)
+        Option.Some(why) -> Result.Err(why)
+        Option.None -> greetingVersionKept(pool, key, pending, body)
+
+fn greetingVersionKept(pool: Pool, key: Int, pending: Greeting, body: List<Int>) -> Result<Pool, String>
+    ? "A version with nothing against it: answered, and what it said kept on"
+      "the Greeting, its service bits included."
     ! [Random.int, Tcp.writeNow, Time.unixMs]
     sent = presenting(pool, key, pending.inbound)?
     noticed = noticedSelf(sent, body)
-    Result.Ok(Pool.update(noticed, greetings = Map.set(noticed.greetings, key, Greeting.update(pending, version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body), height = Domain.Version.peerStartHeightOf(body)))))
+    Result.Ok(Pool.update(noticed, greetings = Map.set(noticed.greetings, key, Greeting.update(pending, version = Domain.Version.peerVersionOf(body), agent = Domain.Version.peerUserAgentOf(body), height = Domain.Version.peerStartHeightOf(body), services = Domain.Version.peerServicesOf(body)))))
 
 fn greetingDone(pool: Pool, key: Int, pending: Greeting) -> Pool
     ? "The verack: the Peer becomes a Peer, and whatever it said early is"
@@ -3158,7 +3242,7 @@ fn greetingDone(pool: Pool, key: Int, pending: Greeting) -> Pool
       "not touch pool.dialing, which by now belongs to whatever dial was"
       "started after this one settled."
     ! [Console.print]
-    ready = Pool.update(pool, greetings = Map.remove(pool.greetings, key), standing = Domain.Inbox.greeted(pool.standing, key, pending.version, pending.agent, pending.height))
+    ready = Pool.update(pool, greetings = Map.remove(pool.greetings, key), standing = Domain.Inbox.offered(Domain.Inbox.greeted(pool.standing, key, pending.version, pending.agent, pending.height), key, pending.services))
     released = releaseEarly(ready, key, pending.early)
     match pending.inbound
         true -> inboundGreeted(released, key)
@@ -3217,7 +3301,7 @@ fn sampleGreeting(inbound: Bool) -> Greeting
     ? "One greeting part way through, for the cases here. It takes the side"
       "that dialled as a parameter, because that is the field every case"
       "about it turns on."
-    Greeting(address = "127.0.0.1:18444", inbound = inbound, version = 70016, agent = "/test/", height = 179, deadlineMs = 10000, early = [])
+    Greeting(address = "127.0.0.1:18444", inbound = inbound, version = 70016, agent = "/test/", height = 179, services = 9, deadlineMs = 10000, early = [])
 
 verify sampleGreeting
     sampleGreeting(true).inbound => true

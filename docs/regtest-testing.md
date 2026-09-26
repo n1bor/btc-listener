@@ -2754,6 +2754,75 @@ of the eleven beneath it, is refused by the same batch check with a line that
 names the rule instead; those two are covered by the verify cases in
 `infra/headers.av`, because Core will not mine one for you.
 
+### A caller that is this node, one from 2012, and one that cannot serve witnesses
+
+[#280](https://github.com/n1bor/btc-listener/issues/280) item 16. The
+Handshake used to accept any `version`: the nonce this node put in its own
+was never kept or compared, so the node could dial itself and hold two
+slots; a short body read as protocol 0 and was seated, then asked for witness
+Blocks it could not serve; and the service bits were never read. Three
+checks now end a Handshake at the `version` (`Domain.Handshake.versionFault`,
+with a law that pins exactly those three): our own nonce coming back, a
+protocol below 70016, and — for a Peer this node dialled — no `NODE_WITNESS`.
+An inbound Peer without the bit is a light client: seated, served, and
+never asked for a Block (`Infra.Peers.askableKeys`).
+
+A liar the node dials, and two callers beside a polite one against the
+served port. The self-connection has to be staged by the liar: this node
+sends its `version` to a caller only after reading the caller's, so a caller
+never holds the nonce to echo, where a Peer the node dialled has it in hand
+before it answers.
+
+```bash
+python3 tools/regtest/liar.py 18455 echo &
+sleep 3
+timeout -s INT 70 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D serve:18458 log &
+sleep 8
+python3 tools/regtest/caller.py 18458 polite 127.0.0.2 &
+python3 tools/regtest/caller.py 18458 ancient 127.0.0.4 &
+python3 tools/regtest/caller.py 18458 unwitnessed 127.0.0.5 &
+sleep 20; $C generatetoaddress 1 "$($C getnewaddress)"
+wait
+```
+
+`echo` reads the node's `version` and sends its nonce back in its own;
+`ancient` offers protocol 209; `unwitnessed` completes a proper Handshake
+with services 1 and then reports every command the node sends it for forty
+seconds. Expect:
+
+```
+liar: echoing the node's nonce 1160865666685508896
+liar: got verack
+liar: the node hung up
+caller: dropped after 0.0 s                                   # ancient
+caller: still connected after 40.0 s; the node sent: verack  # unwitnessed
+caller: still connected after 60.1 s                         # polite
+
+peer 127.0.0.1:18455 refused: peer 0 is this node: its version carries our own nonce
+peer 0 is 127.0.0.1:18454
+peer 2 dialled us from 127.0.0.5:34505
+inbound peer 2 completed its handshake
+peer 3 dialled us from 127.0.0.2:35821
+inbound peer 3 completed its handshake
+peer 4 dialled us from 127.0.0.4:35053
+peer 4 handshake failed: speaks protocol 209, below the 70016 this node needs
+following at Height 208: 1 connected, 0 disconnected, set +1 -0
+```
+
+The two refusals name the reason. The light client stays seated for its
+forty seconds and hears nothing but the `verack`: this node announces
+Transactions by `inv` and not Blocks, so the mined Block reaches it only if
+it asks, and a `getdata` never goes to a Peer without the bit. The polite
+caller is untouched. Before this change all three were seated -- and a first
+cut of the change seated the liar and the ancient caller too, because it
+checked the `version` only on the facade path the standalone commands use
+(`Infra.Peers.acknowledged`), where `follow` greets through the process loop
+(`Infra.Peers.greetingVersion`). The symptom was `handshake deadline
+expired` on both, ten seconds in, rather than the refusal: the node had
+answered the bad `version` and was waiting for a `verack` that never came. A
+check on the Handshake has to be on both paths, and only this run shows
+which one `follow` takes.
+
 ### A caller that greets you and then says nothing for ever
 
 [#330](https://github.com/n1bor/btc-listener/issues/330). A crawler is not
