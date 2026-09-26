@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 
-CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/sighash.json"
+CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/test/data/sighash.json"
 
 PER_FILE = 250
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}

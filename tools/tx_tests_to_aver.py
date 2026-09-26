@@ -31,8 +31,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 
-VALID = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/tx_valid.json"
-INVALID = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/tx_invalid.json"
+VALID = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/test/data/tx_valid.json"
+INVALID = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/test/data/tx_invalid.json"
 
 sys.path.insert(0, HERE)
 from script_tests_to_aver import opcode_names, parse_script  # noqa: E402

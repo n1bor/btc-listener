@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 RAW = os.path.join(DATA, "siphash_vectors.h")
 OUT = os.path.join(HERE, "..", "corpus", "siphashcases.av")
-URL = "https://raw.githubusercontent.com/veorq/SipHash/master/vectors.h"
+URL = "https://raw.githubusercontent.com/veorq/SipHash/32d067603b93b47828700880649198e0bfbbcffa/vectors.h"
 
 KEY = bytes(range(16))
 K0 = int.from_bytes(KEY[:8], "little")

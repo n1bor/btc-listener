@@ -29,7 +29,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
-URL = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/key_io_valid.json"
+URL = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/test/data/key_io_valid.json"
 
 # Core's chain names against this project's Network.  testnet4 shares testnet3's
 # address prefixes -- the fork changed the genesis and the difficulty rules, not

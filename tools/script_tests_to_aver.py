@@ -42,8 +42,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 
-CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/test/data/script_tests.json"
-CORE_HEADER = "https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/script/script.h"
+CORE_JSON = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/test/data/script_tests.json"
+CORE_HEADER = "https://raw.githubusercontent.com/bitcoin/bitcoin/ed7dd7cf4e1561a97edf72eba29a67b14e28c717/src/script/script.h"
 
 # The consensus limit on a Script, which is also what makes an over-long Script
 # cheap: Core refuses it on size before running a single opcode, and so does

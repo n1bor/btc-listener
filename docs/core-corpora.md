@@ -126,6 +126,18 @@ that disagreement is the honest record of the gap rather than a silent pass.
 
 ## Regenerating
 
+**Every corpus is fetched by commit, not by branch** (n1bor/btc-listener#280,
+item 19). Each generator's `URL` constant names a commit of `bitcoin/bitcoin`,
+`bitcoin-core/qa-assets`, `bitcoin/bips` or `veorq/SipHash`, so a refresh
+reproduces the same corpus until somebody moves the constant, and a moved
+upstream branch cannot change what this repository generates. To take a newer
+upstream: read the branch head (`gh api repos/bitcoin/bitcoin/commits/master
+-q .sha`), put it in the constants, run `tools/refresh_corpora.sh`, and read
+the diff of `corpus/*.av` before committing — a corpus that changed is a
+Core behaviour that changed. The same reasoning pins every GitHub Action in
+`ci.yml` and `canary.yml` to a commit, with Dependabot proposing the bumps.
+
+
 ### Scripts
 
 Same three steps as the Transaction corpus below, and the same probe project:

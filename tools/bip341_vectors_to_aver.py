@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "script_tests_data")
 OUT = os.path.abspath(os.path.join(HERE, "..", "corpus"))
 NAME = "bip341-wallet-test-vectors.json"
-URL = ("https://raw.githubusercontent.com/bitcoin/bips/master"
+URL = ("https://raw.githubusercontent.com/bitcoin/bips/02bebeb5ef53dc21a52d5706c6b4c17b6af6c1cc"
        "/bip-0341/wallet-test-vectors.json")
 
 

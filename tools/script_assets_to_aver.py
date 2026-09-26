@@ -27,7 +27,7 @@ import os
 import sys
 import urllib.request
 
-URL = "https://raw.githubusercontent.com/bitcoin-core/qa-assets/main/unit_test_data/script_assets_test.json"
+URL = "https://raw.githubusercontent.com/bitcoin-core/qa-assets/0739b29cfb99e8de42298f550e9cdbf1a7659dcf/unit_test_data/script_assets_test.json"
 CACHE = "/tmp/btc-listener-script-assets.json"
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "corpus")
 PER_FILE = 250
