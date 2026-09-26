@@ -645,7 +645,7 @@ laws), baseline regenerated, `--gate` 0 regressions.
 | law | pins | tier |
 |---|---|---|
 | `Snapshot.ringWith.holdsEachIdOnce` | after `ringWith(views, view)` exactly one row names `view.txId` | cases |
-| `SpendContext.inputAt.someExactlyWhenTheInputExists` | `Some` exactly for `0 <= index < inputs`; the negative side fails before the fix and is the hostile lane's (a `0 - 1` claim is jasisz/aver#1451 in the export) | cases |
+| `SpendContext.inputAt.someExactlyWhenTheInputExists` | `Some` exactly for `0 <= index < inputs`; the negative side fails before the fix and was the hostile lane's alone until jasisz/aver#1451 closed on the `8fb5d98e` pin, when a `0 - 1` row joined the cases | cases |
 | `Address.routableOctets.agreesWithCoreIsRoutable` | equals `coreIsRoutable`, Core's `IsRoutable` written flat, over a 12×10×5×3 grid of octets | cases |
 | `Inventory.countPrefix.isCompactSize` | the inv count prefix is `CompactSize.encode` below 65536 | universal |
 | `Block.countPrefix.isCompactSize` | the Locator count prefix is `CompactSize.encode` below 65536 | universal |
