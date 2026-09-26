@@ -498,7 +498,7 @@ function bitcoinMessage(command, payload, corrupt = false) {
 function versionPayload() {
   const fixed = Buffer.alloc(4 + 8 + 8 + 26 + 26 + 8);
   fixed.writeInt32LE(70016, 0);
-  fixed.writeBigUInt64LE(0n, 4);
+  fixed.writeBigUInt64LE(9n, 4); // NODE_NETWORK | NODE_WITNESS: a Peer this node dialled is refused without the witness bit (#280 item 16)
   fixed.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 12);
   fixed.writeBigUInt64LE(12345n, fixed.length - 8);
   const agent = Buffer.from("/node-wasm:1/", "ascii");
