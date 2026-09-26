@@ -60,6 +60,14 @@ verify baseOf
     baseOf(1305123906) => Base.SignNone
     baseOf(1444414211) => Base.SignSingle
 
+verify baseOf law lowFiveBitsDecide
+    given hashType: Int = [0, 1, 2, 3, 4, 31, 32, 33, 34, 35, 129, 130, 131, 227, 255, 256, 4294967267, 4294967295]
+    baseOf(hashType) => baseOf(Bits.and(hashType, 31))
+
+verify baseOf law anyoneCanPayDoesNotChangeTheBase
+    given hashType: Int = [0, 1, 2, 3, 4, 31, 32, 35, 100, 127]
+    baseOf(hashType + 128) => baseOf(hashType)
+
 fn isAnyoneCanPay(hashType: Int) -> Bool
     ? "Whether the 0x80 bit is set, which drops every other Input."
     Int.mod(Int.div(hashType, 128), 2) == 1
@@ -72,6 +80,10 @@ verify isAnyoneCanPay
     isAnyoneCanPay(0) => false
     isAnyoneCanPay(1601138113) => true
     isAnyoneCanPay(1145543262) => false
+
+verify isAnyoneCanPay law isBitSeven
+    given hashType: Int = [0, 1, 3, 127, 128, 129, 131, 255, 256, 384, 4294967267, 4294967295]
+    isAnyoneCanPay(hashType) => Bits.and(hashType, 128) == 128
 
 fn legacy(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, hashType: Int) -> Result<String, String>
     ? "The thirty-two byte message, as hexadecimal in the order it is hashed."
@@ -86,6 +98,34 @@ verify legacy
     legacy(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000")?))?, 0, "51", 1) => Result.Ok("ab9a28ba9210379d4ad8420d143e7c25146f65f558ab2dc06ad8e931a3ac186c")
     legacy(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000")?))?, 1, "51", 1) => Result.Err("no input at index 1 to sign")
     legacy(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000000000000151ffffffff01e803000000000000015300000000")?))?, 0, "51", 4294967296) => Result.Err("hash type 4294967296 does not fit in four bytes")
+    legacy(threeInputsOneOutput(), 1, "51", 3) => Result.Ok(one())
+    legacy(threeInputsOneOutput(), 2, "51", 3) => Result.Ok(one())
+    legacy(threeInputsOneOutput(), 1, "51", 131) => Result.Ok(one())
+    legacy(threeInputsOneOutput(), 2, "51", 35) => Result.Ok(one())
+    legacy(threeInputsOneOutput(), 1, "51", 4294967267) => Result.Ok(one())
+    legacy(threeInputsOneOutput(), 0, "51", 3) == Result.Ok(one()) => false
+    legacy(threeInputsOneOutput(), 1, "51", 1) == Result.Ok(one()) => false
+
+fn threeInputsOneOutput() -> Transaction
+    ? "Three Inputs and one Output, for the SIGHASH_SINGLE bug: signing Input"
+      "one or two under SINGLE has no matching Output, and Core's SignatureHash"
+      "returns uint256::ONE rather than a hash -- the bug every implementation"
+      "reproduces because coins on the chain were signed under it."
+      "Pinned by the singleBug cases rather than a law: stated over every"
+      "SINGLE hash type the export landed on sorry (#353), the digest being"
+      "opaque to the prover past the branch that returns one()."
+    Transaction(version = 1, inputs = [sampleInput(0), sampleInput(1), sampleInput(2)], outputs = [Output(value = 1000, script = "53")], lockTime = 0, txid = "", size = 0, isSegWit = false)
+
+verify threeInputsOneOutput
+    List.len(threeInputsOneOutput().inputs) => 3
+    List.len(threeInputsOneOutput().outputs) => 1
+
+fn sampleInput(index: Int) -> Input
+    ? "An Input spending Output index of the zero Transaction Id, for the fixture."
+    Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = index, script = "", sequence = 4294967295, witness = [])
+
+verify sampleInput
+    sampleInput(2).previousIndex => 2
 
 fn withHashType(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, hashType: Int) -> Result<String, String>
     ? "The hash type is serialised as four bytes, so it has to fit in four."
@@ -131,6 +171,7 @@ fn one() -> String
 
 verify one
     String.len(one()) => 64
+    one() => "0100000000000000000000000000000000000000000000000000000000000000"
 
 fn hashed(transaction: Transaction, inputIndex: Int, scriptCodeHex: String, hashType: Int) -> Result<String, String>
     ? "Serialise the modified copy and hash it twice, as Bitcoin hashes."
@@ -211,6 +252,63 @@ verify withoutSeparators
     withoutSeparators([Op.Code(81)], []) => [Op.Code(81)]
     withoutSeparators([Op.Code(171)], []) => []
     withoutSeparators([Op.Code(81), Op.Code(171), Op.Code(82)], []) => [Op.Code(81), Op.Code(82)]
+
+verify withoutSeparators law isStableFilter
+    given ops: List<Op> = [[], [Op.Code(171)], [Op.Push(1, [171])], [Op.Code(81), Op.Code(171), Op.Code(82)], [Op.Code(171), Op.Code(171)], [Op.Push(76, [171]), Op.Code(171), Op.Push(1, [171])]]
+    given acc: List<Op> = [[], [Op.Code(82)]]
+    because separatorReason(ops, acc)
+    using []
+    withoutSeparators(ops, acc) => List.concat(List.reverse(acc), retainedNonSeparators(ops))
+
+fn retainedNonSeparators(ops: List<Op>) -> List<Op>
+    ? "The specification the filter is measured against: every operation but"
+      "OP_CODESEPARATOR itself, in order. A push carrying 0xab stays, because"
+      "Core's FindAndDelete(CScript(OP_CODESEPARATOR)) matches operations,"
+      "not bytes."
+    match ops
+        [] -> []
+        [head, ..tail] -> keptInSpec(head, retainedNonSeparators(tail))
+
+verify retainedNonSeparators
+    retainedNonSeparators([]) => []
+    retainedNonSeparators([Op.Code(171)]) => []
+    retainedNonSeparators([Op.Code(81), Op.Code(171), Op.Push(1, [171])]) => [Op.Code(81), Op.Push(1, [171])]
+
+fn keptInSpec(op: Op, rest: List<Op>) -> List<Op>
+    ? "An operation in front of the rest, unless it is OP_CODESEPARATOR."
+    match op
+        Op.Push(code, data) -> List.prepend(op, rest)
+        Op.Code(code) -> match code == 171
+            true -> rest
+            false -> List.prepend(op, rest)
+
+verify keptInSpec
+    keptInSpec(Op.Code(171), [Op.Code(81)]) => [Op.Code(81)]
+    keptInSpec(Op.Code(81), []) => [Op.Code(81)]
+    keptInSpec(Op.Push(1, [171]), []) => [Op.Push(1, [171])]
+
+fn separatorReason(ops: List<Op>, acc: List<Op>) -> Bool
+    ? "Follow the accumulator filter one operation at a time, preserving its reversed prefix."
+    match ops
+        [] -> withoutSeparators(ops, acc) == List.concat(List.reverse(acc), retainedNonSeparators(ops))
+        [head, ..tail] -> Bool.and(separatorReason(tail, accAfter(head, acc)), withoutSeparators(ops, acc) == List.concat(List.reverse(acc), retainedNonSeparators(ops)))
+
+verify separatorReason
+    separatorReason([], []) => true
+    separatorReason([Op.Code(171)], []) => true
+    separatorReason([Op.Code(81), Op.Code(171), Op.Push(1, [171])], [Op.Code(82)]) => true
+
+fn accAfter(op: Op, acc: List<Op>) -> List<Op>
+    ? "What the filter's accumulator holds after this operation."
+    match op
+        Op.Push(code, data) -> List.prepend(op, acc)
+        Op.Code(code) -> match code == 171
+            true -> acc
+            false -> List.prepend(op, acc)
+
+verify accAfter
+    accAfter(Op.Code(171), [Op.Code(82)]) => [Op.Code(82)]
+    accAfter(Op.Code(81), []) => [Op.Code(81)]
 
 fn keptUnlessSeparator(op: Op, rest: List<Op>, acc: List<Op>) -> List<Op>
     ? "A push is always kept, whatever bytes it happens to carry."

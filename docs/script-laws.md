@@ -478,3 +478,29 @@ the Height come from the hostile lane: at `2^63` the subsidy's halving walk
 exhausts the step budget, and a `forkHeight` below zero is not a fork. The
 regtest run for the refusal is the `bip30` liar section of
 `docs/regtest-testing.md`.
+## Signature-hash laws (n1bor/btc-listener#353)
+
+Six laws over `Domain.Sighash` and `Domain.Bip341`, the two modules that
+turn a hash type byte into what a signature commits to. Both are inside the
+`domain/interp.av` cone, so the proof job gates them. Measured at pin
+`c4b08179`: **129 universal, 1 bounded, 0 open, 134 declined** for the cone
+(the bounded one is still `ScriptParse.parse.directPushRunsPastTheEnd`);
+`--gate` reports ten new laws against the committed baseline — these six
+and #352's four, which had not been written into it — and no regression, so
+the baseline is regenerated with exactly those ten added.
+
+| law | pins | tier |
+|---|---|---|
+| `Sighash.baseOf.lowFiveBitsDecide` | `baseOf(t) == baseOf(t & 31)`: only the low five bits choose ALL, NONE or SINGLE (Core's `nHashType & 0x1f`) | universal |
+| `Sighash.baseOf.anyoneCanPayDoesNotChangeTheBase` | `baseOf(t + 128) == baseOf(t)`: setting ANYONECANPAY leaves the base alone | universal |
+| `Sighash.isAnyoneCanPay.isBitSeven` | `isAnyoneCanPay(t) == (t & 128 == 128)` | universal |
+| `Sighash.withoutSeparators.isStableFilter` | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, `because separatorReason` | universal |
+| `Bip341.validHashType.isBip341Set` | valid exactly on `0..3` and `129..131`, the set BIP341 names, with negatives refused | universal |
+| `Bip341.spendType.isTwiceTheExtensionPlusTheAnnex` | `spendType(annex, ext) == 2 * ext + annex`, the byte BIP341 writes into the signature message | universal |
+
+The seventh, that a SINGLE hash type signing an Input past the last Output
+yields the value one (the SIGHASH_SINGLE bug Core's `SignatureHash`
+preserves), landed on `sorry` as a law over every SINGLE type — the digest is
+opaque to the prover past the branch that returns it — and is pinned by
+seven cases in `verify legacy` instead: Inputs one and two under types 3, 35,
+131, 163 and `0xffffffe3`, and the two negatives (Input zero, and type 1).
