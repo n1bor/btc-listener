@@ -2386,7 +2386,31 @@ fn onAskedAddresses(state: Following, key: Int) -> Result<Following, String>
     ! [Console.error, Console.print, Tcp.close, Tcp.writeNow, Time.unixMs]
     offered = parsedAll(List.take(Map.keys(state.book), servedAddressCap()), Domain.Network.portOf(state.pool.network), [])
     answered = Infra.Peers.tell(state.pool, key, "addr", Domain.Addr.payload(offered, Int.div(Time.unixMs(), 1000), 0)?)?
-    Result.Ok(saidOffered(withPool(state, answered), List.len(offered), key))
+    Result.Ok(saidOffered(relayedAddresses(withPool(state, answered), List.len(offered)), List.len(offered), key))
+
+fn relayedAddresses(state: Following, handed: Int) -> Following
+    ? "The Snapshot's tally of Addresses handed on (#383)."
+    withWatch(state, Watching.update(state.watch, snapshot = Domain.Snapshot.withRelayedAddresses(state.watch.snapshot, handed)))
+
+verify relayedAddresses
+    relayedAddresses(sampleFollowing(), 250).watch.snapshot.relayed.addresses => 250
+
+fn relayedTransaction(state: Following, others: Int) -> Following
+    ? "One more Transaction told onward, when there was anybody to tell (#383)."
+    match others > 0
+        false -> state
+        true -> withWatch(state, Watching.update(state.watch, snapshot = Domain.Snapshot.withRelayedTransactions(state.watch.snapshot, 1)))
+
+verify relayedTransaction
+    relayedTransaction(sampleFollowing(), 0).watch.snapshot.relayed.transactions => 0
+    relayedTransaction(sampleFollowing(), 2).watch.snapshot.relayed.transactions => 1
+
+fn relayedBlock(state: Following) -> Following
+    ? "One more Block served to a Peer that asked (#383)."
+    withWatch(state, Watching.update(state.watch, snapshot = Domain.Snapshot.withRelayedBlocks(state.watch.snapshot, 1)))
+
+verify relayedBlock
+    relayedBlock(relayedBlock(sampleFollowing())).watch.snapshot.relayed.blocks => 2
 
 fn parsedAll(addresses: List<String>, port: Int, acc: List<PeerAddress>) -> List<PeerAddress>
     ? "The Book's keys as Peer Addresses, passing over any that will not"
@@ -2707,7 +2731,7 @@ fn announcing(state: Following, key: Int, after: Mempool, held: Domain.Mempool.H
     _said = saidLineIfPlain(state.watch, "mempool admitted {held.txid}: {held.size} bytes, {held.fee} sat at {held.rate}/kB; holding {Domain.Mempool.count(after)} ({Domain.Mempool.bytes(after)} bytes)")
     payload = Domain.Inventory.getDataPayload(Domain.Inventory.txType(), [hashOf(held.txid)])?
     told = toldOthers(state.pool, Infra.Peers.peerKeys(state.pool), key, payload)?
-    seen = arrivedOnRing(state, held, Time.unixMs())
+    seen = relayedTransaction(arrivedOnRing(state, held, Time.unixMs()), List.len(Infra.Peers.peerKeys(state.pool)) - 1)
     Result.Ok(Following(pool = told, store = seen.store, blocks = seen.blocks, book = seen.book, nextKey = seen.nextKey, watch = seen.watch, mempool = after, rebuilding = seen.rebuilding, log = state.log, board = state.board, gate = state.gate))
 
 fn arrivedOnRing(state: Following, held: Domain.Mempool.Held, nowMs: Int) -> Following
@@ -2867,7 +2891,7 @@ fn sendingBlock(state: Following, key: Int, location: Location, left: Int) -> Re
     payload = Infra.Blocks.read(state.blocks, location)?
     sent = Infra.Peers.tell(state.pool, key, "block", payload)?
     _said = saidLineIfPlain(state.watch, "served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
-    servingWithin(withPool(state, sent), left)
+    servingWithin(relayedBlock(withPool(state, sent)), left)
 
 fn serving(pool: Pool, mempool: Mempool, key: Int, asked: List<List<Int>>) -> Result<Pool, String>
     ? "Each identifier asked for, answered from what we hold."

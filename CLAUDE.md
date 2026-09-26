@@ -205,6 +205,14 @@ Three flags are load-bearing and easy to drop:
   still needs its own `aver.toml` with an **absolute** provider path, or
   every case that reaches the curve fails.
 
+**The binary knows which commit it is** (#383): `domain/build.av` holds `commit()`
+and `builtAt()` as `dev`/`unstamped`, and the `compile` and `windows` jobs in
+`ci.yml` rewrite those two literals from `$GITHUB_SHA` before `aver compile`, so
+the published `main-build` says its commit on the status page, in the Screen
+and in the user agent (`/aver-btc-listener:0.1-<sha>/`), and a local build says
+`dev`. Nothing else in the binary can say what it was built from: `aver
+--version` does not move between releases.
+
 The fifteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `utxo`,
 `assumevalid`, `follow`, `show`, `tx`, `spend`, `audit`, `prune`, `reindex`,
 listen, `help`), their ordering constraints and their output formats are

@@ -11,7 +11,7 @@ module Screen
         "because a blank Panel and a Panel not yet built should not look"
         "alike; placeholderLines is that sentence, kept for the next one."
     exposes [DrawOp, Panel, View, Pressed, Answer, opened, pressed, pressedAll, frameOf, overviewLines, pageSections, placeholderLines, keymapLine, confirmLine, etaClock, ageText]
-    depends [Domain.Screenlines, Domain.Snapshot]
+    depends [Domain.Build, Domain.Screenlines, Domain.Snapshot, Domain.Stamp]
     effects []
 
 type DrawOp
@@ -180,7 +180,7 @@ fn linesOf(view: View, snapshot: Snapshot, nowMs: Int) -> List<String>
 verify linesOf
     linesOf(View(panel = Panel.Mempool, confirming = false), Domain.Snapshot.started(0), 0) => ["", "Mempool: 0 Transaction(s), 0 of 0 bytes", "minimum fee rate to enter: 0 sat/kB"]
     List.len(linesOf(View(panel = Panel.Peers, confirming = false), Domain.Snapshot.started(0), 0)) => 5
-    List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 5
+    List.len(linesOf(opened(), Domain.Snapshot.started(0), 0)) => 8
 
 fn mempoolPanelLines(view: MempoolView) -> List<String>
     ? "The Mempool Panel (#134): how much is held, against what cap, and"
@@ -370,13 +370,14 @@ verify placeholderLines
 fn overviewLines(snapshot: Snapshot, nowMs: Int) -> List<String>
     ? "The Overview: the catch-up while it runs, the tip once there is one."
     match snapshot.phase
-        Phase.Headers -> ibdLines(snapshot)
-        Phase.Bodies -> ibdLines(snapshot)
+        Phase.Headers -> List.concat(ibdLines(snapshot), aboutLines(snapshot, nowMs))
+        Phase.Bodies -> List.concat(ibdLines(snapshot), aboutLines(snapshot, nowMs))
         Phase.Listening -> tipLines(snapshot, nowMs)
 
 verify overviewLines
-    overviewLines(Domain.Snapshot.started(0), 0) => ["", "catching up", "headers 0 held, 0.0/s", "blocks 0/0 (0%) 0.0/s eta —", "set 0/0 (0%) 0.0/s eta —"]
-    List.len(overviewLines(Domain.Snapshot.tipAt(Domain.Snapshot.started(0), 7, "aa", 0), 5000)) => 8
+    List.take(overviewLines(Domain.Snapshot.started(0), 0), 5) => ["", "catching up", "headers 0 held, 0.0/s", "blocks 0/0 (0%) 0.0/s eta —", "set 0/0 (0%) 0.0/s eta —"]
+    List.len(overviewLines(Domain.Snapshot.started(0), 0)) => 8
+    List.len(overviewLines(Domain.Snapshot.tipAt(Domain.Snapshot.started(0), 7, "aa", 0), 5000)) => 11
 
 fn tenths(n: Int) -> String
     ? "A count of tenths as a number with one decimal place (#260): 23 is"
@@ -438,11 +439,36 @@ fn tipLines(snapshot: Snapshot, nowMs: Int) -> List<String>
         "{Domain.Screenlines.tipLine(snapshot.tip)}  (age {ageText(snapshot.tip.atMs, nowMs)})",
         "",
         "last Transactions:",
-    ], List.concat(transactionLines(List.take(snapshot.rings.transactions, 4), []), [
+    ], List.concat(transactionLines(List.take(snapshot.rings.transactions, 4), []), List.concat([
         "",
         Domain.Screenlines.peersLine(snapshot.company, nowMs),
         "Mempool: {snapshot.mempool.held} Transaction(s), floor {snapshot.mempool.floorRate} sat/kB",
-    ]))
+    ], aboutLines(snapshot, nowMs))))
+
+fn aboutLines(snapshot: Snapshot, nowMs: Int) -> List<String>
+    ? "When this node started and for how long it has run, which build it"
+      "is, and what it has handed on to Peers since it started (#383). On"
+      "both forms of the Overview, so the status page always says it."
+    [
+        "",
+        "started {Domain.Stamp.isoOf(snapshot.startedMs)}, up {ageText(snapshot.startedMs, nowMs)}, {Domain.Build.label()}",
+        "relayed {snapshot.relayed.blocks} Block(s), {snapshot.relayed.transactions} Transaction(s), {snapshot.relayed.addresses} Address(es)",
+    ]
+
+verify aboutLines
+    List.len(aboutLines(Domain.Snapshot.started(0), 0)) => 3
+    String.startsWith(lineAt(aboutLines(Domain.Snapshot.started(0), 250000), 1), "started 1970-01-01T00:00:00.000Z, up 4m10s, build ") => true
+    lineAt(aboutLines(Domain.Snapshot.withRelayedBlocks(Domain.Snapshot.started(0), 3), 0), 2) => "relayed 3 Block(s), 0 Transaction(s), 0 Address(es)"
+
+fn lineAt(lines: List<String>, index: Int) -> String
+    ? "One line out of a Panel, for the cases here; empty past the end."
+    match List.drop(lines, index)
+        [] -> ""
+        [head, ..tail] -> head
+
+verify lineAt
+    lineAt(["a", "b"], 1) => "b"
+    lineAt(["a"], 3) => ""
 
 fn transactionLines(views: List<TxView>, acc: List<String>) -> List<String>
     ? "The newest few Transactions, one line each; none yet is said, not"

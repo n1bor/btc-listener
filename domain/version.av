@@ -6,7 +6,7 @@ module Version
         "rather than this module reaching for them — so the exact bytes are"
         "checkable against a known-good vector instead of against a live Peer."
     exposes [payload, payloadOffering, nodeNetwork, nodeWitness, nodeNetworkLimited, protocolVersion, userAgent, peerVersionOf, peerUserAgentOf, peerStartHeightOf, addrRecvOffset, addrRecvOf]
-    depends [Bytes, Domain.Message, Domain.Address, Domain.CompactSize, Domain.ScriptState]
+    depends [Bytes, Domain.Build, Domain.Message, Domain.Address, Domain.CompactSize, Domain.ScriptState]
     effects []
 
 fn protocolVersion() -> Int
@@ -18,10 +18,13 @@ verify protocolVersion
 
 fn userAgent() -> String
     ? "How this program names itself to a Peer."
-    "/aver-btc-listener:0.1/"
+      "The build's commit rides behind the version (#383), so another node's"
+      "peer list says which build this is; a local build says 0.1-dev."
+    "/aver-btc-listener:0.1-{Domain.Build.commit()}/"
 
 verify userAgent
-    userAgent() => "/aver-btc-listener:0.1/"
+    String.startsWith(userAgent(), "/aver-btc-listener:0.1-") => true
+    String.len(userAgent()) >= 27 => true
 
 fn nodeNetwork() -> Int
     ? "The service bit that says this node serves the whole chain."
@@ -68,9 +71,9 @@ fn payload(peer: PeerAddress, timestamp: Int, nonce: Int) -> Result<Bytes, Strin
     payloadOffering(peer, timestamp, nonce, 0, 0)
 
 verify payload
-    payload(Domain.Address.fromString("10.0.0.1")?, 0, 0) => Result.Ok(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff0000000000000000000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001")?)
-    Bytes.toHex(payload(Domain.Address.fromString("192.168.1.10")?, 1700000000, 7)?) => "80110100000000000000000000f1536500000000000000000000000000000000000000000000ffffc0a8010a208d000000000000000000000000000000000000ffff0000000000000700000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001"
-    List.len(Bytes.octets(payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)?)) => 109
+    payload(Domain.Address.fromString("10.0.0.1")?, 0, 0) => Result.Ok(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff00000000000000000000000000001b2f617665722d6274632d6c697374656e65723a302e312d6465762f0000000001")?)
+    Bytes.toHex(payload(Domain.Address.fromString("192.168.1.10")?, 1700000000, 7)?) => "80110100000000000000000000f1536500000000000000000000000000000000000000000000ffffc0a8010a208d000000000000000000000000000000000000ffff00000000000007000000000000001b2f617665722d6274632d6c697374656e65723a302e312d6465762f0000000001"
+    List.len(Bytes.octets(payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)?)) => 113
 
 fn payloadOffering(peer: PeerAddress, timestamp: Int, nonce: Int, services: Int, startHeight: Int) -> Result<Bytes, String>
     ? "The same, with the service bits and the Height this node holds."
@@ -89,7 +92,7 @@ verify payloadOffering
     payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 0, 0) => payload(Domain.Address.fromString("10.0.0.1")?, 0, 0)
     List.take(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 1, 0)?), 5) => [128, 17, 1, 0, 1]
     List.take(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 0, 0)?), 5) => [128, 17, 1, 0, 0]
-    List.drop(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 1, 179)?), 104) => [179, 0, 0, 0, 1]
+    List.drop(Bytes.octets(payloadOffering(Domain.Address.fromString("10.0.0.1")?, 0, 0, 1, 179)?), 108) => [179, 0, 0, 0, 1]
 
 fn networkAddress(octets: List<Int>, port: Int) -> List<Int>
     ? "A 26-byte address field: services, IPv4-mapped IPv6, then the port."
@@ -157,7 +160,7 @@ fn addrRecvOf(body: List<Int>, port: Int) -> Result<PeerAddress, String>
     addrRecvIn(List.take(List.drop(body, addrRecvOffset()), 16), port)
 
 verify addrRecvOf
-    Domain.Address.toString(addrRecvOf(Bytes.octets(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff0000000000000000000000000000172f617665722d6274632d6c697374656e65723a302e312f0000000001")?), 8333)?) => "10.0.0.1:8333"
+    Domain.Address.toString(addrRecvOf(Bytes.octets(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d000000000000000000000000000000000000ffff00000000000000000000000000001b2f617665722d6274632d6c697374656e65723a302e312d6465762f0000000001")?), 8333)?) => "10.0.0.1:8333"
     addrRecvOf([], 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
     addrRecvOf(List.take(Bytes.octets(Bytes.fromHex("8011010000000000000000000000000000000000000000000000000000000000000000000000ffff0a000001208d")?), 40), 8333) => Result.Err("addr_recv is not an IPv4-mapped address")
 

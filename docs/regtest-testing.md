@@ -278,6 +278,32 @@ $C getmempoolentry <txid> | grep base       # "base": 0.00002190
 `2190 sat` is `0.00002190`. A mismatch means the Set lookup answered about
 something other than what this Transaction spends.
 
+**The floor is zero** (#383): this node admits a Transaction that pays no fee
+while its Mempool has room, where Core's default asks 1000 sat/kB. Core's
+wallet will not make one, and Core will not relay one unless told to, so run
+the regtest Core with `minrelaytxfee=0` in its `bitcoin.conf` (a restart) and
+build the Transaction by hand, paying every satoshi of one Output back out:
+
+```bash
+U=$($C listunspent 1 9999999 | python3 -c 'import json,sys; u=[x for x in json.load(sys.stdin) if x["spendable"]][0]; print(u["txid"], u["vout"], u["amount"])')
+set -- $U
+RAW=$($C createrawtransaction "[{\"txid\":\"$1\",\"vout\":$2}]" "{\"$($C getnewaddress "" bech32)\":$3}")
+SIGNED=$($C signrawtransactionwithwallet "$RAW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hex"])')
+$C sendrawtransaction "$SIGNED" 0
+```
+
+The node must admit it at a rate of zero, and the Overview's `relayed` line
+must not move when Core is its only Peer, because a Transaction is counted as
+relayed only when there was somebody other than its sender to tell:
+
+```
+mempool admitted a262bcfe…0408: 188 bytes, 0 sat at 0/kB; holding 1 (188 bytes)
+```
+
+A Mempool at its cap still asks its floor plus the 1000 sat/kB incremental
+relay fee before it evicts anything, so zero is what an empty Mempool asks and
+not what a full one does.
+
 ### 6. Relay, with a second node that has no other Peer
 
 An admission that is never passed on is half a Mempool. The only way to prove
@@ -540,7 +566,7 @@ $C2 getpeerinfo
 ```
 
 ```
-id 17  127.0.0.1:18455  '/aver-btc-listener:0.1/'  outbound  v70016
+id 17  127.0.0.1:18455  '/aver-btc-listener:0.1-dev/'  outbound  v70016
 ```
 
 #### The first connection is dropped, and that is Core, not us
@@ -1252,7 +1278,7 @@ covers. The second is the new one, and before #210 it did not exist —
 
 `$C getpeerinfo` should show the pair from Core's side: one `"inbound": true`
 entry that is our dial out to it, and one `"inbound": false` on port 18455
-that is its dial in to us, both with `"subver": "/aver-btc-listener:0.1/"`.
+that is its dial in to us, both with `"subver": "/aver-btc-listener:0.1-dev/"`.
 
 **The listener is bound before the Handshakes.** The first line of the run
 must be the listener, not the Peer:
@@ -1626,6 +1652,26 @@ and a caller that says nothing does not stop a Block from connecting.
 sleep 5
 curl -s localhost:18330/ | grep -c '<h2>'          # 5: one heading per Panel
 curl -s localhost:18330/ | grep -A3 'Overview'      # the tip line the Screen shows
+curl -s localhost:18330/ | grep -E 'started|relayed'   # when it started, which build, what it has relayed (#383)
+```
+
+The last two lines read, on a local build a minute after start and again once
+a second Core has synced 167 Blocks through this node and received one relayed
+Transaction (section 6 with `$C2 addnode 127.0.0.1:18472 onetry`):
+
+```
+started 2026-09-26T15:12:30.371Z, up 13s, build dev, unstamped
+relayed 0 Block(s), 0 Transaction(s), 0 Address(es)
+...
+relayed 167 Block(s), 1 Transaction(s), 0 Address(es)
+```
+
+The published binary says its commit in place of `dev` and its build time in
+place of `unstamped`, and so does its user agent. A Block counts when it is
+served to a Peer that asked, a Transaction when it was told to somebody other
+than its sender, an Address when a `getaddr` was answered with it.
+
+```bash
 curl -s -o /dev/null -w '%{http_code}\n' localhost:18330/x   # 404
 printf 'junk\r\n\r\n' | nc -q1 localhost 18330 | head -1      # HTTP/1.1 400 Bad Request
 for i in 1 2 3 4 5; do nc localhost 18330 < /dev/null & done  # five callers that say nothing

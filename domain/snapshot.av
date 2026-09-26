@@ -9,7 +9,7 @@ module Snapshot
         "The rings are bounded on purpose: a Snapshot is what the node would"
         "want to say about now, not a log, so the newest few of everything is"
         "the whole point and forgetting the rest is correct."
-    exposes [Phase, Sample, Progress, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, notedArrival, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, withServing, rateOf, rateTenthsOf, etaSecsOf, percentOf, quietestSecsOf, inboundOf, outboundOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
+    exposes [Phase, Sample, Progress, Relayed, noRelayed, withRelayedBlocks, withRelayedTransactions, withRelayedAddresses, TipView, PeerView, BlockView, MempoolView, ReorgView, TxView, Company, Rings, Snapshot, started, headersAt, bodiesAt, tipAt, notedBlock, notedReorg, notedOrphan, notedTransaction, notedArrival, advanced, freshProgress, setsAt, withPeers, withCandidates, withMempool, withServing, rateOf, rateTenthsOf, etaSecsOf, percentOf, quietestSecsOf, inboundOf, outboundOf, blockLimit, reorgLimit, orphanLimit, transactionLimit, windowMs]
     depends []
     effects []
 
@@ -89,6 +89,42 @@ record Snapshot
     company: Company
     mempool: MempoolView
     rings: Rings
+    startedMs: Int
+    relayed: Relayed
+
+record Relayed
+    blocks: Int
+    transactions: Int
+    addresses: Int
+
+fn noRelayed() -> Relayed
+    ? "Nothing relayed yet: what a node starts with (#383)."
+    Relayed(blocks = 0, transactions = 0, addresses = 0)
+
+verify noRelayed
+    noRelayed().blocks => 0
+
+fn withRelayedBlocks(snapshot: Snapshot, count: Int) -> Snapshot
+    ? "This many more Blocks served to Peers that asked for them."
+    Snapshot.update(snapshot, relayed = Relayed(blocks = snapshot.relayed.blocks + count, transactions = snapshot.relayed.transactions, addresses = snapshot.relayed.addresses))
+
+verify withRelayedBlocks
+    withRelayedBlocks(started(0), 2).relayed.blocks => 2
+    withRelayedBlocks(withRelayedBlocks(started(0), 2), 1).relayed.blocks => 3
+
+fn withRelayedTransactions(snapshot: Snapshot, count: Int) -> Snapshot
+    ? "This many more Transactions announced onward after admission."
+    Snapshot.update(snapshot, relayed = Relayed(blocks = snapshot.relayed.blocks, transactions = snapshot.relayed.transactions + count, addresses = snapshot.relayed.addresses))
+
+verify withRelayedTransactions
+    withRelayedTransactions(started(0), 1).relayed.transactions => 1
+
+fn withRelayedAddresses(snapshot: Snapshot, count: Int) -> Snapshot
+    ? "This many more Candidates handed to a Peer that asked getaddr."
+    Snapshot.update(snapshot, relayed = Relayed(blocks = snapshot.relayed.blocks, transactions = snapshot.relayed.transactions, addresses = snapshot.relayed.addresses + count))
+
+verify withRelayedAddresses
+    withRelayedAddresses(started(0), 250).relayed.addresses => 250
 
 fn windowMs() -> Int
     ? "How far back the rate looks."
@@ -136,7 +172,7 @@ verify freshProgress
 
 fn started(nowMs: Int) -> Snapshot
     ? "The Snapshot a node begins with: no tip, nothing done, nobody met."
-    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), sets = freshProgress(), company = Company(peers = [], candidates = 0, serving = Option.None), mempool = MempoolView(held = 0, bytes = 0, cap = 0, floorRate = 0), rings = Rings(blocks = [], reorgs = [], orphans = 0, orphanMs = 0, transactions = []))
+    Snapshot(phase = Phase.Headers, tip = TipView(height = 0, blockId = "", atMs = nowMs), headers = freshProgress(), bodies = freshProgress(), sets = freshProgress(), company = Company(peers = [], candidates = 0, serving = Option.None), mempool = MempoolView(held = 0, bytes = 0, cap = 0, floorRate = 0), rings = Rings(blocks = [], reorgs = [], orphans = 0, orphanMs = 0, transactions = []), startedMs = nowMs, relayed = noRelayed())
 
 verify started
     started(5).tip.height => 0
@@ -145,7 +181,7 @@ verify started
 
 fn headersAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
     ? "The Header count moved; remember when, so a rate can be read off."
-    Snapshot(phase = Phase.Headers, tip = snapshot.tip, headers = advanced(snapshot.headers, done, target, nowMs), bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = Phase.Headers, tip = snapshot.tip, headers = advanced(snapshot.headers, done, target, nowMs), bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify headersAt
     headersAt(started(0), 100, 200, 1000).headers.done => 100
@@ -154,7 +190,7 @@ verify headersAt
 
 fn bodiesAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
     ? "The body count moved, which also means the Header phase is behind us."
-    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = advanced(snapshot.bodies, done, target, nowMs), sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = advanced(snapshot.bodies, done, target, nowMs), sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify bodiesAt
     bodiesAt(started(0), 7, 9, 1000).bodies.done => 7
@@ -163,7 +199,7 @@ verify bodiesAt
 fn setsAt(snapshot: Snapshot, done: Int, target: Int, nowMs: Int) -> Snapshot
     ? "The Set walked forward; the phase stays a catch-up phase, because a"
       "Set still connecting is a node not yet at the tip."
-    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = advanced(snapshot.sets, done, target, nowMs), company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = Phase.Bodies, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = advanced(snapshot.sets, done, target, nowMs), company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify setsAt
     setsAt(started(0), 7, 9, 1000).sets.done => 7
@@ -171,7 +207,7 @@ verify setsAt
 
 fn tipAt(snapshot: Snapshot, height: Int, blockId: String, nowMs: Int) -> Snapshot
     ? "Caught up: the node stands on this Block, listening."
-    Snapshot(phase = Phase.Listening, tip = TipView(height = height, blockId = blockId, atMs = nowMs), headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = Phase.Listening, tip = TipView(height = height, blockId = blockId, atMs = nowMs), headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify tipAt
     tipAt(started(0), 318980, "aa", 1000).tip.height => 318980
@@ -451,7 +487,7 @@ verify sampleTx
 
 fn withRings(snapshot: Snapshot, rings: Rings) -> Snapshot
     ? "The Snapshot, with its rings moved on."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = snapshot.mempool, rings = rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 fn inboundOf(peers: List<PeerView>) -> Int
     ? "How many of these Peers dialled us (#164)."
@@ -499,14 +535,14 @@ verify samplePeer
 
 fn withPeers(snapshot: Snapshot, peers: List<PeerView>) -> Snapshot
     ? "Who the node is talking to, refreshed whole each tick."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = peers, candidates = snapshot.company.candidates, serving = snapshot.company.serving), mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = peers, candidates = snapshot.company.candidates, serving = snapshot.company.serving), mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify withPeers
     List.len(withPeers(started(0), [PeerView(key = 0, address = "1.2.3.4:8333", version = 70016, agent = "/Satoshi/", lastHeardMs = 9, sent = 0, received = 0, inbound = false)]).company.peers) => 1
 
 fn withCandidates(snapshot: Snapshot, count: Int) -> Snapshot
     ? "How many Candidates the Address Book holds."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = snapshot.company.peers, candidates = count, serving = snapshot.company.serving), mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = snapshot.company.peers, candidates = count, serving = snapshot.company.serving), mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify withCandidates
     withCandidates(started(0), 41).company.candidates => 41
@@ -517,7 +553,7 @@ fn withServing(snapshot: Snapshot, serving: Option<String>) -> Snapshot
       "not asked to serve -- which is what makes it worth drawing: a watcher"
       "can tell a node nobody can reach from one that is waiting to be"
       "dialled (#214)."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = snapshot.company.peers, candidates = snapshot.company.candidates, serving = serving), mempool = snapshot.mempool, rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = Company(peers = snapshot.company.peers, candidates = snapshot.company.candidates, serving = serving), mempool = snapshot.mempool, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify withServing
     withServing(started(0), Option.Some("1.2.3.4:8333")).company.serving => Option.Some("1.2.3.4:8333")
@@ -526,7 +562,7 @@ verify withServing
 
 fn withMempool(snapshot: Snapshot, view: MempoolView) -> Snapshot
     ? "What the Mempool holds, refreshed whole each tick (#134)."
-    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = view, rings = snapshot.rings)
+    Snapshot(phase = snapshot.phase, tip = snapshot.tip, headers = snapshot.headers, bodies = snapshot.bodies, sets = snapshot.sets, company = snapshot.company, mempool = view, rings = snapshot.rings, startedMs = snapshot.startedMs, relayed = snapshot.relayed)
 
 verify withMempool
     withMempool(started(0), MempoolView(held = 3, bytes = 900, cap = 5000000, floorRate = 1000)).mempool.held => 3
