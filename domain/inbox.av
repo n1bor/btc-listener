@@ -29,7 +29,7 @@ module Inbox
         "live beside the buffer. What replaced it is smaller -- the buffer is"
         "the queue -- and it costs a caller nothing, because a caller waiting"
         "on one Message discards the others exactly as it always did."
-    exposes [Frame, TakenOne, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, saidBytes, seated, offered, addressesHeld, faultyIn, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
+    exposes [Frame, TakenOne, Buffer, emptyBuffer, Standing, Popped, PoppedAt, maxPayload, firstOf, noStanding, saidBytes, seated, offered, addressesHeld, faultyIn, forgotten, absorbedInto, popped, poppedAny, greeted, standingAt]
     depends [Bytes, Domain.Message, Domain.Network]
     effects []
 
@@ -41,9 +41,14 @@ record TakenOne
     frame: Frame
     rest: Bytes
 
+record Buffer
+    settled: Bytes
+    arriving: List<Bytes>
+    arrivingLen: Int
+
 record Standing
     address: String
-    buffer: Bytes
+    buffer: Buffer
     version: Int
     agent: String
     sent: Int
@@ -179,12 +184,12 @@ fn seated(standing: Map<Int, Standing>, key: Int, address: String, inbound: Bool
       "which is the whole reason inbound slots need defending in a way"
       "outbound ones never did (n1bor/btc-listener#30). It is also what a"
       "Peers Panel shows in its direction column (#164)."
-    Map.set(standing, key, Standing(address = address, buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = inbound, height = 0, services = 0))
+    Map.set(standing, key, Standing(address = address, buffer = emptyBuffer(), version = 0, agent = "", sent = 0, received = 0, inbound = inbound, height = 0, services = 0))
 
 verify seated
     Map.len(seated(noStanding(), 0, "192.0.2.1:8333", false)) => 1
-    standingAt(seated(noStanding(), 0, "192.0.2.1:8333", false), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0))
-    standingAt(seated(noStanding(), 0, "192.0.2.1:8333", true), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0))
+    standingAt(seated(noStanding(), 0, "192.0.2.1:8333", false), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = emptyBuffer(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0))
+    standingAt(seated(noStanding(), 0, "192.0.2.1:8333", true), 0) => Option.Some(Standing(address = "192.0.2.1:8333", buffer = emptyBuffer(), version = 0, agent = "", sent = 0, received = 0, inbound = true, height = 0, services = 0))
 
 fn addressesHeld(standing: Map<Int, Standing>) -> List<String>
     ? "Where every Peer currently held can be reached."
@@ -234,12 +239,173 @@ fn absorbedInto(standing: Map<Int, Standing>, key: Int, arrived: Bytes) -> Map<I
     ? "Bytes just read from one Peer, onto the end of its buffer."
     match Map.get(standing, key)
         Option.None -> standing
-        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = Bytes.concat(held.buffer, arrived), version = held.version, agent = held.agent, sent = held.sent, received = held.received + Bytes.len(arrived), inbound = held.inbound, height = held.height, services = held.services))
+        Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = absorbed(held.buffer, arrived), version = held.version, agent = held.agent, sent = held.sent, received = held.received + Bytes.len(arrived), inbound = held.inbound, height = held.height, services = held.services))
 
 verify absorbedInto
     absorbedInto(noStanding(), 0, Bytes.fromList([1, 2])) => noStanding()
     standingBuffer(absorbedInto(oneSeated(), 0, Bytes.fromList([1, 2])), 0) => [1, 2]
     standingBuffer(absorbedInto(absorbedInto(oneSeated(), 0, Bytes.fromList([1])), 0, Bytes.fromList([2])), 0) => [1, 2]
+
+fn emptyBuffer() -> Buffer
+    ? "Nothing read from this Peer yet."
+    Buffer(settled = Bytes.empty(), arriving = [], arrivingLen = 0)
+
+verify emptyBuffer
+    bufferLen(emptyBuffer()) => 0
+
+fn absorbed(buffer: Buffer, arrived: Bytes) -> Buffer
+    ? "One read's bytes kept as they came, newest first, and not yet joined"
+      "to what was there (#280 item 17). Joining on every read copied the"
+      "whole buffer each time: a 4 MB Block arriving in 64 KB reads was"
+      "copied sixty-four times over, some 128 MB of copying for one"
+      "Message. The join waits until the bytes for a whole Message are here"
+      "(settledIfWhole), so each byte is copied a bounded number of times"
+      "however many reads carried it."
+    Buffer(settled = buffer.settled, arriving = List.prepend(arrived, buffer.arriving), arrivingLen = buffer.arrivingLen + Bytes.len(arrived))
+
+verify absorbed
+    bufferLen(absorbed(emptyBuffer(), Bytes.fromList([1, 2, 3]))) => 3
+    bufferLen(absorbed(absorbed(emptyBuffer(), Bytes.fromList([1, 2, 3])), Bytes.fromList([4]))) => 4
+    Bytes.octets(allOf(absorbed(absorbed(emptyBuffer(), Bytes.fromList([1, 2, 3])), Bytes.fromList([4])))) => [1, 2, 3, 4]
+
+fn bufferLen(buffer: Buffer) -> Int
+    ? "Every byte held for this Peer, joined or not."
+    Bytes.len(buffer.settled) + buffer.arrivingLen
+
+verify bufferLen
+    bufferLen(Buffer(settled = Bytes.fromList([1, 2]), arriving = [Bytes.fromList([3])], arrivingLen = 1)) => 3
+
+fn allOf(buffer: Buffer) -> Bytes
+    ? "The whole buffer as one run of bytes, oldest first."
+    Bytes.concat(buffer.settled, joined(List.reverse(buffer.arriving)))
+
+verify allOf
+    Bytes.octets(allOf(emptyBuffer())) => []
+    Bytes.octets(allOf(Buffer(settled = Bytes.fromList([1]), arriving = [Bytes.fromList([3]), Bytes.fromList([2])], arrivingLen = 2))) => [1, 2, 3]
+
+fn joinedUp(buffer: Buffer) -> Buffer
+    ? "Every read joined into one run of bytes."
+    Buffer(settled = allOf(buffer), arriving = [], arrivingLen = 0)
+
+verify joinedUp
+    joinedUp(Buffer(settled = Bytes.fromList([1]), arriving = [Bytes.fromList([3]), Bytes.fromList([2])], arrivingLen = 2)) => Buffer(settled = Bytes.fromList([1, 2, 3]), arriving = [], arrivingLen = 0)
+
+fn joined(chunks: List<Bytes>) -> Bytes
+    ? "Many runs of bytes as one, joined pairwise so no byte is copied more"
+      "than log2 of the number of runs times: joining each onto a growing"
+      "whole would copy the whole again for every run."
+    match chunks
+        [] -> Bytes.empty()
+        [one, ..rest] -> joinedOnward(one, rest, chunks)
+
+verify joined
+    Bytes.octets(joined([])) => []
+    Bytes.octets(joined([Bytes.fromList([1])])) => [1]
+    Bytes.octets(joined([Bytes.fromList([1]), Bytes.fromList([2]), Bytes.fromList([3])])) => [1, 2, 3]
+    Bytes.octets(joined([Bytes.fromList([1, 2]), Bytes.fromList([]), Bytes.fromList([3]), Bytes.fromList([4, 5]), Bytes.fromList([6])])) => [1, 2, 3, 4, 5, 6]
+
+fn joinedOnward(one: Bytes, rest: List<Bytes>, chunks: List<Bytes>) -> Bytes
+    ? "One run is the answer; more are paired and joined again."
+    match rest
+        [] -> one
+        [second, ..more] -> joined(paired(chunks, []))
+
+verify joinedOnward
+    Bytes.octets(joinedOnward(Bytes.fromList([1]), [], [Bytes.fromList([1])])) => [1]
+    Bytes.octets(joinedOnward(Bytes.fromList([1]), [Bytes.fromList([2])], [Bytes.fromList([1]), Bytes.fromList([2])])) => [1, 2]
+
+fn paired(chunks: List<Bytes>, acc: List<Bytes>) -> List<Bytes>
+    ? "Adjacent runs joined two at a time, order kept; an odd last one stands."
+    match chunks
+        [] -> List.reverse(acc)
+        [first, ..afterFirst] -> pairedWith(first, afterFirst, acc)
+
+verify paired
+    paired([], []) => []
+    paired([Bytes.fromList([1]), Bytes.fromList([2]), Bytes.fromList([3])], []) => [Bytes.fromList([1, 2]), Bytes.fromList([3])]
+    paired([Bytes.fromList([1]), Bytes.fromList([2]), Bytes.fromList([3]), Bytes.fromList([4])], []) => [Bytes.fromList([1, 2]), Bytes.fromList([3, 4])]
+
+fn pairedWith(first: Bytes, afterFirst: List<Bytes>, acc: List<Bytes>) -> List<Bytes>
+    ? "The run after the first, joined to it if there is one."
+    match afterFirst
+        [] -> List.reverse(List.prepend(first, acc))
+        [second, ..rest] -> paired(rest, List.prepend(Bytes.concat(first, second), acc))
+
+verify pairedWith
+    pairedWith(Bytes.fromList([1]), [], []) => [Bytes.fromList([1])]
+    pairedWith(Bytes.fromList([1]), [Bytes.fromList([2])], []) => [Bytes.fromList([1, 2])]
+
+fn settledIfWhole(buffer: Buffer) -> Option<Buffer>
+    ? "The reads joined, when what is held is at least one whole Message,"
+      "or a header announcing more than a Message may carry, which is an"
+      "error the join lets firstOf raise. Otherwise nothing: the bytes"
+      "stay as they came and the next read is one prepend."
+      "How much is needed is read off the header, which may itself sit"
+      "across the settled bytes and the first reads, so headOf gathers"
+      "just those twenty-four bytes rather than joining everything to"
+      "learn that the Message is not here yet."
+    match Bool.and(buffer.arrivingLen > 0, bufferLen(buffer) >= neededBy(headOf(buffer.settled, List.reverse(buffer.arriving))))
+        true -> Option.Some(joinedUp(buffer))
+        false -> Option.None
+
+verify settledIfWhole
+    settledIfWhole(emptyBuffer()) => Option.None
+    settledIfWhole(absorbed(emptyBuffer(), Bytes.fromList([1, 2, 3]))) => Option.None
+    settledIfWhole(absorbed(emptyBuffer(), Bytes.fromList(List.take(withPayload(), 27))?)) => Option.None
+    settledIfWhole(absorbed(absorbed(emptyBuffer(), Bytes.fromList(List.take(withPayload(), 27))?), Bytes.fromList(List.drop(withPayload(), 27))?)) => Option.Some(Buffer(settled = Bytes.fromList(withPayload())?, arriving = [], arrivingLen = 0))
+    settledIfWhole(absorbed(emptyBuffer(), Bytes.fromList(oneMessage())?)) => Option.Some(Buffer(settled = Bytes.fromList(oneMessage())?, arriving = [], arrivingLen = 0))
+    settledIfWhole(absorbed(absorbed(emptyBuffer(), Bytes.fromList(List.take(overLong(), 10))?), Bytes.fromList(List.drop(overLong(), 10))?)) => Option.Some(Buffer(settled = Bytes.fromList(overLong())?, arriving = [], arrivingLen = 0))
+    settledIfWhole(Buffer(settled = Bytes.fromList(oneMessage())?, arriving = [], arrivingLen = 0)) => Option.None
+
+fn headOf(front: Bytes, oldestFirst: List<Bytes>) -> Bytes
+    ? "At least a header's worth of the buffer's front, if that much is held,"
+      "gathered from the settled bytes and then one read at a time."
+    match Bytes.len(front) >= Domain.Message.headerLength()
+        true -> Bytes.take(front, Domain.Message.headerLength())
+        false -> headOnward(front, oldestFirst)
+
+verify headOf
+    Bytes.octets(headOf(Bytes.empty(), [])) => []
+    Bytes.octets(headOf(Bytes.fromList([1, 2]), [Bytes.fromList([3]), Bytes.fromList([4])])) => [1, 2, 3, 4]
+    Bytes.len(headOf(Bytes.fromList(List.take(oneMessage(), 10))?, [Bytes.fromList(List.drop(oneMessage(), 10))?])) => 24
+    Bytes.len(headOf(Bytes.fromList(withPayload())?, [])) => 24
+
+fn headOnward(front: Bytes, oldestFirst: List<Bytes>) -> Bytes
+    ? "The next read's first bytes onto the front, or the front as it stands."
+    match oldestFirst
+        [] -> front
+        [one, ..rest] -> headOf(Bytes.concat(front, Bytes.take(one, Domain.Message.headerLength())), rest)
+
+verify headOnward
+    Bytes.octets(headOnward(Bytes.fromList([1]), [])) => [1]
+    Bytes.octets(headOnward(Bytes.fromList([1]), [Bytes.fromList([2, 3])])) => [1, 2, 3]
+
+fn neededBy(head: Bytes) -> Int
+    ? "How many bytes a whole Message needs, read off its header: the header"
+      "alone until there is one, then header and announced payload, or the"
+      "header alone again when the announcement is impossible, so that"
+      "firstOf sees it and ends the conversation now rather than after"
+      "four megabytes of whatever follows."
+    match Bytes.len(head) < Domain.Message.headerLength()
+        true -> Domain.Message.headerLength()
+        false -> neededFor(Domain.Message.payloadLengthAt(Bytes.octets(Bytes.take(head, Domain.Message.headerLength()))))
+
+verify neededBy
+    neededBy(Bytes.empty()) => 24
+    neededBy(Bytes.fromList(oneMessage())?) => 24
+    neededBy(Bytes.fromList(withPayload())?) => 32
+    neededBy(Bytes.fromList(overLong())?) => 24
+
+fn neededFor(announced: Int) -> Int
+    ? "Header and payload, or the header alone for an impossible payload."
+    match announced > maxPayload()
+        true -> Domain.Message.headerLength()
+        false -> Domain.Message.headerLength() + announced
+
+verify neededFor
+    neededFor(0) => 24
+    neededFor(8) => 32
+    neededFor(4000001) => 24
 
 fn popped(network: Network, standing: Map<Int, Standing>, key: Int) -> Result<Option<Popped>, String>
     ? "Take the oldest whole Message one Peer has sent and not had read,"
@@ -248,7 +414,7 @@ fn popped(network: Network, standing: Map<Int, Standing>, key: Int) -> Result<Op
       "has one holder when it is set."
     match Map.get(standing, key)
         Option.None -> Result.Ok(Option.None)
-        Option.Some(held) -> poppedFrom(held, firstOf(network, held.buffer))
+        Option.Some(held) -> poppedSettling(network, held, firstOf(network, held.buffer.settled))
 
 verify popped
     popped(Network.Signet, noStanding(), 0) => Result.Ok(Option.None)
@@ -256,6 +422,35 @@ verify popped
     popped(Network.Signet, absorbedInto(oneSeated(), 0, Bytes.fromList(oneMessage())?), 0) => Result.Ok(Option.Some(Popped(held = readOnce(), frame = Frame(command = "verack", body = []))))
     popped(Network.Signet, absorbedInto(oneSeated(), 0, Bytes.fromList(overLong())?), 0) => Result.Err("a Message announced 4000001 payload bytes, which is more than the 4000000 the protocol allows")
     popped(Network.Signet, absorbedInto(oneSeated(), 0, Bytes.fromList(corrupted())?), 0) => Result.Err("a Message did not match the checksum its own header carries")
+
+fn poppedSettling(network: Network, held: Standing, found: Result<Option<TakenOne>, String>) -> Result<Option<Popped>, String>
+    ? "A Message among the settled bytes is taken from them; none there, and"
+      "the reads are joined and looked at, but only once they hold a whole"
+      "one (#280 item 17). A join that finds nothing is never done: the"
+      "standing handed back on None is the one held, so a join then would"
+      "be repeated on every read until the Message completed."
+    match found
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(Option.Some(taken)) -> poppedOne(held, Option.Some(taken))
+        Result.Ok(Option.None) -> poppedJoined(network, held, settledIfWhole(held.buffer))
+
+verify poppedSettling
+    poppedSettling(Network.Signet, emptyStanding(), Result.Err("no")) => Result.Err("no")
+    poppedSettling(Network.Signet, emptyStanding(), Result.Ok(Option.None)) => Result.Ok(Option.None)
+    poppedSettling(Network.Signet, emptyStanding(), Result.Ok(Option.Some(TakenOne(frame = sampleFrame(), rest = Bytes.empty())))) => Result.Ok(Option.Some(Popped(held = emptyStanding(), frame = sampleFrame())))
+    poppedSettling(Network.Signet, Standing.update(emptyStanding(), buffer = absorbed(absorbed(emptyBuffer(), Bytes.fromList(List.take(withPayload(), 27))?), Bytes.fromList(List.drop(withPayload(), 27))?)), Result.Ok(Option.None)) => Result.Ok(Option.Some(Popped(held = emptyStanding(), frame = Frame(command = "ping", body = [1, 2, 3, 4, 5, 6, 7, 8]))))
+    poppedSettling(Network.Signet, Standing.update(emptyStanding(), buffer = absorbed(emptyBuffer(), Bytes.fromList(List.take(withPayload(), 27))?)), Result.Ok(Option.None)) => Result.Ok(Option.None)
+
+fn poppedJoined(network: Network, held: Standing, ready: Option<Buffer>) -> Result<Option<Popped>, String>
+    ? "The joined reads cut, when there was a whole Message to join for."
+    match ready
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(buffer) -> poppedFrom(Standing.update(held, buffer = buffer), firstOf(network, buffer.settled))
+
+verify poppedJoined
+    poppedJoined(Network.Signet, emptyStanding(), Option.None) => Result.Ok(Option.None)
+    poppedJoined(Network.Signet, emptyStanding(), Option.Some(Buffer(settled = Bytes.fromList(oneMessage())?, arriving = [], arrivingLen = 0))) => Result.Ok(Option.Some(Popped(held = emptyStanding(), frame = Frame(command = "verack", body = []))))
+    poppedJoined(Network.Signet, emptyStanding(), Option.Some(Buffer(settled = Bytes.fromList(corrupted())?, arriving = [], arrivingLen = 0))) => Result.Err("a Message did not match the checksum its own header carries")
 
 fn poppedFrom(held: Standing, found: Result<Option<TakenOne>, String>) -> Result<Option<Popped>, String>
     ? "A buffer with no whole Message in it is a Peer mid-sentence."
@@ -271,11 +466,18 @@ fn poppedOne(held: Standing, one: Option<TakenOne>) -> Result<Option<Popped>, St
     ? "The Message off the front, and the buffer shortened by exactly it."
     match one
         Option.None -> Result.Ok(Option.None)
-        Option.Some(taken) -> Result.Ok(Option.Some(Popped(held = Standing.update(held, buffer = taken.rest), frame = taken.frame)))
+        Option.Some(taken) -> Result.Ok(Option.Some(Popped(held = Standing.update(held, buffer = shortened(held.buffer, taken.rest)), frame = taken.frame)))
 
 verify poppedOne
     poppedOne(emptyStanding(), Option.None) => Result.Ok(Option.None)
     poppedOne(emptyStanding(), Option.Some(TakenOne(frame = sampleFrame(), rest = Bytes.empty()))) => Result.Ok(Option.Some(Popped(held = emptyStanding(), frame = sampleFrame())))
+
+fn shortened(buffer: Buffer, rest: Bytes) -> Buffer
+    ? "The settled bytes replaced by what followed the Message cut from them."
+    Buffer.update(buffer, settled = rest)
+
+verify shortened
+    shortened(emptyBuffer(), Bytes.fromList([9])) => Buffer(settled = Bytes.fromList([9]), arriving = [], arrivingLen = 0)
 
 fn poppedAny(network: Network, standing: Map<Int, Standing>) -> Result<Option<PoppedAt>, String>
     ? "The next Message any Peer has sent and not had read, and which Peer."
@@ -292,7 +494,7 @@ verify poppedAny
     poppedAny(Network.Signet, noStanding()) => Result.Ok(Option.None)
     poppedAny(Network.Signet, oneSeated()) => Result.Ok(Option.None)
     poppedAny(Network.Signet, absorbedInto(oneSeated(), 0, Bytes.fromList(oneMessage())?)) => Result.Ok(Option.Some(PoppedAt(held = readOnce(), key = 0, frame = Frame(command = "verack", body = []))))
-    poppedAny(Network.Signet, absorbedInto(seated(oneSeated(), 1, "192.0.2.2:8333", false), 1, Bytes.fromList(oneMessage())?)) => Result.Ok(Option.Some(PoppedAt(held = Standing(address = "192.0.2.2:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 24, inbound = false, height = 0, services = 0), key = 1, frame = Frame(command = "verack", body = []))))
+    poppedAny(Network.Signet, absorbedInto(seated(oneSeated(), 1, "192.0.2.2:8333", false), 1, Bytes.fromList(oneMessage())?)) => Result.Ok(Option.Some(PoppedAt(held = Standing(address = "192.0.2.2:8333", buffer = emptyBuffer(), version = 0, agent = "", sent = 0, received = 24, inbound = false, height = 0, services = 0), key = 1, frame = Frame(command = "verack", body = []))))
 
 fn firstWith(network: Network, standing: Map<Int, Standing>, keys: List<Int>) -> Result<Option<PoppedAt>, String>
     ? "The first Peer, in identifier order, with a whole Message waiting."
@@ -367,8 +569,8 @@ fn saidBytes(standing: Map<Int, Standing>, key: Int, count: Int) -> Map<Int, Sta
         Option.Some(held) -> Map.set(standing, key, Standing(address = held.address, buffer = held.buffer, version = held.version, agent = held.agent, sent = held.sent + count, received = held.received, inbound = held.inbound, height = held.height, services = held.services))
 
 verify saidBytes
-    standingAt(saidBytes(seated(noStanding(), 0, "a", false), 0, 24), 0) => Option.Some(Standing(address = "a", buffer = Bytes.empty(), version = 0, agent = "", sent = 24, received = 0, inbound = false, height = 0, services = 0))
-    standingAt(saidBytes(saidBytes(seated(noStanding(), 0, "a", false), 0, 24), 0, 10), 0) => Option.Some(Standing(address = "a", buffer = Bytes.empty(), version = 0, agent = "", sent = 34, received = 0, inbound = false, height = 0, services = 0))
+    standingAt(saidBytes(seated(noStanding(), 0, "a", false), 0, 24), 0) => Option.Some(Standing(address = "a", buffer = emptyBuffer(), version = 0, agent = "", sent = 24, received = 0, inbound = false, height = 0, services = 0))
+    standingAt(saidBytes(saidBytes(seated(noStanding(), 0, "a", false), 0, 24), 0, 10), 0) => Option.Some(Standing(address = "a", buffer = emptyBuffer(), version = 0, agent = "", sent = 34, received = 0, inbound = false, height = 0, services = 0))
     Map.len(saidBytes(noStanding(), 9, 24)) => 0
 
 fn offered(standing: Map<Int, Standing>, key: Int, services: Int) -> Map<Int, Standing>
@@ -458,7 +660,7 @@ verify corrupted
 
 fn emptyStanding() -> Standing
     ? "A Peer just seated, for the cases here."
-    Standing(address = "192.0.2.1:8333", buffer = Bytes.empty(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0)
+    Standing(address = "192.0.2.1:8333", buffer = emptyBuffer(), version = 0, agent = "", sent = 0, received = 0, inbound = false, height = 0, services = 0)
 
 fn readOnce() -> Standing
     ? "The seated Peer once it has been read once: 24 bytes counted, buffer empty."
@@ -490,7 +692,7 @@ fn bufferOf(held: Option<Standing>) -> Result<Bytes, String>
     ? "The buffer behind a Peer we may not hold."
     match held
         Option.None -> Result.Err("none")
-        Option.Some(one) -> Result.Ok(one.buffer)
+        Option.Some(one) -> Result.Ok(allOf(one.buffer))
 
 verify bufferOf
     bufferOf(Option.None) => Result.Err("none")

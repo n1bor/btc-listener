@@ -345,6 +345,10 @@ verify decodeNext
     decodeNext([1, 0, 0, 0, 0]) => Result.Err("Transaction ends inside its SegWit marker")
     decodeNext([1, 0, 0, 0, 0, 2]) => Result.Err("Transaction carries unknown optional data")
 
+verify decodeNext law sizeIsWhatItConsumed
+    given raw: List<Int> = [Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), List.concat(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), [7, 8, 9]), Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?), [], [1, 2, 3]]
+    sizeIsWhatItConsumed(raw) => true
+
 fn markerFault(afterVersion: List<Int>) -> Result<Bool, String>
     ? "Whether the bytes after the version open a SegWit serialisation, or refuse to."
       "A zero where the Input count belongs is the marker, and the flag byte"
@@ -420,6 +424,19 @@ fn assemble(raw: List<Int>, version: Int, body: List<Int>, segwit: Bool, inputsR
 
 verify assemble
     sizeOf(assemble(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 2, List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6), true, readInputs(List.drop(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?), 6))?)?.transaction) => 70
+
+fn sizeIsWhatItConsumed(raw: List<Int>) -> Bool
+    ? "A decoded Transaction's size is exactly the bytes decodeNext took off"
+      "the front (#280 item 17): what lets Domain.Block and Domain.CompactBlock"
+      "cut a Transaction's bytes by its size instead of by two list lengths."
+      "Bytes that do not decode consume nothing and claim nothing."
+    match decodeNext(raw)
+        Result.Err(_) -> true
+        Result.Ok(decoded) -> decoded.transaction.size == List.len(raw) - List.len(decoded.rest)
+
+verify sizeIsWhatItConsumed
+    sizeIsWhatItConsumed([]) => true
+    sizeIsWhatItConsumed(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?)) => true
 
 fn markerWidth(segwit: Bool) -> Int
     ? "The two marker bytes a SegWit serialisation carries after the version."

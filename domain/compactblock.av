@@ -202,17 +202,17 @@ fn atIndex(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, at: In
     ? "The Transaction at this position, or why it could not be read."
     match Domain.Transaction.decodeNext(bytes)
         Result.Err(why) -> Result.Err("a prefilled Transaction at index {at} would not decode: {why}")
-        Result.Ok(one) -> carried(header, nonce, shortIds, left, at, bytes, one.rest, acc)
+        Result.Ok(one) -> carried(header, nonce, shortIds, left, at, bytes, one.rest, one.transaction.size, acc)
 
 verify atIndex
     atIndex([], 0, [], 1, 0, [], []) => Result.Err("a prefilled Transaction at index 0 would not decode: Transaction ends before its lock time")
 
-fn carried(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, at: Int, bytes: List<Int>, rest: List<Int>, acc: List<Prefilled>) -> Result<Compact, String>
-    ? "What it consumed is what is no longer left."
-    prefilledRead(header, nonce, shortIds, left - 1, rest, at, List.prepend(Prefilled(index = at, raw = List.take(bytes, List.len(bytes) - List.len(rest))), acc))
+fn carried(header: List<Int>, nonce: Int, shortIds: List<Int>, left: Int, at: Int, bytes: List<Int>, rest: List<Int>, size: Int, acc: List<Prefilled>) -> Result<Compact, String>
+    ? "What it consumed is its decoded size (#280 item 17), not two lengths."
+    prefilledRead(header, nonce, shortIds, left - 1, rest, at, List.prepend(Prefilled(index = at, raw = List.take(bytes, size)), acc))
 
 verify carried
-    carried([], 0, [], 1, 0, [], [], []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = [Prefilled(index = 0, raw = [])]))
+    carried([], 0, [], 1, 0, [], [], 0, []) => Result.Ok(Compact(header = [], nonce = 0, shortIds = [], prefilled = [Prefilled(index = 0, raw = [])]))
 
 fn totalOf(compact: Compact) -> Int
     ? "How many Transactions the Block holds."
@@ -235,7 +235,10 @@ fn wantedFrom(compact: Compact, held: List<Int>) -> Wanted
       "it sits one place further on than its own index. Asking by the wrong"
       "one asks for the coinbase and never gets the Transaction that was"
       "missing."
-    wantedInto(compact, held, totalOf(compact), 0, compact.shortIds, [], [])
+      "The held ids become a Map once and the prefilled positions a Map once"
+      "(#280 item 17): the walk used to scan both lists at every position of"
+      "the Block, Mempool size times Transactions."
+    wantedInto(compact, setOf(held, {}), prefilledByIndex(compact.prefilled, {}), totalOf(compact), 0, compact.shortIds, [], [])
 
 verify wantedFrom
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), []) => Wanted(indexes = [], haveByPosition = [])
@@ -245,46 +248,67 @@ verify wantedFrom
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [7, 8], prefilled = [Prefilled(index = 0, raw = [1])]), [7]) => Wanted(indexes = [2], haveByPosition = [7])
     wantedFrom(Compact(header = [], nonce = 0, shortIds = [7, 8], prefilled = [Prefilled(index = 1, raw = [1])]), [8]) => Wanted(indexes = [0], haveByPosition = [8])
 
-fn wantedInto(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+fn setOf(ids: List<Int>, acc: Map<Int, Bool>) -> Map<Int, Bool>
+    ? "The ids as a Map, for a lookup per position rather than a scan."
+    match ids
+        [] -> acc
+        [head, ..tail] -> setOf(tail, Map.set(acc, head, true))
+
+verify setOf
+    Map.len(setOf([], {})) => 0
+    Map.has(setOf([7, 8], {}), 8) => true
+    Map.has(setOf([7, 8], {}), 9) => false
+
+fn prefilledByIndex(prefilled: List<Prefilled>, acc: Map<Int, List<Int>>) -> Map<Int, List<Int>>
+    ? "The sender's own Transactions by the position each fills."
+    match prefilled
+        [] -> acc
+        [head, ..tail] -> prefilledByIndex(tail, Map.set(acc, head.index, head.raw))
+
+verify prefilledByIndex
+    Map.len(prefilledByIndex([], {})) => 0
+    Map.get(prefilledByIndex([Prefilled(index = 2, raw = [1])], {}), 2) => Option.Some([1])
+
+fn wantedInto(compact: Compact, held: Map<Int, Bool>, sent: Map<Int, List<Int>>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
     ? "Walking the Block's positions, not the short ids."
     match at >= total
         true -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
-        false -> wantedAt(compact, held, total, at, shortIds, missing, have, prefilledAt(compact.prefilled, at))
+        false -> wantedAt(compact, held, sent, total, at, shortIds, missing, have, Map.get(sent, at))
 
 verify wantedInto
-    wantedInto(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], 0, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
+    wantedInto(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), {}, {}, 0, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
 
-fn wantedAt(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>, sent: Option<List<Int>>) -> Wanted
+fn wantedAt(compact: Compact, held: Map<Int, Bool>, sent: Map<Int, List<Int>>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>, filled: Option<List<Int>>) -> Wanted
     ? "A position the sender filled in is one we never have to ask for, and it"
       "consumes no short id."
-    match sent
-        Option.Some(raw) -> wantedInto(compact, held, total, at + 1, shortIds, missing, have)
-        Option.None -> wantedShortId(compact, held, total, at, shortIds, missing, have)
+    match filled
+        Option.Some(raw) -> wantedInto(compact, held, sent, total, at + 1, shortIds, missing, have)
+        Option.None -> wantedShortId(compact, held, sent, total, at, shortIds, missing, have)
 
 verify wantedAt
-    wantedAt(Compact(header = [], nonce = 0, shortIds = [7], prefilled = [Prefilled(index = 0, raw = [1])]), [], 2, 0, [7], [], [], Option.Some([1])) => Wanted(indexes = [1], haveByPosition = [])
+    wantedAt(Compact(header = [], nonce = 0, shortIds = [7], prefilled = [Prefilled(index = 0, raw = [1])]), {}, {0 => [1]}, 2, 0, [7], [], [], Option.Some([1])) => Wanted(indexes = [1], haveByPosition = [])
 
-fn wantedShortId(compact: Compact, held: List<Int>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+fn wantedShortId(compact: Compact, held: Map<Int, Bool>, sent: Map<Int, List<Int>>, total: Int, at: Int, shortIds: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
     ? "The next short id names this position."
       "Running out of them means the Message's counts disagree with its own"
       "positions; there is nothing further to want and assembled will refuse"
       "the Block when it is asked to build it."
     match shortIds
         [] -> Wanted(indexes = List.reverse(missing), haveByPosition = List.reverse(have))
-        [head, ..tail] -> oneWanted(compact, held, total, at, head, tail, missing, have)
+        [head, ..tail] -> oneWanted(compact, held, sent, total, at, head, tail, missing, have)
 
 verify wantedShortId
-    wantedShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), [], 1, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
+    wantedShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), {}, {}, 1, 0, [], [], []) => Wanted(indexes = [], haveByPosition = [])
 
-fn oneWanted(compact: Compact, held: List<Int>, total: Int, at: Int, shortId: Int, rest: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
+fn oneWanted(compact: Compact, held: Map<Int, Bool>, sent: Map<Int, List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, missing: List<Int>, have: List<Int>) -> Wanted
     ? "Held, or asked for by the position it sits at."
-    match List.contains(held, shortId)
-        true -> wantedInto(compact, held, total, at + 1, rest, missing, List.prepend(shortId, have))
-        false -> wantedInto(compact, held, total, at + 1, rest, List.prepend(at, missing), have)
+    match Map.has(held, shortId)
+        true -> wantedInto(compact, held, sent, total, at + 1, rest, missing, List.prepend(shortId, have))
+        false -> wantedInto(compact, held, sent, total, at + 1, rest, List.prepend(at, missing), have)
 
 verify oneWanted
-    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [7], 1, 0, 7, [], [], []) => Wanted(indexes = [], haveByPosition = [7])
-    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), [], 1, 0, 7, [], [], []) => Wanted(indexes = [0], haveByPosition = [])
+    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), {7 => true}, {}, 1, 0, 7, [], [], []) => Wanted(indexes = [], haveByPosition = [7])
+    oneWanted(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), {}, {}, 1, 0, 7, [], [], []) => Wanted(indexes = [0], haveByPosition = [])
 
 fn getBlockTxnPayload(blockHash: List<Int>, indexes: List<Int>) -> Result<Bytes, String>
     ? "The request that asks for the positions we could not fill."
@@ -347,7 +371,7 @@ fn assembled(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<In
       "what happens next is hashing them: a Transaction re-serialised from a"
       "decoded shape is a different byte string for anything SegWit, and the"
       "Merkle Root would not match a Block that is perfectly good."
-    filling(compact, held, supplied, totalOf(compact), 0, compact.shortIds, [])
+    filling(compact, held, prefilledByIndex(compact.prefilled, {}), supplied, totalOf(compact), 0, compact.shortIds, [])
 
 verify assembled
     assembled(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), []) => Result.Ok([])
@@ -356,46 +380,46 @@ verify assembled
     assembled(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [[4]]) => Result.Ok([[4]])
     assembled(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
 
-fn filling(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+fn filling(compact: Compact, held: Map<Int, List<Int>>, sent: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "One position at a time, from the front."
     match at >= total
         true -> Result.Ok(List.reverse(acc))
-        false -> atPosition(compact, held, supplied, total, at, shortIds, acc, prefilledAt(compact.prefilled, at))
+        false -> atPosition(compact, held, sent, supplied, total, at, shortIds, acc, Map.get(sent, at))
 
 verify filling
-    filling(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 0, 0, [], []) => Result.Ok([])
+    filling(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), {}, [], 0, 0, [], []) => Result.Ok([])
 
-fn atPosition(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>, sent: Option<List<Int>>) -> Result<List<List<Int>>, String>
+fn atPosition(compact: Compact, held: Map<Int, List<Int>>, sent: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>, filled: Option<List<Int>>) -> Result<List<List<Int>>, String>
     ? "A position the sender filled in takes no short id with it."
-    match sent
-        Option.Some(raw) -> filling(compact, held, supplied, total, at + 1, shortIds, List.prepend(raw, acc))
-        Option.None -> byShortId(compact, held, supplied, total, at, shortIds, acc)
+    match filled
+        Option.Some(raw) -> filling(compact, held, sent, supplied, total, at + 1, shortIds, List.prepend(raw, acc))
+        Option.None -> byShortId(compact, held, sent, supplied, total, at, shortIds, acc)
 
 verify atPosition
-    atPosition(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 1, 0, [], [], Option.Some([2])) => Result.Ok([[2]])
+    atPosition(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), {}, [], 1, 0, [], [], Option.Some([2])) => Result.Ok([[2]])
 
-fn byShortId(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+fn byShortId(compact: Compact, held: Map<Int, List<Int>>, sent: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortIds: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "The next short id names this position."
       "Running out of short ids here means the counts disagreed with the"
       "positions, which is a Message that cannot be rebuilt rather than one"
       "that rebuilds wrongly."
     match shortIds
         [] -> Result.Err("position {at} has no short id and no prefilled Transaction")
-        [head, ..tail] -> fromHoldings(compact, held, supplied, total, at, head, tail, acc)
+        [head, ..tail] -> fromHoldings(compact, held, sent, supplied, total, at, head, tail, acc)
 
 verify byShortId
-    byShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), [], 1, 0, [], []) => Result.Err("position 0 has no short id and no prefilled Transaction")
+    byShortId(Compact(header = [], nonce = 0, shortIds = [], prefilled = []), Map.fromList([]), {}, [], 1, 0, [], []) => Result.Err("position 0 has no short id and no prefilled Transaction")
 
-fn fromHoldings(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+fn fromHoldings(compact: Compact, held: Map<Int, List<Int>>, sent: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "Ours if we hold it, otherwise the next Transaction we were sent."
     match Map.get(held, shortId)
-        Option.Some(raw) -> filling(compact, held, supplied, total, at + 1, rest, List.prepend(raw, acc))
-        Option.None -> fromSupplied(compact, held, supplied, total, at, shortId, rest, acc)
+        Option.Some(raw) -> filling(compact, held, sent, supplied, total, at + 1, rest, List.prepend(raw, acc))
+        Option.None -> fromSupplied(compact, held, sent, supplied, total, at, shortId, rest, acc)
 
 verify fromHoldings
-    fromHoldings(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([(7, [9])]), [], 1, 0, 7, [], []) => Result.Ok([[9]])
+    fromHoldings(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([(7, [9])]), {}, [], 1, 0, 7, [], []) => Result.Ok([[9]])
 
-fn fromSupplied(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
+fn fromSupplied(compact: Compact, held: Map<Int, List<Int>>, sent: Map<Int, List<Int>>, supplied: List<List<Int>>, total: Int, at: Int, shortId: Int, rest: List<Int>, acc: List<List<Int>>) -> Result<List<List<Int>>, String>
     ? "What the getblocktxn answer sent, in the order it was asked for."
       "Nothing left to take is a Peer that answered with fewer Transactions"
       "than it was asked for, and the Block cannot be rebuilt. Saying which"
@@ -403,11 +427,11 @@ fn fromSupplied(compact: Compact, held: Map<Int, List<Int>>, supplied: List<List
       "morning."
     match supplied
         [] -> Result.Err("position {at} is named by short id {shortId}, which we do not hold and were not sent")
-        [head, ..tail] -> filling(compact, held, tail, total, at + 1, rest, List.prepend(head, acc))
+        [head, ..tail] -> filling(compact, held, sent, tail, total, at + 1, rest, List.prepend(head, acc))
 
 verify fromSupplied
-    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [], 1, 0, 7, [], []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
-    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), [[4]], 1, 0, 7, [], []) => Result.Ok([[4]])
+    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), {}, [], 1, 0, 7, [], []) => Result.Err("position 0 is named by short id 7, which we do not hold and were not sent")
+    fromSupplied(Compact(header = [], nonce = 0, shortIds = [7], prefilled = []), Map.fromList([]), {}, [[4]], 1, 0, 7, [], []) => Result.Ok([[4]])
 
 fn prefilledAt(prefilled: List<Prefilled>, at: Int) -> Option<List<Int>>
     ? "The Transaction the sender put at this position, if it put one."

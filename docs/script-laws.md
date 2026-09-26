@@ -478,6 +478,36 @@ the Height come from the hostile lane: at `2^63` the subsidy's halving walk
 exhausts the step budget, and a `forkHeight` below zero is not a fork. The
 regtest run for the refusal is the `bip30` liar section of
 `docs/regtest-testing.md`.
+## A Transaction's size is what its decoder consumed (n1bor/btc-listener#280 item 17)
+
+One law over `Domain.Transaction.decodeNext`: `sizeIsWhatItConsumed` — a
+decoded Transaction's `size` equals the bytes `decodeNext` took off the
+front, and bytes that do not decode consume nothing and claim nothing. It is
+what lets `Domain.Block.oneCarried` and `Domain.CompactBlock.carried` cut a
+Transaction's bytes by its size in one `List.take` rather than by the
+difference of two list lengths per Transaction, which was O(bytes × txs) on a
+4 MB Block. The law lands as a Bool-valued function with cases under the same
+name, and its rows are the witness-serialised and legacy shapes plus an
+empty and a short input.
+
+**Why the budgets rose, 134 → 136 for the engine cone and 102 → 104 for the
+laws leaf.** Both the law and its case function are declined in both cones
+— the leaf reaches `Domain.Transaction` through `Domain.Block` — for the
+reason every claim reaching `decodeNext` already is: the
+Transaction decoder's mutual recursion (`inputFrom`, `inputWhole`,
+`readInputsInto`, `readOneInput`, `takeWitnessItems`, …) is fuel-lowered in
+the Lean export because `remaining - 1` has no guard the exporter can read as
+a decreasing measure, and `native_decide` could turn fuel exhaustion into a
+default value. `Domain.Transaction.decode`, `Domain.Bip143.hashed`,
+`Domain.Sighash.hashed` and the two `decode` laws from #358 are declined on the
+same sentence, fifty claims in all. The verify block and the hostile lane are the evidence the
+law stands on until that recursion is reshaped, which is the standing note on
+every decodeNext claim and not a new fact about this one. Measured at pin
+`c4b08179`: **129 universal, 1 bounded, 0 open, 136 declined** for the engine
+cone and **127 universal, 11 bounded, 0 open, 104 declined** for the leaf,
+`--gate` reporting 0 regressions and no new exported law in either; both
+baselines are regenerated so the two declines are named in them.
+
 ## Signature-hash laws (n1bor/btc-listener#353)
 
 Six laws over `Domain.Sighash` and `Domain.Bip341`, the two modules that

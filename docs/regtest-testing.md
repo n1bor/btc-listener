@@ -416,6 +416,72 @@ order — and each of them silently names every Transaction wrongly.
 **This capture needs a node, so the generated file is committed** rather than
 rebuilt in CI, the same way the Core corpora are.
 
+### 8b. A large Block: a thousand Transactions in one Message
+
+[#280](https://github.com/n1bor/btc-listener/issues/280) item 17. Three
+paths did work proportional to the Block's size *per Transaction*, or to the
+buffer *per read*, which nothing in sections 1–8 notices because every Block
+there is one coinbase of 250 bytes. `Domain.Block.oneCarried` found a
+Transaction's bytes by the difference of two list lengths for each
+Transaction (O(bytes × txs) on a 4 MB Block); `Domain.CompactBlock.wantedFrom`
+scanned the prefilled list per position and the held list per short id
+(O(n · m) against the Mempool); and `Domain.Inbox.absorbedInto` joined every
+read onto the buffer with `Bytes.concat`, so a 4 MB Message arriving in 64 KB
+reads was copied sixty-four times over. Now a Transaction's bytes are cut by
+its own `size` (a law, `decodeNext law sizeIsWhatItConsumed`, pins that the
+size is exactly what the decoder consumed), the compact Block's lookups are
+Maps, and a Peer's reads are kept as they came and joined once, when the
+bytes for a whole Message are there.
+
+The Block has to be big enough to notice. With the node following, send a
+thousand Transactions on Core — the node admits each to its Mempool as Core
+relays it — then mine one Block, which reaches the node as a compact Block
+and is rebuilt from that Mempool; then sync a fresh node, which fetches the
+same Block whole, as one `block` Message that arrives in many reads:
+
+```bash
+timeout -s INT 150 $BIN regtest follow 127.0.0.1:18454 $D log &
+sleep 8
+A=$($C getnewaddress)
+for i in $(seq 1 1000); do $C sendtoaddress $A 0.001 >/dev/null; done
+$C generatetoaddress 1 "$($C getnewaddress)"; BIG=$($C getblockcount); sleep 20
+wait
+grep -E "^[0-9]+ (bodies|set) $BIG" $D/metrics.log   # workedMs is the turn that took the Block
+rm -rf $D2; timeout 120 $BIN regtest follow 127.0.0.1:18454 $D2 log
+$BIN regtest show $D2 $BIG summary | grep -i -m1 block; $C getblockhash $BIG
+$BIN regtest txindex $D2 1 $BIG; $BIN regtest outputs $D2 1 $BIG; $BIN regtest utxo $D2 $BIG
+$BIN regtest audit $D2 1 $BIG | tail -1
+```
+
+Expect:
+
+```
+core mempool: 501 txs 72065 bytes
+node admitted: 134
+block 216: 502 txs 112514 bytes
+compact Block: 135 of 502 Transaction(s) already held, asking for 367
+block 216 1a61692ebf61029f606b1655ddc5fd1227d75d8c0be7183cff9643ceed91a997 502 tx 112514 bytes
+1790456410943 bodies 216 216 0 0 58744 143 1 0 0 0      # the turn that took the compact Block and asked for 367
+1790456410972 bodies 216 216 1 112514 2 27 1 0 0 0       # the turn that took the 367 and kept the Block
+1790456411016 set 216 216 0 0 24 20 1 0 627 135
+
+node block  1a61692ebf61029f606b1655ddc5fd1227d75d8c0be7183cff9643ceed91a997 core 1a61692ebf61029f606b1655ddc5fd1227d75d8c0be7183cff9643ceed91a997
+1790456502339 bodies 216 216 216 171136 21 81 1 0 0 0    # the fresh node: all 216 bodies, 171 KB, in 81 ms of work
+738 Transactions recorded from 216 Blocks
+blocks 216  transactions 738  spends resolved 522  coinbase 216  unresolved 0  scripts 532 passed / 0 failed / 0 undecided  CLEAN (faults 0, script failures 0)
+```
+
+Half the `sendtoaddress` calls fail once the wallet runs out of confirmed
+coins to spend, so the Block carried 502 Transactions rather than a thousand,
+and Core relayed 134 of them to the node before the Block was mined, so the
+compact Block was part rebuilt and part fetched — both paths in one run. The
+fresh node's Block Id agrees with Core's, its audit is CLEAN once `txindex`,
+`outputs` and `utxo` have run (an `audit` straight after `follow` reports every
+spend unresolved, because nothing has indexed the parents yet), and the
+`workedMs` of the turns that took the Block are tens of milliseconds. Sections 1–4 are the
+same before and after this change; only a Block with many Transactions
+shows the difference, and it shows it as time, not as a wrong answer.
+
 ### 9. A Transaction that only the abandoned branch ever had
 
 The sweep in section 7 removes what a Block confirms. This is the other half:
