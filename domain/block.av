@@ -623,6 +623,11 @@ fn countPrefix(count: Int) -> List<Int>
         true -> List.prepend(253, Domain.Message.littleEndian(count, 2))
         false -> [count]
 
+verify countPrefix law isCompactSize
+    given count: Int = [0, 1, 252, 253, 254, 1000, 65535]
+    when Bool.and(count >= 0, count <= 65535)
+    countPrefix(count) => Domain.CompactSize.encode(count)
+
 verify countPrefix
     countPrefix(0) => [0]
     countPrefix(1) => [1]
@@ -734,25 +739,28 @@ verify locatorIn
     List.len(locatorIn(List.concat([128, 17, 1, 0, 1], zeros(32, [])))) => 1
 
 fn hashesIn(count: Count, acc: List<List<Int>>) -> List<List<Int>>
-    ? "Each Id, thirty-two bytes at a time."
-    match count.value <= 0
-        true -> List.reverse(acc)
-        false -> oneHashIn(count, acc)
+    ? "Each Id, thirty-two bytes at a time, with the byte count taken once"
+      "(#358): taken per Id it made a long getheaders quadratic on the loop."
+    idsIn(count.rest, count.value, List.len(count.rest), acc)
 
 verify hashesIn
     hashesIn(Count(value = 0, rest = [], width = 1), []) => []
+    hashesIn(Count(value = 1, rest = [], width = 1), []) => []
+    List.len(hashesIn(Count(value = 1, rest = zeros(32, []), width = 1), [])) => 1
+    List.len(hashesIn(Count(value = 2, rest = zeros(64, []), width = 1), [])) => 2
+    List.len(hashesIn(Count(value = 3, rest = zeros(64, []), width = 1), [])) => 2
 
-fn oneHashIn(count: Count, acc: List<List<Int>>) -> List<List<Int>>
+fn idsIn(rest: List<Int>, value: Int, left: Int, acc: List<List<Int>>) -> List<List<Int>>
     ? "An Id that runs off the end of the Message stops the walk rather than"
-      "being read as a short one -- a Peer that miscounted has told us"
-      "nothing, and a truncated Id would match nothing anyway."
-    match List.len(count.rest) < 32
+      "producing a short one, and the count stops it too."
+    match Bool.or(value <= 0, left < 32)
         true -> List.reverse(acc)
-        false -> hashesIn(Count(value = count.value - 1, rest = List.drop(count.rest, 32), width = count.width), List.prepend(List.take(count.rest, 32), acc))
+        false -> idsIn(List.drop(rest, 32), value - 1, left - 32, List.prepend(List.take(rest, 32), acc))
 
-verify oneHashIn
-    oneHashIn(Count(value = 1, rest = [], width = 1), []) => []
-    List.len(oneHashIn(Count(value = 1, rest = zeros(32, []), width = 1), [])) => 1
+verify idsIn
+    idsIn([], 1, 0, []) => []
+    List.len(idsIn(zeros(32, []), 1, 32, [])) => 1
+    List.len(idsIn(zeros(40, []), 5, 40, [])) => 1
 
 fn headersPayload(headers: List<String>) -> Result<Bytes, String>
     ? "A headers Message: a count, then each Header followed by a zero."

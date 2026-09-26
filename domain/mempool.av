@@ -280,7 +280,7 @@ verify admit
     admit(withOne(), entry("aa", 250, 250, ["cc:0"], "")) => Admission.Known
     admit(withOne(), entry("bb", 250, 250, ["cc:0"], "")) => Admission.Conflicts("aa")
     admit(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
-    admit(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+    admit(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 2000 a full Mempool asks: its floor of 1000 plus the 1000 incremental relay fee")
 
 fn admitUnheld(pool: Mempool, held: Held) -> Admission
     ? "Nothing held under that Id, so the Outputs it spends are the question."
@@ -291,18 +291,43 @@ fn admitUnheld(pool: Mempool, held: Held) -> Admission
 verify admitUnheld
     admitUnheld(withOne(), entry("bb", 250, 250, ["cc:0"], "")) => Admission.Conflicts("aa")
     admitUnheld(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
-    admitUnheld(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+    admitUnheld(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 2000 a full Mempool asks: its floor of 1000 plus the 1000 incremental relay fee")
 
 fn admitUnclaimed(pool: Mempool, held: Held) -> Admission
+    ? "A full Mempool asks more than its floor first (#358). It used to lodge"
+      "the entry and evict the cheapest, and the tie-break at an equal rate"
+      "is by Transaction Id, so a newcomer at the floor rate with a smaller"
+      "Id evicted a held Transaction for nothing, and could do so for ever."
+      "Core's rollingMinimumFeeRate is the evicted rate plus the incremental"
+      "relay fee, and that is the bar here: a Transaction that does not"
+      "clear it by the increment is refused before anything is evicted."
+    match Bool.and(pool.bytes + held.size > pool.cap, held.rate < floorRate(pool) + incrementalRelay())
+        true -> Admission.Refused("pays {held.rate} per 1000 bytes, under the {floorRate(pool) + incrementalRelay()} a full Mempool asks: its floor of {floorRate(pool)} plus the {incrementalRelay()} incremental relay fee")
+        false -> admitUnclaimedWithRoom(pool, held)
+
+verify admitUnclaimed
+    admitUnclaimed(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 2000 a full Mempool asks: its floor of 1000 plus the 1000 incremental relay fee")
+    admitUnclaimed(full(), entry("bb", 250, 500, ["dd:0"], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 500, ["dd:0"], ""))]), claims = Map.fromList([("dd:0", "bb")]), bytes = 250, cap = 250))
+    admitUnclaimed(full(), entry("bb", 250, 499, ["dd:0"], "")) => Admission.Refused("pays 1996 per 1000 bytes, under the 2000 a full Mempool asks: its floor of 1000 plus the 1000 incremental relay fee")
+
+fn incrementalRelay() -> Int
+    ? "Core's DEFAULT_INCREMENTAL_RELAY_FEE: 1000 satoshis per 1000 bytes, the"
+      "least a Transaction must beat the floor by to be worth an eviction."
+    1000
+
+verify incrementalRelay
+    incrementalRelay() => 1000
+
+fn admitUnclaimedWithRoom(pool: Mempool, held: Held) -> Admission
     ? "Room is made after the entry is lodged rather than before, because"
       "whether it fits is not the question -- whether it pays more than what"
       "it would displace is. Placing it and then evicting the cheapest asks"
       "exactly that, and if the answer is itself, it never belonged."
     settled(lodged(pool, held), held)
 
-verify admitUnclaimed
-    admitUnclaimed(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
-    admitUnclaimed(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
+verify admitUnclaimedWithRoom
+    admitUnclaimedWithRoom(empty(10000), entry("bb", 250, 250, [], "")) => Admission.Admitted(Mempool(held = Map.fromList([("bb", entry("bb", 250, 250, [], ""))]), claims = Map.fromList([]), bytes = 250, cap = 10000))
+    admitUnclaimedWithRoom(full(), entry("bb", 250, 250, ["dd:0"], "")) => Admission.Refused("pays 1000 per 1000 bytes, under the 1000 a full Mempool asks")
 
 fn settled(pool: Mempool, held: Held) -> Admission
     ? "Whether the Transaction survived the room being made for it."

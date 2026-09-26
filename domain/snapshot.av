@@ -343,10 +343,14 @@ fn notedArrival(snapshot: Snapshot, view: TxView) -> Snapshot
       "it (#164). This is the flow a Core user watches in mempool terms: it"
       "arrives, it waits, and a Block takes it -- and the same row says all"
       "three things in turn."
-    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = List.take(List.prepend(view, snapshot.rings.transactions), transactionLimit())))
+      "Through ringWith (#358): a Transaction re-admitted after a Block that"
+      "held it was disconnected already has a row, and prepending a second"
+      "broke the one-row-per-Id rule this ring was built on."
+    withRings(snapshot, Rings(blocks = snapshot.rings.blocks, reorgs = snapshot.rings.reorgs, orphans = snapshot.rings.orphans, orphanMs = snapshot.rings.orphanMs, transactions = ringWith(snapshot.rings.transactions, view)))
 
 verify notedArrival
     notedArrival(started(0), sampleTx("tt", false)).rings.transactions => [sampleTx("tt", false)]
+    List.len(notedArrival(notedArrival(started(0), sampleTx("tt", true)), sampleTx("tt", false)).rings.transactions) => 1
     List.len(notedArrival(notedArrival(started(0), sampleTx("aa", false)), sampleTx("bb", false)).rings.transactions) => 2
 
 fn ringWith(views: List<TxView>, view: TxView) -> List<TxView>
@@ -361,6 +365,39 @@ verify ringWith
     ringWith([sampleTx("tt", false)], sampleTx("tt", true)) => [sampleTx("tt", true)]
     ringWith([sampleTx("aa", true), sampleTx("tt", false)], sampleTx("tt", true)) => [sampleTx("aa", true), sampleTx("tt", true)]
     List.len(ringWith([sampleTx("aa", true)], sampleTx("tt", true))) => 2
+
+fn holdsEachIdOnce(views: List<TxView>, view: TxView) -> Bool
+    ? "After ringWith exactly one row names the Transaction. Cases rather"
+      "than a law: stated over the ring the export landed on sorry (#358)."
+    rowsFor(ringWith(views, view), view.txId, 0) == 1
+
+verify holdsEachIdOnce
+    holdsEachIdOnce([], sampleTx("tt", false)) => true
+    holdsEachIdOnce([sampleTx("aa", false)], sampleTx("aa", true)) => true
+    holdsEachIdOnce([sampleTx("aa", false)], sampleTx("zz", false)) => true
+    holdsEachIdOnce([sampleTx("aa", true), sampleTx("bb", false)], sampleTx("aa", true)) => true
+    holdsEachIdOnce([sampleTx("tt", true), sampleTx("aa", false), sampleTx("bb", true)], sampleTx("tt", false)) => true
+    holdsEachIdOnce([sampleTx("tt", true), sampleTx("aa", false), sampleTx("bb", true)], sampleTx("zz", false)) => true
+
+fn rowsFor(views: List<TxView>, txId: String, acc: Int) -> Int
+    ? "How many rows name this Transaction."
+    match views
+        [] -> acc
+        [head, ..tail] -> rowsFor(tail, txId, acc + oneIf(head.txId == txId))
+
+verify rowsFor
+    rowsFor([], "aa", 0) => 0
+    rowsFor([sampleTx("aa", false), sampleTx("aa", true)], "aa", 0) => 2
+
+fn oneIf(yes: Bool) -> Int
+    ? "One for true."
+    match yes
+        true -> 1
+        false -> 0
+
+verify oneIf
+    oneIf(true) => 1
+    oneIf(false) => 0
 
 fn holdsTx(views: List<TxView>, txId: String) -> Bool
     ? "Whether the ring already names this Transaction."

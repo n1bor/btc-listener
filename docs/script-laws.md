@@ -587,3 +587,52 @@ prover), and `acceptsExactlyWhatTheRuleGives` was the one claim in the entry
 the Lean build could not compile at all — its refusal strings interpolate
 several values — so each is a Bool-valued function with the cases the law's
 `given` rows would have been, and the same name.
+
+## Thirteen smaller findings (n1bor/btc-listener#358)
+
+The September 2026 survey's smaller findings, landed together. The fixes:
+`Infra.Peers.hostText` splits on the last colon and strips the brackets, so
+IPv6 callers no longer share one inbound slot as host `"["`;
+`Domain.Snapshot.notedArrival` goes through `ringWith`, so a Transaction
+re-admitted after a disconnect keeps its one row; `Domain.SpendContext.inputAt`
+answers `None` below zero; `Domain.TxCheck` refuses `bad-txns-oversize` on the
+non-witness size, worked out from the record; `Domain.Address.routable` is
+Core's `IsRoutable` for IPv4 (255/8 is routable but for `255.255.255.255`);
+`Domain.Inventory.collect` and `Domain.Block.hashesIn` take one length and
+carry it, and an `inv` naming more than `MAX_INV_SZ` (50,000) entries costs
+the Peer before an entry is read; `Domain.ScriptWork.intoLightest` with no
+branches makes one rather than dropping the Piece; a full Mempool asks its
+floor plus the incremental relay fee before it evicts anything, so a
+newcomer at the floor with a smaller Id no longer churns it for free; and
+`Domain.Network` says which testnet it is. The sign bit (item 3) landed with
+#356, the loose `k:` record and the Id key (item 4) with #355. The second
+proof entry gathers `Domain.Address`, `Domain.Inventory` and
+`Domain.Snapshot` too, and stands at **68 universal, 9 bounded, 0 open, 102
+declined** at pin `c4b08179` — three laws added, the declines up from 98 with
+the three modules' cones (cases under fuel-lowered recursions, none of them
+laws), baseline regenerated, `--gate` 0 regressions.
+
+| law | pins | tier |
+|---|---|---|
+| `Snapshot.ringWith.holdsEachIdOnce` | after `ringWith(views, view)` exactly one row names `view.txId` | cases |
+| `SpendContext.inputAt.someExactlyWhenTheInputExists` | `Some` exactly for `0 <= index < inputs`; the negative side fails before the fix and is the hostile lane's (a `0 - 1` claim is jasisz/aver#1451 in the export) | cases |
+| `Address.routableOctets.agreesWithCoreIsRoutable` | equals `coreIsRoutable`, Core's `IsRoutable` written flat, over a 12×10×5×3 grid of octets | cases |
+| `Inventory.countPrefix.isCompactSize` | the inv count prefix is `CompactSize.encode` below 65536 | universal |
+| `Block.countPrefix.isCompactSize` | the Locator count prefix is `CompactSize.encode` below 65536 | universal |
+| `IndexKeys.scanOrder.isByteFieldNumber` | the big-endian key field is `ByteField.number` | bounded (`when`) |
+| `ScriptWork.intoLightest.keepsEveryPiece` | one more Piece among the branches, whatever the branches | cases (verify only) |
+| `Infra.Utxo.txidIn.agreesWithUtxoStore` | the Set-key Id slice agrees with `UtxoStore.txidInKey` (verify only: `infra/` is outside both proof entries) | verify |
+| `Infra.Utxo.fromScanOrder.isByteFieldNumberIn` | the big-endian reader is `ByteField.numberIn` (verify only) | verify |
+
+Four of the statements are cases rather than laws: `agreesWithCoreIsRoutable`
+(two flat Bool trees over four octets), `holdsEachIdOnce`,
+`someExactlyWhenTheInputExists` and `keepsEveryPiece` landed on `sorry`; each
+is a Bool-valued function with the rows the `given` would have carried.
+`Domain.ScriptWork` is not gathered into the second entry: its cone reaches
+the engine's, and trying it took the entry's declines from 102 to 123. The `inv` cap has no
+law, having a liar instead: the `invflood` section of `docs/regtest-testing.md`.
+
+Item 12's remaining duplicates — the witness-version byte reader in Script,
+Witness and ReadAddress, and the second Script tokenizer — are left as they
+are: each is a few lines, and a law pinning them equal would be longer than
+the duplication it pins.

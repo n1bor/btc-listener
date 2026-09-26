@@ -298,12 +298,72 @@ fn routableOctets(octets: List<Int>) -> Bool
       "answer."
     match List.len(octets) == 4
         false -> false
-        true -> firstOf(octets)
+        true -> Bool.and(octets != [255, 255, 255, 255], firstOf(octets))
 
 verify routableOctets
     routableOctets([1, 2, 3, 4]) => true
     routableOctets([]) => false
     routableOctets([1, 2, 3]) => false
+    routableOctets([255, 255, 255, 255]) => false
+    routableOctets([255, 1, 2, 3]) => true
+    routableOctets([0, 1, 2, 3]) => false
+
+fn agreesWithCoreIsRoutable(a: Int, b: Int, c: Int, d: Int) -> Bool
+    ? "routableOctets agrees with Core's IsRoutable on this address. Cases"
+      "rather than a law over the octet grid: the export landed on sorry"
+      "(#358), the two flat Bool trees being too wide for the prover."
+    routableOctets([a, b, c, d]) == coreIsRoutable(a, b, c, d)
+
+verify agreesWithCoreIsRoutable
+    agreesWithCoreIsRoutable(1, 2, 3, 4) => true
+    agreesWithCoreIsRoutable(0, 0, 0, 0) => true
+    agreesWithCoreIsRoutable(0, 1, 2, 3) => true
+    agreesWithCoreIsRoutable(255, 255, 255, 255) => true
+    agreesWithCoreIsRoutable(255, 1, 2, 3) => true
+    agreesWithCoreIsRoutable(10, 0, 0, 1) => true
+    agreesWithCoreIsRoutable(127, 0, 0, 1) => true
+    agreesWithCoreIsRoutable(172, 16, 0, 1) => true
+    agreesWithCoreIsRoutable(172, 31, 255, 255) => true
+    agreesWithCoreIsRoutable(172, 32, 0, 1) => true
+    agreesWithCoreIsRoutable(192, 168, 0, 1) => true
+    agreesWithCoreIsRoutable(192, 0, 2, 1) => true
+    agreesWithCoreIsRoutable(192, 0, 3, 1) => true
+    agreesWithCoreIsRoutable(198, 18, 0, 1) => true
+    agreesWithCoreIsRoutable(198, 19, 255, 255) => true
+    agreesWithCoreIsRoutable(198, 20, 0, 1) => true
+    agreesWithCoreIsRoutable(198, 51, 100, 1) => true
+    agreesWithCoreIsRoutable(198, 51, 101, 1) => true
+    agreesWithCoreIsRoutable(203, 0, 113, 1) => true
+    agreesWithCoreIsRoutable(169, 254, 0, 1) => true
+    agreesWithCoreIsRoutable(169, 253, 0, 1) => true
+    agreesWithCoreIsRoutable(100, 64, 0, 1) => true
+    agreesWithCoreIsRoutable(100, 127, 255, 255) => true
+    agreesWithCoreIsRoutable(100, 128, 0, 1) => true
+    agreesWithCoreIsRoutable(62, 210, 113, 61) => true
+
+fn coreIsRoutable(a: Int, b: Int, c: Int, d: Int) -> Bool
+    ? "Core's IsRoutable for an IPv4 address, written flat from netaddress.cpp:"
+      "IsValid (not 0.0.0.0/8's INADDR_ANY family and not INADDR_NONE) and none"
+      "of RFC1918, RFC2544, RFC3927, RFC6598, RFC5737 or IsLocal (127/8 and 0/8)."
+    Bool.and(Bool.and(Bool.and(a != 0, a != 127), Bool.not(Bool.and(Bool.and(a == 255, b == 255), Bool.and(c == 255, d == 255)))), Bool.and(Bool.and(Bool.not(Bool.or(a == 10, Bool.or(Bool.and(a == 172, Bool.and(b >= 16, b <= 31)), Bool.and(a == 192, b == 168)))), Bool.not(Bool.and(a == 198, Bool.or(b == 18, b == 19)))), Bool.and(Bool.and(Bool.not(Bool.and(a == 169, b == 254)), Bool.not(Bool.and(a == 100, Bool.and(b >= 64, b <= 127)))), Bool.not(Bool.or(Bool.and(a == 192, Bool.and(b == 0, c == 2)), Bool.or(Bool.and(a == 198, Bool.and(b == 51, c == 100)), Bool.and(a == 203, Bool.and(b == 0, c == 113))))))))
+
+verify coreIsRoutable
+    coreIsRoutable(1, 2, 3, 4) => true
+    coreIsRoutable(0, 0, 0, 0) => false
+    coreIsRoutable(255, 255, 255, 255) => false
+    coreIsRoutable(255, 1, 2, 3) => true
+    coreIsRoutable(10, 0, 0, 1) => false
+    coreIsRoutable(172, 16, 0, 1) => false
+    coreIsRoutable(172, 32, 0, 1) => true
+    coreIsRoutable(192, 168, 0, 1) => false
+    coreIsRoutable(198, 18, 0, 1) => false
+    coreIsRoutable(169, 254, 0, 1) => false
+    coreIsRoutable(100, 64, 0, 1) => false
+    coreIsRoutable(100, 128, 0, 1) => true
+    coreIsRoutable(192, 0, 2, 1) => false
+    coreIsRoutable(198, 51, 100, 1) => false
+    coreIsRoutable(203, 0, 113, 1) => false
+    coreIsRoutable(127, 0, 0, 1) => false
 
 fn firstOf(octets: List<Int>) -> Bool
     ? "Four octets, taken one at a time."
@@ -354,14 +414,18 @@ verify notReserved
     notReserved(10, 0, 0) => false
 
 fn notPrivate(a: Int, b: Int) -> Bool
-    ? "RFC1918, loopback, RFC6598 and the broadcast address."
-    Bool.and(Bool.and(a != 10, a != 127), Bool.and(Bool.and(a != 255, notSixteenTwelve(a, b)), Bool.and(notOneNineTwo(a, b), notShared(a, b))))
+    ? "RFC1918, loopback and RFC6598; notSpecial has the rest."
+      "255/8 is not here (#358): Core's IsValid refuses only 255.255.255.255,"
+      "INADDR_NONE, which notSpecial does; the rest of 255/8 is routable to"
+      "Core and was refused here under a comment that claimed the published"
+      "ranges. 0/8 stays refused, as Core's IsLocal has it."
+    Bool.and(Bool.and(a != 10, a != 127), Bool.and(notSixteenTwelve(a, b), Bool.and(notOneNineTwo(a, b), notShared(a, b))))
 
 verify notPrivate
     notPrivate(1, 2) => true
     notPrivate(10, 0) => false
     notPrivate(127, 0) => false
-    notPrivate(255, 255) => false
+    notPrivate(255, 255) => true
 
 fn notSixteenTwelve(a: Int, b: Int) -> Bool
     ? "172.16.0.0/12 is private; 172.32.0.0 is not."

@@ -351,9 +351,9 @@ verify provenAtLimitOrNot
 
 fn refusal(network: Network, header: BlockHeader, height: Int, lineage: Lineage, recent: List<Int>, nowSecs: Int) -> Option<String>
     ? "Why a Header that has a parent cannot be placed on it, if it cannot."
-      "Bits first, then the clock, then the median: the order Core asks them"
-      "in, so a Header wrong on more than one count is reported the way Core"
-      "would report it."
+      "Bits first, then the median, then the clock: the order Core asks them"
+      "in (nBits, time-too-old, time-too-new), so a Header wrong on more than"
+      "one count is reported the way Core would report it."
     expected = expectedBits(network, ruleFor(network, height), lineage, header.timestamp)
     match header.bits == expected
         false -> Option.Some("Header {header.blockId} at Height {height} carries bits {header.bits} where the rule gives {expected}")
@@ -404,15 +404,30 @@ verify placeable
     placeable(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231469665], 1231469665) => false
 
 fn timely(header: BlockHeader, height: Int, recent: List<Int>, nowSecs: Int) -> Option<String>
-    ? "Not past the clock by more than two hours, then past the median."
-    match header.timestamp > nowSecs + 7200
-        true -> Option.Some("Header {header.blockId} is {header.timestamp - nowSecs} s ahead of the clock")
-        false -> afterMedian(header, height, recent)
+    ? "Past the median, then not past the clock by more than two hours: the"
+      "order Core's ContextualCheckBlockHeader asks them in (time-too-old"
+      "before time-too-new), so a Header wrong on both counts is reported the"
+      "way Core reports it (#358). It used to ask the clock first, under a"
+      "comment on refusal that claimed Core's order."
+    match afterMedian(header, height, recent)
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> underTheClock(header, nowSecs)
 
 verify timely
     timely(sampleHeader(), 1, [1231006505], 1231469665) => Option.None
     timely(sampleHeader(), 1, [1231006505], 1231462465) => Option.None
     timely(sampleHeader(), 1, [1231006505], 1231462464) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 is 7201 s ahead of the clock")
+    timely(sampleHeader(), 1, [1231469665], 1231000000) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 at 1231469665 is not after the median 1231469665 of the Headers before it")
+
+fn underTheClock(header: BlockHeader, nowSecs: Int) -> Option<String>
+    ? "Not more than two hours ahead of this node's clock."
+    match header.timestamp > nowSecs + 7200
+        true -> Option.Some("Header {header.blockId} is {header.timestamp - nowSecs} s ahead of the clock")
+        false -> Option.None
+
+verify underTheClock
+    underTheClock(sampleHeader(), 1231469665) => Option.None
+    underTheClock(sampleHeader(), 1231462464) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 is 7201 s ahead of the clock")
 
 fn afterMedian(header: BlockHeader, height: Int, recent: List<Int>) -> Option<String>
     ? "Strictly after the median of the Headers before it."

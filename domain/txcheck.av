@@ -15,7 +15,7 @@ module TxCheck
         "The first thing wrong is the thing reported. There is no ordering"
         "claim in that beyond the one Bitcoin itself makes."
     exposes [wrongWith, maxMoney, isCoinbase]
-    depends [Domain.Transaction]
+    depends [Bytes, Domain.CompactSize, Domain.Transaction]
     effects []
 
 fn maxMoney() -> Int
@@ -50,10 +50,83 @@ fn withAmounts(transaction: Transaction, first: Input, rest: List<Input>) -> Opt
     ? "Every amount, and their sum, inside what can exist."
     match amountsWrong(Domain.Transaction.outputsOf(transaction), 0)
         Option.Some(why) -> Option.Some(why)
-        Option.None -> withInputs(transaction, first, rest)
+        Option.None -> withSize(transaction, first, rest)
 
 verify withAmounts
     withAmounts(sample([spending("aa", 0, "")], [Output(value = 2100000000000001, script = "51")]), spending("aa", 0, ""), []) => Option.Some("output of 2100000000000001 is more than there is")
+
+fn withSize(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
+    ? "Core's bad-txns-oversize (#358): the Transaction without its witness,"
+      "weighted by four, may not exceed MAX_BLOCK_WEIGHT. CONTEXT.md defers"
+      "Block weight, which is a rule over a Block; this one is over a"
+      "Transaction, and a Peer can hand the node one directly."
+    match strippedSize(transaction) * 4 > 4000000
+        true -> Option.Some("bad-txns-oversize: {strippedSize(transaction)} non-witness bytes weigh more than a Block")
+        false -> withInputs(transaction, first, rest)
+
+verify withSize
+    withSize(sample([spending("aa", 0, "")], [Output(value = 1, script = "51")]), spending("aa", 0, ""), []) => Option.None
+    withSize(sample([spending("aa", 0, "")], [Output(value = 1, script = hugeScript())]), spending("aa", 0, ""), []) => Option.Some("bad-txns-oversize: 1048640 non-witness bytes weigh more than a Block")
+
+fn strippedSize(transaction: Transaction) -> Int
+    ? "The serialised size without the SegWit marker, flag and witnesses:"
+      "version, the Inputs behind their count, the Outputs behind theirs,"
+      "and the lock time. Worked out from the record rather than kept on it,"
+      "because the record's size counts the witness."
+    8 + List.len(Domain.CompactSize.encode(List.len(transaction.inputs))) + inputsSize(transaction.inputs, 0) + List.len(Domain.CompactSize.encode(List.len(transaction.outputs))) + outputsSize(transaction.outputs, 0)
+
+verify strippedSize
+    strippedSize(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) => 204
+    strippedSize(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?) == Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")?))?.size => true
+    strippedSize(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) => 62
+    strippedSize(Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?) < Domain.Transaction.decode(Bytes.octets(Bytes.fromHex("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0188130000000000000251510202aabb01cc00000000")?))?.size => true
+
+fn inputsSize(inputs: List<Input>, acc: Int) -> Int
+    ? "Thirty-six bytes of outpoint, the script behind its length, four of sequence."
+    match inputs
+        [] -> acc
+        [head, ..tail] -> inputsSize(tail, acc + 40 + List.len(Domain.CompactSize.encode(scriptBytes(head.script))) + scriptBytes(head.script))
+
+verify inputsSize
+    inputsSize([], 0) => 0
+    inputsSize([spending("aa", 0, "")], 0) => 41
+
+fn outputsSize(outputs: List<Output>, acc: Int) -> Int
+    ? "Eight bytes of value, the script behind its length."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> outputsSize(tail, acc + 8 + List.len(Domain.CompactSize.encode(scriptBytes(head.script))) + scriptBytes(head.script))
+
+verify outputsSize
+    outputsSize([], 0) => 0
+    outputsSize([Output(value = 1, script = "51")], 0) => 10
+
+fn scriptBytes(hex: String) -> Int
+    ? "How many bytes a script spelt in hexadecimal is."
+    Int.div(String.len(hex), 2)
+
+verify scriptBytes
+    scriptBytes("") => 0
+    scriptBytes("51") => 1
+
+fn hugeScript() -> String
+    ? "Over a million bytes of OP_1, for the oversize case: two bytes doubled"
+      "twenty times is 2^21 characters."
+    doubled("51", 20)
+
+verify hugeScript
+    scriptBytes(hugeScript()) => 1048576
+
+fn doubled(text: String, times: Int) -> String
+    ? "The text joined to itself this many times over."
+    match times <= 0
+        true -> text
+        false -> doubled(String.join([text, text], ""), times - 1)
+
+verify doubled
+    doubled("ab", 0) => "ab"
+    doubled("ab", 1) => "abab"
+    String.len(doubled("ab", 3)) => 16
 
 fn amountsWrong(outputs: List<Output>, sofar: Int) -> Option<String>
     ? "Each Output in turn, carrying the running total."

@@ -733,13 +733,43 @@ verify hostLimit
 
 fn hostText(address: String) -> String
     ? "The host part of an address as the standing spells it: before the port."
-    match String.split(address, ":")
-        [] -> address
-        [host, ..rest] -> host
+      "Before the last colon, not the first (#358): an IPv6 address is spelt"
+      "[::1]:8333 or [::ffff:1.2.3.4]:8333 by the runtime, and splitting on"
+      "the first colon made every IPv6 caller the host \"[\", one inbound slot"
+      "between them. The brackets come off so the host reads as the address."
+    hostOf(List.reverse(String.split(address, ":")), address)
 
 verify hostText
     hostText("127.0.0.1:54668") => "127.0.0.1"
     hostText("nowhere") => "nowhere"
+    hostText("[::1]:8333") => "::1"
+    hostText("[::ffff:1.2.3.4]:8333") => "::ffff:1.2.3.4"
+    hostText("[2001:db8::7]:18444") => "2001:db8::7"
+
+fn hostOf(reversedParts: List<String>, address: String) -> String
+    ? "Everything before the last colon, brackets stripped; the whole text"
+      "when there is no colon."
+    match reversedParts
+        [] -> address
+        [port] -> address
+        [port, ..hostParts] -> unbracketed(String.join(List.reverse(hostParts), ":"))
+
+verify hostOf
+    hostOf(["nowhere"], "nowhere") => "nowhere"
+    hostOf(["54668", "127.0.0.1"], "127.0.0.1:54668") => "127.0.0.1"
+    hostOf(["8333", "1]", "", "[", ], "[::1]:8333") => "::1"
+    hostOf([], "") => ""
+
+fn unbracketed(host: String) -> String
+    ? "An IPv6 host without the brackets its port needs."
+    match String.startsWith(host, "[")
+        false -> host
+        true -> String.slice(host, 1, String.len(host) - 1)
+
+verify unbracketed
+    unbracketed("::1") => "::1"
+    unbracketed("[::1]") => "::1"
+    unbracketed("127.0.0.1") => "127.0.0.1"
 
 fn inboundFromHost(standing: Map<Int, Standing>, keys: List<Int>, host: String, sofar: Int) -> Int
     ? "How many Peers that dialled us came from this host."

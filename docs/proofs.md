@@ -40,19 +40,21 @@ The engine's cone is 34 modules; the chain, the stores and the codecs are
 outside it, and Chainwork's laws were gated by nothing but `aver verify` from
 the day they were written. Since n1bor/btc-listener#349 a leaf module,
 `domain/laws.av`, depends on every law-carrying module outside that cone —
-Block, Chainwork, Segment, Subsidy, Target, HeaderTree, Watchdog, UtxoStore —
-and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
+Address, Block, Chainwork, Connect, Disconnect, HeaderTree, Inventory,
+Segment, Snapshot, Subsidy, Target, TreeStore, Watchdog, UtxoStore, fourteen
+as of #358 — and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
 it with the same flags against `proof/laws.declined` and
 `proof/laws.manifest.json`. A law added to a module the leaf does not yet
 name is added to its `depends` in the same PR. Measured at pin `c4b08179`
 with `Domain.Connect` and `Domain.Disconnect` (#354), `Domain.TreeStore`
-(#355) and the Target and Block laws of #356 in the leaf: **66 universal,
-8 bounded, 0 open, 98 declined** (the bounded are
+(#355), the Target and Block laws of #356 and the Address, Inventory and
+Snapshot modules of #358 in the leaf: **68 universal, 9 bounded, 0 open,
+102 declined** (the bounded are
 `Segment.nameOf.sortsWithSegment`, over `String` order,
 `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
 []`, the three on-disk-record round trips of #355 and the three
-`when`-guarded Target laws of #356; the declined count rose from 66 with the
-#354 modules, whose cones`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
+`when`-guarded Target laws of #356 and `IndexKeys.scanOrder.isByteFieldNumber`
+of #358; the declined count rose from 66 with the #354 modules, whose cones`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
 []`, and the three on-disk-record round trips of #355, under `when` on the
 Height; the declined count rose from 66 with the #354 modules, whose cones
 bring the Block walk's mutual recursion and the Transaction decoder — the

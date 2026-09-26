@@ -231,6 +231,16 @@ def header_flood(conn):
             pass
         time.sleep(0.5)
     print('liar: sent', sent, 'claims', file=sys.stderr, flush=True)
+def inv_flood(conn):
+    # An inv naming 50,001 Blocks -- one over Core's MAX_INV_SZ -- of all-zero
+    # Ids (#358). Core disconnects a Peer for the count alone, before reading
+    # an entry; this node used to walk every entry, and walked each one with
+    # a length of what remained, so a 4 MB inv was quadratic on the one loop.
+    # Sent once the node is in its listen loop, on the getaddr it sends on
+    # joining, so the drop is a `dropping peer` line and not a catch-up fault.
+    count = 50001
+    payload = bytes([0xfd]) + struct.pack('<H', count) + (struct.pack('<I', 2) + b'\0' * 32) * count
+    answer_getheaders(conn, headers_payload([]), then=msg('inv', payload), on='getaddr')
 def addr_payload(n, seed):
     # n routable IPv4 addresses, distinct per seed, as one addr Message.
     out = bytes([0xfd]) + struct.pack('<H', n)
@@ -289,6 +299,9 @@ def serve(port, mode):
     elif mode == 'bip30':
         header, body, block_id = duplicate_coinbase_block(sys.argv[3])
         serve_block(conn, header, body, block_id)
+        return
+    elif mode == 'invflood':
+        inv_flood(conn)
         return
     elif mode == 'lowbits':
         answer_getheaders(conn, headers_payload([low_bits_header()]))

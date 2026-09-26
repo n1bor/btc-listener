@@ -2972,6 +2972,41 @@ reorganised nothing left the node standing on the liar's Header, and a Set
 that had connected the duplicate would show it at 168 with `set -1` on the
 way back.
 
+### An inv that names more Blocks than Core allows
+
+[#358](https://github.com/n1bor/btc-listener/issues/358), item 8. Core's
+`MAX_INV_SZ` is 50,000: an `inv` or `getdata` naming more is misbehaviour and
+the Peer is disconnected on the count, before an entry is read. This node had
+no cap, and walked the entries with a length of what remained taken per
+entry, so a 4 MB `inv` — some 111,000 entries — was quadratic on the one loop.
+`Domain.Inventory.collect` and `Domain.Block.hashesIn` now take one length
+and carry it, and `Domain.Inventory.tooMany` reads the count alone.
+
+The `invflood` mode sends one `inv` naming 50,001 Blocks of the all-zero Id,
+on the `getaddr` the node sends on joining, so the Message is acted on in the
+listen loop rather than kept during the catch-up:
+
+```bash
+python3 tools/regtest/liar.py 18455 invflood &
+timeout -s INT 40 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+The Peer must be dropped **for the count**, with no Block asked for, and the
+node carry on at Core's tip:
+
+```
+headers complete: 191 known
+dropping peer 0: an inv naming 50001 entries, above the 50000 Core allows (MAX_INV_SZ, #358)
+following at Height 190: 0 connected, 0 disconnected, set +0 -0
+```
+
+The liar prints `liar: sent the lie` after `got getaddr`. A run that instead
+prints `peer 0 did not send the compact Block for 0000…0000 within 10
+seconds` is the node having read the entries and asked for the first of
+them, which is what this section exists to refuse — it happened once in five
+runs while this section was written and is
+[#381](https://github.com/n1bor/btc-listener/issues/381).
+
 ## Before you commit
 
 The language gates come first, and none of them is optional:

@@ -20,7 +20,7 @@ module Utxo
         "The read half (prepared) is kept apart from the write half (written)"
         "so the walk can run the reads beside the next Block's fetch (#233)."
     exposes [alreadyHeld, Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
-    depends [Bytes, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
+    depends [Bytes, Domain.ByteField, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store]
     effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
 record Applied
@@ -549,6 +549,20 @@ verify txidIn
     txidIn(Domain.UtxoStore.unspentKey("aa", 0)?) => Bytes.fromList([170])
     txidIn(Domain.UtxoStore.unspentKey("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", 3)?) => Bytes.fromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16")?
 
+fn agreesWithUtxoStore(txid: String, index: Int) -> Result<Bool, String>
+    ? "The two slices of a Set key agree on the Transaction Id (#358): this"
+      "module's txidIn and Domain.UtxoStore.txidInKey are the same cut"
+      "written twice. Cases rather than a law: the hostile lane's Ids are"
+      "not hexadecimal and the key cannot be built from them."
+    key = Domain.UtxoStore.unspentKey(txid, index)?
+    Result.Ok(txidIn(key) == Domain.UtxoStore.txidInKey(Bytes.octets(key)))
+
+verify agreesWithUtxoStore
+    agreesWithUtxoStore("aa", 0) => Result.Ok(true)
+    agreesWithUtxoStore("cc", 1) => Result.Ok(true)
+    agreesWithUtxoStore("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 0) => Result.Ok(true)
+    agreesWithUtxoStore("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 4294967295) => Result.Ok(true)
+
 fn idBytesIn(octets: List<Int>) -> List<Int>
     ? "The bytes between the tag and the position."
     List.take(List.drop(octets, 1), List.len(octets) - 1 - Domain.IndexKeys.indexWidth())
@@ -579,6 +593,10 @@ verify fromScanOrder
     fromScanOrder([0, 0, 0, 1], 0) => 1
     fromScanOrder([0, 0, 1, 0], 0) => 256
     fromScanOrder(Domain.IndexKeys.scanOrder(962268, 4), 0) => 962268
+
+verify fromScanOrder law isByteFieldNumberIn
+    given bytes: List<Int> = [[], [0], [1], [255], [1, 0], [0, 0, 0, 5], [255, 255, 255, 255], [1, 2, 3, 4, 5, 6, 7, 8]]
+    fromScanOrder(bytes, 0) => Domain.ByteField.numberIn(bytes)
 
 fn disconnectBlock(store: Store, blockId: String, transactions: List<Transaction>, standing: Reached) -> Result<Applied, String>
     ? "Take this Block back out of the Set, from what it recorded on the way in,"

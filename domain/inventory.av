@@ -4,7 +4,7 @@ module Inventory
         "A Peer offers Transactions by identifier only; the Transaction itself"
         "arrives after a getdata asks for it. Asking with the witness type is"
         "what makes the reply SegWit-serialised, which the decoder needs."
-    exposes [txHashesOf, requestedTxHashesOf, blockHashesOf, requestedBlockHashesOf, getDataPayload, entrySize, txType, witnessTxType, witnessBlockType]
+    exposes [tooMany, announcedCount, maxEntries, txHashesOf, requestedTxHashesOf, blockHashesOf, requestedBlockHashesOf, getDataPayload, entrySize, txType, witnessTxType, witnessBlockType]
     depends [Bytes, Domain.CompactSize, Domain.Message]
     effects []
 
@@ -124,24 +124,34 @@ verify countWidth
 
 fn collect(entries: List<Int>, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
     ? "Walk the entries, keeping the identifiers of the kind asked for."
-    match List.len(entries) < entrySize()
-        true -> List.reverse(acc)
-        false -> collectOne(entries, wanted, acc)
+      "The length is taken once and carried (#358): taken per entry it made"
+      "a 4 MB inv -- some 111,000 entries -- quadratic on the one loop."
+    walked(entries, List.len(entries), wanted, acc)
 
 verify collect
     List.len(collect(List.concat([1, 0, 0, 0], thirtyTwo()), txType(), [])) => 1
     List.len(collect(List.concat([2, 0, 0, 0], thirtyTwo()), blockType(), [])) => 1
     List.len(collect([1, 2], txType(), [])) => 0
 
-fn collectOne(entries: List<Int>, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
+fn walked(entries: List<Int>, left: Int, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
+    ? "The walk itself, with how many bytes remain."
+    match left < entrySize()
+        true -> List.reverse(acc)
+        false -> collectOne(entries, left, wanted, acc)
+
+verify walked
+    List.len(walked(List.concat([1, 0, 0, 0], thirtyTwo()), 36, txType(), [])) => 1
+    walked([1, 2], 2, txType(), []) => []
+
+fn collectOne(entries: List<Int>, left: Int, wanted: Int, acc: List<List<Int>>) -> List<List<Int>>
     ? "Keep this entry's identifier if it is of the kind asked for."
     kind = Domain.Message.readLittleEndian(List.take(entries, 4))
-    collect(List.drop(entries, entrySize()), wanted, keepIfWanted(kind, wanted, List.take(List.drop(entries, 4), 32), acc))
+    walked(List.drop(entries, entrySize()), left - entrySize(), wanted, keepIfWanted(kind, wanted, List.take(List.drop(entries, 4), 32), acc))
 
 verify collectOne
-    List.len(collectOne(List.concat([1, 0, 0, 0], thirtyTwo()), txType(), [])) => 1
-    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), txType(), [])) => 0
-    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), blockType(), [])) => 1
+    List.len(collectOne(List.concat([1, 0, 0, 0], thirtyTwo()), 36, txType(), [])) => 1
+    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), 36, txType(), [])) => 0
+    List.len(collectOne(List.concat([2, 0, 0, 0], thirtyTwo()), 36, blockType(), [])) => 1
 
 fn keepIfWanted(kind: Int, wanted: Int, hash: List<Int>, acc: List<List<Int>>) -> List<List<Int>>
     ? "An Announcement mixes kinds, and a caller wants one of them."
@@ -159,11 +169,45 @@ fn getDataPayload(kind: Int, hashes: List<List<Int>>) -> Result<Bytes, String>
       "The same Message serves Transactions and Blocks; only the type differs."
     Bytes.fromList(List.concat(countPrefix(List.len(hashes)), entriesFor(kind, hashes, [])))
 
+fn maxEntries() -> Int
+    ? "Core's MAX_INV_SZ: an inv or getdata naming more is misbehaviour, and"
+      "the Peer is disconnected before the entries are read (#358)."
+    50000
+
+verify maxEntries
+    maxEntries() => 50000
+
+fn announcedCount(body: List<Int>) -> Int
+    ? "How many entries the Message says it carries, whatever it carries."
+    match body
+        [] -> 0
+        [first, ..rest] -> Domain.CompactSize.read(body).value
+
+verify announcedCount
+    announcedCount([]) => 0
+    announcedCount([1, 9]) => 1
+    announcedCount([253, 80, 195]) => 50000
+    announcedCount([253, 81, 195]) => 50001
+
+fn tooMany(body: List<Int>) -> Bool
+    ? "Whether the count alone is grounds to drop the sender."
+    announcedCount(body) > maxEntries()
+
+verify tooMany
+    tooMany([]) => false
+    tooMany([253, 80, 195]) => false
+    tooMany([253, 81, 195]) => true
+
 fn countPrefix(count: Int) -> List<Int>
     ? "A CompactSize count; an Announcement never offers more than 50000."
     match count < 253
         true -> [count]
         false -> List.prepend(253, Domain.Message.littleEndian(count, 2))
+
+verify countPrefix law isCompactSize
+    given count: Int = [0, 1, 252, 253, 254, 1000, 50000, 65535]
+    when Bool.and(count >= 0, count <= 65535)
+    countPrefix(count) => Domain.CompactSize.encode(count)
 
 verify countPrefix
     countPrefix(1) => [1]

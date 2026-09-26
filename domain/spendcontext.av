@@ -302,6 +302,25 @@ verify lockingOf
     lockingOf(bare(Domain.Rules.latest())) => Option.None
     lockingOf(committed(Domain.Rules.latest(), emptyTransaction(), 0, 5, "51", [])) => Option.None
     lockingOf(committed(Domain.Rules.latest(), Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), 0, 5, "51", [])) => Option.Some(Locking(version = 1, lockTime = 0, sequence = 0))
+    lockingOf(committed(Domain.Rules.latest(), twoInputs(), 2, 5, "51", [])) => Option.None
+    isSome(lockingOf(committed(Domain.Rules.latest(), twoInputs(), 1, 5, "51", []))) => true
+
+fn isSome(locking: Option<Locking>) -> Bool
+    ? "Whether there was an Input to read."
+    match locking
+        Option.Some(_) -> true
+        Option.None -> false
+
+verify isSome
+    isSome(Option.None) => false
+    isSome(Option.Some(Locking(version = 1, lockTime = 0, sequence = 0))) => true
+
+fn twoInputs() -> Transaction
+    ? "A Transaction with Inputs 0 and 1, for the law above."
+    Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = []), Input(previousTxid = "00", previousIndex = 1, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)
+
+verify twoInputs
+    List.len(twoInputs().inputs) => 2
 
 fn lockingIn(commitment: Commitment) -> Option<Locking>
     ? "An Input index the Transaction does not have leaves this None rather"
@@ -315,20 +334,66 @@ verify lockingIn
     lockingIn(Commitment(transaction = Transaction(version = 1, inputs = [Input(previousTxid = "00", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false), inputIndex = 0, amount = 0, scriptCode = "", witness = [], sigVersion = SigVersion.Base, prevouts = [], tap = Option.None)) => Option.Some(Locking(version = 1, lockTime = 0, sequence = 0))
 
 fn inputAt(inputs: List<Input>, index: Int) -> Option<Input>
-    ? "The Input at a position, counting down."
-    match inputs
-        [] -> Option.None
-        [head, ..tail] -> thisOrFurther(head, tail, index)
+    ? "The Input at a position, counting down; nothing below zero (#358),"
+      "where the count-down answered Input 0 and messageFor answered None."
+      "The negative side is pinned by the hostile lane only: a claim with"
+      "0 - 1 in it is evaluated false by the Lean export's native_decide"
+      "while the VM answers None, which is jasisz/aver#1451."
+    match index < 0
+        true -> Option.None
+        false -> inputFrom(inputs, index)
 
 verify inputAt
     inputAt([], 0) => Option.None
     inputAt([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0) => Option.Some(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []))
 
+fn someExactlyWhenTheInputExists(inputs: List<Input>, index: Int) -> Bool
+    ? "inputAt answers Some exactly for 0 <= index < the count. Cases rather"
+      "than a law: the export landed on sorry over the mutual recursion"
+      "beneath inputAt (#358); the negative side is the hostile lane's."
+    isSomeInput(inputAt(inputs, index)) == Bool.and(index >= 0, index < List.len(inputs))
+
+verify someExactlyWhenTheInputExists
+    someExactlyWhenTheInputExists([], 0) => true
+    someExactlyWhenTheInputExists(twoInputs().inputs, 0) => true
+    someExactlyWhenTheInputExists(twoInputs().inputs, 1) => true
+    someExactlyWhenTheInputExists(twoInputs().inputs, 2) => true
+    someExactlyWhenTheInputExists([sampleInput()], 0) => true
+    someExactlyWhenTheInputExists([sampleInput()], 1) => true
+    someExactlyWhenTheInputExists([sampleInput()], 3) => true
+
+fn isSomeInput(found: Option<Input>) -> Bool
+    ? "Whether there was an Input at that position."
+    match found
+        Option.Some(_) -> true
+        Option.None -> false
+
+verify isSomeInput
+    isSomeInput(Option.None) => false
+    isSomeInput(Option.Some(sampleInput())) => true
+
+fn sampleInput() -> Input
+    ? "One Input, for the cases here."
+    Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])
+
+verify sampleInput
+    sampleInput().sequence => 7
+
+fn inputFrom(inputs: List<Input>, index: Int) -> Option<Input>
+    ? "The count-down itself."
+    match inputs
+        [] -> Option.None
+        [head, ..tail] -> thisOrFurther(head, tail, index)
+
+verify inputFrom
+    inputFrom([], 0) => Option.None
+    inputFrom([Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = [])], 0) => Option.Some(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []))
+
 fn thisOrFurther(head: Input, tail: List<Input>, index: Int) -> Option<Input>
     ? "Here when the count runs out, otherwise on."
     match index < 1
         true -> Option.Some(head)
-        false -> inputAt(tail, index - 1)
+        false -> inputFrom(tail, index - 1)
 
 verify thisOrFurther
     thisOrFurther(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []), [], 0) => Option.Some(Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 7, witness = []))
