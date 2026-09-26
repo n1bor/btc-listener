@@ -14,7 +14,7 @@ module Owner
         "fresh() and hands it nothing."
         "A run that ends in failure says why with Run.fail, which is what"
         "Run.all() answers main once the loop has returned."
-    depends [Tcp, Wait, Work, App.Cli, App.Node, Domain.Catchup, Domain.Connect, Infra.Catching, Infra.ChainState, Infra.Follow, Infra.Peers, Infra.Wire]
+    depends [Tcp, Wait, Work, App.Cli, App.Node, Domain.Catchup, Domain.Connect, Domain.Network, Infra.Catching, Infra.ChainState, Infra.Follow, Infra.Peers, Infra.Wire]
     exposes [State, fresh, peers, started, heard, handled, ticked, accepted, drained, due, headers, aligned, fetched, begun, connected, ended, settled]
     effects [
         Args.get,
@@ -37,13 +37,293 @@ record State
     catching: Option<Catching>
     over: Bool
     first: Bool
+    answeredMs: Int
 
 fn fresh() -> State
     ? "No node opened yet, no Catch-up under way, the first Catch-up still owed."
-    State(node = Option.None, catching = Option.None, over = false, first = true)
+    State(node = Option.None, catching = Option.None, over = false, first = true, answeredMs = 0)
 
 verify fresh
     fresh().over => false
+
+fn clocked(state: State, enteredMs: Int) -> State
+    ? "The owner asked again: whatever passed since its last answer, the"
+      "coordinator spent waiting, and the node's Pool is told (#386)."
+    match state.node
+        Option.None -> state
+        Option.Some(node) -> withNode(state, Infra.Follow.pollReturned(node, waitedSince(state.answeredMs, enteredMs), enteredMs))
+
+verify clocked
+    clocked(fresh(), 5000).answeredMs => 0
+    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(State.update(fresh(), answeredMs = 4000), Infra.Follow.sampleFollowing()), 5000))) => 1000
+    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(fresh(), Infra.Follow.sampleFollowing()), 5000))) => 0
+
+fn waitedSince(answeredMs: Int, enteredMs: Int) -> Int
+    ? "Nothing before the first answer; never negative against a skewed clock."
+    match answeredMs <= 0
+        true -> 0
+        false -> Int.max(enteredMs - answeredMs, 0)
+
+verify waitedSince
+    waitedSince(0, 5000) => 0
+    waitedSince(4000, 5000) => 1000
+    waitedSince(6000, 5000) => 0
+
+fn nodeOf(state: State) -> Pool
+    ? "The node's Pool, for the cases here; an empty pool when there is no node."
+    match state.node
+        Option.None -> Infra.Peers.opened(Domain.Network.Network.Regtest)
+        Option.Some(node) -> node.pool
+
+verify nodeOf
+    Infra.Peers.polledMsOf(nodeOf(fresh())) => 0
+
+fn answered(state: State, enteredMs: Int, leftMs: Int) -> State
+    ? "The owner is answering: the turn's work is measured against the"
+      "watchdog's budget and the instant remembered for the next question."
+    ! [Console.error, Disk.appendText, Time.unixMs]
+    match state.node
+        Option.None -> State.update(state, answeredMs = leftMs)
+        Option.Some(node) -> answeredOn(state, Infra.Follow.turnWorked(node, enteredMs, leftMs), node, leftMs)
+
+fn answeredOn(state: State, worked: Result<Following, String>, node: Following, leftMs: Int) -> State
+    ? "The node after the turn was measured -- or as it was, if the watchdog"
+      "line could not be written -- and the answer's instant remembered."
+      "Two steps rather than one expression: the Rust backend moved leftMs"
+      "into the inner call and then read it again (jasisz/aver#1454)."
+    match worked
+        Result.Err(_) -> State.update(withNode(state, node), answeredMs = leftMs)
+        Result.Ok(measured) -> State.update(withNode(state, measured), answeredMs = leftMs)
+
+verify answeredOn
+    answeredOn(fresh(), Result.Err("no"), Infra.Follow.sampleFollowing(), 7).answeredMs => 7
+    answeredOn(fresh(), Result.Ok(Infra.Follow.sampleFollowing()), Infra.Follow.sampleFollowing(), 9).answeredMs => 9
+
+fn started(state: State) -> Tuple<State, Result<Infra.Wire.Started, Run.Wake>>
+    ? "started, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Args.get,
+        Console.error, Console.print,
+        Disk.appendText, Disk.exists, Disk.listDir, Disk.makeDir, Disk.readBytesAt, Disk.size, Disk.writeBytes,
+        Infra.Kv.get, Infra.Kv.open,
+        Process.stopRequested,
+        Random.int,
+        Run.fail,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.dialled, Tcp.listen, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.enableRawMode, Terminal.flush, Terminal.hideCursor,
+        Time.unixMs,
+        Wait.poll,
+    ]
+    enteredMs = Time.unixMs()
+    match startedAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn heard(state: State, key: Int) -> Tuple<State, Result<Infra.Wire.Heard, Run.Wake>>
+    ? "heard, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Run.fail,
+        Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.readNow, Tcp.writeNow,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match heardAnswered(clocked(state, enteredMs), key)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn handled(state: State, key: Int, command: String, body: List<Int>) -> Tuple<State, Result<Bool, Run.Wake>>
+    ? "handled, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendBytes, Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Run.fail,
+        Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.writeNow,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match handledAnswered(clocked(state, enteredMs), key, command, body)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn ticked(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+    ? "ticked, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Run.fail,
+        Tcp.accept, Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.disableRawMode, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey, Terminal.showCursor,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match tickedAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn accepted(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+    ? "accepted, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Run.fail,
+        Tcp.accept, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.peerAddress,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match acceptedAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn drained(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+    ? "drained, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Run.fail,
+        Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.writeNow,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match drainedAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn due(state: State) -> Tuple<State, Result<Infra.Catching.Due, Run.Wake>>
+    ? "due, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Run.fail,
+        Tcp.close, Tcp.closeDial, Tcp.closeListener,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.now, Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match dueAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn headers(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Batch, Run.Wake>>
+    ? "headers, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.accept, Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    enteredMs = Time.unixMs()
+    match headersAnswered(clocked(state, enteredMs), key)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn aligned(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Aligned, Run.Wake>>
+    ? "aligned, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.get,
+        Time.unixMs,
+    ]
+    enteredMs = Time.unixMs()
+    match alignedAnswered(clocked(state, enteredMs), key)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn fetched(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Fetch, Run.Wake>>
+    ? "fetched, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Tcp.accept, Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.unixMs,
+    ]
+    enteredMs = Time.unixMs()
+    match fetchedAnswered(clocked(state, enteredMs), key)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn begun(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun, Run.Wake>>
+    ? "begun, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.applyAll, Infra.Kv.get,
+        Time.unixMs,
+    ]
+    enteredMs = Time.unixMs()
+    match begunAnswered(clocked(state, enteredMs), final)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn connected(state: State, height: Int) -> Tuple<State, Result<Infra.Catching.Step, Run.Wake>>
+    ? "connected, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.BlockJobs.begin, Infra.BlockJobs.take, Infra.Kv.applyAll, Infra.Kv.get, Infra.Kv.getAll,
+        Process.stopRequested,
+        Tcp.accept, Tcp.close, Tcp.readNow, Tcp.writeNow,
+        Terminal.clear, Terminal.flush, Terminal.moveTo, Terminal.print, Terminal.readKey,
+        Time.now, Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match connectedAnswered(clocked(state, enteredMs), height)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn ended(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
+    ? "ended, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Time.unixMs,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match endedAnswered(clocked(state, enteredMs))
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
+
+fn settled(state: State, key: Int, ending: Infra.Catching.Ending) -> Tuple<State, Result<Infra.Catching.Settled, Run.Wake>>
+    ? "settled, with the turn clocked (#386): the gap since the last answer was the coordinator's poll, and the span to this answer is the turn's work."
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
+        Process.stopRequested,
+        Random.int,
+        Run.fail,
+        Tcp.beginConnect, Tcp.close, Tcp.closeDial, Tcp.closeListener, Tcp.dialled, Tcp.readNow, Tcp.writeNow,
+        Terminal.disableRawMode, Terminal.flush, Terminal.showCursor,
+        Time.unixMs,
+        Wait.poll,
+        Work.cancel,
+    ]
+    enteredMs = Time.unixMs()
+    match settledAnswered(clocked(state, enteredMs), key, ending)
+        (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn peers(state: State) -> List<Int>
     ? "The keys the loop seats one peer process for: every Peer with a"
@@ -91,7 +371,7 @@ fn failedIf(outcome: Result<Unit, String>) -> Unit
         Result.Ok(_) -> Unit
         Result.Err(why) -> Run.fail(why)
 
-fn started(state: State) -> Tuple<State, Result<Infra.Wire.Started, Run.Wake>>
+fn startedAnswered(state: State) -> Tuple<State, Result<Infra.Wire.Started, Run.Wake>>
     ? "The node opened from the command line, once."
     ! [
         Args.get,
@@ -144,7 +424,7 @@ fn failedStart(state: State, why: String) -> Tuple<State, Result<Infra.Wire.Star
     _failed = Run.fail(why)
     (State.update(state, over = true), Result.Ok(Infra.Wire.Started.Failed(why)))
 
-fn heard(state: State, key: Int) -> Tuple<State, Result<Infra.Wire.Heard, Run.Wake>>
+fn heardAnswered(state: State, key: Int) -> Tuple<State, Result<Infra.Wire.Heard, Run.Wake>>
     ? "This Peer's next whole Message, or a park on its socket until it says"
       "something, or until its greeting has run out of time."
     ! [
@@ -199,7 +479,7 @@ verify quietDeadline
     quietDeadline(80, 50) => Option.Some(30)
     quietDeadline(40, 50) => Option.Some(0)
 
-fn handled(state: State, key: Int, command: String, body: List<Int>) -> Tuple<State, Result<Bool, Run.Wake>>
+fn handledAnswered(state: State, key: Int, command: String, body: List<Int>) -> Tuple<State, Result<Bool, Run.Wake>>
     ? "One Message acted on. The answer the walk is waiting for goes to the"
       "walk, a Block goes to the download while one is flying, and every"
       "other Message is Infra.Follow's dispatch, as it always was."
@@ -275,7 +555,7 @@ fn stillSeated(node: Following, key: Int) -> Bool
     ? "Whether this Peer still has a socket after what was done."
     List.contains(Infra.Follow.seatedKeys(node), key)
 
-fn ticked(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+fn tickedAnswered(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
     ? "The loop's own clock. It is never answered while the node is open:"
       "each ask does the second's work and parks until the next second, or"
       "until the dial or a Board Reader is ready. A stop asked for, or the"
@@ -342,7 +622,7 @@ fn socketItems(sockets: List<Tcp.Socket>, acc: List<Wait.Item>) -> List<Wait.Ite
 verify socketItems
     socketItems([], []) => []
 
-fn accepted(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+fn acceptedAnswered(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
     ? "A caller taken off the listener, then a park on the listener until"
       "the next one is queued, so a caller is admitted as it arrives and"
       "not on the clock's next second. The park also ends after a second,"
@@ -392,7 +672,7 @@ fn listenerWake(listener: Tcp.Socket, failed: Bool) -> Run.Wake
         true -> Run.Wake.Until([], Option.Some(Infra.Follow.tickMs()))
         false -> Run.Wake.Until([Wait.Item.Socket(listener)], Option.Some(Infra.Follow.tickMs()))
 
-fn drained(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
+fn drainedAnswered(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
     ? "The outboxes moved onto their sockets and the Blocks Peers asked for"
       "read onto the wires with room, then a park: on the sockets still owed"
       "bytes, on the next turn while Blocks are owed with room for them, or"
@@ -453,7 +733,7 @@ fn sendingItems(owed: List<Tcp.Connection>, acc: List<Wait.Item>) -> List<Wait.I
 verify sendingItems
     sendingItems([], []) => []
 
-fn due(state: State) -> Tuple<State, Result<Infra.Catching.Due, Run.Wake>>
+fn dueAnswered(state: State) -> Tuple<State, Result<Infra.Catching.Due, Run.Wake>>
     ? "The next Catch-up's Peer, once one is due; until then a park that"
       "comes back when the owner moves or a second has passed, because a"
       "held claim falls due on the clock."
@@ -510,7 +790,7 @@ fn takenWith(state: State, node: Following, taken: Result<Walked, String>) -> Tu
         Result.Err(why) -> (closing(state, node, Result.Err(why)), Result.Ok(Infra.Catching.Due.Over))
         Result.Ok(walked) -> (fromWalked(state, walked), Result.Ok(Infra.Catching.Due.From(walked.catching.key)))
 
-fn headers(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Batch, Run.Wake>>
+fn headersAnswered(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Batch, Run.Wake>>
     ? "One batch of Headers: the getheaders sent, then a park until the"
       "Peer's own process hands its answer over, it goes, or its deadline"
       "passes, then the answer placed."
@@ -589,7 +869,7 @@ fn awaitingHeaders(state: State, node: Following, catching: Catching, nowMs: Int
 verify awaitingHeaders
     awaitingHeaders(fresh(), Infra.Follow.sampleFollowing(), Infra.Follow.sampleCatching(), 10) => (fresh(), Result.Ok(Infra.Catching.Batch.Failed("peer 1 closed the connection before answering")))
 
-fn aligned(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Aligned, Run.Wake>>
+fn alignedAnswered(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Aligned, Run.Wake>>
     ? "The Set back to the fork and the bodies planned, or the chain's refusal."
     ! [
         Console.print,
@@ -615,7 +895,7 @@ fn alignedWith(state: State, outcome: Result<Aligning, String>) -> Tuple<State, 
 verify alignedWith
     alignedWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Aligned.Stopped("no")))
 
-fn fetched(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Fetch, Run.Wake>>
+fn fetchedAnswered(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Fetch, Run.Wake>>
     ? "One turn of the download, then a park until a Block lands or a tick"
       "passes; answered when the slice runs out or the bodies are all here."
     ! [
@@ -647,7 +927,7 @@ fn flownWith(state: State, flown: Result<Flown, String>) -> Tuple<State, Result<
 verify flownWith
     flownWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Fetch.Failed("no")))
 
-fn begun(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun, Run.Wake>>
+fn begunAnswered(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun, Run.Wake>>
     ? "A chunk of the Set begun at the Height after the fork."
     ! [
         Console.print,
@@ -673,7 +953,7 @@ fn begunWith(state: State, outcome: Result<Chunking, String>) -> Tuple<State, Re
 verify begunWith
     begunWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Begun.Refused("no")))
 
-fn connected(state: State, height: Int) -> Tuple<State, Result<Infra.Catching.Step, Run.Wake>>
+fn connectedAnswered(state: State, height: Int) -> Tuple<State, Result<Infra.Catching.Step, Run.Wake>>
     ? "The Block at this Height through its decode and connection jobs:"
       "each job is begun here and the request parks on it, and the next ask"
       "takes it. The decode of the next Height runs beside this one's"
@@ -736,7 +1016,7 @@ fn steppingWith(state: State, stepped: Result<Stepping, String>) -> Tuple<State,
 verify steppingWith
     steppingWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Step.Refused("no")))
 
-fn ended(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
+fn endedAnswered(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
     ? "The chunk's window written; Built says whether the Set is at the tip."
     ! [
         Console.print,
@@ -764,7 +1044,7 @@ fn endedWith(state: State, outcome: Result<Chunked, String>) -> Tuple<State, Res
 verify endedWith
     endedWith(fresh(), Result.Err("no")) => (fresh(), Result.Ok(Infra.Catching.Chunk.Refused("no")))
 
-fn settled(state: State, key: Int, ending: Infra.Catching.Ending) -> Tuple<State, Result<Infra.Catching.Settled, Run.Wake>>
+fn settledAnswered(state: State, key: Int, ending: Infra.Catching.Ending) -> Tuple<State, Result<Infra.Catching.Settled, Run.Wake>>
     ? "What the Catch-up came to. Moved: the lines said and the gate told."
       "Faulted: the Peer dropped and the next one asked, or nobody left."
       "Stopped: the chain cannot be followed past here, and the run ends"

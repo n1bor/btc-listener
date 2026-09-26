@@ -1805,7 +1805,18 @@ already on the Overview or recoverable from the store afterwards; the split
 between waiting for a Peer and working on what it sent exists only while it is
 happening. The Peers `Wait.poll` is bracketed by two clock readings, so
 `polledMs` is wall clock inside that poll and `workedMs` is the rest of the
-window. This does not aggregate the separate Work-owner and dashboard waits.
+window. Under `follow` the poll is the generated coordinator's, one a turn
+over every process's park, and `Infra.Peers` never sees it — so `App.Owner`
+clocks every question it is asked: the gap since its last answer is the
+coordinator's poll and goes to the Pool as `polledMs`, and the span to this
+answer is the turn's work, which over thirty seconds is also the `watchdog
+slow turn` line (#386; between #361 and #386 `polledMs` read 0 and `workedMs`
+read the whole window, and the slow-turn line had no caller). The standalone
+commands still poll inside `Infra.Peers` and were never affected. A `follow`
+left alone for 150 s on regtest writes rows like
+`1790444250325 listen 192 192 0 0 59990 16 1 0 0 0`: sixty seconds of poll,
+sixteen milliseconds of work. This does not aggregate
+the separate Work-owner and dashboard waits.
 
 Read the shape of a regtest run and you can see what it is telling you:
 

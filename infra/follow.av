@@ -22,7 +22,7 @@ module Follow
         "and then serves the chain to (Stage 8, on the listen and accept that"
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
-    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, sampleCatching]
+    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, pollReturned, turnWorked, sampleCatching]
     depends [Bytes, Tcp, Work, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.Catchup, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Target, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Pace, Infra.Screen, Infra.Store, Domain.Watchdog]
     effects [
         Console.error, Console.print,
@@ -2078,6 +2078,37 @@ fn firstAfterNone(state: Following, heldBefore: Int) -> Following
     match Bool.and(heldBefore == 0, List.len(Infra.Peers.peerKeys(state.pool)) > 0)
         false -> state
         true -> withGate(heardFrom(state, firstKey(state.pool), Time.unixMs()), Domain.Catchup.held(state.gate, firstKey(state.pool), ""))
+
+fn pollReturned(state: Following, waitedMs: Int, nowMs: Int) -> Following
+    ? "The coordinator's Wait.poll just returned and asked the owner something"
+      "(#386). Under follow the loop's waiting is the generated coordinator's,"
+      "one poll a turn over every process's park, and Infra.Peers never sees"
+      "it; so the owner measures it as the gap between its last answer and"
+      "this question, and hands it to the Pool here. That puts metrics.log's"
+      "polledMs and workedMs back to what their header says, and stamps the"
+      "instant the watchdog's slow-turn budget counts from."
+    withWatch(Following.update(state, pool = Infra.Peers.polledFor(state.pool, Int.max(waitedMs, 0))), Watching.update(state.watch, pollReturnedMs = nowMs))
+
+verify pollReturned
+    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 250, 1000).pool) => 250
+    pollReturned(sampleFollowing(), 250, 1000).watch.pollReturnedMs => 1000
+    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 0 - 5, 1000).pool) => 0
+
+fn turnWorked(state: Following, enteredMs: Int, leftMs: Int) -> Result<Following, String>
+    ? "The owner is about to answer; this is how long the turn worked (#386)."
+      "Over the budget it is the slow-turn line (#359, #370), in debug.log and"
+      "on the plain console, naming what the turn was handling -- the line"
+      "that has had no caller since #361 put follow on the process loop."
+    ! [Console.error, Disk.appendText, Time.unixMs]
+    match Domain.Watchdog.overrun(enteredMs, leftMs, Domain.Watchdog.turnBudgetMs())
+        false -> Result.Ok(state)
+        true -> slowTurnSaid(state, Domain.Watchdog.slowTurn(state.watch.handling, leftMs - enteredMs))
+
+fn slowTurnSaid(state: Following, line: String) -> Result<Following, String>
+    ? "The slow-turn line, written and said."
+    ! [Console.error, Disk.appendText, Time.unixMs]
+    _said = saidErrorIfPlain(state.watch, "watchdog {line}")
+    Result.Ok(withLog(state, Infra.Metrics.noting(state.log, "watchdog", line)?))
 
 fn heardFrom(state: Following, key: Int, nowMs: Int) -> Following
     ? "This Peer just spoke; remember when, for it and for the pool."

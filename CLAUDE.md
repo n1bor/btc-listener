@@ -128,6 +128,13 @@ build` took five minutes to say the same.
   builds clean. It cost this project four renames in a day, so it is left here
   struck through rather than deleted: if a binding ever goes ambiguous again,
   this is what it was and Cargo is still the only gate that sees it.
+- **Two shapes the Rust backend cannot compile at pin `c4b08179`**, both quiet
+  under `check`, `verify` and a plain `compile`: a match arm `[_, .._]` with
+  both positions wild (jasisz/aver#1450 — write `[head, ..tail]` and leave the
+  binders unused), and a non-`Copy` value such as an `Int` parameter read twice
+  in one expression, inside a call and again in a record update around it
+  (jasisz/aver#1454 — bind the call's result first). Each cost a `cargo check`
+  round in #358 and #386; retire both notes when the pin passes their fixes.
 - A type named after a builtin is silently resolved to the builtin
   (`Connection` against `Tcp.Connection`, #25). And **`aver check` passing is
   not proof a module compiles** — only reachability from `main.av` is, so
