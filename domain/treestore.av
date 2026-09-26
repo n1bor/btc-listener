@@ -17,7 +17,7 @@ module TreeStore
         "Header already contains it. That is a deliberate 64 characters per"
         "Block: it lets a walk up the tree read a Placement without decoding a"
         "Header, and this keyspace is walked once per arriving Header."
-    exposes [Held, headerKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
+    exposes [sampleHeaderHex, sampleParentId, Held, headerKey, bestTipKey, encodeHeld, decodeHeld, heldFor]
     depends [Bytes, Domain.ByteField, Domain.HeaderTree, Domain.Index, Domain.IndexKeys]
     effects []
 
@@ -37,7 +37,7 @@ fn encodeHeld(held: Held) -> Result<Bytes, String>
     Bytes.fromList(List.concat(Domain.ByteField.number(held.placement.height, Domain.Index.heightWidth()), List.concat(Domain.ByteField.prefixed(workBytes(held.placement.work))?, List.concat(Domain.ByteField.prefixed(Bytes.octets(Bytes.fromHex(held.placement.parentId)?))?, Bytes.octets(Bytes.fromHex(held.headerHex)?)))))
 
 verify encodeHeld
-    List.len(Bytes.octets(encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))?)) => 4 + 1 + 5 + 1 + 32 + 2
+    List.len(Bytes.octets(encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))?)) => 4 + 1 + 5 + 1 + 32 + 80
 
 fn workBytes(work: Int) -> List<Int>
     ? "A quantity of work, in as few bytes as hold it."
@@ -67,9 +67,48 @@ fn decodeHeld(blockId: String, stored: Bytes) -> Result<Held, String>
     heldIn(blockId, Bytes.octets(stored))
 
 verify decodeHeld
-    decodeHeld("aa", encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))?) => Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))
-    decodeHeld("bb", encodeHeld(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("aa", 486604799), "bb", 486604799), "02"))?) => Result.Ok(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("aa", 486604799), "bb", 486604799), "02"))
     decodeHeld("aa", Domain.Index.emptyBytes()) => Result.Err("a Header record is at least 4 bytes, got 0")
+    decodeHeld("aa", encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))?) => Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))
+    decodeHeld("bb", encodeHeld(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt(sampleParentId(), 486604799), "bb", 486604799), sampleHeaderHex()))?) => Result.Ok(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt(sampleParentId(), 486604799), "bb", 486604799), sampleHeaderHex()))
+    decodeHeld("aa", encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))?) => Result.Err("a Header record ends in a 32-byte parent and an 80-byte Header, got 32 and 2")
+    decodeHeld("bb", encodeHeld(heldFor(Domain.HeaderTree.childOf(Domain.HeaderTree.rootedAt("aa", 486604799), "bb", 486604799), sampleHeaderHex()))?) => Result.Err("a Header record ends in a 32-byte parent and an 80-byte Header, got 1 and 80")
+
+verify decodeHeld law readsWhatEncodeHeldWrote
+    given height: Int = [0, 1, 4000, 4294967295]
+    given work: Int = [0, 1, 4295032833, 1000000000000000000000000000000000000000000000000000000000000000000000000000]
+    when Bool.and(Bool.and(height >= 0, height <= 4294967295), Bool.and(work >= 0, work < 340282366920938463463374607431768211456))
+    decodeHeld("aa", encodeHeld(heldFor(Placement(blockId = "aa", parentId = sampleParentId(), height = height, work = work), sampleHeaderHex()))?) => Result.Ok(heldFor(Placement(blockId = "aa", parentId = sampleParentId(), height = height, work = work), sampleHeaderHex()))
+
+fn sampleRecord() -> Result<Bytes, String>
+    ? "A whole record: a 4-byte Height, a length byte and 5 bytes of work, a length byte and the parent, the Header."
+    encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))
+
+verify sampleRecord
+    List.len(Bytes.octets(sampleRecord()?)) => 123
+
+fn decodes(read: Result<Held, String>) -> Bool
+    ? "Whether the record was accepted."
+    match read
+        Result.Ok(_) -> true
+        Result.Err(_) -> false
+
+verify decodes
+    decodes(Result.Err("no")) => false
+    decodes(Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))) => true
+
+fn sampleHeaderHex() -> String
+    ? "Mainnet's genesis Header, eighty real bytes for the cases here and in Infra.Headers."
+    "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
+
+verify sampleHeaderHex
+    String.len(sampleHeaderHex()) => 160
+
+fn sampleParentId() -> String
+    ? "Mainnet's genesis Block Id, a real parent for the cases here and in Infra.Headers."
+    "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+verify sampleParentId
+    String.len(sampleParentId()) => 64
 
 fn heldIn(blockId: String, octets: List<Int>) -> Result<Held, String>
     ? "A Height, then a length-prefixed work and parent, then the Header."
@@ -77,20 +116,31 @@ fn heldIn(blockId: String, octets: List<Int>) -> Result<Held, String>
         true -> Result.Err("a Header record is at least {Domain.Index.heightWidth()} bytes, got {List.len(octets)}")
         false -> heldFrom(blockId, octets)
 
+verify heldIn law refusesAnythingCutShort
+    given cut: Int = [0, 3, 4, 5, 10, 42, 43, 100, 122, 123]
+    when Bool.and(cut >= 0, cut <= 123)
+    decodes(heldIn("aa", List.take(Bytes.octets(sampleRecord()?), cut))) => cut == 123
+
 verify heldIn
     heldIn("aa", []) => Result.Err("a Header record is at least 4 bytes, got 0")
 
 fn heldFrom(blockId: String, octets: List<Int>) -> Result<Held, String>
-    ? "The four fields, in the order they were written."
+    ? "The four fields, in the order they were written, and only that shape."
+      "A record cut short used to decode (#355): the parent came out shorter"
+      "than a Block Id and the Header empty, and nothing downstream asked."
+      "A parent is thirty-two bytes and a Header eighty, always, so anything"
+      "else is refused by its numbers."
     afterHeight = Domain.ByteField.after(octets, Domain.Index.heightWidth())
     work = Domain.ByteField.numberIn(Domain.ByteField.prefixedIn(afterHeight))
     afterWork = Domain.ByteField.afterPrefixed(afterHeight)
-    parent = Bytes.toHex(Bytes.fromList(Domain.ByteField.prefixedIn(afterWork))?)
-    header = Bytes.toHex(Bytes.fromList(Domain.ByteField.afterPrefixed(afterWork))?)
-    Result.Ok(heldFor(Placement(blockId = blockId, parentId = parent, height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), work = work), header))
+    parentOctets = Domain.ByteField.prefixedIn(afterWork)
+    headerOctets = Domain.ByteField.afterPrefixed(afterWork)
+    match Bool.and(List.len(parentOctets) == 32, List.len(headerOctets) == 80)
+        false -> Result.Err("a Header record ends in a 32-byte parent and an 80-byte Header, got {List.len(parentOctets)} and {List.len(headerOctets)}")
+        true -> Result.Ok(heldFor(Placement(blockId = blockId, parentId = Bytes.toHex(Bytes.fromList(parentOctets)?), height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), work = work), Bytes.toHex(Bytes.fromList(headerOctets)?)))
 
 verify heldFrom
-    heldFrom("aa", Bytes.octets(encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))?)) => Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), "0100"))
+    heldFrom("aa", Bytes.octets(encodeHeld(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))?)) => Result.Ok(heldFor(Domain.HeaderTree.rootedAt("aa", 486604799), sampleHeaderHex()))
 
 fn headerTag() -> Int
     ? "The byte that begins every Header record: ASCII 'k'."

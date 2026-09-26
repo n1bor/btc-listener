@@ -17,7 +17,7 @@ module UtxoStore
         "The value format is Domain.Index's, unchanged. An Output is an amount"
         "and a Script wherever it is written down, and having two spellings of"
         "the same thing would be two things to get wrong."
-    exposes [Unspent, Reached, unspentKey, keyAt, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
+    exposes [Unspent, Reached, sampleBlockId, unspentKey, keyAt, undoKey, undoWindowKey, reachedKey, encodeReached, decodeReached, encodeCoin, decodeCoin, encodeUndo, decodeUndo, unspentAt, keyOf, matured, maturity, neverSpendable]
     depends [Bytes, Domain.ByteField, Domain.Index, Domain.IndexKeys]
     effects []
 
@@ -217,11 +217,32 @@ fn encodeReached(reached: Reached) -> Result<Bytes, String>
       "being true the moment the chain changes its mind, and nothing on disk"
       "can tell that it has. Naming the Block makes it checkable, and it is"
       "also the only way back down: Undo Data is keyed by Block Id."
-    Bytes.fromList(List.concat(Domain.ByteField.number(reached.height, Domain.Index.heightWidth()), Bytes.octets(Bytes.fromHex(reached.blockId)?)))
+      "A Block Id is sixty-four hexadecimal characters and nothing shorter is"
+      "written (#355): a record with less behind the Height than a Block Id"
+      "would read back as the bare Height this format exists to refuse."
+    match String.len(reached.blockId) == 64
+        false -> Result.Err("a Set standing names its Block by a 64-character Id, got {String.len(reached.blockId)} character(s)")
+        true -> Bytes.fromList(List.concat(Domain.ByteField.number(reached.height, Domain.Index.heightWidth()), Bytes.octets(Bytes.fromHex(reached.blockId)?)))
 
 verify encodeReached
-    Bytes.octets(encodeReached(Reached(height = 0, blockId = "aa"))?) => [0, 0, 0, 0, 170]
-    Bytes.octets(encodeReached(Reached(height = 4000, blockId = ""))?) => Domain.ByteField.number(4000, 4)
+    Bytes.octets(encodeReached(Reached(height = 0, blockId = sampleBlockId()))?) => List.concat([0, 0, 0, 0], Bytes.octets(Bytes.fromHex(sampleBlockId())?))
+    List.len(Bytes.octets(encodeReached(Reached(height = 4000, blockId = sampleBlockId()))?)) => 36
+    encodeReached(Reached(height = 4000, blockId = "")) => Result.Err("a Set standing names its Block by a 64-character Id, got 0 character(s)")
+    encodeReached(Reached(height = 4000, blockId = "aa")) => Result.Err("a Set standing names its Block by a 64-character Id, got 2 character(s)")
+
+fn sampleBlockId() -> String
+    ? "Mainnet's genesis Block Id, a real sixty-four characters for the cases here and elsewhere."
+    "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+verify sampleBlockId
+    String.len(sampleBlockId()) => 64
+
+fn standingWidth() -> Int
+    ? "The one width a Set standing has: the Height, then a 32-byte Block Id."
+    Domain.Index.heightWidth() + 32
+
+verify standingWidth
+    standingWidth() => 36
 
 fn decodeReached(stored: Bytes) -> Result<Reached, String>
     ? "Read it back."
@@ -232,19 +253,90 @@ fn decodeReached(stored: Bytes) -> Result<Reached, String>
     reachedIn(Bytes.octets(stored))
 
 verify decodeReached
-    decodeReached(encodeReached(Reached(height = 0, blockId = "aa"))?) => Result.Ok(Reached(height = 0, blockId = "aa"))
-    decodeReached(encodeReached(Reached(height = 4000, blockId = "bb"))?) => Result.Ok(Reached(height = 4000, blockId = "bb"))
-    decodeReached(Domain.Index.emptyBytes()) => Result.Err("a Set standing is at least 4 bytes, got 0")
+    decodeReached(encodeReached(Reached(height = 0, blockId = sampleBlockId()))?) => Result.Ok(Reached(height = 0, blockId = sampleBlockId()))
+    decodeReached(encodeReached(Reached(height = 4000, blockId = sampleBlockId()))?) => Result.Ok(Reached(height = 4000, blockId = sampleBlockId()))
+    decodeReached(Domain.Index.emptyBytes()) => Result.Err("a Set standing is exactly 36 bytes, a 4-byte Height and a 32-byte Block Id, got 0")
+    decodeReached(Bytes.fromList([0, 0, 15, 160])) => Result.Err("a Set standing is exactly 36 bytes, a 4-byte Height and a 32-byte Block Id, got 4")
+
+verify decodeReached law readsWhatEncodeReachedWrote
+    given height: Int = [0, 4000, 4294967295]
+    given blockId: String = [sampleBlockId(), "000000000000000000000000000000000000000000000000000000000000ffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]
+    when Bool.and(Bool.and(height >= 0, height <= 4294967295), isBlockIdText(blockId))
+    decodeReached(encodeReached(Reached(height = height, blockId = blockId))?) => Result.Ok(Reached(height = height, blockId = blockId))
+
+fn isBlockIdText(text: String) -> Bool
+    ? "Sixty-four lower-case hexadecimal characters."
+    Bool.and(String.len(text) == 64, hexOnly(Bytes.octets(String.toUtf8(text))))
+
+verify isBlockIdText
+    isBlockIdText(sampleBlockId()) => true
+    isBlockIdText("") => false
+    isBlockIdText("zz") => false
+
+fn hexOnly(octets: List<Int>) -> Bool
+    ? "Every byte is 0-9 or a-f."
+    match octets
+        [] -> true
+        [head, ..tail] -> Bool.and(Bool.or(Bool.and(head >= 48, head <= 57), Bool.and(head >= 97, head <= 102)), hexOnly(tail))
+
+verify hexOnly
+    hexOnly([]) => true
+    hexOnly([48, 57, 97, 102]) => true
+    hexOnly([48, 122]) => false
+    hexOnly([65]) => false
 
 fn reachedIn(octets: List<Int>) -> Result<Reached, String>
-    ? "A Height, then the Block Id that follows it."
-    match List.len(octets) < Domain.Index.heightWidth()
-        true -> Result.Err("a Set standing is at least {Domain.Index.heightWidth()} bytes, got {List.len(octets)}")
-        false -> Result.Ok(Reached(height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), blockId = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, Domain.Index.heightWidth()))?)))
+    ? "A Height, then the Block Id that follows it, and nothing else."
+      "Exactly one shape (#355). This used to refuse fewer than four bytes"
+      "and take anything from four up, so four bytes and nothing behind them"
+      "read as a Height with an empty Block Id -- the bare Height the format"
+      "exists to refuse, because a Height alone cannot say whether h: was"
+      "re-pointed underneath it."
+    match List.len(octets) == standingWidth()
+        false -> Result.Err("a Set standing is exactly {standingWidth()} bytes, a {Domain.Index.heightWidth()}-byte Height and a 32-byte Block Id, got {List.len(octets)}")
+        true -> Result.Ok(Reached(height = Domain.ByteField.numberIn(Domain.ByteField.at(octets, 0, Domain.Index.heightWidth())), blockId = Bytes.toHex(Bytes.fromList(Domain.ByteField.after(octets, Domain.Index.heightWidth()))?)))
 
 verify reachedIn
-    reachedIn([]) => Result.Err("a Set standing is at least 4 bytes, got 0")
-    reachedIn([0, 0, 0, 1, 170]) => Result.Ok(Reached(height = 1, blockId = "aa"))
+    reachedIn([]) => Result.Err("a Set standing is exactly 36 bytes, a 4-byte Height and a 32-byte Block Id, got 0")
+    reachedIn([0, 0, 0, 1, 170]) => Result.Err("a Set standing is exactly 36 bytes, a 4-byte Height and a 32-byte Block Id, got 5")
+    reachedIn(List.concat([0, 0, 0, 1], Bytes.octets(Bytes.fromHex(sampleBlockId())?))) => Result.Ok(Reached(height = 1, blockId = sampleBlockId()))
+
+fn refusesAnythingButOneShape(count: Int) -> Bool
+    ? "A record of this many zero bytes decodes exactly when it is 36 long."
+      "Stated as a law over the count it landed on sorry (#355): the prover"
+      "does not see through zeros' recursion to the length, so the eight"
+      "counts either side of the one shape are cases."
+    decodes(reachedIn(zeros(count, []))) == (count == standingWidth())
+
+verify refusesAnythingButOneShape
+    refusesAnythingButOneShape(0) => true
+    refusesAnythingButOneShape(3) => true
+    refusesAnythingButOneShape(4) => true
+    refusesAnythingButOneShape(5) => true
+    refusesAnythingButOneShape(35) => true
+    refusesAnythingButOneShape(36) => true
+    refusesAnythingButOneShape(37) => true
+    refusesAnythingButOneShape(100) => true
+
+fn decodes(read: Result<Reached, String>) -> Bool
+    ? "Whether the record was accepted."
+    match read
+        Result.Ok(_) -> true
+        Result.Err(_) -> false
+
+verify decodes
+    decodes(Result.Ok(Reached(height = 0, blockId = ""))) => true
+    decodes(Result.Err("no")) => false
+
+fn zeros(count: Int, acc: List<Int>) -> List<Int>
+    ? "That many zero bytes."
+    match count <= 0
+        true -> acc
+        false -> zeros(count - 1, List.prepend(0, acc))
+
+verify zeros
+    zeros(0, []) => []
+    zeros(3, []) => [0, 0, 0]
 
 fn unspentTag() -> Int
     ? "The byte that begins every Set entry: ASCII 'u'."

@@ -2238,6 +2238,60 @@ only while that Peer has less than 4 MiB waiting, which is a Block's worth of
 room short of the limit, so what this node puts on a wire can no longer be what
 fills it.
 
+### A Set standing that is only a Height
+
+[#355](https://github.com/n1bor/btc-listener/issues/355). `meta:setTo` is a
+Height and the Block Id the Set stands on, and CLAUDE.md has always said a
+record holding a bare Height is refused — but the decoder took anything from
+four bytes up, so four bytes and nothing behind them read as a Height with an
+empty Block Id, and a `k:` record cut short read as a Placement with a short
+parent and an empty Header. Both decoders now take exactly one shape. Core
+cannot write our Index and the node never writes a short record itself, so
+a small RocksDB example does it: `providers/kv/examples/cut_record.rs` keeps
+the first N bytes of one record and prints the whole value first, so it can
+be put back. **The node must be stopped**: RocksDB's lock is exclusive.
+
+```bash
+cargo build --release --manifest-path providers/kv/Cargo.toml --example cut_record
+CUT=providers/kv/target/release/examples/cut_record
+$CUT $D/kv msetTo 4                       # the key is the 'm' tag then the name
+timeout 60 $BIN regtest follow 127.0.0.1:18454 $D
+$BIN regtest utxo $D 176
+```
+
+The cut prints the record it found and what it left:
+
+```
+msetTo: was 36 byte(s): 000000b031ec72273b862695d48790dbe702390d4bd6bbe43fc9c1cc16cc7164e6513635
+msetTo: cut to 4 byte(s)
+```
+
+and both commands must stop on it **by name, before standing on anything**,
+exit 1:
+
+```
+error: a Set standing is exactly 36 bytes, a 4-byte Height and a 32-byte Block Id, got 4
+```
+
+Before this change `follow` read the four bytes as Height 176 on Block `""`
+and carried on. Put the record back with the hex the cut printed, and the
+node is where it was:
+
+```bash
+$CUT $D/kv msetTo put:000000b031ec72273b862695d48790dbe702390d4bd6bbe43fc9c1cc16cc7164e6513635
+timeout 60 $BIN regtest follow 127.0.0.1:18454 $D
+```
+
+```
+following at Height 176: 0 connected, 0 disconnected, set +0 -0
+```
+
+A `k:` record is refused the same way (`a Header record ends in a 32-byte
+parent and an 80-byte Header, got 32 and 2`); cutting one is the same
+command with `k` followed by the 32 raw bytes of a Block Id, which the shell
+does not spell easily, so that path is the verify cases and the law in
+`domain/treestore.av`.
+
 ## A Peer that lies
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad

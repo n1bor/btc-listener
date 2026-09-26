@@ -504,3 +504,35 @@ preserves), landed on `sorry` as a law over every SINGLE type — the digest is
 opaque to the prover past the branch that returns it — and is pinned by
 seven cases in `verify legacy` instead: Inputs one and two under types 3, 35,
 131, 163 and `0xffffffe3`, and the two negatives (Input zero, and type 1).
+## The on-disk records have one shape each (n1bor/btc-listener#355)
+
+Four laws over the two decoders that used to take a record shorter than
+what the encoder writes. `Domain.UtxoStore.reachedIn` accepted anything from
+four bytes up, so a `meta:setTo` of four bytes read as a Height with an empty
+Block Id — the bare Height CLAUDE.md says is refused; `Domain.TreeStore.heldIn`
+took a `k:` record cut anywhere past its Height and handed back a short parent
+and an empty Header. Both now refuse by their numbers, `encodeReached`
+refuses an Id that is not sixty-four characters, and `domain/laws.av` gathers
+`Domain.TreeStore` so the proof job sees these too. Measured at pin
+`c4b08179` with the leaf at eleven modules: **62 universal, 5 bounded, 0
+open, 95 declined** — the three `when`-guarded laws below are the bounded
+ones added; `--gate` reports them as new and no regression, and the baseline
+is regenerated with exactly those three.
+
+| law | pins | tier |
+|---|---|---|
+| `UtxoStore.decodeReached.readsWhatEncodeReachedWrote` | `decode(encode(Reached(h, id))) == Ok(Reached(h, id))` for Heights `0`, `4000`, `2^32 - 1` and three real Ids; `when` a 32-bit Height and a 64-hex Id | bounded (`when`) |
+| `TreeStore.decodeHeld.readsWhatEncodeHeldWrote` | `decode(encode(held)) == Ok(held)` over Heights and Chain Work up to 2^256, with a real parent and Header | bounded (`when`) |
+| `TreeStore.heldIn.refusesAnythingCutShort` | the 123-byte sample record cut to `n` bytes decodes exactly when `n == 123` | bounded (`when`) |
+
+The fourth, that a Set standing of `n` zero bytes decodes exactly when
+`n == 36`, landed on `sorry` as a law over the count — the prover does not
+see through the zero-filling recursion to a length — and is eight cases in
+`verify refusesAnythingButOneShape` instead, either side of the one shape.
+
+`Domain.IndexKeys.idBytes` is left as it was, on purpose. It builds keys
+from Ids the program has computed itself — a Header's hash, a Transaction's
+— never from an Id read off the disk, and the 117 verify cases across ten
+modules that build a key from `"aa"` are the house's fixture style; a strict
+`idBytes` would rewrite them to close no path a record can take. The two
+decoders above are the ones a corrupted or truncated directory reaches.

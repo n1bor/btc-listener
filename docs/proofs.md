@@ -45,11 +45,12 @@ and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
 it with the same flags against `proof/laws.declined` and
 `proof/laws.manifest.json`. A law added to a module the leaf does not yet
 name is added to its `depends` in the same PR. Measured at pin `c4b08179`
-with `Domain.Connect` and `Domain.Disconnect` in the leaf (#354): **62
-universal, 2 bounded, 0 open, 95 declined** (the bounded two are
-`Segment.nameOf.sortsWithSegment`, over `String` order, and
+with `Domain.Connect` and `Domain.Disconnect` (#354) and `Domain.TreeStore`
+(#355) in the leaf: **62 universal, 5 bounded, 0 open, 95 declined** (the
+bounded five are `Segment.nameOf.sortsWithSegment`, over `String` order,
 `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
-[]`; the declined count rose from 66 with those two modules, whose cones
+[]`, and the three on-disk-record round trips of #355, under `when` on the
+Height; the declined count rose from 66 with the #354 modules, whose cones
 bring the Block walk's mutual recursion and the Transaction decoder — the
 reason is written up in `docs/script-laws.md` under #354. The pin move from
 `600b3551` promoted two `when`-guarded laws to universal, which the gate at

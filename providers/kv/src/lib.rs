@@ -93,10 +93,14 @@ fn cache_bytes() -> Result<usize, String> {
 fn parsed_cache_mb(raw: &str) -> Result<usize, String> {
     let said = raw.trim();
     match said.parse::<usize>() {
-        Ok(mb) if mb > 0 => mb
-            .checked_mul(1 << 20)
-            .ok_or_else(|| format!("{CACHE_MB_VAR} is '{said}', which is more megabytes than this machine can address")),
-        _ => Err(format!("{CACHE_MB_VAR} must be a whole number of megabytes above zero, not '{said}'")),
+        Ok(mb) if mb > 0 => mb.checked_mul(1 << 20).ok_or_else(|| {
+            format!(
+                "{CACHE_MB_VAR} is '{said}', which is more megabytes than this machine can address"
+            )
+        }),
+        _ => Err(format!(
+            "{CACHE_MB_VAR} must be a whole number of megabytes above zero, not '{said}'"
+        )),
     }
 }
 
@@ -197,7 +201,10 @@ fn durable() -> WriteOptions {
 
 fn open_in<'a>(value: &'a ProviderValue, what: &str) -> Result<&'a Open, ProviderFault> {
     let ProviderValue::Resource(resource) = value else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} is not a Handle")));
+        return Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not a Handle"),
+        ));
     };
     resource
         .downcast_ref::<Open>()
@@ -209,7 +216,10 @@ struct Kv;
 fn string_in(value: &ProviderValue, what: &str) -> Result<String, ProviderFault> {
     match value {
         ProviderValue::String(s) => Ok(s.clone()),
-        _ => Err(ProviderFault::new("bad_shape", format!("{what} is not a String"))),
+        _ => Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not a String"),
+        )),
     }
 }
 
@@ -220,7 +230,10 @@ fn string_in(value: &ProviderValue, what: &str) -> Result<String, ProviderFault>
 fn bytes_in(value: &ProviderValue, what: &str) -> Result<Vec<u8>, ProviderFault> {
     match value {
         ProviderValue::Bytes(bytes) => Ok(bytes.clone()),
-        _ => Err(ProviderFault::new("bad_shape", format!("{what} is not Bytes"))),
+        _ => Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not Bytes"),
+        )),
     }
 }
 
@@ -233,15 +246,24 @@ fn shown(key: &[u8]) -> String {
 /// The pairs of a `List<Tuple<Bytes, Bytes>>`.
 fn pairs_in(value: &ProviderValue, what: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ProviderFault> {
     let ProviderValue::List(items) = value else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} is not a List")));
+        return Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not a List"),
+        ));
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let ProviderValue::Tuple(parts) = item else {
-            return Err(ProviderFault::new("bad_shape", format!("{what} holds a non-Tuple")));
+            return Err(ProviderFault::new(
+                "bad_shape",
+                format!("{what} holds a non-Tuple"),
+            ));
         };
         let [key, value] = parts.as_slice() else {
-            return Err(ProviderFault::new("bad_shape", format!("{what} holds a Tuple that is not a pair")));
+            return Err(ProviderFault::new(
+                "bad_shape",
+                format!("{what} holds a Tuple that is not a pair"),
+            ));
         };
         out.push((bytes_in(key, "key")?, bytes_in(value, "value")?));
     }
@@ -250,7 +272,10 @@ fn pairs_in(value: &ProviderValue, what: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>
 
 fn keys_in(value: &ProviderValue, what: &str) -> Result<Vec<Vec<u8>>, ProviderFault> {
     let ProviderValue::List(items) = value else {
-        return Err(ProviderFault::new("bad_shape", format!("{what} is not a List")));
+        return Err(ProviderFault::new(
+            "bad_shape",
+            format!("{what} is not a List"),
+        ));
     };
     items.iter().map(|item| bytes_in(item, "key")).collect()
 }
@@ -300,35 +325,50 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.get" => {
                 let [handle, key] = args else {
-                    return Err(ProviderFault::new("bad_arity", "get takes a Handle and Bytes"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "get takes a Handle and Bytes",
+                    ));
                 };
                 let key = bytes_in(key, "key")?;
                 let open = open_in(handle, "handle")?;
                 Ok(match open.0.get(&key) {
                     Err(why) => failed(&format!("cannot read '{}'", shown(&key)), why),
                     Ok(None) => ok(ProviderValue::OptionNone),
-                    Ok(Some(bytes)) => ok(ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes)))),
+                    Ok(Some(bytes)) => ok(ProviderValue::OptionSome(Box::new(
+                        ProviderValue::Bytes(bytes),
+                    ))),
                 })
             }
             "Infra.Kv.getAll" => {
                 let [handle, keys] = args else {
-                    return Err(ProviderFault::new("bad_arity", "getAll takes a Handle and a List"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "getAll takes a Handle and a List",
+                    ));
                 };
                 let keys = keys_in(keys, "keys")?;
                 let open = open_in(handle, "handle")?;
                 let mut found = Vec::with_capacity(keys.len());
                 for (key, answer) in keys.iter().zip(open.0.multi_get(&keys)) {
                     found.push(match answer {
-                        Err(why) => return Ok(failed(&format!("cannot read '{}'", shown(key)), why)),
+                        Err(why) => {
+                            return Ok(failed(&format!("cannot read '{}'", shown(key)), why))
+                        }
                         Ok(None) => ProviderValue::OptionNone,
-                        Ok(Some(bytes)) => ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes))),
+                        Ok(Some(bytes)) => {
+                            ProviderValue::OptionSome(Box::new(ProviderValue::Bytes(bytes)))
+                        }
                     });
                 }
                 Ok(ok(ProviderValue::List(found)))
             }
             "Infra.Kv.putAll" => {
                 let [handle, entries] = args else {
-                    return Err(ProviderFault::new("bad_arity", "putAll takes a Handle and a List"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "putAll takes a Handle and a List",
+                    ));
                 };
                 let entries = pairs_in(entries, "entries")?;
                 let open = open_in(handle, "handle")?;
@@ -343,7 +383,10 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.applyAll" => {
                 let [handle, puts, deletes] = args else {
-                    return Err(ProviderFault::new("bad_arity", "applyAll takes a Handle and two Lists"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "applyAll takes a Handle and two Lists",
+                    ));
                 };
                 let puts = pairs_in(puts, "puts")?;
                 let deletes = keys_in(deletes, "deletes")?;
@@ -362,7 +405,10 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.deleteAll" => {
                 let [handle, keys] = args else {
-                    return Err(ProviderFault::new("bad_arity", "deleteAll takes a Handle and a List"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "deleteAll takes a Handle and a List",
+                    ));
                 };
                 let keys = keys_in(keys, "keys")?;
                 let open = open_in(handle, "handle")?;
@@ -391,7 +437,10 @@ impl CapabilityProvider for Kv {
             }
             "Infra.Kv.prefixed" => {
                 let [handle, prefix] = args else {
-                    return Err(ProviderFault::new("bad_arity", "prefixed takes a Handle and Bytes"));
+                    return Err(ProviderFault::new(
+                        "bad_arity",
+                        "prefixed takes a Handle and Bytes",
+                    ));
                 };
                 let prefix = bytes_in(prefix, "prefix")?;
                 let open = open_in(handle, "handle")?;
@@ -537,7 +586,9 @@ mod tests {
                 .map(|item| match item {
                     ProviderValue::OptionNone => None,
                     ProviderValue::OptionSome(inner) => match *inner {
-                        ProviderValue::Bytes(value) => Some(String::from_utf8(value).expect("this test stores text")),
+                        ProviderValue::Bytes(value) => {
+                            Some(String::from_utf8(value).expect("this test stores text"))
+                        }
                         other => panic!("expected Bytes, got {other:?}"),
                     },
                     other => panic!("expected an Option, got {other:?}"),
@@ -638,11 +689,11 @@ mod tests {
         {
             let handle = opened(dir.path());
             put(&handle, &[("first", "1")]);
-            }
+        }
         {
             let handle = opened(dir.path());
             put(&handle, &[("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")]);
-            }
+        }
         let log = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -744,7 +795,10 @@ mod tests {
             other => panic!("expected Some, got {other:?}"),
         }
 
-        match okayed(call("prefixed", &[handle, ProviderValue::Bytes(vec![0xff])])) {
+        match okayed(call(
+            "prefixed",
+            &[handle, ProviderValue::Bytes(vec![0xff])],
+        )) {
             ProviderValue::List(items) => match items.as_slice() {
                 [ProviderValue::Tuple(parts)] => match parts.as_slice() {
                     [ProviderValue::Bytes(key), ProviderValue::Bytes(value)] => {
@@ -788,7 +842,10 @@ mod tests {
                 ProviderValue::Bytes(index.to_string().into_bytes()),
             ]));
         }
-        did(call("putAll", &[handle.clone(), ProviderValue::List(entries)]));
+        did(call(
+            "putAll",
+            &[handle.clone(), ProviderValue::List(entries)],
+        ));
 
         let mut prefix = vec![b'o'];
         prefix.extend_from_slice(&txid);
@@ -840,7 +897,9 @@ mod tests {
             contract_hash: CONTRACT_HASH.to_string(),
             model_hash: String::new(),
         };
-        let fault = Kv.invoke(&context, &[text("only one argument")]).unwrap_err();
+        let fault = Kv
+            .invoke(&context, &[text("only one argument")])
+            .unwrap_err();
         assert_eq!(fault.code, "bad_arity");
         let fault = Kv
             .invoke(&context, &[text("not a handle"), raw("b:aa")])
@@ -863,7 +922,10 @@ mod tests {
         let first = opened(dir.path());
         put(&first, &[("b:aa", "1")]);
         let why = erred(call("open", &[text(&dir.path().to_string_lossy())]));
-        assert!(why.starts_with("cannot open the database at "), "unexpected: {why}");
+        assert!(
+            why.starts_with("cannot open the database at "),
+            "unexpected: {why}"
+        );
         drop(first);
         let again = opened(dir.path());
         assert_eq!(got(&again, "b:aa"), Some("1".to_string()));
@@ -901,7 +963,10 @@ mod tests {
         let puts = ProviderValue::List(vec![ProviderValue::Tuple(vec![raw("u:cc"), raw("3")])]);
         let deletes = ProviderValue::List(vec![raw("u:aa"), raw("u:zz")]);
         did(call("applyAll", &[handle.clone(), puts, deletes]));
-        assert_eq!(gotAll(&handle, &["u:aa", "u:bb", "u:cc"]), vec![None, Some("2".to_string()), Some("3".to_string())]);
+        assert_eq!(
+            gotAll(&handle, &["u:aa", "u:bb", "u:cc"]),
+            vec![None, Some("2".to_string()), Some("3".to_string())]
+        );
     }
 
     #[test]
@@ -918,7 +983,9 @@ mod tests {
         for said in ["0", "-1", "512MB", "1.5", "", "  ", "lots"] {
             assert!(parsed_cache_mb(said).is_err(), "'{said}' should be refused");
         }
-        assert!(parsed_cache_mb("0").expect_err("zero is refused").contains(CACHE_MB_VAR));
+        assert!(parsed_cache_mb("0")
+            .expect_err("zero is refused")
+            .contains(CACHE_MB_VAR));
     }
 
     /// usize::MAX megabytes is more bytes than the machine can address, and the
@@ -958,14 +1025,26 @@ mod compaction_tests {
     /// taken against.
     #[test]
     fn absent_is_leveled() {
-        assert!(matches!(parsed_compaction("leveled"), Ok(DBCompactionStyle::Level)));
-        assert!(matches!(parsed_compaction("level"), Ok(DBCompactionStyle::Level)));
+        assert!(matches!(
+            parsed_compaction("leveled"),
+            Ok(DBCompactionStyle::Level)
+        ));
+        assert!(matches!(
+            parsed_compaction("level"),
+            Ok(DBCompactionStyle::Level)
+        ));
     }
 
     #[test]
     fn universal_is_understood() {
-        assert!(matches!(parsed_compaction("universal"), Ok(DBCompactionStyle::Universal)));
-        assert!(matches!(parsed_compaction("  universal  "), Ok(DBCompactionStyle::Universal)));
+        assert!(matches!(
+            parsed_compaction("universal"),
+            Ok(DBCompactionStyle::Universal)
+        ));
+        assert!(matches!(
+            parsed_compaction("  universal  "),
+            Ok(DBCompactionStyle::Universal)
+        ));
     }
 
     /// Refused, not guessed: a deployment that names a style and is given

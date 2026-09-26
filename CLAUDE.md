@@ -245,7 +245,10 @@ two backends — Memory (fixtures), Database (RocksDB in `kv/`, made on first
 open). The log backend and `migrate` are gone (#44); a directory holding an
 `index.log` and no `kv/` is refused. The Index is derived: `reindex` rebuilds
 every `b:` Location from the Segments (#93), which is the recovery path after a
-crash (#92, the rusty-leveldb era; RocksDB syncs every batch).
+crash (#92, the rusty-leveldb era; RocksDB syncs every batch). Every on-disk
+record has exactly one shape and its decoder refuses any other by its numbers
+(#355); `providers/kv/examples/cut_record.rs` is how the regtest document
+hands the node a short one, since nothing else can write the Index.
 Key prefixes: `b:` Block Id → Location, `h:` Height →
 Block Id, `t:` Transaction Id → site, `n:` Block Id → Height, `k:` Block Id →
 Header plus its Height and Chain Work, `o:<txid>:<index>` → Output (what lets a
