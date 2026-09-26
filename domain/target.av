@@ -72,6 +72,12 @@ verify ruleFor
     ruleFor(Network.Regtest, 2016) => Rule.Same
     ruleFor(Network.Regtest, 1) => Rule.MinOrLast
 
+verify ruleFor law windowsRepeatAndRegtestNeverRetargets
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 2015, 2016, 4032, 32256, 840000]
+    when height >= 0
+    Bool.and(ruleFor(network, height) == ruleFor(network, height + 2016), Bool.or(network != Network.Regtest, ruleFor(network, height) != Rule.Retarget)) => true
+
 fn atBoundary(network: Network) -> Rule
     ? "The rule at the first Height of a window."
     match network
@@ -118,6 +124,24 @@ verify compactOf
     compactOf(Domain.Block.targetOf(503543726)) => 503543726
     compactOf(Domain.Block.targetOf(545259519)) => 545259519
     compactOf(Domain.Block.targetOf(386075020)) => 386075020
+
+verify compactOf law truncatesAndIsIdempotent
+    given target: Int = [1, 255, 256, 65535, 65536, 8388607, 8388608, 16777215, 16777216, 4295032833, 211995196999759460994199096039995000850151983156297728, 26959535291011309493156476344723991336010898738574164086137773096960]
+    when Bool.and(target >= 1, target < 115792089237316195423570985008687907853269984665640564039457584007913129639936)
+    Bool.and(Domain.Block.targetOf(compactOf(target)) <= target, compactOf(Domain.Block.targetOf(compactOf(target))) == compactOf(target)) => true
+
+fn roundTripsTheLimit(network: Network) -> Bool
+    ? "compactOf(targetOf(limitBits(n))) == limitBits(n): Core's GetCompact(SetCompact(x)) == x"
+      "on the limit. Cases over the four Networks rather than a law: stated"
+      "as one, the export landed on sorry (#356), the byteLength countdown"
+      "over a 256-bit target being beyond the prover."
+    compactOf(Domain.Block.targetOf(limitBits(network))) == limitBits(network)
+
+verify roundTripsTheLimit
+    roundTripsTheLimit(Network.Mainnet) => true
+    roundTripsTheLimit(Network.Testnet) => true
+    roundTripsTheLimit(Network.Signet) => true
+    roundTripsTheLimit(Network.Regtest) => true
 
 fn byteLength(value: Int, acc: Int) -> Int
     ? "How many bytes a non-negative number occupies."
@@ -185,6 +209,45 @@ verify retargeted
     retargeted(Network.Signet, 503543726, 0, 10000000) => 503543726
     retargeted(Network.Mainnet, 486604799, 0, 1209600) => 486604799
 
+verify retargeted law clampsAndNeverExceedsTheLimit
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given parentBits: Int = [486604799, 453248203, 386021021, 503543726, 545259519]
+    given span: Int = [0 - 5, 1, 302399, 302400, 1209600, 4838400, 4838401, 99999999]
+    when canonical(parentBits)
+    retargetSpec(network, parentBits, span) => true
+
+fn canonical(bits: Int) -> Bool
+    ? "Four bytes that read back as themselves from the target they name."
+      "A match rather than Bool.and, so bits outside four bytes are never"
+      "unpacked: targetOf on an exponent of 2^39 is a power loop that long."
+    match Bool.and(bits >= 0, bits <= 4294967295)
+        false -> false
+        true -> compactOf(Domain.Block.targetOf(bits)) == bits
+
+verify canonical
+    canonical(486604799) => true
+    canonical(545259519) => true
+    canonical(494993407) => false
+    canonical(0 - 1) => false
+    canonical(4294967296) => false
+
+fn retargetSpec(network: Network, parentBits: Int, span: Int) -> Bool
+    ? "Core's retarget in three statements: the new target is at most four"
+      "times the old (the span clamped to [T/4, 4T]), never above the"
+      "Network's limit (bnNew > bnPowLimit -> bnPowLimit), and exactly the"
+      "old bits at exactly one window when the old target is under the limit."
+    old = Domain.Block.targetOf(parentBits)
+    limit = Domain.Block.targetOf(limitBits(network))
+    fresh = retargeted(network, parentBits, 0, span)
+    new = Domain.Block.targetOf(fresh)
+    Bool.and(Bool.and(new * 1209600 <= old * 4838400, new <= limit), Bool.or(span != 1209600, Bool.or(old > limit, fresh == parentBits)))
+
+verify retargetSpec
+    retargetSpec(Network.Mainnet, 486604799, 1209600) => true
+    retargetSpec(Network.Mainnet, 453248203, 99999999) => true
+    retargetSpec(Network.Mainnet, 453248203, 1) => true
+    retargetSpec(Network.Mainnet, 503543726, 1209600) => true
+
 fn clamped(span: Int) -> Int
     ? "A window's span held between a quarter and four times two weeks."
     Int.max(302400, Int.min(4838400, span))
@@ -216,6 +279,13 @@ fn minOrLast(network: Network, lineage: Lineage, time: Int) -> Int
 verify minOrLast
     minOrLast(Network.Testnet, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 2200) => 9
     minOrLast(Network.Testnet, Lineage(parentBits = 7, parentTime = 1000, firstTime = 0, lastBits = 9), 2201) => 486604799
+
+verify minOrLast law twentyMinutesIsStrict
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given parentTime: Int = [0, 1231006505, 1700000000]
+    given lastBits: Int = [486604799, 453248203]
+    when Bool.and(parentTime >= 0, parentTime <= 4294967295)
+    Bool.and(minOrLast(network, Lineage(parentBits = lastBits, parentTime = parentTime, firstTime = parentTime, lastBits = lastBits), parentTime + 1200) == lastBits, minOrLast(network, Lineage(parentBits = lastBits, parentTime = parentTime, firstTime = parentTime, lastBits = lastBits), parentTime + 1201) == limitBits(network)) => true
 
 fn proven(header: BlockHeader) -> Option<String>
     ? "Why this Header proves no work, if it does not."
@@ -295,6 +365,44 @@ verify refusal
     refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231000000) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 is 469665 s ahead of the clock")
     refusal(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231469665], 1231469665) => Option.Some("Header 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048 at 1231469665 is not after the median 1231469665 of the Headers before it")
 
+fn acceptsExactlyWhatTheRuleGives(header: BlockHeader, lineage: Lineage, recent: List<Int>, nowSecs: Int) -> Bool
+    ? "refusal is None exactly when placeable. Cases rather than a law: the"
+      "law form was the one claim in this cone the Lean build could not"
+      "compile at all (#356), the string interpolation in the refusal"
+      "reasons defeating the export."
+    accepted(refusal(Network.Mainnet, header, 1, lineage, recent, nowSecs)) == placeable(Network.Mainnet, header, 1, lineage, recent, nowSecs)
+
+verify acceptsExactlyWhatTheRuleGives
+    acceptsExactlyWhatTheRuleGives(sampleHeader(), Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => true
+    acceptsExactlyWhatTheRuleGives(sampleHeader(), Lineage(parentBits = 486604798, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => true
+    acceptsExactlyWhatTheRuleGives(sampleHeader(), Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231000000) => true
+    acceptsExactlyWhatTheRuleGives(sampleHeader(), Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231469665], 1231469665) => true
+    acceptsExactlyWhatTheRuleGives(sampleHeader(), Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [], 1231469666) => true
+    acceptsExactlyWhatTheRuleGives(BlockHeader(blockId = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 1231476866, bits = 486604799, nonce = 0), Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => true
+    acceptsExactlyWhatTheRuleGives(BlockHeader(blockId = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048", version = 1, previousBlockId = "", merkleRoot = "", timestamp = 1231469665, bits = 486604798, nonce = 0), Lineage(parentBits = 486604798, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => true
+
+fn accepted(answer: Option<String>) -> Bool
+    ? "No reason to refuse."
+    match answer
+        Option.None -> true
+        Option.Some(_) -> false
+
+verify accepted
+    accepted(Option.None) => true
+    accepted(Option.Some("no")) => false
+
+fn placeable(network: Network, header: BlockHeader, height: Int, lineage: Lineage, recent: List<Int>, nowSecs: Int) -> Bool
+    ? "The three things a Header with a parent has to satisfy, stated flat:"
+      "the bits its rule gives, not more than two hours ahead of the clock,"
+      "and strictly after the median of the Headers before it."
+    Bool.and(header.bits == expectedBits(network, ruleFor(network, height), lineage, header.timestamp), Bool.and(header.timestamp <= nowSecs + 7200, header.timestamp > medianOf(recent)))
+
+verify placeable
+    placeable(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => true
+    placeable(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604798, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231469665) => false
+    placeable(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231006505], 1231000000) => false
+    placeable(Network.Mainnet, sampleHeader(), 1, Lineage(parentBits = 486604799, parentTime = 1231006505, firstTime = 1231006505, lastBits = 486604799), [1231469665], 1231469665) => false
+
 fn timely(header: BlockHeader, height: Int, recent: List<Int>, nowSecs: Int) -> Option<String>
     ? "Not past the clock by more than two hours, then past the median."
     match header.timestamp > nowSecs + 7200
@@ -332,6 +440,38 @@ verify medianOf
     medianOf([3, 1, 2]) => 2
     medianOf([4, 1, 3, 2]) => 3
     medianOf([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]) => 6
+
+verify medianOf law isOneOfItsInputs
+    given times: List<Int> = [[5], [3, 1, 2], [4, 1, 3, 2], [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], [1, 1, 2, 2, 3], [7, 7, 7], [0 - 3, 5, 0 - 9, 2]]
+    when times != []
+    List.contains(times, medianOf(times)) => true
+
+fn isOrderFree(times: List<Int>) -> Bool
+    ? "The median is the same whichever order the times arrive in. Cases"
+      "rather than a law: the export landed on sorry over the insertion sort."
+    Bool.and(medianOf(times) == medianOf(List.reverse(times)), medianOf(times) == medianOf(sortedInts(times, [])))
+
+verify isOrderFree
+    isOrderFree([]) => true
+    isOrderFree([5]) => true
+    isOrderFree([3, 1, 2]) => true
+    isOrderFree([4, 1, 3, 2]) => true
+    isOrderFree([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]) => true
+    isOrderFree([1, 1, 2, 2, 3]) => true
+    isOrderFree([0 - 3, 5, 0 - 9, 2]) => true
+
+fn takesTheUpperMiddle(left: Int, right: Int) -> Bool
+    ? "medianOf([a, b]) is the greater: Core's pbegin[(pend - pbegin) / 2] on"
+      "an even list is the upper middle, and a lower middle would shift the"
+      "median-time-past by one Header. Cases rather than a law: on sorry."
+    medianOf([left, right]) == Int.max(left, right)
+
+verify takesTheUpperMiddle
+    takesTheUpperMiddle(1, 3) => true
+    takesTheUpperMiddle(3, 1) => true
+    takesTheUpperMiddle(0 - 7, 0) => true
+    takesTheUpperMiddle(0, 0) => true
+    takesTheUpperMiddle(1231006505, 1231469665) => true
 
 fn sortedInts(values: List<Int>, acc: List<Int>) -> List<Int>
     ? "The values in ascending order, by insertion."

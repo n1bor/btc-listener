@@ -367,13 +367,81 @@ fn meetsTarget(blockId: String, bits: Int) -> Result<Bool, String>
       "A Block Id is displayed back to front, so read as a number it is the"
       "big-endian value of the hex as written -- which is why a valid one starts"
       "with zeros."
+      "First, whether the bits are a target at all (#356). Core's SetCompact"
+      "flags a mantissa with its sign bit set as negative and a mantissa"
+      "shifted past 256 bits as overflowing, and CheckProofOfWork fails on"
+      "either; a sign bit over a zero mantissa is a target of zero, which"
+      "fails too. targetOf reads the sign bit as part of the mantissa, so"
+      "without this a Header carrying 0x1d80ffff named a target 128 times"
+      "easier than 0x1d00ffff and was accepted under it."
     bytes = Bytes.fromHex(blockId)?
-    Result.Ok(Domain.Message.readLittleEndian(List.reverse(Bytes.octets(bytes))) <= targetOf(bits))
+    match compactFault(bits)
+        true -> Result.Ok(false)
+        false -> Result.Ok(Domain.Message.readLittleEndian(List.reverse(Bytes.octets(bytes))) <= targetOf(bits))
 
 verify meetsTarget
     meetsTarget("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 486604799) => Result.Ok(true)
     meetsTarget("ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 486604799) => Result.Ok(false)
     meetsTarget("zz", 486604799) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+    meetsTarget("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 494993407) => Result.Ok(false)
+    meetsTarget("0000000000000000000000000000000000000000000000000000000000000000", 8388608) => Result.Ok(false)
+    meetsTarget("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", 587202561) => Result.Ok(false)
+
+verify meetsTarget law signBitProvesNothing
+    given blockId: String = ["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "0000000000000000000000000000000000000000000000000000000000000000", "ff0000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"]
+    given bits: Int = [494993407, 58720257, 553648127, 8388608, 486604799, 0]
+    when Bool.and(Bool.and(bits >= 0, bits <= 4294967295), Bits.and(bits, 8388608) != 0)
+    provesNothing(meetsTarget(blockId, bits)) => true
+
+verify meetsTarget law overflowProvesNothing
+    given blockId: String = ["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "0000000000000000000000000000000000000000000000000000000000000000"]
+    given bits: Int = [587202561, 570490880, 553713663, 486604799]
+    when Bool.and(Bool.and(bits >= 0, bits <= 4294967295), overflowing(bits))
+    provesNothing(meetsTarget(blockId, bits)) => true
+
+fn provesNothing(met: Result<Bool, String>) -> Bool
+    ? "Not met, or not even a Block Id."
+    match met
+        Result.Ok(yes) -> Bool.not(yes)
+        Result.Err(_) -> true
+
+verify provesNothing
+    provesNothing(Result.Ok(false)) => true
+    provesNothing(Result.Ok(true)) => false
+    provesNothing(Result.Err("no")) => true
+
+fn compactFault(bits: Int) -> Bool
+    ? "Bits that name no target: not a four-byte field, a set sign bit, or a"
+      "mantissa shifted past 256 bits (Core's fNegative and fOverflow, and"
+      "the zero target a signed zero mantissa makes)."
+    Bool.or(Bool.or(bits < 0, bits > 4294967295), Bool.or(Bits.and(bits, 8388608) != 0, overflowing(bits)))
+
+verify compactFault
+    compactFault(486604799) => false
+    compactFault(545259519) => false
+    compactFault(494993407) => true
+    compactFault(8388608) => true
+    compactFault(587202561) => true
+    compactFault(0 - 1) => true
+    compactFault(4294967296) => true
+    compactFault(0) => false
+
+fn overflowing(bits: Int) -> Bool
+    ? "Core's fOverflow: a non-zero mantissa whose exponent puts it past 256"
+      "bits -- above 34 bytes, above 33 with more than one byte set, above"
+      "32 with more than two."
+    size = Int.div(bits, 16777216)
+    word = Int.mod(bits, 8388608)
+    Bool.and(word != 0, Bool.or(size > 34, Bool.or(Bool.and(word > 255, size > 33), Bool.and(word > 65535, size > 32))))
+
+verify overflowing
+    overflowing(486604799) => false
+    overflowing(587202561) => true
+    overflowing(587202560) => false
+    overflowing(570490880) => true
+    overflowing(570425601) => true
+    overflowing(553713663) => false
+    overflowing(553648383) => false
 
 fn genesisBlockId(network: Network) -> String
     ? "The first Block of each Network, where every Locator ultimately ends."

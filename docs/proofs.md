@@ -45,10 +45,14 @@ and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
 it with the same flags against `proof/laws.declined` and
 `proof/laws.manifest.json`. A law added to a module the leaf does not yet
 name is added to its `depends` in the same PR. Measured at pin `c4b08179`
-with `Domain.Connect` and `Domain.Disconnect` (#354) and `Domain.TreeStore`
-(#355) in the leaf: **62 universal, 5 bounded, 0 open, 95 declined** (the
-bounded five are `Segment.nameOf.sortsWithSegment`, over `String` order,
+with `Domain.Connect` and `Domain.Disconnect` (#354), `Domain.TreeStore`
+(#355) and the Target and Block laws of #356 in the leaf: **66 universal,
+8 bounded, 0 open, 98 declined** (the bounded are
+`Segment.nameOf.sortsWithSegment`, over `String` order,
 `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
+[]`, the three on-disk-record round trips of #355 and the three
+`when`-guarded Target laws of #356; the declined count rose from 66 with the
+#354 modules, whose cones`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
 []`, and the three on-disk-record round trips of #355, under `when` on the
 Height; the declined count rose from 66 with the #354 modules, whose cones
 bring the Block walk's mutual recursion and the Transaction decoder — the

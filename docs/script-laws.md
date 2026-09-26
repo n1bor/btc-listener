@@ -536,3 +536,54 @@ from Ids the program has computed itself — a Header's hash, a Transaction's
 modules that build a key from `"aa"` are the house's fixture style; a strict
 `idBytes` would rewrite them to close no path a record can take. The two
 decoders above are the ones a corrupted or truncated directory reaches.
+
+## The retarget rule against Core (n1bor/btc-listener#356)
+
+`Domain.Target` had cases only: one mainnet window (Block 32256) and the four
+genesis values. Eleven statements now pin the rule #281 puts in front of every
+Header, and reading for them found a Header check that was wrong: `Domain.Block.meetsTarget`
+read the compact mantissa's sign bit as part of the mantissa, so bits
+`0x1d80ffff` named a target 128 times easier than `0x1d00ffff` and a Block Id
+under it was accepted, where Core's `SetCompact` flags the word negative and
+`CheckProofOfWork` fails. `meetsTarget` now refuses the sign bit, the
+overflow Core flags, and bits that are not four bytes, before it unpacks
+anything. Measured at pin `c4b08179` on top of #355: the laws entry goes to
+**66 universal, 8 bounded, 0 open, 98 declined** (`--gate` reports seven new laws and no
+regression; the three extra declines are the unqualified duplicates of the
+three `Connect.connected` laws already declined for `Map` order, which the
+export now lists under both spellings), and the baseline is regenerated.
+
+| law | pins | tier |
+|---|---|---|
+| `Block.meetsTarget.signBitProvesNothing` | with bit 23 set no Block Id meets the target (Core: `fNegative`, or a zero target) | universal |
+| `Block.meetsTarget.overflowProvesNothing` | with the mantissa shifted past 256 bits no Block Id meets the target (Core: `fOverflow`) | universal |
+| `Target.compactOf.roundTripsTheLimitOfEveryNetwork` | `compactOf(targetOf(limitBits(n))) == limitBits(n)` on all four Networks (Core: `GetCompact(SetCompact(x)) == x`) | cases |
+| `Target.compactOf.truncatesAndIsIdempotent` | `targetOf(compactOf(t)) <= t` and `compactOf` is idempotent through `targetOf`, for `0 < t < 2^256` | bounded (`when`) |
+| `Target.ruleFor.windowsRepeatAndRegtestNeverRetargets` | the rule at `h` is the rule at `h + 2016`, and regtest is never `Retarget` (`fPowNoRetargeting`) | universal |
+| `Target.retargeted.clampsAndNeverExceedsTheLimit` | for canonical parent bits and spans either side of the clamp: the new target is at most four times the old, never above the Network's limit, and the old bits at exactly one window when the old target is under the limit (`retargetSpec`) | bounded (`when`) |
+| `Target.minOrLast.twentyMinutesIsStrict` | `parentTime + 1200` keeps the last bits; `+ 1201` gives the limit | universal |
+| `Target.refusal.acceptsExactlyWhatTheRuleGives` | `refusal == None` exactly when `placeable`: the rule's bits, at most two hours ahead, strictly after the median | cases |
+| `Target.medianOf.isOrderFree` | invariant under reversal and sorting | cases |
+| `Target.medianOf.isOneOfItsInputs` | an element of a non-empty input | bounded (`when`) |
+| `Target.medianOf.takesTheUpperMiddleOfAnEvenList` | `medianOf([a, b]) == max(a, b)`, Core's `pbegin[(pend - pbegin) / 2]`; a lower middle would shift MTP by one Header | cases |
+
+The `canonical` guard on the retarget law is a `match`, not a `Bool.and`:
+the hostile lane's `2^63` as parent bits is an exponent of `2^39`, and
+`targetOf` on it is a power loop that long — the lane was killed for memory
+before the guard was made lazy.
+
+Four of the eleven are cases rather than laws. The limit round trip,
+`isOrderFree` and the upper-middle pair landed on `sorry` (the `byteLength`
+countdown over a 256-bit target and the insertion sort are beyond the
+prover), and `acceptsExactlyWhatTheRuleGives` was the one claim in the entry
+the Lean build could not compile at all — its refusal strings interpolate
+several values — so each is a Bool-valued function with the cases the law's
+`given` rows would have been, and the same name.
+
+Four of the eleven are cases rather than laws. The limit round trip,
+`isOrderFree` and the upper-middle pair landed on `sorry` (the `byteLength`
+countdown over a 256-bit target and the insertion sort are beyond the
+prover), and `acceptsExactlyWhatTheRuleGives` was the one claim in the entry
+the Lean build could not compile at all — its refusal strings interpolate
+several values — so each is a Bool-valued function with the cases the law's
+`given` rows would have been, and the same name.
