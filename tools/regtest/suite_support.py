@@ -187,7 +187,7 @@ def receive(peer):
 
 
 def greeting(peer):
-    version = struct.pack("<iQq", 70016, 0, int(time.time())) + bytes(52) + struct.pack("<Q", 4242) + b"\x06/suite" + struct.pack("<i", 0) + b"\0"
+    version = struct.pack("<iQq", 70016, 9, int(time.time())) + bytes(52) + struct.pack("<Q", 4242) + b"\x06/suite" + struct.pack("<i", 0) + b"\0"
     peer.sendall(wire("version", version) + wire("verack"))
     while receive(peer)[0] != "verack":
         pass

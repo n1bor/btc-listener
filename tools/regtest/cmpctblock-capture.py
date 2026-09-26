@@ -36,7 +36,7 @@ def netaddr():
 
 
 def version_payload():
-    return (struct.pack("<iQq", 70016, 0, int(time.time()))
+    return (struct.pack("<iQq", 70016, 9, int(time.time()))
             + netaddr() + netaddr()
             + struct.pack("<Q", 0x1234)
             + bytes([len(b"/cmpct-capture/")]) + b"/cmpct-capture/"

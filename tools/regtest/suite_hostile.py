@@ -38,7 +38,7 @@ def liar(core, mode):
             peer.settimeout(2)
             assert receive(peer)[0] == "version"
             agent = b"/suite/" if mode != "escape" else b"\x1b[2J\x1b]0;pwned\x07/suite/"
-            version = struct.pack("<iQq", 70016, 0, int(time.time())) + bytes(52) + struct.pack("<Q", 789) + bytes([len(agent)]) + agent + struct.pack("<i", core.height()) + b"\0"
+            version = struct.pack("<iQq", 70016, 9, int(time.time())) + bytes(52) + struct.pack("<Q", 789) + bytes([len(agent)]) + agent + struct.pack("<i", core.height()) + b"\0"
             peer.sendall(wire("version", version) + wire("verack"))
             while receive(peer)[0] != "verack":
                 pass
