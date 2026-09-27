@@ -273,6 +273,40 @@ def sigops_block(cli):
     # (#400), in a Block of forty kilobytes.
     coinbase = legacy_coinbase(cli, [(0, b'\xae')] * 4001)
     return mined_block(cli, [coinbase], 'with 4,001 OP_CHECKMULTISIG Outputs')
+def legacy_spend(txid, vout, sequence, locktime, version=1):
+    # A legacy-serialised spend of one Output with an empty scriptSig, paying
+    # nothing to OP_RETURN: the connect path runs no Scripts (ADR 0007), so
+    # what it says about this Transaction is only what its sequence, lock
+    # time and version say.
+    return (struct.pack('<i', version) + b'\x01' + bytes.fromhex(txid)[::-1] + struct.pack('<I', vout) + b'\x00'
+            + struct.pack('<I', sequence) + b'\x01' + struct.pack('<q', 0) + b'\x01\x6a' + struct.pack('<I', locktime))
+def fresh_output(cli):
+    # A wallet Output made and confirmed just now, so the spend of it is as
+    # young as an Output can be: one Block old.
+    import json
+    address = rpc(cli, 'getnewaddress')
+    txid = rpc(cli, 'sendtoaddress', address, '0.1')
+    rpc(cli, 'generatetoaddress', '1', rpc(cli, 'getnewaddress'))
+    for entry in json.loads(rpc(cli, 'listunspent', '1', '1')):
+        if entry['txid'] == txid: return entry
+    raise SystemExit('the fresh Output did not appear in listunspent')
+def nonfinal_block(cli):
+    # A Block carrying a Transaction locked to the Block's own Height with a
+    # sequence that leaves the lock on (#401): IsFinalTx wants the lock time
+    # strictly below the Height, so this one is a Block early. Core's own
+    # mempool would never hold it, which is why a liar has to mine it.
+    import json
+    height = int(rpc(cli, 'getblockcount')) + 1
+    spent = json.loads(rpc(cli, 'listunspent', '1'))[0]
+    coinbase = legacy_coinbase(cli, [(0, b'\x6a')])
+    return mined_block(cli, [coinbase, legacy_spend(spent['txid'], spent['vout'], 0, height)], 'with a Transaction locked to Height %d' % height)
+def sequencelock_block(cli):
+    # A Block carrying a version-2 Transaction whose sequence asks for a
+    # hundred Blocks since the Output it spends was made, spending an Output
+    # made one Block ago (#401, BIP68).
+    spent = fresh_output(cli)
+    coinbase = legacy_coinbase(cli, [(0, b'\x6a')])
+    return mined_block(cli, [coinbase, legacy_spend(spent['txid'], spent['vout'], 100, 0, 2)], 'with a version-2 spend asking 100 Blocks since an Output one Block old')
 def duplicate_coinbase_block(cli):
     # A Block that proves regtest's work on Core's tip and carries one
     # Transaction: the tip's own coinbase, byte for byte (#354). The tip has
@@ -303,11 +337,13 @@ def duplicate_coinbase_block(cli):
         if digest[31] < 0x7f: break                   # under regtest's limit, 0x7fffff << 232
     print('liar: mined', digest[::-1].hex(), 'at Height', info['height'] + 1, 'duplicating coinbase', txid[::-1].hex(), file=sys.stderr, flush=True)
     return header, header + b'\x01' + coinbase, digest
-def serve_block(conn, header, body, block_id):
+def serve_block(conn, header, body, block_id, cli=None):
     # Announce one Header unasked, answer every getheaders with it, and hand
     # over its body when asked. The node hears that the chain moved, asks
     # this Peer for the Headers and then the body, and connects it -- or
-    # refuses to.
+    # refuses to. Given bitcoin-cli, any other Block the node asks for is
+    # served honestly from Core, so a liar whose Block sits on a tip the node
+    # has not fetched yet is not dropped for owing that tip (#401).
     conn.sendall(msg('headers', headers_payload([header])))
     conn.settimeout(120)
     try:
@@ -323,6 +359,8 @@ def serve_block(conn, header, body, block_id):
                     kind = struct.unpack('<I', payload[at:at+4])[0]; h = payload[at+4:at+36]; at += 36
                     if kind & 2 and h == block_id:
                         conn.sendall(msg('block', body)); print('liar: sent the body', file=sys.stderr, flush=True)
+                    elif kind & 2 and cli:
+                        conn.sendall(msg('block', bytes.fromhex(rpc(cli, 'getblock', h[::-1].hex(), '0')))); print('liar: served Core\'s', h[::-1].hex()[:16], 'honestly', file=sys.stderr, flush=True)
     except (socket.timeout, OSError):
         return
 REGTEST_GENESIS_HEADER = bytes.fromhex(
@@ -474,6 +512,14 @@ def serve(port, mode):
         return
     elif mode == 'wrongwitness':
         serve_bodies(conn, sys.argv[3], wrong_witness_body)
+    elif mode == 'nonfinal':
+        header, body, block_id = nonfinal_block(sys.argv[3])
+        serve_block(conn, header, body, block_id, sys.argv[3])
+        return
+    elif mode == 'sequencelock':
+        header, body, block_id = sequencelock_block(sys.argv[3])
+        serve_block(conn, header, body, block_id, sys.argv[3])
+        return
     elif mode == 'overweight':
         header, body, block_id = overweight_block(sys.argv[3])
         serve_block(conn, header, body, block_id)

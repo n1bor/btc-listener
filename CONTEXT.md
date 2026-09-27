@@ -328,24 +328,23 @@ weeks, and the Script coverage itself is still arriving.
 _Avoid_: saying the node "validates" a Block without saying which rules
 
 **By-Height consensus rules**:
-Three that Bitcoin Core enforces on connect and this node does not —
-`IsFinalTx` (locktime against Height and median-time-past), BIP68 sequence
-locks, and BIP113 (#401). Block weight ≤ 4,000,000 WU and signature-operation
-cost ≤ 80,000 are enforced since #400: `Domain.BlockLimits` counts them the
-way Core does, the body gate refuses a body over the weight or over the
-ceiling on its legacy operations alone, and `Domain.Connect` adds the P2SH
-and witness operations against the Outputs the Inputs spend and refuses on
-connect. BIP34 (the Height in the coinbase) and the BIP141 witness commitment
-are enforced since #399: `Domain.Connect.heightOpened` refuses a Block whose
-coinbase does not open with its Height from `Domain.Rules.bip34Height`, and
-`Domain.Body.committed` refuses a body whose witnesses do not hash to the
-coinbase's commitment — the Merkle Root is over txids and never covered
-them, so until #399 a Peer could serve the honest Transactions with any
-witnesses at all. The three are deferred rather than forgotten: each needs a Peer
-willing to spend **real proof of work** before it could matter at all, because
-since #281 an unproven Header is refused before it is placed. So the exposure
-is a false CLEAN from `audit` on a hypothetically-mined bad Block, not anything
-a Peer can do to a running node. `Domain.Rules.at` already resolves the
-activation Heights, so adding one is a rule to write rather than a mechanism to
-build.
+The six that Bitcoin Core enforces on connect and this node once did not are
+all enforced now, each with a liar in `docs/regtest-testing.md` that mines a
+Block breaking it beside honest Core. BIP34 (the Height in the coinbase) and
+the BIP141 witness commitment since #399: `Domain.Connect.heightOpened` refuses
+a Block whose coinbase does not open with its Height from
+`Domain.Rules.bip34Height`, and `Domain.Body.committed` refuses a body whose
+witnesses do not hash to the coinbase's commitment — the Merkle Root is over
+txids and never covered them, so until #399 a Peer could serve the honest
+Transactions with any witnesses at all. Block weight ≤ 4,000,000 WU and
+signature-operation cost ≤ 80,000 since #400: `Domain.BlockLimits` counts them
+the way Core does, the body gate refuses a body over the weight or over the
+ceiling on its legacy operations alone, and `Domain.Connect` adds the P2SH and
+witness operations against the Outputs the Inputs spend. `IsFinalTx`, BIP113
+and BIP68 since #401: `Domain.Finality` judges each Transaction against a
+`Clock` — the Height, the Block's own timestamp, the median-time-past of the
+Block before it (BIP113's cutoff once CSV is in force), and the median before
+each Output a version-2 time lock reaches back to — which `Infra.Utxo.clockFor`
+gathers from the tree so the domain reads no Store. What remains deferred is
+the paragraph above: Scripts on the connect path.
 _Avoid_: fully validating, consensus-complete, Core-equivalent

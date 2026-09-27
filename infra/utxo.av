@@ -19,8 +19,8 @@ module Utxo
         "stands written in the same batch so a crash lands on a whole one."
         "The read half (prepared) is kept apart from the write half (written)"
         "so the walk can run the reads beside the next Block's fetch (#233)."
-    exposes [alreadyHeld, Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
-    depends [Bytes, Domain.ByteField, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store, Domain.Rules, Domain.BlockLimits]
+    exposes [alreadyHeld, clockFor, Applied, Window, Absorbed, Split, connectBlock, resolvedFor, prepared, partitioned, written, emptyWindow, absorbed, flushDue, flushed, disconnectBlock, prunedUndo]
+    depends [Bytes, Domain.ByteField, Domain.Connect, Domain.Disconnect, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Spend, Domain.Transaction, Domain.UtxoStore, Infra.Store, Domain.Rules, Domain.BlockLimits, Domain.Finality, Infra.Headers]
     effects [Infra.Kv.applyAll, Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.getAll, Infra.Kv.putAll]
 
 record Applied
@@ -32,10 +32,50 @@ record Applied
 
 fn connectBlock(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Applied, String>
     ? "Take this Block's spends out of the Set and put its Outputs in."
-    ! [Infra.Kv.applyAll, Infra.Kv.getAll]
-    written(store, blockId, prepared(network, store, partitioned(transactions, Map.fromList([]), Map.fromList([]))?, height, transactions)?)
+    ! [Infra.Kv.applyAll, Infra.Kv.get, Infra.Kv.getAll]
+    written(store, blockId, prepared(network, store, partitioned(transactions, Map.fromList([]), Map.fromList([]))?, height, blockId, transactions)?)
 
-fn prepared(network: Network, store: Store, split: Split, height: Int, transactions: List<Transaction>) -> Result<Connecting, String>
+fn clockFor(network: Network, store: Store, height: Int, blockId: String, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Result<Clock, String>
+    ? "What Domain.Finality needs to judge this Block (#401): its own"
+      "timestamp off its Header, the median-time-past of the Block before it"
+      "(h: names it, the tree holds its Header), whether BIP68 and BIP113 are"
+      "in force, and for each Height a version-2 time lock reaches back to,"
+      "the median-time-past of the Block before that one. Gathered here so"
+      "Domain.Connect stays a function of values and reads no Store."
+    ! [Infra.Kv.get]
+    csv = Domain.Rules.at(network, height).checkSequenceVerify
+    previousMedian = medianBefore(store, height)?
+    wanted = Domain.Finality.heightsWanted(transactions, fromStore, height, csv, [])?
+    medians = mediansFor(store, wanted, height, previousMedian, Map.fromList([]))?
+    Result.Ok(Domain.Finality.clockAt(height, Infra.Headers.timestampOf(store, blockId)?, previousMedian, csv, medians))
+
+fn medianBefore(store: Store, height: Int) -> Result<Int, String>
+    ? "The median-time-past of the Block at the Height below this one; nought"
+      "below genesis, where there is no Block to take it from."
+    ! [Infra.Kv.get]
+    match height <= 0
+        true -> Result.Ok(0)
+        false -> medianAt(store, height - 1, Domain.Index.blockIdIn(Infra.Store.get(store, Domain.IndexKeys.heightKey(height - 1)?)?))
+
+fn medianAt(store: Store, height: Int, blockId: Option<String>) -> Result<Int, String>
+    ? "The median at a Height h: names a Block for."
+    ! [Infra.Kv.get]
+    match blockId
+        Option.None -> Result.Err("index has no Block Id at height {height}")
+        Option.Some(named) -> Infra.Headers.medianTimePastOf(store, named)
+
+fn mediansFor(store: Store, heights: List<Int>, height: Int, previousMedian: Int, acc: Map<Int, Int>) -> Result<Map<Int, Int>, String>
+    ? "The median before each wanted Height: this Block's own Height means an"
+      "Output made in this Block, whose median before is the one already in"
+      "hand."
+    ! [Infra.Kv.get]
+    match heights
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> match head == height
+            true -> mediansFor(store, tail, height, previousMedian, Map.set(acc, head, previousMedian))
+            false -> mediansFor(store, tail, height, previousMedian, Map.set(acc, head, medianBefore(store, head)?))
+
+fn prepared(network: Network, store: Store, split: Split, height: Int, blockId: String, transactions: List<Transaction>) -> Result<Connecting, String>
     ? "What this Block does to the Set: its Inputs resolved and the change"
       "worked out, nothing written (#233)."
       "The half of connecting a Block that only reads, kept apart from the"
@@ -46,10 +86,10 @@ fn prepared(network: Network, store: Store, split: Split, height: Int, transacti
       "hits and the keys the Store still has to answer -- the window's Maps"
       "never enter the product, so nothing else owns them when the Block is"
       "absorbed and every Map.set stays in place."
-    ! [Infra.Kv.getAll]
+    ! [Infra.Kv.get, Infra.Kv.getAll]
     fromStore = resolvedFor(store, split)?
     held = alreadyHeld(store, Map.fromList([]), transactions)?
-    Result.Ok(Domain.Connect.connectedUnless(network, height, transactions, fromStore, held, enforcedAt(network, height)))
+    Result.Ok(Domain.Connect.connectedUnless(network, height, transactions, fromStore, held, enforcedAt(network, height), clockFor(network, store, height, blockId, transactions, fromStore)?))
 
 fn enforcedAt(network: Network, height: Int) -> Domain.BlockLimits.Enforced
     ? "The Block rules in force at a Height, read off Domain.Rules for"

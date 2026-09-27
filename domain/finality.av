@@ -1,0 +1,309 @@
+module Finality
+    intent =
+        "Whether a Transaction is allowed yet at the Block that carries it"
+        "(n1bor/btc-listener#401): Core's IsFinalTx and SequenceLocks."
+        "A Transaction with a lock time is final once the chain has passed"
+        "it -- a Height when the lock time is below 500,000,000, a time"
+        "otherwise -- or when every Input's sequence is the maximum, which"
+        "switches the lock off. The time it is measured against is the"
+        "Block's own timestamp until BIP113, and the median-time-past of the"
+        "Block before it from then on, so a miner cannot free a Transaction"
+        "by lying about the clock. BIP68, from the same activation, gives a"
+        "version-2 Transaction's Input a relative lock in its sequence: bit"
+        "31 clear means the lock is on, bit 22 chooses time over Blocks, and"
+        "the low sixteen bits count Blocks, or units of 512 seconds, since the"
+        "Output it spends was made. Blocks are measured from the Output's"
+        "Height; time from the median-time-past of the Block before the one"
+        "that made it, against the median-time-past of the Block before this"
+        "one, exactly as Core's CalculateSequenceLocks and"
+        "EvaluateSequenceLocks have it."
+    exposes [Clock, clockAt, isFinal, cutoffOf, nonFinalIn, sequenceFault, relativeLockOf, Lock, coinHeightsOf, heightsWanted]
+    depends [Bytes, Domain.Transaction, Domain.UtxoStore]
+    effects []
+
+record Clock
+    height: Int
+    ownTime: Int
+    previousMedian: Int
+    csv: Bool
+    medianBefore: Map<Int, Int>
+
+fn clockAt(height: Int, ownTime: Int, previousMedian: Int, csv: Bool, medianBefore: Map<Int, Int>) -> Clock
+    ? "What connect needs to ask whether a Transaction is allowed yet: the"
+      "Block's Height and timestamp, the median-time-past of the Block"
+      "before it, whether BIP68 and BIP113 are in force, and for the Heights"
+      "the Block's relative time locks reach back to, the median-time-past"
+      "of the Block before each -- gathered by the caller, so this module"
+      "stays a function of values."
+    Clock(height = height, ownTime = ownTime, previousMedian = previousMedian, csv = csv, medianBefore = medianBefore)
+
+verify clockAt
+    clockAt(10, 1000, 900, true, {}).height => 10
+
+fn lockTimeThreshold() -> Int
+    ? "LOCKTIME_THRESHOLD: a lock time below it is a Height, at or above it a time."
+    500000000
+
+verify lockTimeThreshold
+    lockTimeThreshold() => 500000000
+
+fn maxSequence() -> Int
+    ? "The sequence that switches a Transaction's lock time off."
+    4294967295
+
+verify maxSequence
+    maxSequence() => 4294967295
+
+fn cutoffOf(clock: Clock) -> Int
+    ? "The time a lock time is measured against: BIP113 makes it the median"
+      "of the eleven Headers before this Block; before that it was the"
+      "Block's own timestamp."
+    match clock.csv
+        true -> clock.previousMedian
+        false -> clock.ownTime
+
+verify cutoffOf
+    cutoffOf(clockAt(10, 1000, 900, true, {})) => 900
+    cutoffOf(clockAt(10, 1000, 900, false, {})) => 1000
+
+fn isFinal(transaction: Transaction, height: Int, cutoff: Int) -> Bool
+    ? "IsFinalTx: no lock time, or one the chain has passed, or every"
+      "sequence at the maximum."
+    match transaction.lockTime == 0
+        true -> true
+        false -> match passed(transaction.lockTime, height, cutoff)
+            true -> true
+            false -> allMaxSequence(transaction.inputs)
+
+verify isFinal
+    isFinal(locked(0, 0), 10, 1000) => true
+    isFinal(locked(9, 0), 10, 1000) => true
+    isFinal(locked(10, 0), 10, 1000) => false
+    isFinal(locked(10, 4294967295), 10, 1000) => true
+    isFinal(locked(500000000, 0), 10, 500000001) => true
+    isFinal(locked(500000001, 0), 10, 500000001) => false
+    isFinal(locked(500000001, 4294967295), 10, 500000001) => true
+
+fn passed(lockTime: Int, height: Int, cutoff: Int) -> Bool
+    ? "A Height lock against the Height, a time lock against the cutoff,"
+      "strictly: a Transaction locked to Height 10 is final at 11."
+    match lockTime < lockTimeThreshold()
+        true -> lockTime < height
+        false -> lockTime < cutoff
+
+verify passed
+    passed(9, 10, 0) => true
+    passed(10, 10, 0) => false
+    passed(500000000, 0, 500000001) => true
+    passed(500000000, 0, 500000000) => false
+
+fn allMaxSequence(inputs: List<Input>) -> Bool
+    ? "Every Input's sequence is the maximum; none is."
+    match inputs
+        [] -> true
+        [head, ..tail] -> match head.sequence == maxSequence()
+            true -> allMaxSequence(tail)
+            false -> false
+
+verify allMaxSequence
+    allMaxSequence([]) => true
+    allMaxSequence(locked(1, 4294967295).inputs) => true
+    allMaxSequence(locked(1, 5).inputs) => false
+
+fn nonFinalIn(transactions: List<Transaction>, clock: Clock) -> Option<String>
+    ? "The first Transaction that is not final at this Block, if any: Core's"
+      "bad-txns-nonfinal, asked of every Transaction the coinbase included."
+    match transactions
+        [] -> Option.None
+        [head, ..tail] -> match isFinal(head, clock.height, cutoffOf(clock))
+            true -> nonFinalIn(tail, clock)
+            false -> Option.Some("Transaction {Domain.Transaction.txidOf(head)} is not final at Height {clock.height}: lock time {head.lockTime} against {cutoffOf(clock)}")
+
+verify nonFinalIn
+    nonFinalIn([], clockAt(10, 1000, 900, true, {})) => Option.None
+    nonFinalIn([locked(9, 0)], clockAt(10, 1000, 900, true, {})) => Option.None
+    nonFinalIn([locked(10, 0)], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction lk is not final at Height 10: lock time 10 against 900")
+    nonFinalIn([locked(500000950, 0)], clockAt(10, 500001000, 500000900, false, {})) => Option.None
+    nonFinalIn([locked(500000950, 0)], clockAt(10, 500001000, 500000900, true, {})) => Option.Some("Transaction lk is not final at Height 10: lock time 500000950 against 500000900")
+
+type Lock
+    Off
+    Blocks(Int)
+    Seconds(Int)
+
+fn relativeLockOf(sequence: Int) -> Lock
+    ? "BIP68's reading of a sequence: bit 31 set is no lock; bit 22 set is"
+      "time in units of 512 seconds; otherwise Blocks; the low sixteen bits"
+      "are the count."
+    match Bits.and(sequence, 2147483648) != 0
+        true -> Lock.Off
+        false -> match Bits.and(sequence, 4194304) != 0
+            true -> Lock.Seconds(Bits.and(sequence, 65535) * 512)
+            false -> Lock.Blocks(Bits.and(sequence, 65535))
+
+verify relativeLockOf
+    relativeLockOf(4294967295) => Lock.Off
+    relativeLockOf(4294967293) => Lock.Off
+    relativeLockOf(0) => Lock.Blocks(0)
+    relativeLockOf(100) => Lock.Blocks(100)
+    relativeLockOf(4194304 + 3) => Lock.Seconds(1536)
+    relativeLockOf(65535) => Lock.Blocks(65535)
+    relativeLockOf(65536 + 7) => Lock.Blocks(7)
+
+fn sequenceFault(transaction: Transaction, coinHeights: List<Int>, clock: Clock) -> Option<String>
+    ? "SequenceLocks for one Transaction: nothing before BIP68 or below"
+      "version 2; otherwise each Input's relative lock against the Height"
+      "(or median-time-past before) of the Output it spends. coinHeights is"
+      "one Height per Input, in order, an Output made in this Block at this"
+      "Block's Height. Core: bad-txns-nonfinal."
+    match Bool.and(clock.csv, transaction.version >= 2)
+        false -> Option.None
+        true -> eachInput(transaction, transaction.inputs, coinHeights, 0, clock)
+
+verify sequenceFault
+    sequenceFault(sequenced(1, 100), [5], clockAt(10, 1000, 900, true, {})) => Option.None
+    sequenceFault(sequenced(2, 100), [5], clockAt(10, 1000, 900, false, {})) => Option.None
+    sequenceFault(sequenced(2, 100), [5], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 100 Block(s) since Height 5 and the Block is at 10 (BIP68)")
+    sequenceFault(sequenced(2, 5), [5], clockAt(10, 1000, 900, true, {})) => Option.None
+    sequenceFault(sequenced(2, 6), [5], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 6 Block(s) since Height 5 and the Block is at 10 (BIP68)")
+    sequenceFault(sequenced(2, 4194304 + 1), [5], clockAt(10, 1000, 900, true, {5 => 388})) => Option.None
+    sequenceFault(sequenced(2, 4194304 + 1), [5], clockAt(10, 1000, 900, true, {5 => 389})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since the median 389 before Height 5 and the median before this Block is 900 (BIP68)")
+    sequenceFault(sequenced(2, 4194304 + 1), [5], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since Height 5, whose median-time-past the caller did not supply (BIP68)")
+    sequenceFault(sequenced(2, 4294967293), [5], clockAt(10, 1000, 900, true, {})) => Option.None
+
+fn eachInput(transaction: Transaction, inputs: List<Input>, coinHeights: List<Int>, index: Int, clock: Clock) -> Option<String>
+    ? "Input by Input, beside the Height of what it spends."
+    match inputs
+        [] -> Option.None
+        [head, ..tail] -> match coinHeights
+            [] -> Option.None
+            [coinHeight, ..more] -> inputThen(transaction, tail, more, index, clock, oneInput(transaction, index, relativeLockOf(head.sequence), coinHeight, clock))
+
+verify eachInput
+    eachInput(sequenced(2, 100), [], [], 0, clockAt(10, 1000, 900, true, {})) => Option.None
+
+fn inputThen(transaction: Transaction, tail: List<Input>, more: List<Int>, index: Int, clock: Clock, fault: Option<String>) -> Option<String>
+    ? "The rest, unless this Input already failed."
+    match fault
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> eachInput(transaction, tail, more, index + 1, clock)
+
+verify inputThen
+    inputThen(sequenced(2, 100), [], [], 0, clockAt(10, 1000, 900, true, {}), Option.Some("x")) => Option.Some("x")
+    inputThen(sequenced(2, 100), [], [], 0, clockAt(10, 1000, 900, true, {}), Option.None) => Option.None
+
+fn oneInput(transaction: Transaction, index: Int, lock: Lock, coinHeight: Int, clock: Clock) -> Option<String>
+    ? "One relative lock: coinHeight + N Blocks must be at most this Height;"
+      "the median before the coin's Block plus N x 512 seconds at most the"
+      "median before this one."
+    match lock
+        Lock.Off -> Option.None
+        Lock.Blocks(count) -> match coinHeight + count <= clock.height
+            true -> Option.None
+            false -> Option.Some("Transaction {Domain.Transaction.txidOf(transaction)} Input {index} asks {count} Block(s) since Height {coinHeight} and the Block is at {clock.height} (BIP68)")
+        Lock.Seconds(seconds) -> timeLock(transaction, index, seconds, coinHeight, Map.get(clock.medianBefore, coinHeight), clock)
+
+verify oneInput
+    oneInput(sequenced(2, 0), 0, Lock.Off, 5, clockAt(10, 1000, 900, true, {})) => Option.None
+    oneInput(sequenced(2, 0), 0, Lock.Blocks(0), 10, clockAt(10, 1000, 900, true, {})) => Option.None
+
+fn timeLock(transaction: Transaction, index: Int, seconds: Int, coinHeight: Int, coinMedian: Option<Int>, clock: Clock) -> Option<String>
+    ? "The coin's median plus the lock against this Block's cutoff; a median"
+      "the caller did not gather is a fault too, since a lock that cannot be"
+      "judged cannot be passed."
+    match coinMedian
+        Option.None -> Option.Some("Transaction {Domain.Transaction.txidOf(transaction)} Input {index} asks {seconds} second(s) since Height {coinHeight}, whose median-time-past the caller did not supply (BIP68)")
+        Option.Some(median) -> match median + seconds <= clock.previousMedian
+            true -> Option.None
+            false -> Option.Some("Transaction {Domain.Transaction.txidOf(transaction)} Input {index} asks {seconds} second(s) since the median {median} before Height {coinHeight} and the median before this Block is {clock.previousMedian} (BIP68)")
+
+verify timeLock
+    timeLock(sequenced(2, 0), 0, 512, 5, Option.Some(388), clockAt(10, 1000, 900, true, {})) => Option.None
+    timeLock(sequenced(2, 0), 0, 512, 5, Option.Some(389), clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since the median 389 before Height 5 and the median before this Block is 900 (BIP68)")
+
+fn coinHeightsOf(inputs: List<Input>, fromStore: Map<Bytes, Unspent>, height: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "The Height of the Output each Input spends, in Input order: the"
+      "Store's answer when it has one, else this Block's own Height, which is"
+      "what an Output made earlier in the same Block has (an Output the Set"
+      "never had is the walk's to refuse)."
+    match inputs
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> coinHeightsOf(tail, fromStore, height, List.prepend(heightOf(Map.get(fromStore, Domain.UtxoStore.unspentKey(head.previousTxid, head.previousIndex)?), height), acc))
+
+verify coinHeightsOf
+    coinHeightsOf([], {}, 10, []) => Result.Ok([])
+    coinHeightsOf(sequenced(2, 0).inputs, {}, 10, []) => Result.Ok([10])
+    coinHeightsOf(sequenced(2, 0).inputs, {Domain.UtxoStore.unspentKey("aa", 0)? => Unspent(txid = Bytes.fromList([170]), index = 0, value = 1, script = Bytes.empty(), height = 5, coinbase = false)}, 10, []) => Result.Ok([5])
+    coinHeightsOf(locked(0, 0).inputs, {}, 10, []) => Result.Ok([10])
+
+fn heightOf(stored: Option<Unspent>, height: Int) -> Int
+    ? "A stored Output's Height, or this Block's for one made here."
+    match stored
+        Option.None -> height
+        Option.Some(unspent) -> unspent.height
+
+verify heightOf
+    heightOf(Option.None, 10) => 10
+
+fn heightsWanted(transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, height: Int, csv: Bool, acc: List<Int>) -> Result<List<Int>, String>
+    ? "The Heights whose median-time-past a caller must gather before"
+      "sequenceFault can be asked: the Height of every Output spent by a"
+      "version-2 Input carrying a time lock, once BIP68 is in force. Nothing"
+      "before it, so the walk reads no Headers it does not need."
+    match csv
+        false -> Result.Ok(acc)
+        true -> wantedIn(transactions, fromStore, height, acc)
+
+verify heightsWanted
+    heightsWanted([sequenced(2, 4194304 + 1)], {}, 10, false, []) => Result.Ok([])
+    heightsWanted([sequenced(2, 4194304 + 1)], {}, 10, true, []) => Result.Ok([10])
+    heightsWanted([sequenced(2, 100)], {}, 10, true, []) => Result.Ok([])
+    heightsWanted([sequenced(1, 4194304 + 1)], {}, 10, true, []) => Result.Ok([])
+
+fn wantedIn(transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, height: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Each version-2 Transaction's time-locked Inputs."
+    match transactions
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> match head.version >= 2
+            false -> wantedIn(tail, fromStore, height, acc)
+            true -> wantedIn(tail, fromStore, height, wantedInputs(head.inputs, coinHeightsOf(head.inputs, fromStore, height, [])?, acc))
+
+verify wantedIn
+    wantedIn([], {}, 10, [3]) => Result.Ok([3])
+
+fn wantedInputs(inputs: List<Input>, coinHeights: List<Int>, acc: List<Int>) -> List<Int>
+    ? "The coin Height of each Input whose lock counts seconds."
+    match inputs
+        [] -> acc
+        [head, ..tail] -> match coinHeights
+            [] -> acc
+            [coinHeight, ..more] -> wantedInputs(tail, more, wantedIf(relativeLockOf(head.sequence), coinHeight, acc))
+
+verify wantedInputs
+    wantedInputs([], [], []) => []
+
+fn wantedIf(lock: Lock, coinHeight: Int, acc: List<Int>) -> List<Int>
+    ? "Only a time lock needs a median."
+    match lock
+        Lock.Seconds(_) -> List.prepend(coinHeight, acc)
+        Lock.Blocks(_) -> acc
+        Lock.Off -> acc
+
+verify wantedIf
+    wantedIf(Lock.Seconds(512), 5, []) => [5]
+    wantedIf(Lock.Blocks(1), 5, []) => []
+    wantedIf(Lock.Off, 5, []) => []
+
+fn locked(lockTime: Int, sequence: Int) -> Transaction
+    ? "A one-Input Transaction with this lock time and sequence, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = sequence, witness = [])], outputs = [], lockTime = lockTime, txid = "lk", size = 0, isSegWit = false)
+
+verify locked
+    locked(7, 1).lockTime => 7
+
+fn sequenced(version: Int, sequence: Int) -> Transaction
+    ? "A one-Input Transaction of this version with this sequence, for the cases here."
+    Transaction(version = version, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = sequence, witness = [])], outputs = [], lockTime = 0, txid = "sq", size = 0, isSegWit = false)
+
+verify sequenced
+    sequenced(2, 3).version => 2

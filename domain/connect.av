@@ -14,14 +14,13 @@ module Connect
         "opposite (#303), and because the Assume-valid Height sounds like the"
         "switch that turns it on and is not -- it says which range audit may"
         "be taken to have settled. ADR 0007 is the reasoning."
-        "Three consensus rules are deferred with it, and CONTEXT.md lists them"
-        "under Deferred consensus rules with the reason: IsFinalTx, BIP68"
-        "sequence locks and BIP113 (BIP34 is heightOpened below since #399,"
-        "the signature-operation ceiling is connectedCosted since #400). Every one of"
-        "them needs a Peer willing to spend real proof of work before it"
-        "could matter, which #281 now requires before a Header is placed at"
-        "all, so the exposure is a false CLEAN from audit on a"
-        "hypothetically-mined bad Block rather than anything a Peer can do."
+        "The six by-Height rules CONTEXT.md once listed as deferred with it"
+        "are enforced on this path now: BIP34 is heightOpened (#399), the"
+        "signature-operation ceiling is connectedCosted (#400), IsFinalTx,"
+        "BIP113 and BIP68 are connectedFinal (#401). Each needed a Peer"
+        "willing to spend real proof of work before it could matter, which"
+        "#281 requires before a Header is placed at all; the liars that"
+        "exercise them mine regtest Blocks, where the work is cheap."
         "A Transaction may spend an Output made earlier in the same Block, so"
         "the walk carries what the Block has created so far and looks there"
         "before it looks at what the Store resolved. Getting that wrong in"
@@ -33,7 +32,7 @@ module Connect
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
     exposes [Change, Connecting, TxFee, cannotConnect, refusalOf, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
-    depends [Bytes, Domain.BlockLimits, Domain.Hash, Domain.Network, Domain.Script, Domain.StackItem, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
+    depends [Bytes, Domain.BlockLimits, Domain.Finality, Domain.Hash, Domain.Network, Domain.Script, Domain.StackItem, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
 record TxFee
@@ -333,12 +332,13 @@ verify disjoint
     disjoint([], [Bytes.fromList([1])]) => true
     disjoint([Bytes.fromList([1])], [Bytes.fromList([1])]) => false
 
-fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>, enforced: Enforced) -> Connecting
+fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>, enforced: Enforced, clock: Clock) -> Connecting
     ? "connected, after BIP30 and BIP34: a Block that would write an Output"
       "the Set already holds, or whose coinbase does not open with its Height,"
       "or whose signature operations cost more than the ceiling once the P2SH"
-      "and witness ones are counted against the Outputs it spends (#400), is"
-      "refused whole, before its walk."
+      "and witness ones are counted against the Outputs it spends (#400), or"
+      "which carries a Transaction that is not final yet or whose relative"
+      "locks have not run (#401), is refused whole, before its walk."
       "held is every key this Block's Outputs would be written under that the"
       "Set holds already -- the caller looks them up, because the walk only"
       "fetches what the Inputs spend. Without this, a duplicate txid overwrote"
@@ -346,40 +346,116 @@ fn connectedUnless(network: Network, height: Int, transactions: List<Transaction
       "deleted the key outright and lost the original (n1bor/btc-listener#354)."
     match duplicateOutputs(network, height, held)
         Option.Some(why) -> Connecting.Refused(why)
-        Option.None -> connectedOpening(network, height, transactions, fromStore, heightOpened(enforced.bip34, height, transactions), enforced)
+        Option.None -> connectedOpening(network, height, transactions, fromStore, heightOpened(enforced.bip34, height, transactions), enforced, clock)
 
 verify connectedUnless
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [], Domain.BlockLimits.nothing()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
-    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing())) => true
-    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [], Domain.BlockLimits.everything()) => Connecting.Refused("coinbase does not open with Height 225, as BIP34 requires")
-    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.everything()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
-    connectedUnless(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]), [], Domain.BlockLimits.everything()) => connected(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]))
-    connectedUnless(Network.Mainnet, 1, [minting(50), redeeming()], holdingMultisig()?, [], Domain.BlockLimits.Enforced(bip34 = false, payToScriptHash = true, segWit = true)) => Connecting.Refused("Block costs 80080 signature operations, above the 80000 allowed")
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [], Domain.BlockLimits.nothing(), noClock()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing(), noClock()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing(), noClock())) => true
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [], Domain.BlockLimits.everything(), noClock()) => Connecting.Refused("coinbase does not open with Height 225, as BIP34 requires")
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.everything(), noClock()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    connectedUnless(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]), [], Domain.BlockLimits.everything(), noClock()) => connected(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50), redeeming()], holdingMultisig()?, [], Domain.BlockLimits.Enforced(bip34 = false, payToScriptHash = true, segWit = true), noClock()) => Connecting.Refused("Block costs 80080 signature operations, above the 80000 allowed")
 
-fn connectedOpening(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, opened: Option<String>, enforced: Enforced) -> Connecting
-    ? "What BIP34 said, then what the Block costs, then the walk."
+fn connectedOpening(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, opened: Option<String>, enforced: Enforced, clock: Clock) -> Connecting
+    ? "What BIP34 said, then what the Block costs, then whether every"
+      "Transaction is allowed yet, then the walk."
     match opened
         Option.Some(why) -> Connecting.Refused(why)
-        Option.None -> connectedCosted(network, height, transactions, fromStore, sigopCostOf(transactions, fromStore, enforced))
+        Option.None -> connectedCosted(network, height, transactions, fromStore, sigopCostOf(transactions, fromStore, enforced), clock)
 
 verify connectedOpening
-    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.Some("no"), Domain.BlockLimits.nothing()) => Connecting.Refused("no")
-    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.None, Domain.BlockLimits.nothing()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.Some("no"), Domain.BlockLimits.nothing(), noClock()) => Connecting.Refused("no")
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.None, Domain.BlockLimits.nothing(), noClock()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
 
-fn connectedCosted(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, cost: Result<Int, String>) -> Connecting
+fn connectedCosted(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, cost: Result<Int, String>, clock: Clock) -> Connecting
     ? "The signature-operation cost against MAX_BLOCK_SIGOPS_COST (#400),"
-      "then the walk. Core: bad-blk-sigops."
+      "then finality. Core: bad-blk-sigops."
     match cost
         Result.Err(why) -> Connecting.Refused(why)
         Result.Ok(total) -> match total > Domain.BlockLimits.maxSigopCost()
             true -> Connecting.Refused("Block costs {total} signature operations, above the {Domain.BlockLimits.maxSigopCost()} allowed")
-            false -> connected(network, height, transactions, fromStore)
+            false -> connectedFinal(network, height, transactions, fromStore, clock)
 
 verify connectedCosted
-    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Err("no")) => Connecting.Refused("no")
-    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80000)) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
-    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80001)) => Connecting.Refused("Block costs 80001 signature operations, above the 80000 allowed")
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Err("no"), noClock()) => Connecting.Refused("no")
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80000), noClock()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80001), noClock()) => Connecting.Refused("Block costs 80001 signature operations, above the 80000 allowed")
+
+fn connectedFinal(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, clock: Clock) -> Connecting
+    ? "Every Transaction final at this Block (IsFinalTx against the Height"
+      "and BIP113's cutoff) and every version-2 relative lock run (BIP68),"
+      "then the walk (#401). Core: bad-txns-nonfinal."
+    match Domain.Finality.nonFinalIn(transactions, clock)
+        Option.Some(why) -> Connecting.Refused(why)
+        Option.None -> connectedSequenced(network, height, transactions, fromStore, clock, sequenceFaults(List.drop(transactions, 1), fromStore, height, clock))
+
+verify connectedFinal
+    connectedFinal(Network.Mainnet, 1, [minting(50)], Map.fromList([]), noClock()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedFinal(Network.Mainnet, 10, [minting(50), lockedTo(10)], Map.fromList([]), Domain.Finality.clockAt(10, 1000, 900, true, {})) => Connecting.Refused("Transaction lk is not final at Height 10: lock time 10 against 900")
+    connectedFinal(Network.Mainnet, 10, [minting(50), relativeTo(2, 100)], holdingAt(5)?, Domain.Finality.clockAt(10, 1000, 900, true, {})) => Connecting.Refused("Transaction sq Input 0 asks 100 Block(s) since Height 5 and the Block is at 10 (BIP68)")
+    connectedFinal(Network.Mainnet, 10, [minting(50), relativeTo(2, 100)], holdingAt(5)?, Domain.Finality.clockAt(10, 1000, 900, false, {})) => connected(Network.Mainnet, 10, [minting(50), relativeTo(2, 100)], holdingAt(5)?)
+
+fn connectedSequenced(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, clock: Clock, faults: Result<Option<String>, String>) -> Connecting
+    ? "What the relative locks said, then the walk."
+    match faults
+        Result.Err(why) -> Connecting.Refused(why)
+        Result.Ok(Option.Some(why)) -> Connecting.Refused(why)
+        Result.Ok(Option.None) -> connected(network, height, transactions, fromStore)
+
+verify connectedSequenced
+    connectedSequenced(Network.Mainnet, 1, [minting(50)], Map.fromList([]), noClock(), Result.Err("no")) => Connecting.Refused("no")
+    connectedSequenced(Network.Mainnet, 1, [minting(50)], Map.fromList([]), noClock(), Result.Ok(Option.Some("late"))) => Connecting.Refused("late")
+    connectedSequenced(Network.Mainnet, 1, [minting(50)], Map.fromList([]), noClock(), Result.Ok(Option.None)) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+
+fn sequenceFaults(transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, height: Int, clock: Clock) -> Result<Option<String>, String>
+    ? "The first non-coinbase Transaction whose relative locks have not run."
+    match transactions
+        [] -> Result.Ok(Option.None)
+        [head, ..tail] -> sequenceFaultThen(tail, fromStore, height, clock, Domain.Finality.sequenceFault(head, Domain.Finality.coinHeightsOf(head.inputs, fromStore, height, [])?, clock))
+
+verify sequenceFaults
+    sequenceFaults([], Map.fromList([]), 1, noClock()) => Result.Ok(Option.None)
+    sequenceFaults([relativeTo(2, 100)], holdingAt(5)?, 10, Domain.Finality.clockAt(10, 1000, 900, true, {})) => Result.Ok(Option.Some("Transaction sq Input 0 asks 100 Block(s) since Height 5 and the Block is at 10 (BIP68)"))
+    sequenceFaults([relativeTo(2, 4)], holdingAt(5)?, 10, Domain.Finality.clockAt(10, 1000, 900, true, {})) => Result.Ok(Option.None)
+
+fn sequenceFaultThen(tail: List<Transaction>, fromStore: Map<Bytes, Unspent>, height: Int, clock: Clock, fault: Option<String>) -> Result<Option<String>, String>
+    ? "The rest, unless this one failed."
+    match fault
+        Option.Some(why) -> Result.Ok(Option.Some(why))
+        Option.None -> sequenceFaults(tail, fromStore, height, clock)
+
+verify sequenceFaultThen
+    sequenceFaultThen([], Map.fromList([]), 1, noClock(), Option.Some("x")) => Result.Ok(Option.Some("x"))
+
+fn noClock() -> Clock
+    ? "A clock with nothing in force and nothing to compare against, for the"
+      "cases here that are not about time."
+    Domain.Finality.clockAt(1, 0, 0, false, {})
+
+verify noClock
+    noClock().csv => false
+
+fn lockedTo(lockTime: Int) -> Transaction
+    ? "A spend of aa:0 with this lock time and a sequence that leaves it on."
+    Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [Output(value = 1, script = "")], lockTime = lockTime, txid = "lk", size = 0, isSegWit = false)
+
+verify lockedTo
+    lockedTo(7).lockTime => 7
+
+fn relativeTo(version: Int, sequence: Int) -> Transaction
+    ? "A spend of aa:0 of this version with this sequence."
+    Transaction(version = version, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = sequence, witness = [])], outputs = [Output(value = 1, script = "")], lockTime = 0, txid = "sq", size = 0, isSegWit = false)
+
+verify relativeTo
+    relativeTo(2, 3).version => 2
+
+fn holdingAt(height: Int) -> Result<Map<Bytes, Unspent>, String>
+    ? "The Store answering aa:0 with an Output made at this Height."
+    Result.Ok(Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = Bytes.fromList([170]), index = 0, value = 90, script = Bytes.empty(), height = height, coinbase = false))]))
+
+verify holdingAt
+    Map.len(holdingAt(5)?) => 1
 
 fn sigopCostOf(transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, enforced: Enforced) -> Result<Int, String>
     ? "GetBlockSigOpCost: the legacy operations at four each, plus the P2SH"

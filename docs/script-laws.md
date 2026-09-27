@@ -478,6 +478,22 @@ the Height come from the hostile lane: at `2^63` the subsidy's halving walk
 exhausts the step budget, and a `forkHeight` below zero is not a fork. The
 regtest run for the refusal is the `bip30` liar section of
 `docs/regtest-testing.md`.
+## Transaction finality: IsFinalTx, BIP113 and BIP68 (n1bor/btc-listener#401)
+
+No new law. `Domain.Finality` is cases only, pinned to the BIPs' own
+arithmetic: the 500,000,000 threshold, strict `<` against the Height and the
+cutoff, the sequence bits 31 and 22 and the 512-second unit, and the BIP68
+inequalities written as `coinHeight + N ≤ height` and `median + N·512 ≤
+previousMedian` (Core's `−1` and `>=` folded together). Every function in it
+exports and proves as cases.
+
+**Why the leaf budget rose, 109 → 111.** `Domain.Connect.connectedFinal` and
+`connectedSequenced`, the two new steps on the connect path, are declined for
+the reason every `connected` claim is: their cones reach the fuel-lowered
+Set walk. The engine cone is unchanged at **129 universal, 1 bounded, 0 open,
+136 declined**; the leaf at **127 universal, 11 bounded, 0 open, 111
+declined**, `--gate` 0 regressions in both.
+
 ## Block weight and signature-operation cost (n1bor/btc-listener#400)
 
 No new law. `Domain.BlockLimits` is cases only, pinned outside the code: the

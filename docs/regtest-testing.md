@@ -2925,6 +2925,59 @@ headers complete: 244 known
 dropping peer 0: Block 36870650…5ec8 costs 320080 signature operations in its scripts alone, above the 80000 allowed
 ```
 
+### A Transaction that is not final yet, and a relative lock that has not run
+
+[#401](https://github.com/n1bor/btc-listener/issues/401). The last three of
+the six by-Height rules the connect path deferred. `IsFinalTx`: a Transaction
+with a lock time is allowed only once the chain has passed it — a Height when
+the lock time is below 500,000,000, a time otherwise — unless every Input's
+sequence is the maximum; the time it is measured against is the Block's own
+timestamp until BIP113 and the median-time-past of the Block before it from
+then on. BIP68: a version-2 Transaction's Input with bit 31 of its sequence
+clear carries a relative lock, bit 22 choosing seconds (units of 512) over
+Blocks, counted from the Output it spends. `Domain.Finality` is the arithmetic,
+`Domain.Connect.connectedFinal` asks it, and `Infra.Utxo.clockFor` gathers the
+clock from the tree: this Block's timestamp, the median-time-past of the Block
+`h:` names below it, and the median before each Height a time lock reaches
+back to.
+
+The honest baseline is sections 1–4: Core's wallet locks every Transaction it
+makes to the tip's Height (anti-fee-sniping) with a sequence that leaves the
+lock on, so every regtest Block since section 1 carries a Transaction that is
+final by exactly one Block, and every one of them connects. Then two liars
+that mine (as `bip30` does) beside honest Core: `nonfinal` mines a Block
+carrying a spend locked to the Block's own Height, one Block early; and
+`sequencelock` makes a fresh Output through Core's wallet, mines it, then
+mines a Block with a version-2 spend of it asking a hundred Blocks:
+
+```bash
+python3 tools/regtest/liar.py 18455 nonfinal "$C" &
+sleep 3; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+python3 tools/regtest/liar.py 18455 sequencelock "$C" &
+sleep 5; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+Both bodies pass the gate — nothing about the bytes is wrong — and are
+refused when connected, by name, marked invalid, the Peer that served them
+dropped. The `sequencelock` liar's Block sits on a tip the node has not
+fetched yet (the one that confirmed the fresh Output), so it serves that
+Block honestly from Core when asked for it — a liar that could not was
+dropped for owing it before its own Block was ever reached:
+
+```
+liar: mined 1d7b26780d2f2ed410f06f53f063d9003d717bd53967bfa5a51a8f2da1ce39a2 at Height 250 with a Transaction locked to Height 250 (207 bytes)
+headers to 250
+headers complete: 251 known
+dropping peer 0: served Block 1d7b2678…39a2, which does not connect: Transaction cc193277…9b82 is not final at Height 250: lock time 250 against 1790521445 (#376)
+
+liar: mined 2c6c02307f193fa673259650d61dd8a67ff808539dab9bf4ef65eaa3963fd247 at Height 252 with a version-2 spend asking 100 Blocks since an Output one Block old (207 bytes)
+liar: served Core's 25083c25434d9aab honestly
+headers to 251
+following at Height 251: 1 connected, 0 disconnected, set +3 -1
+headers to 252
+dropping peer 0: served Block 2c6c0230…d247, which does not connect: Transaction ce698f24…bb8c Input 0 asks 100 Block(s) since Height 251 and the Block is at 252 (BIP68) (#376)
+```
+
 ### A caller that is this node, one from 2012, and one that cannot serve witnesses
 
 [#280](https://github.com/n1bor/btc-listener/issues/280) item 16. The

@@ -25,7 +25,7 @@ module Headers
         "boundary walks 2015 Headers down, once per 2016. A Header that fails"
         "any of this refuses the whole batch, and nothing of it is written --"
         "the Peer that sent it is at fault, and the caller drops it."
-    exposes [Settled, Arrival, seeded, absorbed, tipOf, markedInvalid]
+    exposes [Settled, Arrival, seeded, absorbed, tipOf, markedInvalid, medianTimePastOf, timestampOf]
     depends [Bytes, Domain.Block, Domain.HeaderBytes, Domain.HeaderTree, Domain.Index, Domain.IndexKeys, Domain.Network, Domain.Reorg, Domain.Target, Domain.TreeStore, Infra.Store]
     effects [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
 
@@ -280,6 +280,50 @@ fn linkPlaced(header: BlockHeader, placement: Option<Placement>) -> Option<Link>
 verify linkPlaced
     linkPlaced(headerD(), Option.None) => Option.None
     linkPlaced(headerD(), Option.Some(Placement(blockId = "x", parentId = "y", height = 4, work = 1))) => Option.Some(Link(header = headerD(), height = 4))
+
+fn medianTimePastOf(store: Store, blockId: String) -> Result<Int, String>
+    ? "The median of up to eleven timestamps walking down from this Block,"
+      "its own included: Core's GetMedianTimePast, which BIP113 measures lock"
+      "times against and BIP68 measures relative time locks from (#401)."
+    ! [Infra.Kv.get]
+    Result.Ok(Domain.Target.medianOf(timesDown(store, blockId, 11, [])?))
+
+verify medianTimePastOf
+    medianTimePastOf(trunkArrival()?.store, headerC().blockId) => Result.Ok(2)
+    medianTimePastOf(trunkArrival()?.store, headerB().blockId) => Result.Ok(2)
+    medianTimePastOf(trunkArrival()?.store, headerStray().blockId) => Result.Ok(0)
+
+fn timesDown(store: Store, blockId: String, left: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Up to this many timestamps, walking previousBlockId through k:."
+    ! [Infra.Kv.get]
+    match left <= 0
+        true -> Result.Ok(acc)
+        false -> timesFrom(store, linkFetched(store, blockId)?, left, acc)
+
+verify timesDown
+    timesDown(trunkArrival()?.store, headerC().blockId, 11, []) => Result.Ok([1, 2, 3])
+    timesDown(trunkArrival()?.store, headerC().blockId, 0, [7]) => Result.Ok([7])
+
+fn timesFrom(store: Store, link: Option<Link>, left: Int, acc: List<Int>) -> Result<List<Int>, String>
+    ? "This Header's timestamp then its parent's; a missing Header ends the walk."
+    ! [Infra.Kv.get]
+    match link
+        Option.None -> Result.Ok(acc)
+        Option.Some(found) -> timesDown(store, found.header.previousBlockId, left - 1, List.prepend(found.header.timestamp, acc))
+
+verify timesFrom
+    timesFrom(trunkArrival()?.store, Option.None, 3, [9]) => Result.Ok([9])
+
+fn timestampOf(store: Store, blockId: String) -> Result<Int, String>
+    ? "A Block's own timestamp, off its Header in the tree."
+    ! [Infra.Kv.get]
+    match linkFetched(store, blockId)?
+        Option.None -> Result.Err("the tree holds no Header for Block {blockId}")
+        Option.Some(found) -> Result.Ok(found.header.timestamp)
+
+verify timestampOf
+    timestampOf(trunkArrival()?.store, headerC().blockId) => Result.Ok(3)
+    timestampOf(trunkArrival()?.store, headerStray().blockId) => Result.Err("the tree holds no Header for Block {headerStray().blockId}")
 
 fn linkFetched(store: Store, blockId: String) -> Result<Option<Link>, String>
     ? "The k: record for a Block Id, decoded, or nothing."
