@@ -2978,6 +2978,50 @@ headers to 252
 dropping peer 0: served Block 2c6c0230…d247, which does not connect: Transaction ce698f24…bb8c Input 0 asks 100 Block(s) since Height 251 and the Block is at 252 (BIP68) (#376)
 ```
 
+### A caller that claims a Height it cannot show
+
+[#405](https://github.com/n1bor/btc-listener/issues/405). Under #328 a Peer
+whose Handshake claimed a Height above the tree's was asked for Headers, on
+the reasoning that a Peer ahead of us is evidence we are behind. On mainnet
+that reasoning met crawlers: inbound callers that connect, put a Height one
+above ours in their `version`, and then never answer `getheaders`. Each cost
+the catch-up gate sixty seconds parked on a stranger's word and a `did not
+answer before its deadline` fault — 391 of them since the log began, 44 in
+one morning. An inbound Peer's Height is a stranger's word about the chain,
+the same footing `addr_recv` has about our address, and Core never starts a
+Header sync on an inbound `start_height`; `Infra.Peers.claimsOf` now weighs
+only the Peers this node dialled. Inbound Peers still announce Blocks the way
+everyone does, with `inv` and `headers`, which #300 weighs.
+
+The honest baseline is section 2: every sync starts from an outbound Peer's
+claim, and Core's is the claim that makes it. Then the `boaster` caller beside
+a polite one — it completes its Handshake claiming the tip plus a thousand and
+reports every command the node sends it for seventy-five seconds:
+
+```bash
+timeout -s INT 90 $BIN regtest follow 127.0.0.1:18454 $D serve:18458 log &
+sleep 8
+python3 tools/regtest/caller.py 18458 polite 127.0.0.2 &
+python3 tools/regtest/caller.py 18458 boaster 127.0.0.3 "$C" &
+wait
+```
+
+Before this change the claim started a catch-up on the boaster — a
+`getheaders` it never answered and, sixty seconds later, `catch-up ended:
+Peer 2 did not answer before its deadline`, which is the mainnet line #405 is
+about. Now the node asks nothing of it, and the boaster is a seated Peer that
+said a number; the chain log carries no fault at all:
+
+```
+caller: still connected after 60.1 s                                                          # polite
+caller: still connected after 75.1 s claiming Height 1258; the node sent: verack               # boaster
+
+peer 1 dialled us from 127.0.0.2:59959
+peer 2 dialled us from 127.0.0.3:33105
+inbound peer 1 completed its handshake
+inbound peer 2 completed its handshake
+```
+
 ### A caller that is this node, one from 2012, and one that cannot serve witnesses
 
 [#280](https://github.com/n1bor/btc-listener/issues/280) item 16. The

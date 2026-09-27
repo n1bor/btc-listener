@@ -616,16 +616,28 @@ verify claimsAmong
     claimsAmong(Domain.Inbox.noStanding(), [], []) => []
     claimsAmong(Domain.Inbox.noStanding(), [7], []) => []
     claimsAmong(Domain.Inbox.greeted(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", false), 1, 70016, "/Satoshi/", 179), [1], []) => [(1, 179)]
-    claimsAmong(Domain.Inbox.greeted(Domain.Inbox.seated(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", false), 2, "1.2.3.5:8333", true), 2, 70016, "/Satoshi/", 965226), [1, 2], []) => [(1, 0), (2, 965226)]
+    claimsAmong(Domain.Inbox.greeted(Domain.Inbox.seated(Domain.Inbox.seated(Domain.Inbox.noStanding(), 1, "1.2.3.4:8333", false), 2, "1.2.3.5:8333", true), 2, 70016, "/Satoshi/", 965226), [1, 2], []) => [(1, 0)]
 
 fn claimedInto(key: Int, standing: Option<Standing>, acc: List<Tuple<Int, Int>>) -> List<Tuple<Int, Int>>
-    ? "One Peer's claim onto the front, when it has a Standing."
+    ? "One Peer's claim onto the front, when it has a Standing and we dialled"
+      "it. An inbound Peer's Height is a stranger's word about the chain, the"
+      "same footing addr_recv has about our address (agreementNeeded), and"
+      "Core never starts a Header sync on an inbound start_height. Mainnet"
+      "showed why (n1bor/btc-listener#405): callers connected claiming a"
+      "Height one above the tree, were asked for Headers under #328, never"
+      "answered, and were charged sixty seconds later -- 391 times since the"
+      "log began, 44 in one morning, each holding the catch-up gate on a"
+      "stranger's word. An inbound Peer still announces Blocks the way"
+      "everyone does, with inv and headers, which #300 weighs."
     match standing
         Option.None -> acc
-        Option.Some(held) -> List.prepend((key, held.height), acc)
+        Option.Some(held) -> match held.inbound
+            true -> acc
+            false -> List.prepend((key, held.height), acc)
 
 verify claimedInto
     claimedInto(3, Option.None, []) => []
+    claimedInto(3, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Domain.Inbox.emptyBuffer(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = true, height = 42, services = 9)), []) => []
     claimedInto(3, Option.Some(Standing(address = "1.2.3.4:8333", buffer = Domain.Inbox.emptyBuffer(), version = 70016, agent = "/Satoshi/", sent = 0, received = 0, inbound = false, height = 42, services = 0)), []) => [(3, 42)]
 
 record Accepted

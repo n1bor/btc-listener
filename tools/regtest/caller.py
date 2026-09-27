@@ -24,9 +24,9 @@ MAGIC = bytes([0xfa,0xbf,0xb5,0xda])           # regtest
 def msg(cmd, payload):
     c = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
     return MAGIC + cmd.encode().ljust(12, b'\0') + struct.pack('<I', len(payload)) + c + payload
-def version_payload(version=70016, services=0, nonce=4242):
+def version_payload(version=70016, services=0, nonce=4242, height=0):
     return (struct.pack('<iQq', version, services, int(time.time())) + b'\0'*26 + b'\0'*26
-            + struct.pack('<Q', nonce) + b'\x0a/caller:1/' + struct.pack('<i', 0) + b'\0')
+            + struct.pack('<Q', nonce) + b'\x0a/caller:1/' + struct.pack('<i', height) + b'\0')
 def their_version(s):
     # The node's version frame, read whole: header, then the payload it announces.
     s.settimeout(10)
@@ -66,6 +66,32 @@ def dial(port, mode, source=None):
             s.settimeout(10); s.recv(65536)               # their version
             s.sendall(msg('verack', b''))
             return held(s, started, 60)
+        elif mode == 'boaster':
+            # A crawler that claims a Height a thousand above the chain in its
+            # version and then answers nothing (#405). Under #328 an inbound
+            # claim used to start a catch-up on this caller, which sat sixty
+            # seconds on its silence and then charged it; now an inbound
+            # Peer's Height is a stranger's word and the node asks it nothing.
+            # Pass bitcoin-cli as the fourth argument for the tip's Height.
+            import subprocess
+            tip = int(subprocess.check_output(sys.argv[4].split() + ['getblockcount']).decode())
+            s.sendall(msg('version', version_payload(height=tip + 1000)))
+            s.settimeout(10); s.recv(65536)               # their version
+            s.sendall(msg('verack', b''))
+            s.settimeout(75); buf = b''; seen = []
+            try:
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk: break
+                    buf += chunk
+                    while len(buf) >= 24:
+                        length = struct.unpack('<I', buf[16:20])[0]
+                        if len(buf) < 24 + length: break
+                        seen.append(buf[4:16].rstrip(b'\0').decode(errors='replace')); buf = buf[24 + length:]
+            except socket.timeout:
+                print('caller: still connected after %.1f s claiming Height %d; the node sent: %s' % (time.time() - started, tip + 1000, ' '.join(seen) or 'nothing'), file=sys.stderr, flush=True); return
+            print('caller: dropped after %.1f s claiming Height %d; the node sent: %s' % (time.time() - started, tip + 1000, ' '.join(seen) or 'nothing'), file=sys.stderr, flush=True)
+            return
         elif mode == 'lurker':
             # What a crawler is: a correct Handshake and then nothing at all,
             # for ever. Held past the twenty-minute per-Peer deadline (#330),

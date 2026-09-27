@@ -86,8 +86,8 @@ Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
 `wrongbody`, `witnessflag`, `emptywitness`, `addrflood`, `escape`, `headerflood`,
 `bip30`, `invflood`, `invflood-late`, `invflood-pieces`, `echo`, `wrongwitness`, `badheight`, `overweight`, `sigops`, `nonfinal`, `sequencelock`); `tools/regtest/caller.py`
 is a caller that dials the node's served port (`early`, `chatty`, `silent`,
-`pinger`, `polite`, `lurker`, `locator`, `deaf`, `ancient`, `unwitnessed`). Each security fix in this repo (#281–#284, #291, #293,
-#300, #347, #354, #358, #399, #400, #401) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
+`pinger`, `polite`, `lurker`, `locator`, `deaf`, `ancient`, `unwitnessed`, `boaster`). Each security fix in this repo (#281–#284, #291, #293,
+#300, #347, #354, #358, #399, #400, #401, #405) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
 shows the offender dropped while the node carries on — that pairing is the
 house pattern, and a security fix without it is unproven. Run the honest
 baseline first: a validity check that has never seen real data can be a
