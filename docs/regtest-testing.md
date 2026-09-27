@@ -2820,6 +2820,62 @@ of the eleven beneath it, is refused by the same batch check with a line that
 names the rule instead; those two are covered by the verify cases in
 `infra/headers.av`, because Core will not mine one for you.
 
+### A body with the right Transactions and the wrong witnesses, and a coinbase that names the wrong Height
+
+[#399](https://github.com/n1bor/btc-listener/issues/399). Two rules Core
+reads out of the coinbase. The first is the one that matters today: the
+Merkle Root a Header commits to is over **txids**, which do not cover witness
+data, so a Peer handed a `getdata` could answer with the honest Transactions
+and any witnesses it liked, and the body passed the gate and was kept under
+the honest Block Id for good. BIP141's coinbase commitment — SHA256d of the
+witness Merkle Root and the coinbase's 32-byte witness nonce, in an
+`OP_RETURN aa21a9ed…` Output — is what covers them, and `Domain.Body.committed`
+now reads it (`fault` takes whether SegWit is in force at the Height). The
+second is BIP34: from its activation Height the coinbase script opens with the
+Block's own Height, which `Domain.Connect.heightOpened` checks on connect,
+after BIP30 rather than before it as Core does, so the `bip30` liar above is
+still refused for BIP30.
+
+The honest baseline is sections 1–4 as they stand: every regtest Block Core
+mines carries a commitment (its coinbase's witness is the 32-byte nonce) and
+opens with its Height, so a commitment or Height check that has never seen a
+real Block would have refused all of them. Then, with the node caught up,
+make three Blocks that each carry a witness Transaction and let the
+`wrongwitness` liar serve them — it flips one byte of the first non-coinbase
+witness item, txids and Merkle Root untouched — and after that the
+`badheight` liar, which mines a Block (as `bip30` does) whose coinbase names
+the tip's Height rather than its own:
+
+```bash
+python3 tools/regtest/liar.py 18455 wrongwitness "$C" &
+for i in 1 2 3; do $C sendtoaddress "$($C getnewaddress "" bech32)" 0.1 >/dev/null; $C generatetoaddress 1 "$($C getnewaddress)" >/dev/null; done
+timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+python3 tools/regtest/liar.py 18455 badheight "$C" &
+sleep 3; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+Expect the first body refused for its commitment before it is written, the
+liar dropped and the three Heights fetched from Core; then the mined Block
+placed, fetched, and refused when connected, marked invalid, its Peer
+dropped, and `debug.log` carrying `Block 54889e82…c516 does not connect and is
+marked invalid: coinbase does not open with Height 236, as BIP34 requires;
+charged to peer 0 (#376)`:
+
+```
+liar: sent 34c59eb2b90d17c16e1909848dc242dcf94e68b768481de6956a92ebda66b8f9 with one witness byte flipped in Transaction 1
+headers complete: 236 known
+dropping peer 0: Block 34c59eb2…b8f9: coinbase commits to witnesses be9edad2…8982, which the Transactions' witnesses do not hash to
+blocks 233/235 (99%)
+following at Height 235: 3 connected, 0 disconnected, set +9 -3
+
+liar: mined 54889e823077b7e0389a0de3291354675e8e2db5d297f86ea71c29b84a69c516 at Height 236 whose coinbase names Height 234
+headers to 236
+headers complete: 237 known
+utxo    connecting 236..236 of 236
+dropping peer 0: served Block 54889e82…c516, which does not connect: coinbase does not open with Height 236, as BIP34 requires (#376)
+following at Height 235: 0 connected, 0 disconnected, set +0 -0
+```
+
 ### A caller that is this node, one from 2012, and one that cannot serve witnesses
 
 [#280](https://github.com/n1bor/btc-listener/issues/280) item 16. The
@@ -3114,7 +3170,11 @@ the median, the Network's bits and a nonce that meets them — and the body is
 the Block the Header commits to, so the fault check has nothing to refuse;
 what the Block would do is write the coinbase's Output a second time. The
 liar announces the Header, answers `getheaders` with it and hands the body
-over on `getdata`. Name it **first**, with the node caught up to Core:
+over on `getdata`. Name it **first**, with the node caught up to Core, and
+with Core's tip a coinbase-only Block (a fresh `generatetoaddress` is): the
+duplicated coinbase carries the tip's witness commitment, which is the right
+one for a Block of one coinbase only when the tip was one too — otherwise the
+body is refused for its commitment (#399) before BIP30 is ever asked:
 
 ```bash
 python3 tools/regtest/liar.py 18455 bip30 "$C" &

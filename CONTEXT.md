@@ -328,10 +328,16 @@ weeks, and the Script coverage itself is still arriving.
 _Avoid_: saying the node "validates" a Block without saying which rules
 
 **By-Height consensus rules**:
-Six that Bitcoin Core enforces on connect and this node does not — BIP34
-(Height in the coinbase), block weight ≤ 4,000,000 WU, sigop cost ≤ 80,000,
-`IsFinalTx` (locktime against Height and median-time-past), BIP68 sequence
-locks, and BIP113. They are deferred rather than forgotten: each needs a Peer
+Five that Bitcoin Core enforces on connect and this node does not — block
+weight ≤ 4,000,000 WU, sigop cost ≤ 80,000 (#400), `IsFinalTx` (locktime
+against Height and median-time-past), BIP68 sequence locks, and BIP113
+(#401). BIP34 (the Height in the coinbase) and the BIP141 witness commitment
+are enforced since #399: `Domain.Connect.heightOpened` refuses a Block whose
+coinbase does not open with its Height from `Domain.Rules.bip34Height`, and
+`Domain.Body.committed` refuses a body whose witnesses do not hash to the
+coinbase's commitment — the Merkle Root is over txids and never covered
+them, so until #399 a Peer could serve the honest Transactions with any
+witnesses at all. The five are deferred rather than forgotten: each needs a Peer
 willing to spend **real proof of work** before it could matter at all, because
 since #281 an unproven Header is refused before it is placed. So the exposure
 is a false CLEAN from `audit` on a hypothetically-mined bad Block, not anything

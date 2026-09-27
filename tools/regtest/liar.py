@@ -146,13 +146,78 @@ def lying_body(cli, block_hash, mode):
         out += tx; at = end
     print('liar: sent', block_hash, 'with', lied or 'nothing to re-serialise, honestly', file=sys.stderr, flush=True)
     return out
+def wrong_witness_body(cli, block_hash):
+    # The honest Block with one byte of one witness item flipped (#399): the
+    # txids and the Merkle Root do not cover witnesses, so before the
+    # coinbase commitment was read this body passed the gate and was kept
+    # under the honest Block Id for good. A Block whose only witness is the
+    # coinbase's nonce is served honestly, and said so.
+    block = bytes.fromhex(rpc(cli, 'getblock', block_hash, '0'))
+    count, at = compact(block, 80); lied = None; out = bytearray(block)
+    for i in range(count):
+        end, marker, n_in, vin_at, wit_at, lock_at = tx_extent(block, at)
+        if i > 0 and marker and lied is None:
+            p = wit_at
+            for _ in range(n_in):
+                items, p = compact(block, p)
+                for _ in range(items):
+                    length, p = compact(block, p)
+                    if length > 0 and lied is None:
+                        out[p] ^= 0x01; lied = 'one witness byte flipped in Transaction %d' % i
+                    p += length
+        at = end
+    print('liar: sent', block_hash, 'with', lied or 'nothing but the coinbase nonce to flip, honestly', file=sys.stderr, flush=True)
+    return bytes(out)
 def flag_body(cli, block_hash):
     return lying_body(cli, block_hash, 'witnessflag')
 def empty_witness_body(cli, block_hash):
     return lying_body(cli, block_hash, 'emptywitness')
+def bad_height_block(cli):
+    # A Block that proves regtest's work on Core's tip and carries one fresh
+    # coinbase: the tip's, with the Height at the front of its script left as
+    # the tip's own (#399). BIP34 says a coinbase opens with the Height of
+    # the Block that carries it, so this one is a Block behind. Its txid is
+    # new (the script differs from every coinbase so far, since the rest of
+    # the tip's coinbase pays a fresh address), so BIP30 has nothing to say,
+    # and a one-Transaction Block's witness commitment is the same constant
+    # whatever the coinbase, so the body gate has nothing to refuse.
+    import json
+    tip = rpc(cli, 'getbestblockhash')
+    info = json.loads(rpc(cli, 'getblockheader', tip, 'true'))
+    block = bytes.fromhex(rpc(cli, 'getblock', tip, '0'))
+    count, at = compact(block, 80)
+    end, marker, n_in, vin_at, wit_at, lock_at = tx_extent(block, at)
+    coinbase = bytearray(block[at:end])
+    # The script starts 36 bytes into the Inputs (outpoint) plus its length
+    # byte; flip the low byte of the pushed Height so the number is off by
+    # one and the push length is unchanged.
+    script_at = vin_at - at + 1 + 36 + 1
+    coinbase[script_at + 1] ^= 0x01
+    # The tip's coinbase committed to the tip's witnesses; this Block has
+    # only the coinbase, whose wtxid is 32 zero bytes, so its commitment is
+    # SHA256d(32 zero bytes, the 32-zero-byte nonce) -- rewritten, or the
+    # body gate refuses the commitment before connect ever sees the Height.
+    constant = hashlib.sha256(hashlib.sha256(bytes(64)).digest()).digest()
+    mark = coinbase.find(bytes.fromhex('6a24aa21a9ed'))
+    assert mark > 0, 'the tip coinbase carries no witness commitment'
+    coinbase[mark + 6:mark + 38] = constant
+    stripped = bytes(coinbase[:4]) + bytes(coinbase[6:wit_at - at]) + bytes(coinbase[lock_at - at:end - at])
+    txid = hashlib.sha256(hashlib.sha256(stripped).digest()).digest()
+    when = max(int(time.time()), info['mediantime'] + 1)
+    prefix = struct.pack('<i', 0x20000000) + bytes.fromhex(tip)[::-1] + txid + struct.pack('<II', when, 0x207fffff)
+    for nonce in range(1 << 32):
+        header = prefix + struct.pack('<I', nonce)
+        digest = hashlib.sha256(hashlib.sha256(header).digest()).digest()
+        if digest[31] < 0x7f: break
+    print('liar: mined', digest[::-1].hex(), 'at Height', info['height'] + 1, 'whose coinbase names Height', info['height'] ^ 1, file=sys.stderr, flush=True)
+    return header, header + b'\x01' + bytes(coinbase), digest
 def duplicate_coinbase_block(cli):
     # A Block that proves regtest's work on Core's tip and carries one
-    # Transaction: the tip's own coinbase, byte for byte (#354). Its Header
+    # Transaction: the tip's own coinbase, byte for byte (#354). The tip has
+    # to be a coinbase-only Block (a fresh generatetoaddress is): its
+    # commitment then covers exactly this Block's witnesses too, where a tip
+    # with witness Transactions would have this body refused for its
+    # commitment (#399) before BIP30 was ever asked. Its Header
     # is honest about everything a Header can be asked -- parent, Merkle
     # Root (a one-Transaction tree's Root is that Transaction's Id), time
     # past the median, the Network's bits, a nonce that meets them -- and
@@ -344,6 +409,12 @@ def serve(port, mode):
         return
     elif mode == 'emptywitness':
         serve_bodies(conn, sys.argv[3], empty_witness_body)
+        return
+    elif mode == 'wrongwitness':
+        serve_bodies(conn, sys.argv[3], wrong_witness_body)
+    elif mode == 'badheight':
+        header, body, block_id = bad_height_block(sys.argv[3])
+        serve_block(conn, header, body, block_id)
         return
     elif mode == 'bip30':
         header, body, block_id = duplicate_coinbase_block(sys.argv[3])

@@ -13,39 +13,272 @@ module Body
         "no other is, every Transaction passes Domain.TxCheck, no Transaction"
         "Id appears twice, the Merkle tree has no duplicated pair at any level"
         "(CVE-2012-2459: a duplicated last Transaction leaves the Root as it"
-        "was), and the Root is the one the Header commits to. Weight and"
-        "signature-operation limits are not here; they are #280's list."
+        "was), and the Root is the one the Header commits to. Since #399 the"
+        "witness commitment is here too: the Merkle Root is over txids, which"
+        "do not cover witnesses, so without it a Peer could serve the honest"
+        "Transactions with any witnesses it liked. Weight and"
+        "signature-operation limits are #400's."
         "A fault is a fault of the Peer that sent the body, which the caller"
         "drops, and the Height goes back on the list to be asked of another."
     exposes [fault]
-    depends [Bytes, Domain.Block, Domain.Transaction, Domain.TxCheck]
+    depends [Bytes, Domain.Block, Domain.Hash, Domain.Transaction, Domain.TxCheck]
     effects []
 
-fn fault(payload: Bytes, blockId: String) -> Option<String>
-    ? "Why this body is not Block blockId, or nothing when it is."
+fn fault(payload: Bytes, blockId: String, witnessed: Bool) -> Option<String>
+    ? "Why this body is not Block blockId, or nothing when it is. witnessed"
+      "is whether SegWit is in force at the Block's Height, which decides"
+      "whether a coinbase commitment is read (n1bor/btc-listener#399)."
     match Domain.Block.decodeHeader(List.take(Bytes.octets(payload), Domain.Block.headerLength()))
         Result.Err(why) -> Option.Some("Block {blockId}: {why}")
-        Result.Ok(header) -> decoded(blockId, header, Domain.Block.transactionsOf(payload))
+        Result.Ok(header) -> decoded(blockId, header, Domain.Block.carriedOf(payload), witnessed)
 
 verify fault
-    fault(Bytes.fromHex(genesisHex())?, genesisId()) => Option.None
-    fault(Bytes.fromHex("01")?, "aa") => Option.Some("Block aa: Block Header must be 80 bytes, got 1")
-    fault(Bytes.fromHex(genesisHeaderHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries no Transactions")
-    fault(Bytes.fromHex(genesisHeaderHex() + "01" + "01000000")?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f would not decode: Transaction ends before its lock time")
-    fault(Bytes.fromHex(genesisHeaderHex() + "01" + spendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not begin with a coinbase")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + coinbaseHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + spendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transactions do not build the Merkle Root 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + doubleSpendHex())?, genesisId()) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transaction 5887ce6952c895b568e2609cc4782f4be3558c8caf34edf13a9e1c24a316a19e spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
+    fault(Bytes.fromHex(genesisHex())?, genesisId(), false) => Option.None
+    fault(Bytes.fromHex("01")?, "aa", false) => Option.Some("Block aa: Block Header must be 80 bytes, got 1")
+    fault(Bytes.fromHex(genesisHeaderHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries no Transactions")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + "01000000")?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f would not decode: Transaction ends before its lock time")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + spendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not begin with a coinbase")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + coinbaseHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + spendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transactions do not build the Merkle Root 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + doubleSpendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transaction 5887ce6952c895b568e2609cc4782f4be3558c8caf34edf13a9e1c24a316a19e spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
+    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), true) => Option.None
+    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), false) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: Transaction a8a8b11128fe861926fdc9754effe87753a8a6b1ca3209aa4714777ee9b1a7e4 carries witness data but the coinbase commits to none")
+    fault(Bytes.fromHex(segwitBlockWitnessTamperedHex())?, segwitBlockId(), true) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase commits to witnesses 0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf, which the Transactions' witnesses do not hash to")
+    fault(Bytes.fromHex(segwitBlockTwoNonceHex())?, segwitBlockId(), true) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase carries no 32-byte witness nonce beside its commitment")
 
-fn decoded(blockId: String, header: BlockHeader, transactions: Result<List<Transaction>, String>) -> Option<String>
-    ? "The Transactions, or the reason there are none."
-    match transactions
+fn decoded(blockId: String, header: BlockHeader, carried: Result<List<Carried>, String>, witnessed: Bool) -> Option<String>
+    ? "The Transactions, or the reason there are none; then the coinbase's"
+      "witness commitment once the rest of the body has passed."
+    match carried
         Result.Err(why) -> Option.Some("Block {blockId} would not decode: {why}")
-        Result.Ok(decodedList) -> shaped(blockId, header, decodedList)
+        Result.Ok(carriedList) -> shapedThenCommitted(blockId, header, carriedList, witnessed)
 
 verify decoded
-    decoded("aa", sampleHeader(), Result.Err("no")) => Option.Some("Block aa would not decode: no")
-    decoded("aa", sampleHeader(), Result.Ok([])) => Option.Some("Block aa carries no Transactions")
+    decoded("aa", sampleHeader(), Result.Err("no"), false) => Option.Some("Block aa would not decode: no")
+    decoded("aa", sampleHeader(), Result.Ok([]), false) => Option.Some("Block aa carries no Transactions")
+
+fn shapedThenCommitted(blockId: String, header: BlockHeader, carried: List<Carried>, witnessed: Bool) -> Option<String>
+    ? "The txid-level checks first, the witness commitment last: a body that"
+      "is not the Block is refused for that before its witnesses are read."
+    match shaped(blockId, header, transactionsFrom(carried, []))
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> committed(blockId, carried, witnessed)
+
+verify shapedThenCommitted
+    shapedThenCommitted("aa", sampleHeader(), [], false) => Option.Some("Block aa carries no Transactions")
+
+fn transactionsFrom(carried: List<Carried>, acc: List<Transaction>) -> List<Transaction>
+    ? "The decoded Transactions, in order, without their bytes."
+    match carried
+        [] -> List.reverse(acc)
+        [head, ..tail] -> transactionsFrom(tail, List.prepend(head.transaction, acc))
+
+verify transactionsFrom
+    transactionsFrom([], []) => []
+    List.len(transactionsFrom([Carried(transaction = coinbase(), bytes = []), Carried(transaction = spend(), bytes = [])], [])) => 2
+
+fn committed(blockId: String, carried: List<Carried>, witnessed: Bool) -> Option<String>
+    ? "BIP141's witness commitment (n1bor/btc-listener#399), as Core's"
+      "ContextualCheckBlock reads it. With SegWit in force and a coinbase"
+      "Output of the commitment's shape, the 32 bytes it carries must be"
+      "SHA256d of the witness Merkle Root -- the tree over wtxids with the"
+      "coinbase's taken as 32 zero bytes -- followed by the witness nonce, the"
+      "coinbase's single 32-byte witness item. Without a commitment, or"
+      "before SegWit, no Transaction may carry witness data at all."
+      "A commitment that does not match is a Peer serving the honest"
+      "Transactions with witnesses of its own: the txids and the Merkle Root"
+      "are untouched by a witness, so nothing else here would notice."
+    match carried
+        [] -> Option.None
+        [first, ..rest] -> committedBy(blockId, first.transaction, rest, commitmentIn(first.transaction.outputs, Option.None), witnessed)
+
+verify committed
+    committed("aa", [], true) => Option.None
+    committed("aa", [Carried(transaction = coinbase(), bytes = [])], true) => Option.None
+
+fn commitmentIn(outputs: List<Output>, found: Option<String>) -> Option<String>
+    ? "The commitment the last qualifying Output carries: OP_RETURN, a 36-byte"
+      "push, the four bytes aa21a9ed, then 32 bytes. Core takes the last such"
+      "Output (GetWitnessCommitmentIndex), so does this."
+    match outputs
+        [] -> found
+        [head, ..tail] -> commitmentIn(tail, commitmentOf(head.script, found))
+
+verify commitmentIn
+    commitmentIn([], Option.None) => Option.None
+    commitmentIn([Output(value = 0, script = "6a24aa21a9ed0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf")], Option.None) => Option.Some("0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf")
+    commitmentIn([Output(value = 0, script = "6a24aa21a9ed" + zeros64()), Output(value = 0, script = "6a24aa21a9ed0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf")], Option.None) => Option.Some("0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf")
+    commitmentIn([Output(value = 0, script = "6a24aa21a9ed0744")], Option.None) => Option.None
+
+fn commitmentOf(script: String, found: Option<String>) -> Option<String>
+    ? "This Output's commitment if it has the shape, else the one found so far."
+    match Bool.and(String.startsWith(script, "6a24aa21a9ed"), String.len(script) >= 76)
+        true -> Option.Some(String.slice(script, 12, 76))
+        false -> found
+
+verify commitmentOf
+    commitmentOf("0014504b0f6601b346a3cec6936a0cd1a1eba5e3ca94", Option.Some("x")) => Option.Some("x")
+    commitmentOf("6a24aa21a9ed" + zeros64() + "ff", Option.None) => Option.Some(zeros64())
+
+fn committedBy(blockId: String, coinbaseTx: Transaction, rest: List<Carried>, found: Option<String>, witnessed: Bool) -> Option<String>
+    ? "No commitment, or one before SegWit, forbids every witness; one in"
+      "force is checked."
+    match found
+        Option.None -> unwitnessed(blockId, List.prepend(coinbaseTx, transactionsFrom(rest, [])))
+        Option.Some(commitment) -> match witnessed
+            false -> unwitnessed(blockId, List.prepend(coinbaseTx, transactionsFrom(rest, [])))
+            true -> matched(blockId, coinbaseTx, rest, commitment)
+
+verify committedBy
+    committedBy("aa", coinbase(), [], Option.None, true) => Option.None
+    committedBy("aa", coinbase(), [], Option.Some(zeros64()), false) => Option.None
+    committedBy("aa", coinbase(), [], Option.Some(zeros64()), true) => Option.Some("Block aa: coinbase carries no 32-byte witness nonce beside its commitment")
+
+fn unwitnessed(blockId: String, transactions: List<Transaction>) -> Option<String>
+    ? "The first Transaction carrying witness data, when none may."
+    match transactions
+        [] -> Option.None
+        [head, ..tail] -> match head.isSegWit
+            true -> Option.Some("Block {blockId}: Transaction {Domain.Transaction.txidOf(head)} carries witness data but the coinbase commits to none")
+            false -> unwitnessed(blockId, tail)
+
+verify unwitnessed
+    unwitnessed("aa", [coinbase(), spend()]) => Option.None
+    unwitnessed("aa", []) => Option.None
+
+fn matched(blockId: String, coinbaseTx: Transaction, rest: List<Carried>, commitment: String) -> Option<String>
+    ? "The nonce off the coinbase, the root off the rest, and the hash of"
+      "the two against what the coinbase said."
+    match nonceOf(coinbaseTx)
+        Option.None -> Option.Some("Block {blockId}: coinbase carries no 32-byte witness nonce beside its commitment")
+        Option.Some(nonce) -> matchedRoot(blockId, commitment, witnessRootOf(rest), nonce)
+
+verify matched
+    matched("aa", coinbase(), [], zeros64()) => Option.Some("Block aa: coinbase carries no 32-byte witness nonce beside its commitment")
+
+fn nonceOf(coinbaseTx: Transaction) -> Option<String>
+    ? "The coinbase's single Input's single 32-byte witness item, Core's"
+      "bad-witness-nonce-size when it is anything else."
+    match coinbaseTx.inputs
+        [] -> Option.None
+        [first, ..more] -> match more
+            [] -> nonceIn(first.witness)
+            [_, .._] -> Option.None
+
+verify nonceOf
+    nonceOf(coinbase()) => Option.None
+    nonceOf(Transaction(version = 1, inputs = [Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [zeros64()])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = true)) => Option.Some(zeros64())
+    nonceOf(Transaction(version = 1, inputs = [Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [zeros64()]), Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = [])], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = true)) => Option.None
+
+fn nonceIn(witness: List<String>) -> Option<String>
+    ? "Exactly one item of exactly 32 bytes."
+    match witness
+        [] -> Option.None
+        [item, ..more] -> match Bool.and(List.len(more) == 0, String.len(item) == 64)
+            true -> Option.Some(item)
+            false -> Option.None
+
+verify nonceIn
+    nonceIn([]) => Option.None
+    nonceIn([zeros64()]) => Option.Some(zeros64())
+    nonceIn([zeros64(), "aa"]) => Option.None
+    nonceIn(["aabb"]) => Option.None
+
+fn witnessRootOf(rest: List<Carried>) -> Result<String, String>
+    ? "The Merkle Root over wtxids, the coinbase's taken as 32 zero bytes."
+    match wtxidsOf(rest, [zeros64()])
+        Result.Err(why) -> Result.Err(why)
+        Result.Ok(wtxids) -> Domain.Block.merkleRootOf(wtxids)
+
+verify witnessRootOf
+    witnessRootOf([]) => Result.Ok(zeros64())
+
+fn wtxidsOf(rest: List<Carried>, acc: List<String>) -> Result<List<String>, String>
+    ? "Each Transaction's wtxid: the identifier of its bytes as they arrived,"
+      "witnesses included, which is the txid for one that carries none."
+    match rest
+        [] -> Result.Ok(List.reverse(acc))
+        [head, ..tail] -> wtxidsOf(tail, List.prepend(Domain.Hash.identifierOf(Bytes.fromList(head.bytes)?), acc))
+
+verify wtxidsOf
+    wtxidsOf([], [zeros64()]) => Result.Ok([zeros64()])
+    wtxidsOf([Carried(transaction = coinbase(), bytes = Bytes.octets(Bytes.fromHex(coinbaseHex())?))], []) => Result.Ok(["4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"])
+
+fn matchedRoot(blockId: String, commitment: String, root: Result<String, String>, nonce: String) -> Option<String>
+    ? "SHA256d(root, nonce) against the commitment."
+    match root
+        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Ok(rootHex) -> match commitmentHash(rootHex, nonce)
+            Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+            Result.Ok(computed) -> matchedHash(blockId, commitment, computed)
+
+verify matchedRoot
+    matchedRoot("aa", zeros64(), Result.Err("no"), zeros64()) => Option.Some("Block aa: no")
+    matchedRoot("aa", "0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf", Result.Ok("zz"), zeros64()) => Option.Some("Block aa: Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn matchedHash(blockId: String, commitment: String, computed: String) -> Option<String>
+    ? "Equal, or the Peer's witnesses are not the Block's."
+    match commitment == computed
+        true -> Option.None
+        false -> Option.Some("Block {blockId}: coinbase commits to witnesses {commitment}, which the Transactions' witnesses do not hash to")
+
+verify matchedHash
+    matchedHash("aa", "00", "00") => Option.None
+    matchedHash("aa", "00", "01") => Option.Some("Block aa: coinbase commits to witnesses 00, which the Transactions' witnesses do not hash to")
+
+fn commitmentHash(root: String, nonce: String) -> Result<String, String>
+    ? "SHA256d over the root in the order it was hashed in -- merkleRootOf"
+      "hands it back displayed, so it is turned round -- then the nonce, and"
+      "the digest in natural order, which is how the coinbase script holds"
+      "it. identifierOf gives the digest reversed, so it is turned round"
+      "again rather than adding a dependency on Crypto here."
+    rootBytes = List.reverse(Bytes.octets(Bytes.fromHex(root)?))
+    nonceBytes = Bytes.octets(Bytes.fromHex(nonce)?)
+    reversed = Domain.Hash.identifierOf(Bytes.fromList(List.concat(rootBytes, nonceBytes))?)
+    Result.Ok(Domain.Hash.reversedHex(Bytes.octets(Bytes.fromHex(reversed)?)))
+
+verify commitmentHash
+    commitmentHash(zeros64(), zeros64()) => Result.Ok("e2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf9")
+    commitmentHash("zz", zeros64()) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn zeros64() -> String
+    ? "Thirty-two zero bytes in hex: the coinbase's wtxid and, on regtest, its nonce."
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+verify zeros64
+    String.len(zeros64()) => 64
+
+fn segwitBlockHex() -> String
+    ? "Regtest Block 727681405c…6540 at Height 225, mined by Core 27 with one"
+      "P2WPKH spend beside the coinbase: Core wrote the commitment"
+      "0744493e… into the coinbase's second Output, which pins this check to"
+      "Core's arithmetic rather than to its own."
+    "0000003089cccae78ae287cade9fe6addf6a433e08795f79649390fae33f1575eaecf60c9022db3af0d386cfa80c91f9e85adea7bbd601f24515cb54ee69482c45fa4e7edae5b86affff7f200000000002020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff0402e10000ffffffff0283fe0295000000001600146b8aef7b980d5f15bd88cbd06788b52b5c1ddc260000000000000000266a24aa21a9ed0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf0120000000000000000000000000000000000000000000000000000000000000000000000000020000000001016f59fe551aef99bf99e2e4ef50aeeddca960a098ae05f4b7e10700598f6c2cbd0100000000fdffffff02b9e30727010000001600149ce3ebd8263379decb1adfffebce51aaa5a9b34980f0fa0200000000160014ed8f9e5d27f507a5dbb7b2f3bc8c2472a46b94570247304402201e8c83b64cd29d6a9520be767551c6d5767878ec5ababbc54ab53004012659e7022055aec1dfb89ec25e018545684a7fac48908e5e3085bd8ea0ea0a6857a21afabb01210386b61c7eca1acac3b0525e1dfce04dee8691d7000b83a6b16189084a7cffeb41e0000000"
+
+verify segwitBlockHex
+    String.len(segwitBlockHex()) => 944
+
+fn segwitBlockId() -> String
+    ? "That Block's Id."
+    "727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540"
+
+verify segwitBlockId
+    String.len(segwitBlockId()) => 64
+
+fn segwitBlockWitnessTamperedHex() -> String
+    ? "The same Block with one byte of the spend's signature flipped: txids"
+      "and Merkle Root untouched, wtxid and commitment not."
+    "0000003089cccae78ae287cade9fe6addf6a433e08795f79649390fae33f1575eaecf60c9022db3af0d386cfa80c91f9e85adea7bbd601f24515cb54ee69482c45fa4e7edae5b86affff7f200000000002020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff0402e10000ffffffff0283fe0295000000001600146b8aef7b980d5f15bd88cbd06788b52b5c1ddc260000000000000000266a24aa21a9ed0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf0120000000000000000000000000000000000000000000000000000000000000000000000000020000000001016f59fe551aef99bf99e2e4ef50aeeddca960a098ae05f4b7e10700598f6c2cbd0100000000fdffffff02b9e30727010000001600149ce3ebd8263379decb1adfffebce51aaa5a9b34980f0fa0200000000160014ed8f9e5d27f507a5dbb7b2f3bc8c2472a46b94570247304402201e8d83b64cd29d6a9520be767551c6d5767878ec5ababbc54ab53004012659e7022055aec1dfb89ec25e018545684a7fac48908e5e3085bd8ea0ea0a6857a21afabb01210386b61c7eca1acac3b0525e1dfce04dee8691d7000b83a6b16189084a7cffeb41e0000000"
+
+verify segwitBlockWitnessTamperedHex
+    String.len(segwitBlockWitnessTamperedHex()) => 944
+
+fn segwitBlockTwoNonceHex() -> String
+    ? "The same Block with the coinbase's witness stack made two items."
+    "0000003089cccae78ae287cade9fe6addf6a433e08795f79649390fae33f1575eaecf60c9022db3af0d386cfa80c91f9e85adea7bbd601f24515cb54ee69482c45fa4e7edae5b86affff7f200000000002020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff0402e10000ffffffff0283fe0295000000001600146b8aef7b980d5f15bd88cbd06788b52b5c1ddc260000000000000000266a24aa21a9ed0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf02200000000000000000000000000000000000000000000000000000000000000000010000000000020000000001016f59fe551aef99bf99e2e4ef50aeeddca960a098ae05f4b7e10700598f6c2cbd0100000000fdffffff02b9e30727010000001600149ce3ebd8263379decb1adfffebce51aaa5a9b34980f0fa0200000000160014ed8f9e5d27f507a5dbb7b2f3bc8c2472a46b94570247304402201e8c83b64cd29d6a9520be767551c6d5767878ec5ababbc54ab53004012659e7022055aec1dfb89ec25e018545684a7fac48908e5e3085bd8ea0ea0a6857a21afabb01210386b61c7eca1acac3b0525e1dfce04dee8691d7000b83a6b16189084a7cffeb41e0000000"
+
+verify segwitBlockTwoNonceHex
+    String.len(segwitBlockTwoNonceHex()) => 948
 
 fn shaped(blockId: String, header: BlockHeader, transactions: List<Transaction>) -> Option<String>
     ? "A coinbase first, then the rest checked one by one."

@@ -64,7 +64,7 @@ module Rules
         "P2SH is the exception and n1bor/btc-listener#66 covers it: Core has no"
         "BIP16 Height at all, because BIP16 activated on a Block timestamp and"
         "Core now enforces P2SH everywhere with one named Block excused."
-    exposes [Rules, at, latest, underFlags, exceptFlags, dummyWrong, strictDerHeight, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
+    exposes [Rules, at, latest, bip34Height, bip34At, underFlags, exceptFlags, dummyWrong, strictDerHeight, stillNop, payToScriptHashHeight, checkLockTimeVerifyHeight, checkSequenceVerifyHeight, segWitHeight, taprootHeight]
     depends [Domain.Network, Domain.Policy]
     effects []
 
@@ -219,6 +219,37 @@ verify checkSequenceVerifyHeight
     checkSequenceVerifyHeight(Network.Testnet) => 770112
     checkSequenceVerifyHeight(Network.Signet) => 1
     checkSequenceVerifyHeight(Network.Regtest) => 1
+
+fn bip34At(network: Network, height: Int) -> Bool
+    ? "Whether BIP34 is in force at this Height: a Block rule, not a Script"
+      "one, so it stands beside Rules rather than in it -- Rules is what the"
+      "Script engine asks, and adding a field to it moved the proof of"
+      "at.witnessImpliesPayToScriptHash off universal in the engine cone."
+    height >= bip34Height(network)
+
+verify bip34At
+    bip34At(Network.Mainnet, 227930) => false
+    bip34At(Network.Mainnet, 227931) => true
+    bip34At(Network.Regtest, 0) => false
+    bip34At(Network.Regtest, 1) => true
+
+fn bip34Height(network: Network) -> Int
+    ? "BIP34 put the Block's own Height at the front of the coinbase script"
+      "from this Height (n1bor/btc-listener#399), so that no two coinbases"
+      "can ever be the same bytes -- which is what made BIP30's duplicate"
+      "Outputs impossible afterwards. Core's chainparams: mainnet 227931,"
+      "testnet3 21111, signet and regtest 1 (regtest's getdeploymentinfo says"
+      "so on Core 27)."
+    match network
+        Network.Mainnet -> 227931
+        Network.Testnet -> 21111
+        Network.Signet -> 1
+        Network.Regtest -> 1
+
+verify bip34Height
+    bip34Height(Network.Mainnet) => 227931
+    bip34Height(Network.Testnet) => 21111
+    bip34Height(Network.Regtest) => 1
 
 fn segWitHeight(network: Network) -> Int
     ? "BIP141 made a witness program mean something at this Height, and BIP147"

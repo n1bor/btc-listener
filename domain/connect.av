@@ -14,9 +14,10 @@ module Connect
         "opposite (#303), and because the Assume-valid Height sounds like the"
         "switch that turns it on and is not -- it says which range audit may"
         "be taken to have settled. ADR 0007 is the reasoning."
-        "Six consensus rules are deferred with it, and CONTEXT.md lists them"
-        "under Deferred consensus rules with the reason: BIP34, block weight,"
-        "sigop cost, IsFinalTx, BIP68 sequence locks and BIP113. Every one of"
+        "Five consensus rules are deferred with it, and CONTEXT.md lists them"
+        "under Deferred consensus rules with the reason: block weight,"
+        "sigop cost, IsFinalTx, BIP68 sequence locks and BIP113 (BIP34 is"
+        "heightOpened below, since #399). Every one of"
         "them needs a Peer willing to spend real proof of work before it"
         "could matter, which #281 now requires before a Header is placed at"
         "all, so the exposure is a false CLEAN from audit on a"
@@ -32,7 +33,7 @@ module Connect
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
     exposes [Change, Connecting, TxFee, cannotConnect, refusalOf, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
-    depends [Bytes, Domain.Network, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
+    depends [Bytes, Domain.Hash, Domain.Network, Domain.StackItem, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
 record TxFee
@@ -332,9 +333,10 @@ verify disjoint
     disjoint([], [Bytes.fromList([1])]) => true
     disjoint([Bytes.fromList([1])], [Bytes.fromList([1])]) => false
 
-fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>) -> Connecting
-    ? "connected, after BIP30: a Block that would write an Output the Set"
-      "already holds is refused whole, before its walk."
+fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>, bip34: Bool) -> Connecting
+    ? "connected, after BIP30 and BIP34: a Block that would write an Output"
+      "the Set already holds, or whose coinbase does not open with its Height,"
+      "is refused whole, before its walk."
       "held is every key this Block's Outputs would be written under that the"
       "Set holds already -- the caller looks them up, because the walk only"
       "fetches what the Inputs spend. Without this, a duplicate txid overwrote"
@@ -342,12 +344,24 @@ fn connectedUnless(network: Network, height: Int, transactions: List<Transaction
       "deleted the key outright and lost the original (n1bor/btc-listener#354)."
     match duplicateOutputs(network, height, held)
         Option.Some(why) -> Connecting.Refused(why)
-        Option.None -> connected(network, height, transactions, fromStore)
+        Option.None -> connectedOpening(network, height, transactions, fromStore, heightOpened(bip34, height, transactions))
 
 verify connectedUnless
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), []) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])]) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
-    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])])) => true
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [], false) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], false) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], false)) => true
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [], true) => Connecting.Refused("coinbase does not open with Height 225, as BIP34 requires")
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [Bytes.fromList([203, 0])], true) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+
+fn connectedOpening(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, opened: Option<String>) -> Connecting
+    ? "What BIP34 said, then the walk."
+    match opened
+        Option.Some(why) -> Connecting.Refused(why)
+        Option.None -> connected(network, height, transactions, fromStore)
+
+verify connectedOpening
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.Some("no")) => Connecting.Refused("no")
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.None) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
 
 fn duplicateOutputs(network: Network, height: Int, held: List<Bytes>) -> Option<String>
     ? "BIP30: why a Block whose Outputs the Set already holds is refused, or"
@@ -401,6 +415,119 @@ fn withCoinbase(network: Network, height: Int, coinbase: Transaction, rest: List
 verify withCoinbase
     withCoinbase(Network.Mainnet, 1, minting(5000000000), [], Map.fromList([])) => Connecting.Applied(Change(added = [Unspent(txid = Bytes.fromList([203]), index = 0, value = 5000000000, script = Bytes.empty(), height = 1, coinbase = true)], removed = [], fees = 0, confirmed = [TxFee(txid = "cb", fee = 0, coinbase = true)]))
     withCoinbase(Network.Mainnet, 1, minting(6000000000), [], Map.fromList([])) => Connecting.Refused("coinbase claims 6000000000 with 5000000000 allowed")
+
+fn heightOpened(bip34: Bool, height: Int, transactions: List<Transaction>) -> Option<String>
+    ? "BIP34 (n1bor/btc-listener#399): from its activation Height the coinbase"
+      "script opens with the Block's own Height, pushed the way Script pushes a"
+      "number. Core checks it in ContextualCheckBlock, before BIP30; here it"
+      "comes after, so a Block that breaks both is still named for BIP30 --"
+      "the order changes the sentence, never the refusal. Core: bad-cb-height."
+      "Whether the rule is in force is the caller's Domain.Rules.bip34At,"
+      "passed as a Bool the way Domain.Body.fault takes witnessed: this module"
+      "is in the laws leaf, and a dependency on Domain.Rules brought its laws"
+      "into a cone where one of them lands on sorry."
+    match bip34
+        false -> Option.None
+        true -> heightOpening(height, transactions)
+
+verify heightOpened
+    heightOpened(false, 1, [minting(50)]) => Option.None
+    heightOpened(true, 225, [openingWith("02e10000")]) => Option.None
+    heightOpened(true, 225, [openingWith("02e00000")]) => Option.Some("coinbase does not open with Height 225, as BIP34 requires")
+    heightOpened(true, 1, [openingWith("5100")]) => Option.None
+    heightOpened(true, 1, [minting(50)]) => Option.Some("coinbase has no Input to carry Height 1 in (BIP34)")
+    heightOpened(true, 1, []) => Option.None
+    heightOpened(true, 227931, [openingWith("035b7a03")]) => Option.None
+    heightOpened(true, 227931, [openingWith("045b7a0300")]) => Option.Some("coinbase does not open with Height 227931, as BIP34 requires")
+
+fn heightOpening(height: Int, transactions: List<Transaction>) -> Option<String>
+    ? "The coinbase's first Input's script, against the push the Height makes."
+      "A Block with no Transactions is the body gate's to refuse, not this."
+    match transactions
+        [] -> Option.None
+        [coinbaseTx, .._] -> heightOpeningIn(height, coinbaseTx.inputs)
+
+verify heightOpening
+    heightOpening(17, [openingWith("0111")]) => Option.None
+    heightOpening(17, [openingWith("0112")]) => Option.Some("coinbase does not open with Height 17, as BIP34 requires")
+    heightOpening(17, []) => Option.None
+
+fn heightOpeningIn(height: Int, inputs: List<Input>) -> Option<String>
+    ? "The first Input's script starts with the Height, or the reason not."
+    match inputs
+        [] -> Option.Some("coinbase has no Input to carry Height {height} in (BIP34)")
+        [first, .._] -> match String.startsWith(first.script, heightPush(height))
+            true -> Option.None
+            false -> Option.Some("coinbase does not open with Height {height}, as BIP34 requires")
+
+verify heightOpeningIn
+    heightOpeningIn(17, []) => Option.Some("coinbase has no Input to carry Height 17 in (BIP34)")
+    heightOpeningIn(17, openingWith("0111").inputs) => Option.None
+
+fn heightPush(height: Int) -> String
+    ? "The Height as CScript writes a number, in hex: OP_0 for zero, OP_1 to"
+      "OP_16 for one to sixteen, otherwise the minimal little-endian number"
+      "behind its length -- Domain.StackItem.fromNumber's bytes, which are"
+      "the same encoding the Script engine reads."
+    match height == 0
+        true -> "00"
+        false -> heightPushPositive(height)
+
+verify heightPush
+    heightPush(0) => "00"
+    heightPush(1) => "51"
+    heightPush(16) => "60"
+    heightPush(17) => "0111"
+    heightPush(224) => "02e000"
+    heightPush(225) => "02e100"
+    heightPush(227931) => "035b7a03"
+    heightPush(481824) => "03205a07"
+
+fn readsBackAsTheHeight(height: Int) -> Bool
+    ? "The pushed number reads back as the Height through Domain.StackItem's"
+      "own reader. Cases rather than a law: the export landed on sorry over"
+      "asNumber's recursion in the laws leaf, where the same reader's own laws"
+      "are proven in the engine cone."
+    Domain.StackItem.asNumber(List.drop(pushBytes(height), 1)) == height
+
+verify readsBackAsTheHeight
+    readsBackAsTheHeight(17) => true
+    readsBackAsTheHeight(127) => true
+    readsBackAsTheHeight(128) => true
+    readsBackAsTheHeight(255) => true
+    readsBackAsTheHeight(256) => true
+    readsBackAsTheHeight(32767) => true
+    readsBackAsTheHeight(32768) => true
+    readsBackAsTheHeight(227931) => true
+    readsBackAsTheHeight(481824) => true
+    readsBackAsTheHeight(968821) => true
+    readsBackAsTheHeight(16777215) => true
+    readsBackAsTheHeight(16777216) => true
+
+fn heightPushPositive(height: Int) -> String
+    ? "One opcode for one to sixteen, a pushed number above."
+    match height <= 16
+        true -> Domain.Hash.reversedHex([80 + height])
+        false -> Domain.Hash.reversedHex(List.reverse(pushBytes(height)))
+
+verify heightPushPositive
+    heightPushPositive(2) => "52"
+    heightPushPositive(300) => "022c01"
+
+fn pushBytes(height: Int) -> List<Int>
+    ? "The push opcode, which is the number's length, then the number."
+    List.prepend(List.len(Domain.StackItem.fromNumber(height)), Domain.StackItem.fromNumber(height))
+
+verify pushBytes
+    pushBytes(17) => [1, 17]
+    pushBytes(225) => [2, 225, 0]
+
+fn openingWith(script: String) -> Transaction
+    ? "A coinbase whose one Input carries this script, for the cases here."
+    Transaction(version = 1, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 4294967295, script = script, sequence = 4294967295, witness = [])], outputs = [Output(value = 5000000000, script = "")], lockTime = 0, txid = "cb", size = 0, isSegWit = false)
+
+verify openingWith
+    List.len(openingWith("51").inputs) => 1
 
 fn walkedFrom(start: Result<Building, String>, rest: List<Transaction>, height: Int, fromStore: Map<Bytes, Unspent>) -> Result<Building, String>
     ? "The walk, from the coinbase's Outputs, unless those had no key."

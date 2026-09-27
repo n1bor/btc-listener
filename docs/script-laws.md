@@ -478,6 +478,28 @@ the Height come from the hostile lane: at `2^63` the subsidy's halving walk
 exhausts the step budget, and a `forkHeight` below zero is not a fork. The
 regtest run for the refusal is the `bip30` liar section of
 `docs/regtest-testing.md`.
+## The coinbase's Height and the witness commitment (n1bor/btc-listener#399)
+
+No new law. `Domain.Connect.heightPush` was written with one — the push reads
+back as the Height through `Domain.StackItem.asNumber` — and it landed on
+sorry in the laws leaf over `asNumber`'s recursion, where the same reader's own
+laws prove in the engine cone; it is `readsBackAsTheHeight`, a Bool-valued
+function with twelve rows from 17 to 16,777,216, under the same name. The first
+cut also made `Domain.Connect` depend on `Domain.Rules`, which brought the Rules
+laws into the leaf where `at.witnessImpliesPayToScriptHash.implication` landed
+on sorry too, and adding a `bip34` field to `Rules` moved that same law off
+universal in the engine cone. Both are undone: BIP34 is `Domain.Rules.bip34At`
+beside `Rules`, and `connectedUnless` takes the switch as a Bool the way
+`Domain.Body.fault` takes `witnessed`.
+
+**Why the leaf budget rose, 104 → 105.** `Domain.Connect.connectedOpening`, the
+one new function on the connect path (BIP34's answer, then the walk), is
+declined for the reason every `connected` claim is: its cone reaches the
+fuel-lowered mutual recursion of the Set walk (`conserving`, `walked`, …). The
+engine cone is unchanged at **129 universal, 1 bounded, 0 open, 136 declined**;
+the leaf at **127 universal, 11 bounded, 0 open, 105 declined**, `--gate` 0
+regressions in both.
+
 ## A Transaction's size is what its decoder consumed (n1bor/btc-listener#280 item 17)
 
 One law over `Domain.Transaction.decodeNext`: `sizeIsWhatItConsumed` — a

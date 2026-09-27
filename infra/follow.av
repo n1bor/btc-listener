@@ -23,7 +23,7 @@ module Follow
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
     exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, pollReturned, turnWorked, sampleCatching]
-    depends [Bytes, Tcp, Work, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.Catchup, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Target, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Pace, Infra.Screen, Infra.Store, Domain.Watchdog]
+    depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.Catchup, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Rules, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Target, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Domain.Watchdog, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Pace, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Tcp, Work]
     effects [
         Console.error, Console.print,
         Disk.appendBytes, Disk.appendText, Disk.readBytesAt, Disk.size, Disk.sync,
@@ -3251,9 +3251,28 @@ fn compactStore(network: Network, store: Store, rebuilding: Option<Rebuilding>, 
       "that Header's. Only then is the Header absorbed."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
     _expected = expectedCompact(rebuilding, blockId)?
-    match Domain.Body.fault(payload, blockId)
+    match Domain.Body.fault(payload, blockId, witnessedNext(network, store)?)
         Option.Some(why) -> Result.Err(why)
         Option.None -> placedCompact(network, store, header, blockId, nowSecs)
+
+fn witnessedNext(network: Network, store: Store) -> Result<Bool, String>
+    ? "Whether SegWit is in force at the Height a compact Block extends the"
+      "tip to (#399). A compact Block is a Block a Peer announced as the"
+      "tip's child, so the tip's Height plus one is what the witness"
+      "commitment is read under; a Branch a Block behind gets the same answer"
+      "everywhere SegWit has been in force for years."
+    ! [Infra.Kv.get]
+    Result.Ok(Domain.Rules.at(network, nextHeight(Infra.Headers.tipOf(store)?)).segWit)
+
+fn nextHeight(tip: Option<Placement>) -> Int
+    ? "One past the tip, or zero with no tree yet."
+    match tip
+        Option.None -> 0
+        Option.Some(placement) -> placement.height + 1
+
+verify nextHeight
+    nextHeight(Option.None) => 0
+    nextHeight(Option.Some(Placement(blockId = "aa", parentId = "bb", height = 7, work = 1))) => 8
 
 fn expectedCompact(rebuilding: Option<Rebuilding>, blockId: String) -> Result<Unit, String>
     ? "Whether this is the compact Block that was asked for."
