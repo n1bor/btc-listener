@@ -84,10 +84,10 @@ an unproven Header or a body that is not the Block — so the paths that exist
 for hostile Peers are exercised by two scripts. `tools/regtest/liar.py` is a
 Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
 `wrongbody`, `witnessflag`, `emptywitness`, `addrflood`, `escape`, `headerflood`,
-`bip30`, `invflood`, `invflood-late`, `invflood-pieces`, `echo`, `wrongwitness`, `badheight`); `tools/regtest/caller.py`
+`bip30`, `invflood`, `invflood-late`, `invflood-pieces`, `echo`, `wrongwitness`, `badheight`, `overweight`, `sigops`); `tools/regtest/caller.py`
 is a caller that dials the node's served port (`early`, `chatty`, `silent`,
 `pinger`, `polite`, `lurker`, `locator`, `deaf`, `ancient`, `unwitnessed`). Each security fix in this repo (#281–#284, #291, #293,
-#300, #347, #354, #358, #399) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
+#300, #347, #354, #358, #399, #400) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
 shows the offender dropped while the node carries on — that pairing is the
 house pattern, and a security fix without it is unproven. Run the honest
 baseline first: a validity check that has never seen real data can be a
@@ -426,8 +426,8 @@ what `audit` may be taken to have settled plus a tripwire on the Block Id it
 pins. #303 corrected ADR 0007, the two standing lines and the `assumevalid`
 message to say so, and left `runsScriptsAt` in place as the seam for #20/#12.
 CONTEXT.md **Deferred consensus rules** lists what else the connect path does
-not check — block weight, sigop cost, `IsFinalTx`, BIP68, BIP113 (#400, #401;
-BIP34 and the witness commitment are enforced since #399) — each
+not check — `IsFinalTx`, BIP68, BIP113 (#401; BIP34 and the witness commitment
+are enforced since #399, Block weight and signature-operation cost since #400) — each
 needing a Peer to spend real proof of work before it could matter, which #281
 requires before a Header is placed.
 

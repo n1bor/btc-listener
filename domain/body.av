@@ -21,7 +21,7 @@ module Body
         "A fault is a fault of the Peer that sent the body, which the caller"
         "drops, and the Height goes back on the list to be asked of another."
     exposes [fault]
-    depends [Bytes, Domain.Block, Domain.Hash, Domain.Transaction, Domain.TxCheck]
+    depends [Bytes, Domain.Block, Domain.BlockLimits, Domain.Hash, Domain.Transaction, Domain.TxCheck]
     effects []
 
 fn fault(payload: Bytes, blockId: String, witnessed: Bool) -> Option<String>
@@ -62,10 +62,55 @@ fn shapedThenCommitted(blockId: String, header: BlockHeader, carried: List<Carri
       "is not the Block is refused for that before its witnesses are read."
     match shaped(blockId, header, transactionsFrom(carried, []))
         Option.Some(why) -> Option.Some(why)
-        Option.None -> committed(blockId, carried, witnessed)
+        Option.None -> committedThenLimited(blockId, carried, witnessed)
 
 verify shapedThenCommitted
     shapedThenCommitted("aa", sampleHeader(), [], false) => Option.Some("Block aa carries no Transactions")
+
+fn committedThenLimited(blockId: String, carried: List<Carried>, witnessed: Bool) -> Option<String>
+    ? "The witness commitment, then what the Block costs (#400)."
+    match committed(blockId, carried, witnessed)
+        Option.Some(why) -> Option.Some(why)
+        Option.None -> limited(blockId, carried)
+
+verify committedThenLimited
+    committedThenLimited("aa", [], false) => Option.None
+
+fn limited(blockId: String, carried: List<Carried>) -> Option<String>
+    ? "Core's two Block ceilings that need only the body (n1bor/btc-listener#400):"
+      "weight at most MAX_BLOCK_WEIGHT, and the legacy signature operations --"
+      "every scriptSig and scriptPubKey, at four each -- at most"
+      "MAX_BLOCK_SIGOPS_COST. The P2SH and witness operations need the Outputs"
+      "the Inputs spend and are counted on connect; a Block over the ceiling on"
+      "its scripts alone is refused here, before it is written."
+    match Domain.BlockLimits.weightOf(carried) > Domain.BlockLimits.maxWeight()
+        true -> Option.Some("Block {blockId} weighs {Domain.BlockLimits.weightOf(carried)} weight units, above the {Domain.BlockLimits.maxWeight()} the protocol allows")
+        false -> costed(blockId, Domain.BlockLimits.legacySigopCostOf(transactionsFrom(carried, [])))
+
+verify limited
+    limited("aa", []) => Option.None
+    limited(genesisId(), Domain.Block.carriedOf(Bytes.fromHex(genesisHex())?)?) => Option.None
+    limited(segwitBlockId(), Domain.Block.carriedOf(Bytes.fromHex(segwitBlockHex())?)?) => Option.None
+
+fn weightOfHex(blockHex: String) -> Result<Int, String>
+    ? "A serialised Block's weight, for pinning the two Blocks Core reports"
+      "weights for: genesis at 1140 and the regtest fixture at 1453."
+    Result.Ok(Domain.BlockLimits.weightOf(Domain.Block.carriedOf(Bytes.fromHex(blockHex)?)?))
+
+verify weightOfHex
+    weightOfHex(genesisHex()) => Result.Ok(1140)
+    weightOfHex(segwitBlockHex()) => Result.Ok(1453)
+    weightOfHex("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn costed(blockId: String, cost: Int) -> Option<String>
+    ? "The legacy operations against the ceiling."
+    match cost > Domain.BlockLimits.maxSigopCost()
+        true -> Option.Some("Block {blockId} costs {cost} signature operations in its scripts alone, above the {Domain.BlockLimits.maxSigopCost()} allowed")
+        false -> Option.None
+
+verify costed
+    costed("aa", 80000) => Option.None
+    costed("aa", 80004) => Option.Some("Block aa costs 80004 signature operations in its scripts alone, above the 80000 allowed")
 
 fn transactionsFrom(carried: List<Carried>, acc: List<Transaction>) -> List<Transaction>
     ? "The decoded Transactions, in order, without their bytes."

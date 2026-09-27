@@ -1,0 +1,466 @@
+module BlockLimits
+    intent =
+        "What a Block may cost to validate, as Core bounds it on connect"
+        "(n1bor/btc-listener#400): its weight, at most 4,000,000 weight"
+        "units, and its signature-operation cost, at most 80,000."
+        "Weight is 3 x the size without witnesses plus the size with them,"
+        "over the whole serialised Block (GetBlockWeight); before SegWit that"
+        "is 4 x the size and MAX_BLOCK_SIZE was a quarter of the ceiling, so"
+        "the one rule covers every Height. Signature operations are counted"
+        "the way CScript::GetSigOpCount does: CHECKSIG and its VERIFY count"
+        "one, CHECKMULTISIG and its VERIFY count twenty unless the count is"
+        "accurate and an OP_1..OP_16 stands before them, a push that runs past"
+        "the end stops the count where it is, and the cost is four per legacy"
+        "operation (every scriptSig and every scriptPubKey, the coinbase's"
+        "included), four per operation in a P2SH redeem script once P2SH is in"
+        "force, and one per witness operation: a P2WPKH spend is one, a P2WSH"
+        "spend is the accurate count of its witness script, other versions"
+        "are nought. The legacy part needs only the Block and is the body"
+        "gate's; the P2SH and witness parts need the Output each Input spends"
+        "and are Domain.Connect's, once the Set has answered."
+    exposes [maxWeight, maxSigopCost, weightOf, sigopsIn, legacySigopsOf, legacySigopCostOf, spendSigopCostOf, Enforced, everything, nothing]
+    depends [Bytes, Domain.Block, Domain.CompactSize, Domain.Hash, Domain.Message, Domain.Script, Domain.ScriptParse, Domain.Transaction, Domain.TxCheck, Domain.UtxoStore]
+    effects []
+
+record Enforced
+    bip34: Bool
+    payToScriptHash: Bool
+    segWit: Bool
+
+fn everything() -> Enforced
+    ? "Every Block rule in force: what a Block mined today is under."
+    Enforced(bip34 = true, payToScriptHash = true, segWit = true)
+
+verify everything
+    everything().segWit => true
+
+fn nothing() -> Enforced
+    ? "No by-Height Block rule in force: the early chain."
+    Enforced(bip34 = false, payToScriptHash = false, segWit = false)
+
+verify nothing
+    nothing().bip34 => false
+
+fn maxWeight() -> Int
+    ? "MAX_BLOCK_WEIGHT."
+    4000000
+
+verify maxWeight
+    maxWeight() => 4000000
+
+fn maxSigopCost() -> Int
+    ? "MAX_BLOCK_SIGOPS_COST."
+    80000
+
+verify maxSigopCost
+    maxSigopCost() => 80000
+
+fn witnessScale() -> Int
+    ? "WITNESS_SCALE_FACTOR: what a non-witness byte or a legacy operation costs."
+    4
+
+verify witnessScale
+    witnessScale() => 4
+
+fn weightOf(carried: List<Carried>) -> Int
+    ? "GetBlockWeight: three times the Block without its witnesses, plus the"
+      "Block with them. The Header is eighty bytes and the count is a"
+      "CompactSize either way; each Transaction's bytes are as it arrived and"
+      "its stripped size is what TxCheck already computes."
+    3 * (81 + widthOver(List.len(carried)) + strippedOf(carried, 0)) + (81 + widthOver(List.len(carried)) + totalOf(carried, 0))
+
+verify weightOf
+    weightOf([]) => 324
+    weightOf([Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())]) => 1140
+
+fn widthOver(count: Int) -> Int
+    ? "The CompactSize count prefix's width, less the one byte 81 already counted."
+    List.len(Domain.CompactSize.encode(count)) - 1
+
+verify widthOver
+    widthOver(1) => 0
+    widthOver(300) => 2
+
+fn strippedOf(carried: List<Carried>, acc: Int) -> Int
+    ? "The Transactions' sizes without witness data, summed."
+    match carried
+        [] -> acc
+        [head, ..tail] -> strippedOf(tail, acc + Domain.TxCheck.strippedSize(head.transaction))
+
+verify strippedOf
+    strippedOf([], 7) => 7
+
+fn totalOf(carried: List<Carried>, acc: Int) -> Int
+    ? "The Transactions' sizes as they arrived, summed."
+    match carried
+        [] -> acc
+        [head, ..tail] -> totalOf(tail, acc + List.len(head.bytes))
+
+verify totalOf
+    totalOf([], 0) => 0
+    totalOf([Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])], 0) => 3
+
+fn sigopsIn(script: List<Int>, accurate: Bool) -> Int
+    ? "CScript::GetSigOpCount over raw bytes: walked opcode by opcode, a"
+      "push skipped by its length, the count stopped where a push runs past"
+      "the end (GetOp fails, Core breaks out and keeps what it had)."
+    counting(script, accurate, 0, 0)
+
+verify sigopsIn
+    sigopsIn([], true) => 0
+    sigopsIn(Domain.Script.bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"), false) => 1
+    sigopsIn(Domain.Script.bytesOf("ac"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("ad"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("ae"), false) => 20
+    sigopsIn(Domain.Script.bytesOf("ae"), true) => 20
+    sigopsIn(Domain.Script.bytesOf("52ae"), true) => 2
+    sigopsIn(Domain.Script.bytesOf("52ae"), false) => 20
+    sigopsIn(Domain.Script.bytesOf("60af"), true) => 16
+    sigopsIn(Domain.Script.bytesOf("acacae"), false) => 22
+    sigopsIn(Domain.Script.bytesOf("ac4c05aa"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("4c01acac"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("4d0100acac"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("4e01000000acac"), true) => 1
+    sigopsIn(Domain.Script.bytesOf("01acac"), true) => 1
+    sigopsIn(coreMultisig(), false) => 20
+    sigopsIn(coreMultisig(), true) => 2
+    sigopsIn(coreMultisigThenIf(), false) => 21
+    sigopsIn(coreMultisigThenIf(), true) => 3
+
+fn counting(script: List<Int>, accurate: Bool, last: Int, acc: Int) -> Int
+    ? "One opcode at a time, remembering the one before for the accurate"
+      "multisig count."
+    match script
+        [] -> acc
+        [op, ..rest] -> counted(op, rest, accurate, last, acc)
+
+verify counting
+    counting([], true, 0, 5) => 5
+    counting([172, 172], false, 0, 0) => 2
+
+fn counted(op: Int, rest: List<Int>, accurate: Bool, last: Int, acc: Int) -> Int
+    ? "This opcode: a push to skip, a signature operation to count, or"
+      "anything else to step past."
+    match Bool.and(op >= 1, op <= 78)
+        true -> skipped(op, rest, accurate, acc)
+        false -> match Bool.or(op == 172, op == 173)
+            true -> counting(rest, accurate, op, acc + 1)
+            false -> match Bool.or(op == 174, op == 175)
+                true -> counting(rest, accurate, op, acc + multisigCount(accurate, last))
+                false -> counting(rest, accurate, op, acc)
+
+verify counted
+    counted(0, [], true, 0, 0) => 0
+    counted(172, [], true, 0, 0) => 1
+
+fn multisigCount(accurate: Bool, last: Int) -> Int
+    ? "MAX_PUBKEYS_PER_MULTISIG, or the OP_N before it when counting accurately."
+    match Bool.and(accurate, Bool.and(last >= 81, last <= 96))
+        true -> last - 80
+        false -> 20
+
+verify multisigCount
+    multisigCount(false, 82) => 20
+    multisigCount(true, 82) => 2
+    multisigCount(true, 0) => 20
+
+fn skipped(op: Int, rest: List<Int>, accurate: Bool, acc: Int) -> Int
+    ? "A push: its length is the opcode for 1..75, or the one, two or four"
+      "bytes after OP_PUSHDATA1, 2 and 4. One that runs past the end stops"
+      "the count."
+    match op <= 75
+        true -> past(rest, op, accurate, acc, op)
+        false -> match op == 76
+            true -> pushdata(rest, 1, accurate, acc)
+            false -> match op == 77
+                true -> pushdata(rest, 2, accurate, acc)
+                false -> pushdata(rest, 4, accurate, acc)
+
+verify skipped
+    skipped(1, [172, 172], true, 0) => 1
+    skipped(2, [172], true, 0) => 0
+
+fn pushdata(rest: List<Int>, width: Int, accurate: Bool, acc: Int) -> Int
+    ? "The length read little-endian off the next width bytes, then skipped."
+    match List.len(rest) < width
+        true -> acc
+        false -> past(List.drop(rest, width), Domain.Message.readLittleEndian(List.take(rest, width)), accurate, acc, 76)
+
+verify pushdata
+    pushdata([1, 172, 172], 1, true, 0) => 1
+    pushdata([], 1, true, 0) => 0
+
+fn past(rest: List<Int>, length: Int, accurate: Bool, acc: Int, op: Int) -> Int
+    ? "Over the pushed bytes, or the end of the count if they are not all there."
+    match List.len(rest) < length
+        true -> acc
+        false -> counting(List.drop(rest, length), accurate, op, acc)
+
+verify past
+    past([172], 1, true, 0, 1) => 0
+    past([172, 172], 1, true, 0, 1) => 1
+
+fn legacySigopsOf(transactions: List<Transaction>, acc: Int) -> Int
+    ? "GetLegacySigOpCount over a Block: every Input's script and every"
+      "Output's, the coinbase's included, counted inaccurately."
+    match transactions
+        [] -> acc
+        [head, ..tail] -> legacySigopsOf(tail, acc + inputSigops(head.inputs, 0) + outputSigops(head.outputs, 0))
+
+verify legacySigopsOf
+    legacySigopsOf([], 0) => 0
+    legacySigopsOf([genesisCoinbase()], 0) => 1
+
+fn inputSigops(inputs: List<Input>, acc: Int) -> Int
+    ? "The scriptSigs' operations."
+    match inputs
+        [] -> acc
+        [head, ..tail] -> inputSigops(tail, acc + sigopsIn(Domain.Script.bytesOf(head.script), false))
+
+verify inputSigops
+    inputSigops([], 3) => 3
+
+fn outputSigops(outputs: List<Output>, acc: Int) -> Int
+    ? "The scriptPubKeys' operations."
+    match outputs
+        [] -> acc
+        [head, ..tail] -> outputSigops(tail, acc + sigopsIn(Domain.Script.bytesOf(head.script), false))
+
+verify outputSigops
+    outputSigops([Output(value = 0, script = "ae"), Output(value = 0, script = "ac")], 0) => 21
+
+fn legacySigopCostOf(transactions: List<Transaction>) -> Int
+    ? "The legacy operations at four each: what the body gate can know."
+    witnessScale() * legacySigopsOf(transactions, 0)
+
+verify legacySigopCostOf
+    legacySigopCostOf([genesisCoinbase()]) => 4
+
+fn spendSigopCostOf(inputs: List<Input>, prevouts: Map<Bytes, List<Int>>, enforced: Enforced, acc: Int) -> Result<Int, String>
+    ? "The P2SH and witness operations one Transaction's Inputs cost, given"
+      "the script of every Output it spends by its key. An Input whose"
+      "Output is not among them costs nothing here: the walk refuses the"
+      "Block for the missing Output itself."
+    match inputs
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> spendSigopCostOf(tail, prevouts, enforced, acc + oneSpendCost(head, Map.get(prevouts, Domain.UtxoStore.unspentKey(head.previousTxid, head.previousIndex)?), enforced))
+
+verify spendSigopCostOf
+    spendSigopCostOf([], {}, everything(), 0) => Result.Ok(0)
+    spendSigopCostOf([Input(previousTxid = "zz", previousIndex = 0, script = "", sequence = 0, witness = [])], {}, everything(), 0) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn oneSpendCost(input: Input, prevout: Option<List<Int>>, enforced: Enforced) -> Int
+    ? "One Input against the Output it spends."
+    match prevout
+        Option.None -> 0
+        Option.Some(script) -> p2shCost(input, script, enforced) + witnessCost(input, script, enforced)
+
+verify oneSpendCost
+    oneSpendCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), Option.None, everything()) => 0
+
+fn p2shCost(input: Input, prevout: List<Int>, enforced: Enforced) -> Int
+    ? "GetP2SHSigOpCount: with P2SH in force and the Output OP_HASH160 <20>"
+      "OP_EQUAL, the accurate count of the redeem script, which is the last"
+      "push of a push-only scriptSig, at four each."
+    match Bool.and(enforced.payToScriptHash, Domain.Script.isPayToScriptHash(prevout))
+        false -> 0
+        true -> witnessScale() * sigopsIn(redeemScriptOf(input.script), true)
+
+verify p2shCost
+    p2shCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), everything()) => 0
+    p2shCost(Input(previousTxid = "", previousIndex = 0, script = coreP2shScriptSig(), sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), everything()) => 12
+    p2shCost(Input(previousTxid = "", previousIndex = 0, script = coreP2shScriptSig(), sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), nothing()) => 0
+    p2shCost(Input(previousTxid = "", previousIndex = 0, script = coreP2shScriptSig(), sequence = 0, witness = []), Domain.Script.bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"), everything()) => 0
+
+fn redeemScriptOf(scriptSigHex: String) -> List<Int>
+    ? "The last item a push-only scriptSig pushes; nothing when it is not"
+      "push-only, which is Core's GetSigOpCount(scriptSig) returning nought"
+      "for an opcode above OP_16."
+    match Domain.Script.isPushOnly(scriptSigHex)
+        false -> []
+        true -> lastPushOf(Result.withDefault(Domain.ScriptParse.opsIn(scriptSigHex), []), [])
+
+verify redeemScriptOf
+    redeemScriptOf("") => []
+    redeemScriptOf("ac") => []
+    redeemScriptOf("0002acac") => [172, 172]
+
+fn lastPushOf(ops: List<Domain.ScriptParse.Op>, last: List<Int>) -> List<Int>
+    ? "The bytes of the last data push, OP_0 and OP_N pushing nothing."
+    match ops
+        [] -> last
+        [head, ..tail] -> match head
+            Domain.ScriptParse.Op.Push(_, data) -> lastPushOf(tail, data)
+            Domain.ScriptParse.Op.Code(_) -> lastPushOf(tail, last)
+
+verify lastPushOf
+    lastPushOf([], [1]) => [1]
+    lastPushOf([Domain.ScriptParse.Op.Push(1, [7]), Domain.ScriptParse.Op.Code(0)], []) => [7]
+
+fn witnessCost(input: Input, prevout: List<Int>, enforced: Enforced) -> Int
+    ? "WitnessSigOps: with SegWit in force, the program is the Output"
+      "itself, or -- with P2SH in force too and the Output P2SH -- the single"
+      "push a push-only scriptSig makes. Version 0 and twenty bytes is one"
+      "operation; version 0 and thirty-two is the accurate count of the"
+      "witness script, the last witness item; anything else is nought."
+    match enforced.segWit
+        false -> 0
+        true -> programCost(programOf(input, prevout, enforced), input.witness)
+
+verify witnessCost
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = ["aa", "bb"]), Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"), everything()) => 1
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = ["aa", "bb"]), Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"), nothing()) => 0
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = ["aa", "52ae"]), Domain.Script.bytesOf("0020" + zeros32Hex()), everything()) => 2
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = ["aa"]), Domain.Script.bytesOf("5120" + zeros32Hex()), everything()) => 0
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "160014751e76e8199196d454941c45d1b3a323f1433bd6", sequence = 0, witness = ["aa", "bb"]), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), everything()) => 1
+    witnessCost(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = ["aa"]), Domain.Script.bytesOf("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"), everything()) => 0
+
+fn programOf(input: Input, prevout: List<Int>, enforced: Enforced) -> List<Int>
+    ? "The witness program an Input spends, native or wrapped in P2SH."
+    match Domain.Script.isAnyWitnessProgram(Domain.Hash.reversedHex(List.reverse(prevout)))
+        true -> prevout
+        false -> wrappedProgramOf(input, prevout, enforced)
+
+verify programOf
+    programOf(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"), everything()) => Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    programOf(Input(previousTxid = "", previousIndex = 0, script = "", sequence = 0, witness = []), Domain.Script.bytesOf("ac"), everything()) => []
+
+fn wrappedProgramOf(input: Input, prevout: List<Int>, enforced: Enforced) -> List<Int>
+    ? "P2SH in force, the Output P2SH, the scriptSig one push, and that push"
+      "a witness program: BIP141's P2SH-wrapped form."
+    match Bool.and(enforced.payToScriptHash, Domain.Script.isPayToScriptHash(prevout))
+        false -> []
+        true -> singlePushProgram(Result.withDefault(Domain.ScriptParse.opsIn(input.script), []))
+
+verify wrappedProgramOf
+    wrappedProgramOf(Input(previousTxid = "", previousIndex = 0, script = "160014751e76e8199196d454941c45d1b3a323f1433bd6", sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), everything()) => Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+    wrappedProgramOf(Input(previousTxid = "", previousIndex = 0, script = "160014751e76e8199196d454941c45d1b3a323f1433bd6", sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), nothing()) => []
+    wrappedProgramOf(Input(previousTxid = "", previousIndex = 0, script = "0002acac", sequence = 0, witness = []), Domain.Script.bytesOf("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087"), everything()) => []
+
+fn singlePushProgram(ops: List<Domain.ScriptParse.Op>) -> List<Int>
+    ? "One push and nothing else, and its data a witness program."
+    match ops
+        [] -> []
+        [only, ..more] -> match more
+            [] -> pushProgram(only)
+            [_, .._] -> []
+
+verify singlePushProgram
+    singlePushProgram([]) => []
+    singlePushProgram([Domain.ScriptParse.Op.Push(22, Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6"))]) => Domain.Script.bytesOf("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+
+fn pushProgram(op: Domain.ScriptParse.Op) -> List<Int>
+    ? "A data push's bytes if they are a witness program; an opcode is not."
+    match op
+        Domain.ScriptParse.Op.Push(_, data) -> programOrNothing(data)
+        Domain.ScriptParse.Op.Code(_) -> []
+
+verify pushProgram
+    pushProgram(Domain.ScriptParse.Op.Code(0)) => []
+
+fn programOrNothing(data: List<Int>) -> List<Int>
+    ? "The data if it is a witness program."
+    match Domain.Script.isAnyWitnessProgram(Domain.Hash.reversedHex(List.reverse(data)))
+        true -> data
+        false -> []
+
+verify programOrNothing
+    programOrNothing([172]) => []
+
+fn programCost(program: List<Int>, witness: List<String>) -> Int
+    ? "Version 0: one for twenty bytes, the witness script's accurate count for thirty-two."
+    match program
+        [] -> 0
+        [version, ..rest] -> match version == 0
+            false -> 0
+            true -> versionZeroCost(List.len(rest) - 1, witness)
+
+verify programCost
+    programCost([], ["aa"]) => 0
+    programCost([81, 32], ["aa"]) => 0
+
+fn versionZeroCost(programLength: Int, witness: List<String>) -> Int
+    ? "Twenty bytes is P2WPKH, thirty-two is P2WSH and the last item is the script."
+    match programLength == 20
+        true -> 1
+        false -> match programLength == 32
+            true -> sigopsIn(Domain.Script.bytesOf(lastOf(witness, "")), true)
+            false -> 0
+
+verify versionZeroCost
+    versionZeroCost(20, []) => 1
+    versionZeroCost(32, ["52ae"]) => 2
+    versionZeroCost(32, []) => 0
+    versionZeroCost(21, []) => 0
+
+fn lastOf(items: List<String>, last: String) -> String
+    ? "The last of a list of hex items, or the default for none."
+    match items
+        [] -> last
+        [head, ..tail] -> lastOf(tail, head)
+
+verify lastOf
+    lastOf([], "x") => "x"
+    lastOf(["a", "b"], "x") => "b"
+
+fn zeros32Hex() -> String
+    ? "Thirty-two zero bytes, for a program of that length in the cases here."
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+verify zeros32Hex
+    String.len(zeros32Hex()) => 64
+
+fn coreMultisig() -> List<Int>
+    ? "Core's sigopcount_tests s1: OP_1 <pubkey> <pubkey> OP_2 OP_CHECKMULTISIG,"
+      "which counts twenty inaccurately and two accurately."
+    List.concat([81], List.concat(pubkeyPush(), List.concat(pubkeyPush(), [82, 174])))
+
+verify coreMultisig
+    List.len(coreMultisig()) => 71
+
+fn coreMultisigThenIf() -> List<Int>
+    ? "Core's s2: s1 then OP_IF OP_CHECKSIG OP_ENDIF, twenty-one and three."
+    List.concat(coreMultisig(), [99, 172, 104])
+
+verify coreMultisigThenIf
+    List.len(coreMultisigThenIf()) => 74
+
+fn pubkeyPush() -> List<Int>
+    ? "A push of a 33-byte compressed key of zeros."
+    List.prepend(33, List.concat(List.take(Domain.Script.bytesOf(zeros32Hex()), 32), [2]))
+
+verify pubkeyPush
+    List.len(pubkeyPush()) => 34
+
+fn coreP2shScriptSig() -> String
+    ? "Core's P2SH test scriptSig: OP_0 OP_0 <s2>, whose last push is s2 with"
+      "an accurate count of three, so twelve at four each."
+    "0000" + "4a" + Domain.Hash.reversedHex(List.reverse(coreMultisigThenIf()))
+
+verify coreP2shScriptSig
+    String.len(coreP2shScriptSig()) => 154
+
+fn genesisCoinbase() -> Transaction
+    ? "Mainnet's genesis coinbase as a record rather than a decode, so the"
+      "cases here do not reach the decoder's fuel-lowered recursion in the"
+      "proof export: Core reports the genesis Block's weight as 1140 and its"
+      "one Output is P2PK, one CHECKSIG."
+    Transaction(version = 1, inputs = [Input(previousTxid = "0000000000000000000000000000000000000000000000000000000000000000", previousIndex = 4294967295, script = "04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73", sequence = 4294967295, witness = [])], outputs = [Output(value = 5000000000, script = "4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac")], lockTime = 0, txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", size = 204, isSegWit = false)
+
+verify genesisCoinbase
+    genesisCoinbase().size => 204
+    genesisCoinbase() == Result.withDefault(Domain.Transaction.decode(genesisCoinbaseBytes()), emptyTransaction()) => true
+
+fn genesisCoinbaseBytes() -> List<Int>
+    ? "The same, serialised."
+    Domain.Script.bytesOf("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")
+
+verify genesisCoinbaseBytes
+    List.len(genesisCoinbaseBytes()) => 204
+
+fn emptyTransaction() -> Transaction
+    ? "A Transaction with nothing in it, the default a decode that cannot fail falls to."
+    Transaction(version = 0, inputs = [], outputs = [], lockTime = 0, txid = "", size = 0, isSegWit = false)
+
+verify emptyTransaction
+    emptyTransaction().size => 0

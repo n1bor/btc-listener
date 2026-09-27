@@ -14,10 +14,10 @@ module Connect
         "opposite (#303), and because the Assume-valid Height sounds like the"
         "switch that turns it on and is not -- it says which range audit may"
         "be taken to have settled. ADR 0007 is the reasoning."
-        "Five consensus rules are deferred with it, and CONTEXT.md lists them"
-        "under Deferred consensus rules with the reason: block weight,"
-        "sigop cost, IsFinalTx, BIP68 sequence locks and BIP113 (BIP34 is"
-        "heightOpened below, since #399). Every one of"
+        "Three consensus rules are deferred with it, and CONTEXT.md lists them"
+        "under Deferred consensus rules with the reason: IsFinalTx, BIP68"
+        "sequence locks and BIP113 (BIP34 is heightOpened below since #399,"
+        "the signature-operation ceiling is connectedCosted since #400). Every one of"
         "them needs a Peer willing to spend real proof of work before it"
         "could matter, which #281 now requires before a Header is placed at"
         "all, so the exposure is a false CLEAN from audit on a"
@@ -33,7 +33,7 @@ module Connect
         "Undo Data either -- restoring it on a disconnect would put back"
         "something that never existed before this Block."
     exposes [Change, Connecting, TxFee, cannotConnect, refusalOf, connected, connectedUnless, duplicateOutputs, paidBy, createdBy, outpointKey, minting, paying, holding, isApplied]
-    depends [Bytes, Domain.Hash, Domain.Network, Domain.StackItem, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
+    depends [Bytes, Domain.BlockLimits, Domain.Hash, Domain.Network, Domain.Script, Domain.StackItem, Domain.Subsidy, Domain.Transaction, Domain.UtxoStore]
     effects []
 
 record TxFee
@@ -333,10 +333,12 @@ verify disjoint
     disjoint([], [Bytes.fromList([1])]) => true
     disjoint([Bytes.fromList([1])], [Bytes.fromList([1])]) => false
 
-fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>, bip34: Bool) -> Connecting
+fn connectedUnless(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, held: List<Bytes>, enforced: Enforced) -> Connecting
     ? "connected, after BIP30 and BIP34: a Block that would write an Output"
       "the Set already holds, or whose coinbase does not open with its Height,"
-      "is refused whole, before its walk."
+      "or whose signature operations cost more than the ceiling once the P2SH"
+      "and witness ones are counted against the Outputs it spends (#400), is"
+      "refused whole, before its walk."
       "held is every key this Block's Outputs would be written under that the"
       "Set holds already -- the caller looks them up, because the walk only"
       "fetches what the Inputs spend. Without this, a duplicate txid overwrote"
@@ -344,24 +346,128 @@ fn connectedUnless(network: Network, height: Int, transactions: List<Transaction
       "deleted the key outright and lost the original (n1bor/btc-listener#354)."
     match duplicateOutputs(network, height, held)
         Option.Some(why) -> Connecting.Refused(why)
-        Option.None -> connectedOpening(network, height, transactions, fromStore, heightOpened(bip34, height, transactions))
+        Option.None -> connectedOpening(network, height, transactions, fromStore, heightOpened(enforced.bip34, height, transactions), enforced)
 
 verify connectedUnless
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [], false) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
-    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], false) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
-    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], false)) => true
-    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [], true) => Connecting.Refused("coinbase does not open with Height 225, as BIP34 requires")
-    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [Bytes.fromList([203, 0])], true) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [], Domain.BlockLimits.nothing()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    isApplied(connectedUnless(Network.Mainnet, 91842, [minting(50)], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.nothing())) => true
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [], Domain.BlockLimits.everything()) => Connecting.Refused("coinbase does not open with Height 225, as BIP34 requires")
+    connectedUnless(Network.Regtest, 225, [openingWith("02e00000")], Map.fromList([]), [Bytes.fromList([203, 0])], Domain.BlockLimits.everything()) => Connecting.Refused("Block would write 1 Output(s) the Set already holds (BIP30)")
+    connectedUnless(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]), [], Domain.BlockLimits.everything()) => connected(Network.Regtest, 225, [openingWith("02e10000")], Map.fromList([]))
+    connectedUnless(Network.Mainnet, 1, [minting(50), redeeming()], holdingMultisig()?, [], Domain.BlockLimits.Enforced(bip34 = false, payToScriptHash = true, segWit = true)) => Connecting.Refused("Block costs 80080 signature operations, above the 80000 allowed")
 
-fn connectedOpening(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, opened: Option<String>) -> Connecting
-    ? "What BIP34 said, then the walk."
+fn connectedOpening(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, opened: Option<String>, enforced: Enforced) -> Connecting
+    ? "What BIP34 said, then what the Block costs, then the walk."
     match opened
         Option.Some(why) -> Connecting.Refused(why)
-        Option.None -> connected(network, height, transactions, fromStore)
+        Option.None -> connectedCosted(network, height, transactions, fromStore, sigopCostOf(transactions, fromStore, enforced))
 
 verify connectedOpening
-    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.Some("no")) => Connecting.Refused("no")
-    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.None) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.Some("no"), Domain.BlockLimits.nothing()) => Connecting.Refused("no")
+    connectedOpening(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Option.None, Domain.BlockLimits.nothing()) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+
+fn connectedCosted(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, cost: Result<Int, String>) -> Connecting
+    ? "The signature-operation cost against MAX_BLOCK_SIGOPS_COST (#400),"
+      "then the walk. Core: bad-blk-sigops."
+    match cost
+        Result.Err(why) -> Connecting.Refused(why)
+        Result.Ok(total) -> match total > Domain.BlockLimits.maxSigopCost()
+            true -> Connecting.Refused("Block costs {total} signature operations, above the {Domain.BlockLimits.maxSigopCost()} allowed")
+            false -> connected(network, height, transactions, fromStore)
+
+verify connectedCosted
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Err("no")) => Connecting.Refused("no")
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80000)) => connected(Network.Mainnet, 1, [minting(50)], Map.fromList([]))
+    connectedCosted(Network.Mainnet, 1, [minting(50)], Map.fromList([]), Result.Ok(80001)) => Connecting.Refused("Block costs 80001 signature operations, above the 80000 allowed")
+
+fn sigopCostOf(transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>, enforced: Enforced) -> Result<Int, String>
+    ? "GetBlockSigOpCost: the legacy operations at four each, plus the P2SH"
+      "and witness operations of every non-coinbase Input against the Output"
+      "it spends -- from the Store's answers or made earlier in this Block."
+    prevouts = prevoutsOf(transactions, scriptsOf(Map.keys(fromStore), fromStore, Map.fromList([])))?
+    spends = spendCostsOf(List.drop(transactions, 1), prevouts, enforced, 0)?
+    Result.Ok(Domain.BlockLimits.legacySigopCostOf(transactions) + spends)
+
+verify sigopCostOf
+    sigopCostOf([minting(50)], Map.fromList([]), Domain.BlockLimits.everything()) => Result.Ok(0)
+    sigopCostOf([minting(50), redeeming()], holdingMultisig()?, Domain.BlockLimits.everything()) => Result.Ok(80080)
+    sigopCostOf([minting(50), redeeming()], holdingMultisig()?, Domain.BlockLimits.nothing()) => Result.Ok(0)
+    sigopCostOf([minting(50), paying("a1", "aa", 0, 90)], holdingMultisig()?, Domain.BlockLimits.everything()) => Result.Ok(0)
+
+fn scriptsOf(keys: List<Bytes>, fromStore: Map<Bytes, Unspent>, acc: Map<Bytes, List<Int>>) -> Map<Bytes, List<Int>>
+    ? "Each stored Output's script by its key."
+    match keys
+        [] -> acc
+        [head, ..tail] -> scriptsOf(tail, fromStore, scriptAt(head, Map.get(fromStore, head), acc))
+
+verify scriptsOf
+    Map.len(scriptsOf([], Map.fromList([]), Map.fromList([]))) => 0
+
+fn scriptAt(key: Bytes, stored: Option<Unspent>, acc: Map<Bytes, List<Int>>) -> Map<Bytes, List<Int>>
+    ? "One stored Output's script, when the key names one."
+    match stored
+        Option.None -> acc
+        Option.Some(unspent) -> Map.set(acc, key, Bytes.octets(unspent.script))
+
+verify scriptAt
+    Map.len(scriptAt(Bytes.empty(), Option.None, Map.fromList([]))) => 0
+
+fn prevoutsOf(transactions: List<Transaction>, acc: Map<Bytes, List<Int>>) -> Result<Map<Bytes, List<Int>>, String>
+    ? "The Store's scripts joined by every Output this Block makes, so an"
+      "Input spending an Output made earlier in the same Block is costed too."
+    match transactions
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> prevoutsOf(tail, outputsInto(head.txid, head.outputs, 0, acc)?)
+
+verify prevoutsOf
+    Map.len(prevoutsOf([minting(50)], Map.fromList([]))?) => 1
+    prevoutsOf([Transaction(version = 1, inputs = [], outputs = [Output(value = 1, script = "")], lockTime = 0, txid = "zz", size = 0, isSegWit = false)], Map.fromList([])) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
+
+fn outputsInto(txid: String, outputs: List<Output>, index: Int, acc: Map<Bytes, List<Int>>) -> Result<Map<Bytes, List<Int>>, String>
+    ? "One Transaction's Outputs, keyed as an Input would name them."
+    match outputs
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> outputsInto(txid, tail, index + 1, Map.set(acc, Domain.UtxoStore.unspentKey(txid, index)?, Domain.Script.bytesOf(head.script)))
+
+verify outputsInto
+    Map.len(outputsInto("cb", [Output(value = 1, script = "ac"), Output(value = 2, script = "")], 0, Map.fromList([]))?) => 2
+
+fn spendCostsOf(transactions: List<Transaction>, prevouts: Map<Bytes, List<Int>>, enforced: Enforced, acc: Int) -> Result<Int, String>
+    ? "Every non-coinbase Transaction's Inputs, costed."
+    match transactions
+        [] -> Result.Ok(acc)
+        [head, ..tail] -> spendCostsOf(tail, prevouts, enforced, Domain.BlockLimits.spendSigopCostOf(head.inputs, prevouts, enforced, acc)?)
+
+verify spendCostsOf
+    spendCostsOf([], Map.fromList([]), Domain.BlockLimits.everything(), 3) => Result.Ok(3)
+
+fn holdingMultisig() -> Result<Map<Bytes, Unspent>, String>
+    ? "The Store answering aa:0 with a P2SH Output, for the cost cases."
+    Result.Ok(Map.fromList([(Domain.UtxoStore.unspentKey("aa", 0)?, Unspent(txid = Bytes.fromList([170]), index = 0, value = 90, script = Bytes.fromHex("a9140766b3e86a21a11b52c874d18e2dcf22d81fc38087")?, height = 1, coinbase = false))]))
+
+verify holdingMultisig
+    Map.len(holdingMultisig()?) => 1
+
+fn redeeming() -> Transaction
+    ? "A spend of aa:0 whose scriptSig is OP_0 then a push of 1,001"
+      "OP_CHECKMULTISIGs: a redeem script of 20,020 accurate operations,"
+      "80,080 at four each, over the ceiling on its own. The scriptSig itself"
+      "counts nothing legacy: the operations sit inside the push."
+    Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "004de903" + multisigs(1001, ""), sequence = 0, witness = [])], outputs = [Output(value = 90, script = "")], lockTime = 0, txid = "a1", size = 0, isSegWit = false)
+
+verify redeeming
+    List.len(redeeming().inputs) => 1
+
+fn multisigs(count: Int, acc: String) -> String
+    ? "OP_CHECKMULTISIG count times, in hex."
+    match count <= 0
+        true -> acc
+        false -> multisigs(count - 1, acc + "ae")
+
+verify multisigs
+    multisigs(0, "") => ""
+    multisigs(3, "") => "aeaeae"
 
 fn duplicateOutputs(network: Network, height: Int, held: List<Bytes>) -> Option<String>
     ? "BIP30: why a Block whose Outputs the Set already holds is refused, or"

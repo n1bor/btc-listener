@@ -2876,6 +2876,55 @@ dropping peer 0: served Block 54889e82…c516, which does not connect: coinbase 
 following at Height 235: 0 connected, 0 disconnected, set +0 -0
 ```
 
+### A Block over the weight, and one over the signature-operation ceiling
+
+[#400](https://github.com/n1bor/btc-listener/issues/400). Core bounds what a
+Block may cost to validate: `GetBlockWeight` (three times the size without
+witnesses plus the size with them) at most 4,000,000, and `GetBlockSigOpCost`
+at most 80,000 — four per legacy `CHECKSIG`/`CHECKMULTISIG` in any scriptSig or
+scriptPubKey (a bare `CHECKMULTISIG` counts twenty), four per operation in a
+P2SH redeem script, one per witness operation. `Domain.BlockLimits` counts
+them Core's way, pinned to Core's `sigopcount_tests` vectors and to the
+weights Core reports for genesis (1140) and the regtest fixture (1453). The
+weight and the legacy operations need only the body, so `Domain.Body.limited`
+refuses before anything is written; the P2SH and witness operations need the
+Output each Input spends, so `Domain.Connect.connectedCosted` adds them on
+connect, against the Store's answers and the Outputs made earlier in the
+Block.
+
+The honest baseline is sections 1–4 on a chain that holds the 502-Transaction
+Block of section 8b: every Block weighs under the ceiling and connects. Then
+two liars that mine (as `bip30` does) beside honest Core: `overweight` mines
+two 600 KB Transactions — neither over `TxCheck`'s per-Transaction quarter,
+together 4.8 million weight units — and `sigops` mines one coinbase with 4,001
+`OP_CHECKMULTISIG` Outputs, 320,080 in cost in forty kilobytes:
+
+```bash
+python3 tools/regtest/liar.py 18455 overweight "$C" &
+sleep 3; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+python3 tools/regtest/liar.py 18455 sigops "$C" &
+sleep 3; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
+```
+
+Both are refused at the body gate with the sum named, the liar dropped, and
+the node stays at Core's tip. (After each, `dropping peer 1: owed Blocks and
+sent none for 30 seconds` follows: the liar's Header is in the tree, so the
+node asks Core for a body Core has never seen, and Core's silence costs it the
+slot — the same thing the `bip30` and `badheight` runs show, and not the rule
+under test.)
+
+```
+liar: mined 1842c341380444ebd57a04588c5d2f94a99548b02a6385852d49c7d7c1575d38 at Height 243 weighing about 4.8 million (1200225 bytes)
+headers to 243
+headers complete: 244 known
+dropping peer 0: Block 1842c341…5d38 weighs 4800900 weight units, above the 4000000 the protocol allows
+
+liar: mined 36870650658ff4828a6ef51e697606fbfd81463244cea612a6f81a9e24165ec8 at Height 243 with 4,001 OP_CHECKMULTISIG Outputs (40148 bytes)
+headers to 243
+headers complete: 244 known
+dropping peer 0: Block 36870650…5ec8 costs 320080 signature operations in its scripts alone, above the 80000 allowed
+```
+
 ### A caller that is this node, one from 2012, and one that cannot serve witnesses
 
 [#280](https://github.com/n1bor/btc-listener/issues/280) item 16. The

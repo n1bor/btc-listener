@@ -478,6 +478,26 @@ the Height come from the hostile lane: at `2^63` the subsidy's halving walk
 exhausts the step budget, and a `forkHeight` below zero is not a fork. The
 regtest run for the refusal is the `bip30` liar section of
 `docs/regtest-testing.md`.
+## Block weight and signature-operation cost (n1bor/btc-listener#400)
+
+No new law. `Domain.BlockLimits` is cases only, pinned outside the code: the
+weights Core reports for genesis (1140) and the regtest fixture (1453), and
+Core's `sigopcount_tests` vectors (`s1` 20 inaccurate / 2 accurate, `s2` 21 /
+3, the P2SH scriptSig 3). The counter, `sigopsIn`, exports and its cases prove;
+so do the P2SH and witness cost helpers.
+
+**Why the leaf budget rose, 105 → 109.** Four claims decline, none of them a
+law: `Domain.BlockLimits.genesisCoinbase` (one case checks the literal record
+against `Domain.Transaction.decode`, whose recursion is fuel-lowered);
+`Domain.TxCheck.strippedSize` (newly exposed for the weight; its own cases
+decode); `Domain.Connect.connectedCosted` (reaches the fuel-lowered Set walk
+like every `connected` claim); and `Domain.Connect.sigopCostOf`, whose cases
+iterate a `Map` with `Bytes` keys — the proof model carries no ordering for
+such keys, so the exporter declines the claim although the program orders them
+the same way on every backend. The engine cone is unchanged at **129
+universal, 1 bounded, 0 open, 136 declined**; the leaf at **127 universal, 11
+bounded, 0 open, 109 declined**, `--gate` 0 regressions in both.
+
 ## The coinbase's Height and the witness commitment (n1bor/btc-listener#399)
 
 No new law. `Domain.Connect.heightPush` was written with one — the push reads

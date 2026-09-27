@@ -211,6 +211,68 @@ def bad_height_block(cli):
         if digest[31] < 0x7f: break
     print('liar: mined', digest[::-1].hex(), 'at Height', info['height'] + 1, 'whose coinbase names Height', info['height'] ^ 1, file=sys.stderr, flush=True)
     return header, header + b'\x01' + bytes(coinbase), digest
+def mined_block(cli, txs, said):
+    # A Block that proves regtest's work on Core's tip and carries these
+    # Transactions, legacy-serialised: no witness, so no commitment is owed
+    # (#400). The Merkle Root is built over their ids the way Core builds
+    # it, an odd level duplicating its last entry.
+    import json
+    tip = rpc(cli, 'getbestblockhash')
+    info = json.loads(rpc(cli, 'getblockheader', tip, 'true'))
+    ids = [hashlib.sha256(hashlib.sha256(tx).digest()).digest() for tx in txs]
+    level = ids[:]
+    while len(level) > 1:
+        if len(level) % 2: level.append(level[-1])
+        level = [hashlib.sha256(hashlib.sha256(level[i] + level[i + 1]).digest()).digest() for i in range(0, len(level), 2)]
+    when = max(int(time.time()), info['mediantime'] + 1)
+    prefix = struct.pack('<i', 0x20000000) + bytes.fromhex(tip)[::-1] + level[0] + struct.pack('<II', when, 0x207fffff)
+    for nonce in range(1 << 32):
+        header = prefix + struct.pack('<I', nonce)
+        digest = hashlib.sha256(hashlib.sha256(header).digest()).digest()
+        if digest[31] < 0x7f: break
+    body = header + bytes([len(txs)]) + b''.join(txs)
+    print('liar: mined', digest[::-1].hex(), 'at Height', info['height'] + 1, said, '(%d bytes)' % len(body), file=sys.stderr, flush=True)
+    return header, body, digest
+def height_push(height):
+    # BIP34's push of the Height: OP_1..OP_16 below seventeen, else a minimal
+    # little-endian number behind its length.
+    if 1 <= height <= 16: return bytes([0x50 + height])
+    n = height.to_bytes((height.bit_length() + 8) // 8, 'little')
+    return bytes([len(n)]) + n
+def legacy_coinbase(cli, outputs):
+    # A coinbase for the Block after Core's tip, legacy-serialised, paying
+    # these Outputs (value, script) and opening with its Height (#399).
+    import json
+    height = int(rpc(cli, 'getblockcount')) + 1
+    script_sig = height_push(height) + b'\x00'
+    tx = struct.pack('<i', 1) + b'\x01' + b'\x00' * 32 + b'\xff\xff\xff\xff' + bytes([len(script_sig)]) + script_sig + b'\xff\xff\xff\xff'
+    tx += compact_bytes(len(outputs))
+    for value, script in outputs:
+        tx += struct.pack('<q', value) + compact_bytes(len(script)) + script
+    return tx + struct.pack('<I', 0)
+def compact_bytes(n):
+    if n < 0xfd: return bytes([n])
+    if n <= 0xffff: return b'\xfd' + struct.pack('<H', n)
+    return b'\xfe' + struct.pack('<I', n)
+def overweight_block(cli):
+    # Two Transactions of 600,000 non-witness bytes each: neither is over
+    # TxCheck's per-Transaction quarter of the ceiling, and together they
+    # weigh 4.8 million, over MAX_BLOCK_WEIGHT (#400). The second spends a
+    # real Output of Core's with an empty scriptSig -- the body gate refuses
+    # the weight before any Input is looked at.
+    import json
+    junk = b'\x6a\x4e' + struct.pack('<I', 600000) + b'\x00' * 600000
+    coinbase = legacy_coinbase(cli, [(0, junk)])
+    spent = json.loads(rpc(cli, 'listunspent', '1'))[0]
+    spend = struct.pack('<i', 1) + b'\x01' + bytes.fromhex(spent['txid'])[::-1] + struct.pack('<I', spent['vout']) + b'\x00' + b'\xff\xff\xff\xff'
+    spend += b'\x01' + struct.pack('<q', 0) + compact_bytes(len(junk)) + junk + struct.pack('<I', 0)
+    return mined_block(cli, [coinbase, spend], 'weighing about 4.8 million')
+def sigops_block(cli):
+    # One coinbase with 4,001 Outputs of OP_CHECKMULTISIG: twenty legacy
+    # operations each at four apiece is 320,080, over MAX_BLOCK_SIGOPS_COST
+    # (#400), in a Block of forty kilobytes.
+    coinbase = legacy_coinbase(cli, [(0, b'\xae')] * 4001)
+    return mined_block(cli, [coinbase], 'with 4,001 OP_CHECKMULTISIG Outputs')
 def duplicate_coinbase_block(cli):
     # A Block that proves regtest's work on Core's tip and carries one
     # Transaction: the tip's own coinbase, byte for byte (#354). The tip has
@@ -412,6 +474,14 @@ def serve(port, mode):
         return
     elif mode == 'wrongwitness':
         serve_bodies(conn, sys.argv[3], wrong_witness_body)
+    elif mode == 'overweight':
+        header, body, block_id = overweight_block(sys.argv[3])
+        serve_block(conn, header, body, block_id)
+        return
+    elif mode == 'sigops':
+        header, body, block_id = sigops_block(sys.argv[3])
+        serve_block(conn, header, body, block_id)
+        return
     elif mode == 'badheight':
         header, body, block_id = bad_height_block(sys.argv[3])
         serve_block(conn, header, body, block_id)
