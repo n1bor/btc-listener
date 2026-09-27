@@ -552,4 +552,5 @@ def serve(port, mode):
         header_flood(conn)
         return
     time.sleep(120)
-serve(int(sys.argv[1]), sys.argv[2])
+if __name__ == '__main__':
+    serve(int(sys.argv[1]), sys.argv[2])

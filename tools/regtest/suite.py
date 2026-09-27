@@ -180,8 +180,9 @@ def storage(s, a, data):
 
 
 def hostile(s, a):
-    from suite_hostile import exercise
+    from suite_hostile import exercise, consensus
     exercise(s, a)
+    consensus(s, a)
 
 
 def serving(s, a, data):

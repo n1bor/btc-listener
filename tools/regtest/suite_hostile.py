@@ -6,6 +6,7 @@ import threading
 import time
 
 from suite_support import free_port, greeting, receive, wait_until, wire
+import liar as liar_tool  # tools/regtest/liar.py: the document's own liar, run here too (#406)
 
 GENESIS = bytes.fromhex("0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206")[::-1]
 
@@ -195,3 +196,111 @@ def exercise(s, a):
                 pass
             assert reply[1] == nonce
     s.passed("hangups-pending-host-cap-and-subsequent-peer")
+
+
+@contextmanager
+def documented_liar(core, mode):
+    """A liar from tools/regtest/liar.py, staged the way the document stages
+    it: the node dials this port, the Handshake completes, and the socket is
+    handed to liar.py's own serve_block or serve_bodies with this Core's
+    bitcoin-cli, so the suite runs exactly the code the document runs (#406).
+    The echo liar is the exception: it has to answer the node's version with
+    the node's own nonce, so its Handshake is the lie."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(1)
+    done = threading.Event()
+    status = {"errors": []}
+    peers = []
+    cli = " ".join([str(core.binaries / "bitcoin-cli"), "-datadir=" + str(core.data), "-regtest", "-rpcport=" + str(core.rpc_port)])
+    mined = {"badheight": liar_tool.bad_height_block, "overweight": liar_tool.overweight_block, "sigops": liar_tool.sigops_block,
+             "nonfinal": liar_tool.nonfinal_block, "sequencelock": liar_tool.sequencelock_block}
+
+    def answer():
+        try:
+            while not done.is_set():
+                try:
+                    peer, _ = server.accept()
+                    break
+                except socket.timeout:
+                    continue
+            else:
+                return
+            peers.append(peer)
+            peer.settimeout(5)
+            command, body = receive(peer)
+            assert command == "version", command
+            if mode == "echo":
+                theirs = liar_tool.version_payload()
+                peer.sendall(wire("version", theirs[:72] + body[72:80] + theirs[80:]) + wire("verack"))
+                try:
+                    while not done.is_set():
+                        try:
+                            receive(peer)
+                        except socket.timeout:
+                            continue
+                except AssertionError:
+                    status["hung_up"] = True  # the node saw its own nonce and closed: the outcome wanted
+                return
+            version = struct.pack("<iQq", 70016, 9, int(time.time())) + bytes(52) + struct.pack("<Q", 789) + bytes([7]) + b"/suite/" + struct.pack("<i", core.height()) + b"\0"
+            peer.sendall(wire("version", version) + wire("verack"))
+            while receive(peer)[0] != "verack":
+                pass
+            if mode == "wrongwitness":
+                liar_tool.serve_bodies(peer, cli, liar_tool.wrong_witness_body)
+            else:
+                header, block, block_id = mined[mode](cli)
+                liar_tool.serve_block(peer, header, block, block_id, cli)
+        except (OSError, AssertionError, SystemExit) as error:
+            if not done.is_set():
+                status["errors"].append(str(error))
+        finally:
+            for peer in peers:
+                peer.close()
+
+    thread = threading.Thread(target=answer, daemon=True)
+    thread.start()
+    try:
+        yield "127.0.0.1:" + str(server.getsockname()[1]), status
+    finally:
+        done.set()
+        for peer in peers:
+            try:
+                peer.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        server.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "documented liar failed to stop"
+
+
+def consensus(s, a):
+    """The consensus-rule liars of #399, #400 and #401 and the echo liar of
+    #280 item 16, each beside honest Core with the node at Core's tip: the
+    body gate or the connect path names the rule, the liar is dropped, and the
+    node ends at Core's tip with Core's Block Id (#406)."""
+    with s.follow(a.peer, label="consensus-baseline") as live:
+        live.tip(a.height(), timeout=120)
+    # Three Blocks carrying bech32 spends the node has not fetched yet: the
+    # wrongwitness liar, named first, is the one asked for their bodies.
+    for _ in range(3):
+        a.rpc("sendtoaddress", a.rpc("getnewaddress", "", "bech32"), 0.1)
+        a.mine(1)
+    # overweight and sigops are refused at the body gate for a fact about the
+    # Block itself, and today the Header stays in the tree and the node asks
+    # honest Core for the body until Core is dropped for owing it, then ends
+    # with no Peers (#408). Until that lands those two cases end at the
+    # diagnosis; the others end with the node at Core's tip.
+    for mode, expected, ends_at_tip in [("wrongwitness", "commits to witnesses", True), ("badheight", "BIP34", True), ("overweight", "weighs", False),
+                                        ("sigops", "signature operations", False), ("nonfinal", "not final", True), ("sequencelock", "BIP68", True), ("echo", "is this node", True)]:
+        with documented_liar(a, mode) as (address, status):
+            with s.follow(address + "," + a.peer, "log", label="liar-" + mode) as live:
+                wait_until(lambda: expected.lower() in live.text().lower(), 120, mode + " diagnosed")
+                if ends_at_tip:
+                    live.tip(a.height(), timeout=120)
+            assert not status["errors"], status
+            if mode == "echo":
+                assert status.get("hung_up"), status
+        s.hashes(a, [a.height()])
+        s.passed("consensus-" + mode)

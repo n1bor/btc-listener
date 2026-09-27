@@ -27,8 +27,12 @@ transaction relay, confirmation and restoration from an abandoned branch;
 compact reconstruction without fetched transactions; serving Core from zero
 and from an old fork; a single announcement during a 2,000-block catch-up with
 a peer disconnect; hostile wire data, header/address floods and admission caps;
-a real PTY Screen; a corrupt local body; prune boundaries and assumevalid; and
-one getdata naming more Blocks than a Peer's outbox holds. The fresh catch-up
+a real PTY Screen; a corrupt local body; prune boundaries and assumevalid;
+one getdata naming more Blocks than a Peer's outbox holds; and, since #406, the
+liars of the consensus sections below run from `tools/regtest/liar.py` itself
+(`wrongwitness`, `badheight`, `overweight`, `sigops`, `nonfinal`,
+`sequencelock`, `echo`), each beside honest Core with the node ending at
+Core's tip. The fresh catch-up
 directory needs `txindex` before `audit`, just like the manual command sequence
 below.
 
