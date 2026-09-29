@@ -2910,12 +2910,15 @@ python3 tools/regtest/liar.py 18455 sigops "$C" &
 sleep 3; timeout -s INT 60 $BIN regtest follow 127.0.0.1:18455,127.0.0.1:18454 $D
 ```
 
-Both are refused at the body gate with the sum named, the liar dropped, and
-the node stays at Core's tip. (After each, `dropping peer 1: owed Blocks and
-sent none for 30 seconds` follows: the liar's Header is in the tree, so the
-node asks Core for a body Core has never seen, and Core's silence costs it the
-slot — the same thing the `bip30` and `badheight` runs show, and not the rule
-under test.)
+Both are refused at the body gate with the sum named, the liar dropped, the
+Block marked invalid, and the node still following Core. The mark is what
+#408 added: a weight or a signature-operation cost is a fact about the Block,
+not about the body, so no other Peer is asked for it. Before that the Height
+went back on the wanted list, Core was asked for a body it had never seen, and
+Core was dropped thirty seconds later for owing it — which on this two-Peer
+regtest ended the run with `every Peer is gone and the Address Book has nothing
+left to dial`. A Merkle Root or witness commitment fault still goes the other
+way and is refetched from an honest Peer, as the `wrongbody` section shows.
 
 ```
 liar: mined 1842c341380444ebd57a04588c5d2f94a99548b02a6385852d49c7d7c1575d38 at Height 243 weighing about 4.8 million (1200225 bytes)

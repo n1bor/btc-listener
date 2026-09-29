@@ -314,7 +314,12 @@ verify boardSockets
 fn drained(state: Following) -> Result<Following, String>
     ? "Every outbox offered to its socket once, then the Blocks Peers asked"
       "for read onto the wires that have room (#361)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     servingBlocks(withPool(state, Infra.Peers.flushedAll(state.pool)?))
 
 fn servingOwed(state: Following) -> Bool
@@ -687,8 +692,8 @@ fn blockLanded(state: Following, catching: Catching, body: List<Int>) -> Walked
       "with the reason as a fault on this node's own side (#327)."
     ! [
         Console.error,
-        Disk.appendBytes, Disk.size, Disk.sync,
-        Infra.Kv.putAll,
+        Disk.appendBytes, Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Tcp.close,
         Time.unixMs,
     ]
@@ -700,8 +705,8 @@ fn filedFlight(state: Following, catching: Catching, flight: Flight, body: List<
     ? "Filed, or grounded."
     ! [
         Console.error,
-        Disk.appendBytes, Disk.size, Disk.sync,
-        Infra.Kv.putAll,
+        Disk.appendBytes, Disk.appendText, Disk.size, Disk.sync,
+        Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll,
         Tcp.close,
         Time.unixMs,
     ]
@@ -2872,7 +2877,12 @@ fn servingBlocks(state: Following) -> Result<Following, String>
       "and drain wires but read no Blocks. A Peer that asks during one waits"
       "until the loop has its turn back, which is bounded by the walk rather"
       "than by the Peer."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     servingWithin(state, servedPerTurn())
 
 fn servedPerTurn() -> Int
@@ -2898,7 +2908,12 @@ verify servedPerTurn
 
 fn servingWithin(state: Following, left: Int) -> Result<Following, String>
     ? "Another Block if this turn has one left in it."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     match servingMore(left)
         true -> servingNext(state, left)
         false -> Result.Ok(state)
@@ -2916,7 +2931,12 @@ verify servingMore
 
 fn servingNext(state: Following, left: Int) -> Result<Following, String>
     ? "The Peer whose turn it is, if any Peer is owed a Block and has room."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     match Infra.Peers.nextBlockWanted(state.pool)
         Option.None -> Result.Ok(state)
         Option.Some(wanted) -> servingBlock(state, wanted, left)
@@ -2927,20 +2947,35 @@ fn servingBlock(state: Following, wanted: Infra.Peers.Wanted, left: Int) -> Resu
       "neither a Block we do not hold nor a Peer that goes mid-write can put"
       "this turn back where it started. It counts against the turn either"
       "way, because looking is what costs the lookup."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     located = Infra.Store.get(state.store, Domain.IndexKeys.blockKey(Domain.Hash.reversedHex(wanted.hash))?)?
     servingLocated(withPool(state, Infra.Peers.blockServed(state.pool, wanted.key)), wanted.key, located, left - 1)
 
 fn servingLocated(state: Following, key: Int, located: Option<Bytes>, left: Int) -> Result<Following, String>
     ? "A Block we never fetched, or one whose bytes we can read back."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     match located
         Option.None -> servingWithin(state, left)
         Option.Some(stored) -> sendingBlock(state, key, Domain.Index.decodeLocation(stored)?, left)
 
 fn sendingBlock(state: Following, key: Int, location: Location, left: Int) -> Result<Following, String>
     ? "The Block off the Segment and onto the wire, exactly as it was stored."
-    ! [Console.error, Console.print, Disk.readBytesAt, Infra.Kv.get, Tcp.close, Tcp.writeNow]
+    ! [
+        Console.error, Console.print,
+        Disk.appendText, Disk.readBytesAt,
+        Infra.Kv.get,
+        Tcp.close, Tcp.writeNow,
+    ]
     payload = Infra.Blocks.read(state.blocks, location)?
     sent = Infra.Peers.tell(state.pool, key, "block", payload)?
     _said = saidLineIfPlain(state.watch, "served a Block of {List.len(Bytes.octets(payload))} bytes to peer {key}")
@@ -3249,11 +3284,17 @@ fn compactStore(network: Network, store: Store, rebuilding: Option<Rebuilding>, 
       "Then whether the bytes hash to the Id they claim, so a Peer cannot"
       "get a Header into the tree by attaching it to a body that is not"
       "that Header's. Only then is the Header absorbed."
+      "Either kind of body fault is the same answer here (#408): the Header"
+      "is absorbed only after the body passes, so a refusal leaves nothing in"
+      "the tree to mark invalid and nothing for the walk to ask anyone for."
+      "That is why the mark belongs to the whole-Block path, where the header"
+      "phase placed the Header before the body was ever fetched."
     ! [Infra.Kv.deleteAll, Infra.Kv.get, Infra.Kv.putAll]
     _expected = expectedCompact(rebuilding, blockId)?
     match Domain.Body.fault(payload, blockId, witnessedNext(network, store)?)
-        Option.Some(why) -> Result.Err(why)
-        Option.None -> placedCompact(network, store, header, blockId, nowSecs)
+        Domain.Body.Fault.Body(why) -> Result.Err(why)
+        Domain.Body.Fault.Block(why) -> Result.Err(why)
+        Domain.Body.Fault.Sound -> placedCompact(network, store, header, blockId, nowSecs)
 
 fn witnessedNext(network: Network, store: Store) -> Result<Bool, String>
     ? "Whether SegWit is in force at the Height a compact Block extends the"

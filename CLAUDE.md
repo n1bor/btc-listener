@@ -330,7 +330,17 @@ anywhere before, so a corrupted payload reached the decoders and surfaced as
 whatever they made of the wreckage. A Block body must hash to the Block Id it
 was requested under (`Domain.Block.idOfWholeBlock`, not `blockIdOf` — the
 former takes a whole Block, and getting that wrong accuses every honest Peer),
-and since #283 must also *be* that Block before it is kept: `Domain.Body.fault`
+and since #283 must also *be* that Block before it is kept. **Which kind of
+fault the body gate found decides what happens next** (#408): `Domain.Body.fault`
+answers `Fault.Body` for a body that is not the Block — it does not decode, its
+Transactions do not build the Merkle Root, its witnesses do not hash to the
+coinbase's commitment — and the Height is asked of another Peer, because the
+Block may be fine; it answers `Fault.Block` for the weight and
+signature-operation ceilings, which are checked after the Root and the
+commitment have bound those bytes to that Header, and then the Header is marked
+invalid and asked of nobody. Getting that the wrong way round cost an honest
+Peer per bad Block: the walk asked each Peer in turn for a body none of them
+had and dropped each one for owing it: `Domain.Body.fault`
 (decode, coinbase first and only, `TxCheck`, no repeated txid, Merkle Root
 with no duplicated pair) runs in `Infra.Bodies.kept` and before a compact
 Block is stored, and a body read from disk is re-hashed in

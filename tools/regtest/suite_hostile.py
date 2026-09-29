@@ -287,18 +287,16 @@ def consensus(s, a):
     for _ in range(3):
         a.rpc("sendtoaddress", a.rpc("getnewaddress", "", "bech32"), 0.1)
         a.mine(1)
-    # overweight and sigops are refused at the body gate for a fact about the
-    # Block itself, and today the Header stays in the tree and the node asks
-    # honest Core for the body until Core is dropped for owing it, then ends
-    # with no Peers (#408). Until that lands those two cases end at the
-    # diagnosis; the others end with the node at Core's tip.
-    for mode, expected, ends_at_tip in [("wrongwitness", "commits to witnesses", True), ("badheight", "BIP34", True), ("overweight", "weighs", False),
-                                        ("sigops", "signature operations", False), ("nonfinal", "not final", True), ("sequencelock", "BIP68", True), ("echo", "is this node", True)]:
+    # Every one of them ends with the node still following Core: a body the
+    # gate refuses is either asked of another Peer or marked invalid and asked
+    # of nobody (#408), and either way the honest Peer beside the liar carries
+    # the chain.
+    for mode, expected in [("wrongwitness", "commits to witnesses"), ("badheight", "BIP34"), ("overweight", "weighs"),
+                           ("sigops", "signature operations"), ("nonfinal", "not final"), ("sequencelock", "BIP68"), ("echo", "is this node")]:
         with documented_liar(a, mode) as (address, status):
             with s.follow(address + "," + a.peer, "log", label="liar-" + mode) as live:
                 wait_until(lambda: expected.lower() in live.text().lower(), 120, mode + " diagnosed")
-                if ends_at_tip:
-                    live.tip(a.height(), timeout=120)
+                live.tip(a.height(), timeout=120)
             assert not status["errors"], status
             if mode == "echo":
                 assert status.get("hung_up"), status

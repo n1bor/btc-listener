@@ -20,63 +20,88 @@ module Body
         "signature-operation limits are #400's."
         "A fault is a fault of the Peer that sent the body, which the caller"
         "drops, and the Height goes back on the list to be asked of another."
-    exposes [fault]
+    exposes [Fault, fault]
     depends [Bytes, Domain.Block, Domain.BlockLimits, Domain.Hash, Domain.Transaction, Domain.TxCheck]
     effects []
 
-fn fault(payload: Bytes, blockId: String, witnessed: Bool) -> Option<String>
-    ? "Why this body is not Block blockId, or nothing when it is. witnessed"
+type Fault
+    Sound
+    Body(String)
+    Block(String)
+
+fn fault(payload: Bytes, blockId: String, witnessed: Bool) -> Fault
+    ? "What is wrong with this body, and whose fault it is (#408). witnessed"
       "is whether SegWit is in force at the Block's Height, which decides"
       "whether a coinbase commitment is read (n1bor/btc-listener#399)."
+      "Fault.Body is a body that is not Block blockId: it does not decode,"
+      "its Transactions do not build the Merkle Root the Header commits to,"
+      "or its witnesses do not hash to the coinbase's commitment. The Block"
+      "itself may be perfectly good, so the Height goes back on the list and"
+      "another Peer is asked -- which is what #283 was for."
+      "Fault.Block is the other kind: the Transactions are the ones the"
+      "Header commits to and the witnesses are the ones the coinbase commits"
+      "to, and the Block they make is one no chain may hold. Asking another"
+      "Peer cannot help, because no honest Peer has a different body for this"
+      "Header. Core reaches the same conclusion in CheckBlock and marks"
+      "BLOCK_FAILED_VALID; the caller marks the Header invalid the way #376's"
+      "connect refusal does."
+      "Only the checks after the Merkle Root and the commitment can tell the"
+      "two apart, which is why TxCheck's faults are the body's: they are"
+      "found before the Root has bound the Transaction list, so a bad"
+      "coinbase there is as likely to be a Peer sending someone else's"
+      "Transactions as it is a Block that was mined wrong."
     match Domain.Block.decodeHeader(List.take(Bytes.octets(payload), Domain.Block.headerLength()))
-        Result.Err(why) -> Option.Some("Block {blockId}: {why}")
+        Result.Err(why) -> Fault.Body("Block {blockId}: {why}")
         Result.Ok(header) -> decoded(blockId, header, Domain.Block.carriedOf(payload), witnessed)
 
 verify fault
-    fault(Bytes.fromHex(genesisHex())?, genesisId(), false) => Option.None
-    fault(Bytes.fromHex("01")?, "aa", false) => Option.Some("Block aa: Block Header must be 80 bytes, got 1")
-    fault(Bytes.fromHex(genesisHeaderHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries no Transactions")
-    fault(Bytes.fromHex(genesisHeaderHex() + "01" + "01000000")?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f would not decode: Transaction ends before its lock time")
-    fault(Bytes.fromHex(genesisHeaderHex() + "01" + spendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not begin with a coinbase")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + coinbaseHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + spendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transactions do not build the Merkle Root 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
-    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + doubleSpendHex())?, genesisId(), false) => Option.Some("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transaction 5887ce6952c895b568e2609cc4782f4be3558c8caf34edf13a9e1c24a316a19e spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
-    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), true) => Option.None
-    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), false) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: Transaction a8a8b11128fe861926fdc9754effe87753a8a6b1ca3209aa4714777ee9b1a7e4 carries witness data but the coinbase commits to none")
-    fault(Bytes.fromHex(segwitBlockWitnessTamperedHex())?, segwitBlockId(), true) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase commits to witnesses 0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf, which the Transactions' witnesses do not hash to")
-    fault(Bytes.fromHex(segwitBlockTwoNonceHex())?, segwitBlockId(), true) => Option.Some("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase carries no 32-byte witness nonce beside its commitment")
+    fault(Bytes.fromHex(genesisHex())?, genesisId(), false) => Fault.Sound
+    fault(Bytes.fromHex("01")?, "aa", false) => Fault.Body("Block aa: Block Header must be 80 bytes, got 1")
+    fault(Bytes.fromHex(genesisHeaderHex())?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries no Transactions")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + "01000000")?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f would not decode: Transaction ends before its lock time")
+    fault(Bytes.fromHex(genesisHeaderHex() + "01" + spendHex())?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f does not begin with a coinbase")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + coinbaseHex())?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f carries a second coinbase, 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + spendHex())?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transactions do not build the Merkle Root 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b the Header commits to, but 9a44fc3782c00b311e5085b8bd2ad0ca1d5d44cd1a7301a76b2ecad7b905caba")
+    fault(Bytes.fromHex(genesisHeaderHex() + "02" + coinbaseHex() + doubleSpendHex())?, genesisId(), false) => Fault.Body("Block 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f: Transaction 5887ce6952c895b568e2609cc4782f4be3558c8caf34edf13a9e1c24a316a19e spends 00000000000000000000000000000000000000000000000000000000000000aa:0 twice")
+    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), true) => Fault.Sound
+    fault(Bytes.fromHex(segwitBlockHex())?, segwitBlockId(), false) => Fault.Body("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: Transaction a8a8b11128fe861926fdc9754effe87753a8a6b1ca3209aa4714777ee9b1a7e4 carries witness data but the coinbase commits to none")
+    fault(Bytes.fromHex(segwitBlockWitnessTamperedHex())?, segwitBlockId(), true) => Fault.Body("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase commits to witnesses 0744493e2170040d7d7654e43fbc2f1bad5dc479ecb3f8ee7326357a39a41ecf, which the Transactions' witnesses do not hash to")
+    fault(Bytes.fromHex(segwitBlockTwoNonceHex())?, segwitBlockId(), true) => Fault.Body("Block 727681405c5551fd44406622521250e6890f2c86e66cc6f79a6533a757416540: coinbase carries no 32-byte witness nonce beside its commitment")
 
-fn decoded(blockId: String, header: BlockHeader, carried: Result<List<Carried>, String>, witnessed: Bool) -> Option<String>
+fn decoded(blockId: String, header: BlockHeader, carried: Result<List<Carried>, String>, witnessed: Bool) -> Fault
     ? "The Transactions, or the reason there are none; then the coinbase's"
       "witness commitment once the rest of the body has passed."
     match carried
-        Result.Err(why) -> Option.Some("Block {blockId} would not decode: {why}")
+        Result.Err(why) -> Fault.Body("Block {blockId} would not decode: {why}")
         Result.Ok(carriedList) -> shapedThenCommitted(blockId, header, carriedList, witnessed)
 
 verify decoded
-    decoded("aa", sampleHeader(), Result.Err("no"), false) => Option.Some("Block aa would not decode: no")
-    decoded("aa", sampleHeader(), Result.Ok([]), false) => Option.Some("Block aa carries no Transactions")
+    decoded("aa", sampleHeader(), Result.Err("no"), false) => Fault.Body("Block aa would not decode: no")
+    decoded("aa", sampleHeader(), Result.Ok([]), false) => Fault.Body("Block aa carries no Transactions")
 
-fn shapedThenCommitted(blockId: String, header: BlockHeader, carried: List<Carried>, witnessed: Bool) -> Option<String>
+fn shapedThenCommitted(blockId: String, header: BlockHeader, carried: List<Carried>, witnessed: Bool) -> Fault
     ? "The txid-level checks first, the witness commitment last: a body that"
       "is not the Block is refused for that before its witnesses are read."
     match shaped(blockId, header, transactionsFrom(carried, []))
-        Option.Some(why) -> Option.Some(why)
+        Option.Some(why) -> Fault.Body(why)
         Option.None -> committedThenLimited(blockId, carried, witnessed)
 
 verify shapedThenCommitted
-    shapedThenCommitted("aa", sampleHeader(), [], false) => Option.Some("Block aa carries no Transactions")
+    shapedThenCommitted("aa", sampleHeader(), [], false) => Fault.Body("Block aa carries no Transactions")
 
-fn committedThenLimited(blockId: String, carried: List<Carried>, witnessed: Bool) -> Option<String>
-    ? "The witness commitment, then what the Block costs (#400)."
+fn committedThenLimited(blockId: String, carried: List<Carried>, witnessed: Bool) -> Fault
+    ? "The witness commitment, then what the Block costs (#400). Everything"
+      "up to here is the body's fault; the ceilings below are the Block's"
+      "(#408), because the Root and the commitment have bound these bytes to"
+      "this Header and no other body can be lighter under it."
     match committed(blockId, carried, witnessed)
-        Option.Some(why) -> Option.Some(why)
+        Option.Some(why) -> Fault.Body(why)
         Option.None -> limited(blockId, carried)
 
 verify committedThenLimited
-    committedThenLimited("aa", [], false) => Option.None
+    committedThenLimited("aa", [], false) => Fault.Sound
 
-fn limited(blockId: String, carried: List<Carried>) -> Option<String>
+fn limited(blockId: String, carried: List<Carried>) -> Fault
     ? "Core's two Block ceilings that need only the body (n1bor/btc-listener#400):"
       "weight at most MAX_BLOCK_WEIGHT, and the legacy signature operations --"
       "every scriptSig and scriptPubKey, at four each -- at most"
@@ -84,13 +109,13 @@ fn limited(blockId: String, carried: List<Carried>) -> Option<String>
       "the Inputs spend and are counted on connect; a Block over the ceiling on"
       "its scripts alone is refused here, before it is written."
     match Domain.BlockLimits.weightOf(carried) > Domain.BlockLimits.maxWeight()
-        true -> Option.Some("Block {blockId} weighs {Domain.BlockLimits.weightOf(carried)} weight units, above the {Domain.BlockLimits.maxWeight()} the protocol allows")
+        true -> Fault.Block("Block {blockId} weighs {Domain.BlockLimits.weightOf(carried)} weight units, above the {Domain.BlockLimits.maxWeight()} the protocol allows")
         false -> costed(blockId, Domain.BlockLimits.legacySigopCostOf(transactionsFrom(carried, [])))
 
 verify limited
-    limited("aa", []) => Option.None
-    limited(genesisId(), Domain.Block.carriedOf(Bytes.fromHex(genesisHex())?)?) => Option.None
-    limited(segwitBlockId(), Domain.Block.carriedOf(Bytes.fromHex(segwitBlockHex())?)?) => Option.None
+    limited("aa", []) => Fault.Sound
+    limited(genesisId(), Domain.Block.carriedOf(Bytes.fromHex(genesisHex())?)?) => Fault.Sound
+    limited(segwitBlockId(), Domain.Block.carriedOf(Bytes.fromHex(segwitBlockHex())?)?) => Fault.Sound
 
 fn weightOfHex(blockHex: String) -> Result<Int, String>
     ? "A serialised Block's weight, for pinning the two Blocks Core reports"
@@ -102,15 +127,15 @@ verify weightOfHex
     weightOfHex(segwitBlockHex()) => Result.Ok(1453)
     weightOfHex("zz") => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
-fn costed(blockId: String, cost: Int) -> Option<String>
+fn costed(blockId: String, cost: Int) -> Fault
     ? "The legacy operations against the ceiling."
     match cost > Domain.BlockLimits.maxSigopCost()
-        true -> Option.Some("Block {blockId} costs {cost} signature operations in its scripts alone, above the {Domain.BlockLimits.maxSigopCost()} allowed")
-        false -> Option.None
+        true -> Fault.Block("Block {blockId} costs {cost} signature operations in its scripts alone, above the {Domain.BlockLimits.maxSigopCost()} allowed")
+        false -> Fault.Sound
 
 verify costed
-    costed("aa", 80000) => Option.None
-    costed("aa", 80004) => Option.Some("Block aa costs 80004 signature operations in its scripts alone, above the 80000 allowed")
+    costed("aa", 80000) => Fault.Sound
+    costed("aa", 80004) => Fault.Block("Block aa costs 80004 signature operations in its scripts alone, above the 80000 allowed")
 
 fn transactionsFrom(carried: List<Carried>, acc: List<Transaction>) -> List<Transaction>
     ? "The decoded Transactions, in order, without their bytes."
