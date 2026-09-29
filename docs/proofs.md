@@ -65,9 +65,15 @@ diff showing exactly those two moving up). Four recursions were reshaped
 for it (a countdown in `Bech32.checksumDigits` and `foldGenerators`, a
 countdown over eras in `Subsidy.minted`, a fuel of the tree's size in
 `HeaderTree.ancestryOf`, one function on a fuel in `UtxoStore.eachUndo`), no
-value changing. `aver proof main.av` would be the whole program and panics
-on a resource inside a sum type (n1bor/btc-listener#350); the leaf reaches no
-`infra/` module and sidesteps it.
+value changing. `aver proof main.av` would be the whole program. At the
+`d8bf3e01` pin it exports without panicking — the panic this paragraph used to
+name closed as jasisz/aver#1449 — and classifies 152 universal and 13 bounded
+laws, which is the union of the two cones. What stops it being the single
+gated entry is 22 verify cases in `Infra.Headers` and `Infra.Utxo` that the
+Lean build isolates with errors, and one `Infra.Utxo` law that lands on
+`sorry`, which `--sorry-budget 0` forbids; both are jasisz/aver#1462. The leaf
+reaches no `infra/` module, so neither reaches it, and n1bor/btc-listener#350
+retires when #1462 closes.
 
 ```bash
 aver proof domain/laws.av --module-root . -o ../btc-listener-proof-laws --check-json --declined-budget $(cat proof/laws.declined) --sorry-budget 0 --gate proof/laws.manifest.json
