@@ -46,17 +46,24 @@ fn fresh() -> State
 verify fresh
     fresh().over => false
 
-fn clocked(state: State, enteredMs: Int) -> State
+fn clocked(state: State, enteredMs: Int, doing: String) -> State
     ? "The owner asked again: whatever passed since its last answer, the"
       "coordinator spent waiting, and the node's Pool is told (#386)."
+      "doing is this answer's own name, and every answer passes its own"
+      "(#412). It is what a slow turn is reported as, so the fourteen names"
+      "here are the vocabulary of the watchdog's lines: a turn that stalls"
+      "while draining outboxes and serving Blocks now says drained, where"
+      "it used to borrow the last message the loop dispatched."
     match state.node
         Option.None -> state
-        Option.Some(node) -> withNode(state, Infra.Follow.pollReturned(node, waitedSince(state.answeredMs, enteredMs), enteredMs))
+        Option.Some(node) -> withNode(state, Infra.Follow.pollReturned(node, waitedSince(state.answeredMs, enteredMs), enteredMs, doing))
 
 verify clocked
-    clocked(fresh(), 5000).answeredMs => 0
-    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(State.update(fresh(), answeredMs = 4000), Infra.Follow.sampleFollowing()), 5000))) => 1000
-    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(fresh(), Infra.Follow.sampleFollowing()), 5000))) => 0
+    clocked(fresh(), 5000, "drained").answeredMs => 0
+    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(State.update(fresh(), answeredMs = 4000), Infra.Follow.sampleFollowing()), 5000, "drained"))) => 1000
+    Infra.Peers.polledMsOf(nodeOf(clocked(withNode(fresh(), Infra.Follow.sampleFollowing()), 5000, "drained"))) => 0
+    Infra.Follow.handlingOf(followingOf(clocked(withNode(fresh(), Infra.Follow.sampleFollowing()), 5000, "drained"))) => "drained"
+    Infra.Follow.handlingOf(followingOf(clocked(withNode(fresh(), Infra.Follow.sampleFollowing()), 5000, "settled"))) => "settled"
 
 fn waitedSince(answeredMs: Int, enteredMs: Int) -> Int
     ? "Nothing before the first answer; never negative against a skewed clock."
@@ -77,6 +84,16 @@ fn nodeOf(state: State) -> Pool
 
 verify nodeOf
     Infra.Peers.polledMsOf(nodeOf(fresh())) => 0
+
+fn followingOf(state: State) -> Infra.Follow.Following
+    ? "The node itself, for the cases here; the sample when there is no node."
+    match state.node
+        Option.None -> Infra.Follow.sampleFollowing()
+        Option.Some(node) -> node
+
+verify followingOf
+    Infra.Follow.handlingOf(followingOf(fresh())) => "starting"
+    Infra.Follow.handlingOf(followingOf(withNode(fresh(), Infra.Follow.pollReturned(Infra.Follow.sampleFollowing(), 0, 1, "ticked")))) => "ticked"
 
 fn answered(state: State, enteredMs: Int, leftMs: Int) -> State
     ? "The owner is answering: the turn's work is measured against the"
@@ -116,7 +133,7 @@ fn started(state: State) -> Tuple<State, Result<Infra.Wire.Started, Run.Wake>>
         Wait.poll,
     ]
     enteredMs = Time.unixMs()
-    match startedAnswered(clocked(state, enteredMs))
+    match startedAnswered(clocked(state, enteredMs, "started"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn heard(state: State, key: Int) -> Tuple<State, Result<Infra.Wire.Heard, Run.Wake>>
@@ -134,7 +151,7 @@ fn heard(state: State, key: Int) -> Tuple<State, Result<Infra.Wire.Heard, Run.Wa
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match heardAnswered(clocked(state, enteredMs), key)
+    match heardAnswered(clocked(state, enteredMs, "heard"), key)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn handled(state: State, key: Int, command: String, body: List<Int>) -> Tuple<State, Result<Bool, Run.Wake>>
@@ -151,7 +168,7 @@ fn handled(state: State, key: Int, command: String, body: List<Int>) -> Tuple<St
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match handledAnswered(clocked(state, enteredMs), key, command, body)
+    match handledAnswered(clocked(state, enteredMs, "handled"), key, command, body)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn ticked(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
@@ -169,7 +186,7 @@ fn ticked(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match tickedAnswered(clocked(state, enteredMs))
+    match tickedAnswered(clocked(state, enteredMs, "ticked"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn accepted(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
@@ -186,7 +203,7 @@ fn accepted(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match acceptedAnswered(clocked(state, enteredMs))
+    match acceptedAnswered(clocked(state, enteredMs, "accepted"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn drained(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
@@ -203,7 +220,7 @@ fn drained(state: State) -> Tuple<State, Result<Infra.Wire.Turned, Run.Wake>>
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match drainedAnswered(clocked(state, enteredMs))
+    match drainedAnswered(clocked(state, enteredMs, "drained"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn due(state: State) -> Tuple<State, Result<Infra.Catching.Due, Run.Wake>>
@@ -220,7 +237,7 @@ fn due(state: State) -> Tuple<State, Result<Infra.Catching.Due, Run.Wake>>
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match dueAnswered(clocked(state, enteredMs))
+    match dueAnswered(clocked(state, enteredMs, "due"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn headers(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Batch, Run.Wake>>
@@ -235,7 +252,7 @@ fn headers(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Batch, 
         Time.unixMs,
     ]
     enteredMs = Time.unixMs()
-    match headersAnswered(clocked(state, enteredMs), key)
+    match headersAnswered(clocked(state, enteredMs, "headers"), key)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn aligned(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Aligned, Run.Wake>>
@@ -247,7 +264,7 @@ fn aligned(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Aligned
         Time.unixMs,
     ]
     enteredMs = Time.unixMs()
-    match alignedAnswered(clocked(state, enteredMs), key)
+    match alignedAnswered(clocked(state, enteredMs, "aligned"), key)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn fetched(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Fetch, Run.Wake>>
@@ -262,7 +279,7 @@ fn fetched(state: State, key: Int) -> Tuple<State, Result<Infra.Catching.Fetch, 
         Time.unixMs,
     ]
     enteredMs = Time.unixMs()
-    match fetchedAnswered(clocked(state, enteredMs), key)
+    match fetchedAnswered(clocked(state, enteredMs, "fetched"), key)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn begun(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun, Run.Wake>>
@@ -274,7 +291,7 @@ fn begun(state: State, final: Bool) -> Tuple<State, Result<Infra.Catching.Begun,
         Time.unixMs,
     ]
     enteredMs = Time.unixMs()
-    match begunAnswered(clocked(state, enteredMs), final)
+    match begunAnswered(clocked(state, enteredMs, "begun"), final)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn connected(state: State, height: Int) -> Tuple<State, Result<Infra.Catching.Step, Run.Wake>>
@@ -290,7 +307,7 @@ fn connected(state: State, height: Int) -> Tuple<State, Result<Infra.Catching.St
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match connectedAnswered(clocked(state, enteredMs), height)
+    match connectedAnswered(clocked(state, enteredMs, "connected"), height)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn ended(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
@@ -304,7 +321,7 @@ fn ended(state: State) -> Tuple<State, Result<Infra.Catching.Chunk, Run.Wake>>
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match endedAnswered(clocked(state, enteredMs))
+    match endedAnswered(clocked(state, enteredMs, "ended"))
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn settled(state: State, key: Int, ending: Infra.Catching.Ending) -> Tuple<State, Result<Infra.Catching.Settled, Run.Wake>>
@@ -323,7 +340,7 @@ fn settled(state: State, key: Int, ending: Infra.Catching.Ending) -> Tuple<State
         Work.cancel,
     ]
     enteredMs = Time.unixMs()
-    match settledAnswered(clocked(state, enteredMs), key, ending)
+    match settledAnswered(clocked(state, enteredMs, "settled"), key, ending)
         (next, answer) -> (answered(next, enteredMs, Time.unixMs()), answer)
 
 fn peers(state: State) -> List<Int>

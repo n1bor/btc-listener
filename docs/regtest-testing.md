@@ -1882,7 +1882,57 @@ coordinator's poll and goes to the Pool as `polledMs`, and the span to this
 answer is the turn's work, which over thirty seconds is also the `watchdog
 slow turn` line (#386; between #361 and #386 `polledMs` read 0 and `workedMs`
 read the whole window, and the slow-turn line had no caller). The standalone
-commands still poll inside `Infra.Peers` and were never affected. A `follow`
+commands still poll inside `Infra.Peers` and were never affected.
+
+**The slow-turn line names the answer the turn was** (#412). `App.Owner` has
+fourteen answers and every one of them is clocked, so any of them can be the
+turn that ran long: `started`, `heard`, `handled`, `ticked`, `accepted`,
+`drained`, `due`, `headers`, `aligned`, `fetched`, `begun`, `connected`,
+`ended`, `settled`. Each passes its own name to `Infra.Follow.pollReturned`
+and that is what the line says; the message dispatch then overwrites it with
+the command and the Peer, which is the better label when the turn really is a
+dispatch. Before #412 only the dispatch wrote the label, so a slow `drained`
+or `due` turn was reported under whichever message the loop had handled last,
+however long before — mainnet read `handling tx from peer 28116` on
+thirty-five-second turns that need never have touched a Transaction, and the
+spread of labels across `tx`, `getdata`, `inv` and `addr` looked like four
+slow paths when it was an artefact of one stale field. `drained` is worth
+knowing by name: it is `Infra.Peers.flushedAll` over every outbox and then
+`servingBlocks`, which reads up to `servedPerTurn()` = 16 Blocks off the
+Segments in a single turn.
+
+**Seeing the labels without waiting for a stall.** No ordinary regtest turn
+works for thirty seconds, so the way to watch the vocabulary come out is to
+make the budget impossible. Flip `Domain.Watchdog.turnBudgetMs` from 30000 to
+1 — the body and the verify case, and mind that `blockBudgetMs` above it is
+also 30000 — build, and run against Core for half a minute:
+
+```bash
+sed -i '63s/^    30000$/    1/' domain/watchdog.av
+sed -i 's/^    turnBudgetMs() => 30000$/    turnBudgetMs() => 1/' domain/watchdog.av
+aver compile main.av --module-root . -o ../btc-listener-build
+(cd ../btc-listener-build && cargo build --release)
+timeout 40 ../btc-listener-build/target/release/main regtest follow 127.0.0.1:18454 $D log
+grep "watchdog slow turn" $D/debug.log
+```
+
+Every turn then trips it, and each line names the answer it was:
+
+```
+2026-10-03T08:17:20.037Z 1791015440037 watchdog slow turn: 0s between two polls, handling starting
+2026-10-03T08:17:20.042Z 1791015440042 watchdog slow turn: 0s between two polls, handling due
+2026-10-03T08:17:20.120Z 1791015440120 watchdog slow turn: 0s between two polls, handling headers
+2026-10-03T08:17:20.190Z 1791015440190 watchdog slow turn: 0s between two polls, handling fetched
+2026-10-03T08:17:20.199Z 1791015440199 watchdog slow turn: 0s between two polls, handling ended
+2026-10-03T08:17:20.328Z 1791015440328 watchdog slow turn: 0s between two polls, handling ended
+```
+
+That is the whole point of #412's first commit: before it, all six of those
+lines said `starting`, because no Message had been dispatched yet and the
+sample's label was the only thing ever written. `due`, `headers`, `fetched`
+and `ended` could not say their own name. **Flip it back by the inverse edit**
+and confirm `git status` is clean before building anything you intend to keep
+— `git checkout --` on the file would take the fix with it. A `follow`
 left alone for 150 s on regtest writes rows like
 `1790444250325 listen 192 192 0 0 59990 16 1 0 0 0`: sixty seconds of poll,
 sixteen milliseconds of work. This does not aggregate

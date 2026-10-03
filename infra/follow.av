@@ -22,7 +22,7 @@ module Follow
         "and then serves the chain to (Stage 8, on the listen and accept that"
         "jasisz/aver#1131 asked for and #1138 delivered). Nothing in this"
         "loop is waiting on the runtime any more."
-    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, pollReturned, turnWorked, sampleCatching]
+    exposes [Following, Catching, Walked, Asking, Batched, Aligning, Flown, Chunking, Stepping, Chunked, Onward, opened, seatedKeys, handled, turned, tickMs, tickFor, tickSockets, Admitted, callerTaken, listenerOf, drained, servingOwed, closed, dueFor, catchingOn, askedHeaders, wantsHeaders, flying, stopAsked, headersHeard, alignedFor, flownOnce, blockLanded, chunkBegun, chunkStepped, chunkEnded, caughtMoved, faultedOn, blockInvalid, chainStopped, withPool, sampleFollowing, pollReturned, handlingOf, turnWorked, sampleCatching]
     depends [Bytes, Domain.Addr, Domain.Address, Domain.AddressBook, Domain.Block, Domain.Body, Domain.Catchup, Domain.CompactBlock, Domain.Hash, Domain.HeaderTree, Domain.Inbox, Domain.Index, Domain.IndexKeys, Domain.Inventory, Domain.Mempool, Domain.Network, Domain.Rules, Domain.Screen, Domain.Screenlines, Domain.Snapshot, Domain.Target, Domain.Transaction, Domain.TreeStore, Domain.UtxoStore, Domain.Version, Domain.Watchdog, Infra.Blocks, Infra.Board, Infra.Bodies, Infra.ChainState, Infra.Debug, Infra.Download, Infra.Headers, Infra.Mempool, Infra.Metrics, Infra.Pace, Infra.Peers, Infra.Resolver, Infra.Rewind, Infra.Screen, Infra.Store, Tcp, Work]
     effects [
         Console.error, Console.print,
@@ -2084,7 +2084,16 @@ fn firstAfterNone(state: Following, heldBefore: Int) -> Following
         false -> state
         true -> withGate(heardFrom(state, firstKey(state.pool), Time.unixMs()), Domain.Catchup.held(state.gate, firstKey(state.pool), ""))
 
-fn pollReturned(state: Following, waitedMs: Int, nowMs: Int) -> Following
+fn handlingOf(state: Following) -> String
+    ? "What a slow turn of this node would be reported as (#412): the answer"
+      "the owner is in, or the command and Peer of the message it dispatched."
+    state.watch.handling
+
+verify handlingOf
+    handlingOf(sampleFollowing()) => "starting"
+    handlingOf(pollReturned(sampleFollowing(), 0, 1, "drained")) => "drained"
+
+fn pollReturned(state: Following, waitedMs: Int, nowMs: Int, doing: String) -> Following
     ? "The coordinator's Wait.poll just returned and asked the owner something"
       "(#386). Under follow the loop's waiting is the generated coordinator's,"
       "one poll a turn over every process's park, and Infra.Peers never sees"
@@ -2092,12 +2101,23 @@ fn pollReturned(state: Following, waitedMs: Int, nowMs: Int) -> Following
       "this question, and hands it to the Pool here. That puts metrics.log's"
       "polledMs and workedMs back to what their header says, and stamps the"
       "instant the watchdog's slow-turn budget counts from."
-    withWatch(Following.update(state, pool = Infra.Peers.polledFor(state.pool, Int.max(waitedMs, 0))), Watching.update(state.watch, pollReturnedMs = nowMs))
+      "doing is which answer this turn is, and it is what the watchdog's"
+      "slow-turn line names (#412). Until it was passed here, handling was"
+      "written in one place only -- the message dispatch below -- so a slow"
+      "turn that was not a message dispatch was reported under whichever"
+      "message the loop had dispatched last, however long before. Mainnet"
+      "read `handling tx from peer N` on thirty-five-second turns that may"
+      "never have touched a Transaction. The dispatch still overwrites this"
+      "with the command and the Peer, which is the better label when it is"
+      "the true one."
+    withWatch(Following.update(state, pool = Infra.Peers.polledFor(state.pool, Int.max(waitedMs, 0))), Watching.update(state.watch, pollReturnedMs = nowMs, handling = doing))
 
 verify pollReturned
-    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 250, 1000).pool) => 250
-    pollReturned(sampleFollowing(), 250, 1000).watch.pollReturnedMs => 1000
-    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 0 - 5, 1000).pool) => 0
+    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 250, 1000, "drained").pool) => 250
+    pollReturned(sampleFollowing(), 250, 1000, "drained").watch.pollReturnedMs => 1000
+    pollReturned(sampleFollowing(), 250, 1000, "drained").watch.handling => "drained"
+    pollReturned(sampleFollowing(), 250, 1000, "due").watch.handling => "due"
+    Infra.Peers.polledMsOf(pollReturned(sampleFollowing(), 0 - 5, 1000, "due").pool) => 0
 
 fn turnWorked(state: Following, enteredMs: Int, leftMs: Int) -> Result<Following, String>
     ? "The owner is about to answer; this is how long the turn worked (#386)."
