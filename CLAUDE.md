@@ -58,8 +58,12 @@ every one of them was a copy-paste of a caller's list.
 The deep dives are `../aver/docs/` (`language.md`, `types.md`, `effects.md`,
 `cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
 whatever that checkout was at when it was last installed — and **`aver
---version` cannot tell you which**, because the version string does not move
-between releases. CI builds the commit named in `.aver-version`. When
+--version` narrows it but does not pin it**. Between releases the string does
+not move, so a build of main says `0.30.0-dev` whichever commit it is; the pin
+is a tagged release now (`b82939cb` is `0.30.0`), so a local `aver 0.30.0` at
+least says the compiler is not a build of main. It still cannot tell two
+commits of the same release apart, and for a pin on main it says nothing at
+all. CI builds the commit named in `.aver-version`. When
 something verifies and will not compile, or the VM and the compiled binary
 disagree, check `git log upstream/main` before believing it is a live bug.
 **Moving the pin is a routine** — README "Moving the Aver pin": pull
