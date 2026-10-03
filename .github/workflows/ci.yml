@@ -270,16 +270,26 @@ jobs:
           done
 
   proof:
-    name: aver proof (the Script engine in Lean)
-    # The pure engine reachable from domain/interp.av, exported to Lean 4 and
-    # checked by the kernel: every verify case as an example, every law as a
-    # theorem (#335, docs/proofs.md). Gated three ways, all committed and
-    # human-edited: proof/interp.declined is the budget of claims the exporter
-    # refuses to state (it only goes down), the sorry budget is zero, and
-    # proof/interp.manifest.json is the per-law baseline `--gate` compares
-    # against, so a law that is removed, demoted or grows an axiom is red.
-    # CI never runs --write-baseline; that would let a regression sign for
-    # itself.
+    name: aver proof (the whole program in Lean)
+    # One entry for the whole program (n1bor/btc-listener#350). This used to be
+    # two jobs: domain/interp.av for the Script engine, and the domain/laws.av
+    # leaf (#349) for every law-carrying module outside its cone. main.av could
+    # not be the entry while the Lean build failed on the verify *example*
+    # exports (jasisz/aver#1462); jasisz/aver#1485 made the law cone the
+    # default, those exports went away, and the whole program now builds with
+    # zero sorries. Its manifest holds every law the two cones held between
+    # them and three more -- including Infra.Utxo.fromScanOrder.isByteFieldNumberIn,
+    # which used to land on sorry -- so nothing is ratcheted less tightly than
+    # it was.
+    #
+    # Gated three ways, all committed and human-edited: proof/main.declined is
+    # the budget of claims the exporter refuses to state (it only goes down),
+    # the sorry budget is zero, and proof/main.manifest.json is the per-law
+    # baseline `--gate` compares against, so a law that is removed, demoted or
+    # grows an axiom is red. CI never runs --write-baseline; that would let a
+    # regression sign for itself. The verify cases are gated by `aver verify`;
+    # to check them through Lean's native_decide as well, pass --examples by
+    # hand, which CLAUDE.md's pin routine asks for on a pin move.
     #
     # The export runs first so the toolchain it names can be installed (and
     # cached) before the check. It is not made the elan default on purpose:
@@ -288,7 +298,7 @@ jobs:
     # as bounded (87/8/6 instead of 99/2/0). The pin carries the fix, and this
     # job is the scenario it was written for, so it runs without the default.
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09
@@ -321,21 +331,21 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/proof/.lake
-          key: proof-lake-${{ hashFiles('.aver-version', 'domain/**', 'infra/kv.av') }}-${{ runner.os }}
+          key: proof-lake-${{ hashFiles('.aver-version', 'main.av', 'domain/**', 'infra/**', 'app/**') }}-${{ runner.os }}
       - name: Export, then install the toolchain it names
         run: |
           export AVER_SPECULATIVE_LOG="$RUNNER_TEMP/proof-speculative.log"
-          aver proof domain/interp.av --module-root . -o "$RUNNER_TEMP/proof"
+          aver proof main.av --module-root . -o "$RUNNER_TEMP/proof"
           elan toolchain install "$(cat "$RUNNER_TEMP/proof/lean-toolchain")"
           elan show
       - name: Check against the committed budgets and baseline
         run: |
           export AVER_SPECULATIVE_LOG="$RUNNER_TEMP/proof-speculative.log"
-          aver proof domain/interp.av --module-root . -o "$RUNNER_TEMP/proof" \
+          aver proof main.av --module-root . -o "$RUNNER_TEMP/proof" \
             --check-json \
-            --declined-budget "$(cat proof/interp.declined)" \
+            --declined-budget "$(cat proof/main.declined)" \
             --sorry-budget 0 \
-            --gate proof/interp.manifest.json | tee proof.json
+            --gate proof/main.manifest.json | tee proof.json
           exit "${PIPESTATUS[0]}"
       - name: Keep the summary, so a red run says which claim moved
         if: always()
@@ -345,71 +355,6 @@ jobs:
           path: |
             proof.json
             ${{ runner.temp }}/proof-speculative.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-  proof-laws:
-    name: aver proof (the laws outside the engine, in Lean)
-    # The second proof entry (n1bor/btc-listener#349): domain/laws.av is a leaf
-    # that depends on every law-carrying module outside the engine's cone --
-    # Chainwork, Segment, Target, Subsidy, HeaderTree, Watchdog, UtxoStore,
-    # Block -- so their laws are kernel-checked and ratcheted the same way the
-    # engine's are, against proof/laws.declined and proof/laws.manifest.json.
-    # Same shape as the job above in every other respect.
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09
-      - name: Check out the Aver source at the pinned revision, at the dev path
-        run: |
-          sudo mkdir -p /home/owensr/aver/aver
-          sudo chown -R "$USER" /home/owensr/aver
-          git -C /home/owensr/aver/aver init --quiet
-          git -C /home/owensr/aver/aver fetch --quiet --depth 1 https://github.com/jasisz/aver "$(cat .aver-version)"
-          git -C /home/owensr/aver/aver checkout --quiet FETCH_HEAD
-      - name: Cache the aver toolchain
-        id: aver-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/aver
-          key: aver-path-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Install aver from that source
-        if: steps.aver-cache.outputs.cache-hit != 'true'
-        run: cargo install --path /home/owensr/aver/aver aver-lang --locked
-      - name: Install elan, with no default toolchain yet
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Cache the Lean toolchain, which the pinned aver chooses
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.elan/toolchains
-          key: elan-toolchains-${{ hashFiles('.aver-version') }}-${{ runner.os }}
-      - name: Cache the lake build of the export
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/proof-laws/.lake
-          key: proof-laws-lake-${{ hashFiles('.aver-version', 'domain/**', 'infra/kv.av') }}-${{ runner.os }}
-      - name: Export, then install the toolchain it names
-        run: |
-          aver proof domain/laws.av --module-root . -o "$RUNNER_TEMP/proof-laws"
-          elan toolchain install "$(cat "$RUNNER_TEMP/proof-laws/lean-toolchain")"
-          elan show
-      - name: Check against the committed budgets and baseline
-        run: |
-          aver proof domain/laws.av --module-root . -o "$RUNNER_TEMP/proof-laws" \
-            --check-json \
-            --declined-budget "$(cat proof/laws.declined)" \
-            --sorry-budget 0 \
-            --gate proof/laws.manifest.json | tee proof-laws.json
-          exit "${PIPESTATUS[0]}"
-      - name: Keep the summary, so a red run says which claim moved
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: proof-laws-summary
-          path: proof-laws.json
           if-no-files-found: ignore
           retention-days: 14
 

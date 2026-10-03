@@ -439,7 +439,11 @@ already pins exactly that.
 ## Connect, Undo and BIP30 (n1bor/btc-listener#354)
 
 Nine laws over `Domain.Connect` and `Domain.Disconnect`, gathered by the
-second proof entry `domain/laws.av`, which now depends on both. Writing the
+second proof entry `domain/laws.av`, which now depends on both. (**That leaf
+is gone.** n1bor/btc-listener#350 retired it: `aver proof main.av` is the one
+entry, and every law named in this file is reached without any `depends` list
+being told about it. The sections below keep the leaf in the present tense
+because each is a measurement taken when it existed, against the pin it names.) Writing the
 round-trip law found that BIP30 was not enforced — a Block re-creating an
 Output the Set held overwrote it and its Undo Data later deleted the original
 — so `connectedUnless` refuses such a Block first, with Core's two mainnet

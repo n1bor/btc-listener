@@ -1,20 +1,21 @@
 # Proofs, and what the proof job in CI proves
 
-`aver proof` exports the pure Script engine — every module reachable from
-`domain/interp.av` that touches no effect — to a Lean 4 project, turns every
-`verify` case into a Lean example and every `verify ... law` into a theorem,
-and asks the Lean kernel to check the lot. CI runs that on every push as the
-`proof` job. This page says what a green run means, what it does not mean, and
-how to move the two files it is measured against.
+`aver proof` exports this program's laws — every `verify ... law` reachable
+from `main.av`, and the functions they reach — to a Lean 4 project, turns each
+law into a theorem, and asks the Lean kernel to check the lot. CI runs that on
+every push as the `proof` job. **One entry covers the whole program**
+(n1bor/btc-listener#350); until Aver 0.30 it took two, and the section below
+says why and what each measured. This page says what a green run means, what it
+does not mean, and how to move the two files it is measured against.
 
 ## What the job runs
 
 ```bash
-aver proof domain/interp.av --module-root . -o "$RUNNER_TEMP/proof" \
+aver proof main.av --module-root . -o "$RUNNER_TEMP/proof" \
   --check-json \
-  --declined-budget "$(cat proof/interp.declined)" \
+  --declined-budget "$(cat proof/main.declined)" \
   --sorry-budget 0 \
-  --gate proof/interp.manifest.json
+  --gate proof/main.manifest.json
 ```
 
 The exit code is the verdict: 0 within every budget and no regression against
@@ -29,55 +30,51 @@ toolchain on first use), the same command against a scratch directory takes a fe
 first time and seconds after, because `lake` caches under `<out>/.lake`:
 
 ```bash
-aver proof domain/interp.av --module-root . -o ../btc-listener-proof \
-  --check-json --declined-budget "$(cat proof/interp.declined)" --sorry-budget 0 \
-  --gate proof/interp.manifest.json
+aver proof main.av --module-root . -o ../btc-listener-proof \
+  --check-json --declined-budget "$(cat proof/main.declined)" --sorry-budget 0 \
+  --gate proof/main.manifest.json
 ```
 
-## The second entry: the laws outside the engine
+## One entry, and the two it replaced
 
-The engine's cone is 34 modules; the chain, the stores and the codecs are
-outside it, and Chainwork's laws were gated by nothing but `aver verify` from
-the day they were written. Since n1bor/btc-listener#349 a leaf module,
-`domain/laws.av`, depends on every law-carrying module outside that cone —
-Address, Block, Chainwork, Connect, Disconnect, HeaderTree, Inventory,
-Segment, Snapshot, Subsidy, Target, TreeStore, Watchdog, UtxoStore, fourteen
-as of #358 — and defines nothing, so it cannot make a cycle; the `proof-laws` job exports
-it with the same flags against `proof/laws.declined` and
-`proof/laws.manifest.json`. A law added to a module the leaf does not yet
-name is added to its `depends` in the same PR. Measured at pin `c4b08179`
-with `Domain.Connect` and `Domain.Disconnect` (#354), `Domain.TreeStore`
-(#355), the Target and Block laws of #356 and the Address, Inventory and
-Snapshot modules of #358 in the leaf: **68 universal, 9 bounded, 0 open,
-102 declined** (the bounded are
-`Segment.nameOf.sortsWithSegment`, over `String` order,
-`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
-[]`, the three on-disk-record round trips of #355 and the three
-`when`-guarded Target laws of #356 and `IndexKeys.scanOrder.isByteFieldNumber`
-of #358; the declined count rose from 66 with the #354 modules, whose cones`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`, under `when held !=
-[]`, and the three on-disk-record round trips of #355, under `when` on the
-Height; the declined count rose from 66 with the #354 modules, whose cones
-bring the Block walk's mutual recursion and the Transaction decoder — the
-reason is written up in `docs/script-laws.md` under #354. The pin move from
-`600b3551` promoted two `when`-guarded laws to universal, which the gate at
-this pin reads as grown axiom sets, so the baseline was regenerated with the
-diff showing exactly those two moving up). Four recursions were reshaped
-for it (a countdown in `Bech32.checksumDigits` and `foldGenerators`, a
-countdown over eras in `Subsidy.minted`, a fuel of the tree's size in
-`HeaderTree.ancestryOf`, one function on a fuel in `UtxoStore.eachUndo`), no
-value changing. `aver proof main.av` would be the whole program. At the
-`d8bf3e01` pin it exports without panicking — the panic this paragraph used to
-name closed as jasisz/aver#1449 — and classifies 152 universal and 13 bounded
-laws, which is the union of the two cones. What stops it being the single
-gated entry is 22 verify cases in `Infra.Headers` and `Infra.Utxo` that the
-Lean build isolates with errors, and one `Infra.Utxo` law that lands on
-`sorry`, which `--sorry-budget 0` forbids; both are jasisz/aver#1462. The leaf
-reaches no `infra/` module, so neither reaches it, and n1bor/btc-listener#350
-retires when #1462 closes.
+**Now.** `aver proof main.av` is the entry and `proof/main.declined` and
+`proof/main.manifest.json` are the two files it is measured against. Measured
+at the `6eddd964` pin: **153 universal, 13 bounded, 0 sorries, 13 declined**,
+166 laws in the manifest, `build_errors: 0`. Four recursions were reshaped
+along the way to make it possible — a countdown in `Bech32.checksumDigits` and
+`foldGenerators`, a countdown over eras in `Subsidy.minted`, a fuel of the
+tree's size in `HeaderTree.ancestryOf`, one function on a fuel in
+`UtxoStore.eachUndo` — no value changing.
 
-```bash
-aver proof domain/laws.av --module-root . -o ../btc-listener-proof-laws --check-json --declined-budget $(cat proof/laws.declined) --sorry-budget 0 --gate proof/laws.manifest.json
-```
+**Why it was two, and what that cost.** `aver proof` could only ever be given
+a module, and `main.av` would not export: it panicked in Lean codegen on the
+capability resource inside `Store.Database(Infra.Kv.Handle)` (closed upstream
+as jasisz/aver#1449) and then, once it exported, its `lake build` failed on 22
+effectful `verify` cases in `Infra.Headers` and `Infra.Utxo` plus one
+`Infra.Utxo` law that landed on `sorry` (jasisz/aver#1462). So the engine
+reachable from `domain/interp.av` was gated by the `proof` job, and
+n1bor/btc-listener#349 added a leaf, `domain/laws.av`, that depended on the
+fifteen law-carrying modules outside that cone and defined nothing, gated by a
+second `proof-laws` job. The chain, the stores and the codecs were otherwise
+gated by nothing but `aver verify`; Chainwork's laws had been from the day they
+were written.
+
+**Why one entry now, and why it is not a weakening.** jasisz/aver#1485 made
+the law cone what `aver proof` exports by default, and all three failing
+shapes lived in the `verify` **example** exports. With those gone the whole
+program builds. Comparing the law names in the single manifest against the two
+it replaced: the engine cone held 130 laws, the leaf 138, their union 163, and
+**not one of them is absent** from `main.av`'s 166. The three it gains are
+`Domain.Stamp.isoOf.alwaysTwentyFourCharacters`,
+`Domain.Stamp.isoOf.dayAndClockAreIndependent`, and — the one worth naming —
+`Infra.Utxo.fromScanOrder.isByteFieldNumberIn`, the law that used to land on
+`sorry` and is proved now. A law added to any module is reached without
+anybody editing a `depends` list, which is the other thing the leaf cost: it
+had to be told.
+
+Historic measurements of the two cones stay where they were written, in
+`docs/script-laws.md` under #354, #355, #356 and #358, each against the pin it
+was taken at. They describe the leaf as a live thing because it was one.
 
 ## What green means
 
@@ -159,16 +156,21 @@ corpus is the only bridge to it.
 
 ## The two committed files, and who may change them
 
-- **`proof/interp.declined`** — the declined budget, a number. It only goes
+- **`proof/main.declined`** — the declined budget, a number. It only goes
   down. A PR that lifts a decline (a recursion given a measure, a cone that no
   longer reaches a provider) lowers it in the same PR. A PR that raises it has
-  to say why in its own diff; CI will not raise it for you. Raised once so far,
-  130 → 134 with n1bor/btc-listener#347: two laws over `Domain.Transaction.decode`
-  and two fixture helpers whose cases call it. Every claim on `decode` is
-  declined by construction (the three mutual-recursion groups, #349), and a
-  refusal law about the decoder cannot live anywhere else; they run under
-  `aver verify` and `--hostile` and are the test the fix is measured by.
-- **`proof/interp.manifest.json`** — the per-law baseline: for every law, its
+  to say why in its own diff; CI will not raise it for you. **13 today, and
+  they are eight laws, all one cause**: the `Domain.Transaction` and
+  `Domain.Connect`/`Domain.Disconnect` mutual recursions the exporter cannot
+  bound, the Connect and Disconnect five listed under both their qualified and
+  their bare names. Every claim on `decode` is declined by construction (the
+  three mutual-recursion groups), and a refusal law about the decoder cannot
+  live anywhere else; they run under `aver verify` and `--hostile` and are the
+  test the fix is measured by. The history of the number is worth keeping: the
+  two budgets it replaced stood at 136 and 111, raised over time for written
+  reasons, and collapsed to 3 and 13 at the `6eddd964` pin when the examples
+  stopped being exported.
+- **`proof/main.manifest.json`** — the per-law baseline: for every law, its
   tier, its theorem and its axiom set. CI runs `--gate` against it and fails on
   any law removed, demoted (universal > bounded > sampled > failed), whose
   axiom set grew, or whose backend changed. New laws are allowed and do not
@@ -176,8 +178,8 @@ corpus is the only bridge to it.
   removes or weakens a law:
 
   ```bash
-  aver proof domain/interp.av --module-root . -o ../btc-listener-proof \
-    --write-baseline proof/interp.manifest.json
+  aver proof main.av --module-root . -o ../btc-listener-proof \
+    --write-baseline proof/main.manifest.json
   ```
 
   and commit the result in the same PR, where the diff shows exactly what was
