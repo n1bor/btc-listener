@@ -1935,7 +1935,22 @@ and confirm `git status` is clean before building anything you intend to keep
 — `git checkout --` on the file would take the fix with it. A `follow`
 left alone for 150 s on regtest writes rows like
 `1790444250325 listen 192 192 0 0 59990 16 1 0 0 0`: sixty seconds of poll,
-sixteen milliseconds of work. This does not aggregate
+sixteen milliseconds of work.
+
+**A row is a window, never a turn, and reading it as a turn is a mistake this
+project has now made twice.** `polledMs` and `workedMs` accumulate since the
+previous row, and a row is written at every phase change and on a sixty-second
+heartbeat while the listen phase holds — so for all 4,479 listen rows of a
+ninety-hour mainnet run, `polledMs + workedMs` lay between 55 s and 66 s,
+every single one. A listen row saying `workedMs 44850` therefore means the
+loop worked forty-five of those sixty seconds across however many turns it
+took, which is a busy fraction; it does not mean any turn took forty-five
+seconds. `bodies` rows average five seconds of window and `set` rows a
+quarter of one, because those phases write a row per flight and per chunk. The
+only per-turn measurement in the node is the watchdog's `slow turn` line,
+which `Domain.Watchdog.overrun` raises against a single span over
+`turnBudgetMs`. Over that same ninety hours the node worked 15.9 % of the
+wall clock and polled 84.1 % of it, and raised twenty-six slow-turn lines. This does not aggregate
 the separate Work-owner and dashboard waits.
 
 Read the shape of a regtest run and you can see what it is telling you:
