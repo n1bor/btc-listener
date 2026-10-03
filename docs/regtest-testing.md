@@ -3036,6 +3036,32 @@ fetched yet (the one that confirmed the fresh Output), so it serves that
 Block honestly from Core when asked for it — a liar that could not was
 dropped for owing it before its own Block was ever reached:
 
+**And it has to announce more than once, which cost a red `main` to learn.**
+`serve_block` used to send its `headers` a single time, on joining. That is a
+race the liar can lose: its Block sits on Core's tip, and if the node has not
+placed *that* tip's Header yet — it is still fetching the body below it — the
+announcement names a Header whose parent is unknown and cannot be placed. The
+node is right to ignore it, #300 then holds a Peer whose catch-up moved
+nothing, and nothing asks that Peer anything ever again. The suite waits 120
+seconds for a diagnosis that can no longer come. It happened once, on the
+`main` run of #350, with the node at Height 2009 and the liar's Block on 2010;
+the node's own log is the proof that it did nothing wrong:
+
+```
+peer 0 sent Headers unasked, naming 55005f85…8d66
+headers complete: 2010 known          <- unchanged: the Header has no parent here
+falling back to a whole Block from peer 1
+headers complete: 2011 known
+block 2010 16a1c559…a9e4 2 tx 666 bytes
+following at Height 2010: 1 connected, 0 disconnected
+```
+
+`serve_block` now repeats the announcement every three seconds until the body
+has been asked for, which closes the race without changing what is tested. The
+same three local runs that passed before still pass. **A liar that says its
+piece once is a liar that can be ignored for timing reasons**, which is worth
+remembering for the next mode: the node is under no obligation to ask twice.
+
 ```
 liar: mined 1d7b26780d2f2ed410f06f53f063d9003d717bd53967bfa5a51a8f2da1ce39a2 at Height 250 with a Transaction locked to Height 250 (207 bytes)
 headers to 250

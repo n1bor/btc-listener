@@ -18,17 +18,26 @@ def headers_payload(headers):
     return bytes([len(headers)]) + b''.join(h + b'\0' for h in headers)
 def command_of(frame):
     return frame[4:16].rstrip(b'\0').decode(errors='replace') if len(frame) >= 16 else ''
-def frames(conn):
+def frames(conn, on_idle=None):
     # One frame at a time, however many a read returns: a node sends verack,
     # getaddr and getheaders back to back, and a reader that takes each recv
     # as one frame sees only the first.
+    # on_idle, with a short socket timeout, is called each time the read times
+    # out instead of the timeout reaching the caller -- which is how a liar
+    # repeats something the node was not ready to hear the first time. Without
+    # it the timeout propagates exactly as it always did.
     buf = b''
     while True:
         while len(buf) >= 24:
             length = struct.unpack('<I', buf[16:20])[0]
             if len(buf) < 24 + length: break
             yield buf[:24 + length]; buf = buf[24 + length:]
-        chunk = conn.recv(65536)
+        try:
+            chunk = conn.recv(65536)
+        except socket.timeout:
+            if on_idle is None: raise
+            on_idle()
+            continue
         if not chunk: return
         buf += chunk
 def answer_getheaders(conn, payload, then=b'', on='getheaders'):
@@ -344,10 +353,28 @@ def serve_block(conn, header, body, block_id, cli=None):
     # refuses to. Given bitcoin-cli, any other Block the node asks for is
     # served honestly from Core, so a liar whose Block sits on a tip the node
     # has not fetched yet is not dropped for owing that tip (#401).
+    #
+    # The announcement is REPEATED every three seconds until the body has been
+    # asked for, because announcing once is a race the liar can lose. The
+    # liar's Block sits on Core's tip, and if the node has not placed that
+    # tip's Header yet -- it is still fetching the body below it -- the
+    # announcement names a Header whose parent is unknown, which cannot be
+    # placed; #300 then holds a Peer whose catch-up moved nothing, and nothing
+    # asks this Peer anything again. CI lost that race once on `sequencelock`,
+    # with the node at Height 2009 and the liar's Block on 2010: the node
+    # correctly ignored the orphan, connected Core's Block, and sat at the tip
+    # while the suite waited 120 s for a diagnosis that could never come.
+    served = [False]
+    until = time.time() + 180
+    def again():
+        # The three-second read timeout is also the clock on the whole
+        # exchange, which the single 120-second timeout used to be.
+        if time.time() > until: raise socket.timeout()
+        if not served[0]: conn.sendall(msg('headers', headers_payload([header])))
     conn.sendall(msg('headers', headers_payload([header])))
-    conn.settimeout(120)
+    conn.settimeout(3)
     try:
-        for frame in frames(conn):
+        for frame in frames(conn, on_idle=again):
             cmd = command_of(frame)
             print('liar: got', cmd, file=sys.stderr, flush=True)
             if cmd == 'getheaders':
@@ -358,6 +385,7 @@ def serve_block(conn, header, body, block_id, cli=None):
                 for _ in range(count):
                     kind = struct.unpack('<I', payload[at:at+4])[0]; h = payload[at+4:at+36]; at += 36
                     if kind & 2 and h == block_id:
+                        served[0] = True
                         conn.sendall(msg('block', body)); print('liar: sent the body', file=sys.stderr, flush=True)
                     elif kind & 2 and cli:
                         conn.sendall(msg('block', bytes.fromhex(rpc(cli, 'getblock', h[::-1].hex(), '0')))); print('liar: served Core\'s', h[::-1].hex()[:16], 'honestly', file=sys.stderr, flush=True)
