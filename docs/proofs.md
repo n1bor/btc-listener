@@ -95,21 +95,53 @@ Three numbers in the summary, and a manifest.
   lands on `sorry` is a red run, by design.
 - **`declined`** — claims the exporter refused to state at all, so no theorem,
   no `sorry` and no error stands in for them. They need their own budget
-  precisely because nothing else would notice them. 130 today, in two
-  families:
-  - **74 reach a provider operation** (`ripemd160`, `sha1`, `verifySignature`,
-    `verifySchnorr`). Every claim on `evaluate`, `run`, `walked`, `stepped` and
-    everything downstream of CHECKSIG or HASH160. Opaque on purpose (the curve
-    is a provider because its edge cases are consensus rules), so these stay
-    declined; engine-level invariants over the evaluator need hand-written
-    Lean over the export, not sampled laws.
-  - **56 reach a mutual recursion the exporter cannot bound**:
-    `Domain.Transaction`'s three groups and `Domain.Bech32`'s
-    `drain`/`regroup`. Each is a follow-up; fixing one lowers the number.
+  precisely because nothing else would notice them. **Three in the engine cone
+  and thirteen in the laws leaf**, and since the `6eddd964` pin they are all
+  one cause:
 
-  Every verify case in the cone is also emitted as a Lean example and checked
-  by `native_decide`, which is a second run of the same cases through the
-  translation rather than the VM.
+  - Every remaining decline **reaches a mutual recursion the exporter cannot
+    bound**. In the engine cone that is `Domain.Transaction.decode`'s two laws
+    and `decodeNext.sizeIsWhatItConsumed`; in the leaf it is those three again
+    plus `Domain.Connect.connected`'s three (`valueIsConserved`,
+    `noOutputSpentTwice`, `feesAgreeWithConfirmed`) and
+    `Domain.Disconnect.reversal`'s two. Thirteen entries for eight distinct
+    laws: the Connect and Disconnect five are listed under both their
+    qualified and their bare names, the Transaction three only qualified. The cause is written up in `docs/script-laws.md` under
+    #354: the groups of `inputFrom`/`inputWhole`/`readInputAfter`/
+    `readInputsInto`/`readOneInput` and their Output twins pass `remaining - 1`
+    with no guard showing it smaller. Bounding one group retires several laws
+    at once, and it is the single highest-value follow-up this file names.
+
+  **The provider family is gone, and it was never about the laws.** The two
+  cones at pin `d8bf3e01`, counted off their committed manifests:
+
+  | cone | declined | reaching a provider | reaching a recursion | other |
+  |---|---|---|---|---|
+  | engine | 136 | 74 | 62 | 0 |
+  | laws leaf | 111 | 3 | 98 | 10 |
+
+  Every one of those 77 provider declines — the claims on `evaluate`, `run`,
+  `walked` and `stepped`, which this file used to describe as permanently
+  declined because the curve is a provider on purpose — was a `verify`
+  **example** claim. Not one was a law. jasisz/aver#1485 made the law cone the
+  default, and once the examples stopped being exported the provider opacity
+  stopped costing anything: **no law in either cone needs the curve to be
+  transparent.** The same goes for most of the recursion declines, 59 of the
+  engine's 62 being examples too. That is why the budgets fell from 136 and 111
+  to 3 and 13 with no change whatever to the law classification — 129 universal
+  and 1 bounded in the engine, 127 and 11 in the leaf, the same numbers the
+  gate held before, and the same 130 and 138 laws in the manifests with none
+  lost and none gained.
+
+  **What that default costs, and how to get it back.** `aver proof` without
+  `--examples` no longer emits each verify case as a Lean example checked by
+  `native_decide`, so the second run of the cases through the translation —
+  rather than through the VM — is no longer part of either gate. The cases
+  themselves are checked by `aver verify`, which is their gate and always was;
+  what is lost is the cross-check that the Lean translation agrees with the VM
+  about them. Pass `--examples` to restore it. It is worth one run by hand when
+  the Aver pin moves, which is exactly when a translation could start
+  disagreeing, and it is not worth the 133 declines in every CI run.
 
 ## What green does not mean
 

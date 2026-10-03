@@ -43,8 +43,16 @@ function does not use is a `warning[unused-effect]` naming the correct set in
 its `used:` clause, so `aver check` will tell you what the list should say
 rather than only that it is wrong. Adding a genuinely new effect propagates one
 function at a time up every caller and then through the module boundary, which
-fails separately — loop `aver check` until it is quiet rather than trying to
-predict the fan-out. n1bor/btc-listener#178 narrowed 58 lists this way and
+fails separately. **Since the `6eddd964` pin there is a tool for exactly this
+and it is faster than looping `aver check`**: `aver effects . --module-root .`
+reports every declared list against the minimum the checker computes, and
+`--write` rewrites them all to that minimum through the formatter's own
+layout, in one pass. `--since <rev>` separates the functions whose bodies
+actually changed from the ones that only inherited a callee's effect, which is
+the distinction a fan-out makes you work out by hand. Before it existed the
+only route was to loop `aver check` and read each `warning[unused-effect]`'s
+`used:` clause, which is what #408 did one check at a time.
+n1bor/btc-listener#178 narrowed 58 lists the old way and
 every one of them was a copy-paste of a caller's list.
 
 The deep dives are `../aver/docs/` (`language.md`, `types.md`, `effects.md`,
@@ -65,6 +73,15 @@ is worked around*, and only the second retires with its issue —
 `connect_timeout_secs` in `aver.toml` cites #1118 and #1125, both now closed,
 and stays: it is a dial's deadline, which the dial still needs now that the
 dial is a key in `Wait.poll` rather than a five-second stall.
+
+**And run one `aver proof --examples` by hand on a pin move.** Since
+jasisz/aver#1485 the law cone is the default, so neither proof gate emits the
+`verify` cases as Lean examples checked by `native_decide` any more — the
+cross-check that the Lean translation agrees with the VM about the cases is
+opt-in. `aver verify` is still the cases' own gate and is unaffected. A pin
+move is exactly when a translation could start disagreeing, so it is the one
+time the opt-in earns its keep; `docs/proofs.md` says what it costs and why it
+is not in CI.
 
 **Test against a real node before you commit.** `aver verify` checks this
 program against fixtures its own authors wrote, and a fixture cannot disagree
