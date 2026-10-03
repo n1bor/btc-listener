@@ -23,7 +23,6 @@ module Main
         Time.now, Time.unixMs,
         Wait.poll,
         Work.cancel,
-        yield,
     ]
 
 process peer seated by App.Owner.peers
@@ -62,7 +61,7 @@ verify stop
 
 fn starter() -> Unit
     ? "Open the node once, before any Peer is read."
-    ! [Infra.Wire.started, yield]
+    ! [Infra.Wire.started]
     match Infra.Wire.started()
         Infra.Wire.Started.Running -> Unit
         Infra.Wire.Started.Failed(_) -> Unit
@@ -70,7 +69,7 @@ fn starter() -> Unit
 fn peer(key: Int) -> Unit
     ? "One seated Peer: its Messages, one at a time, acted on in the order"
       "they arrived, for as long as it stays seated."
-    ! [Infra.Wire.handled, Infra.Wire.heard, yield]
+    ! [Infra.Wire.handled, Infra.Wire.heard]
     heard = Infra.Wire.heard(key)
     going = handledIf(key, heard)
     match going
@@ -79,28 +78,28 @@ fn peer(key: Int) -> Unit
 
 fn handledIf(key: Int, heard: Infra.Wire.Heard) -> Bool
     ? "A Message acted on, or a Peer that is gone."
-    ! [Infra.Wire.handled, yield]
+    ! [Infra.Wire.handled]
     match heard
         Infra.Wire.Heard.Message(command, body) -> Infra.Wire.handled(key, command, body)
         Infra.Wire.Heard.Gone -> false
 
 fn ticker() -> Unit
     ? "The loop's own clock, once a second, until the node closes."
-    ! [Infra.Wire.ticked, yield]
+    ! [Infra.Wire.ticked]
     match Infra.Wire.ticked()
         Infra.Wire.Turned.Again -> ticker()
         Infra.Wire.Turned.Over -> Unit
 
 fn acceptor() -> Unit
     ? "Callers on the listener, each taken as it arrives, until the node closes."
-    ! [Infra.Wire.accepted, yield]
+    ! [Infra.Wire.accepted]
     match Infra.Wire.accepted()
         Infra.Wire.Turned.Again -> acceptor()
         Infra.Wire.Turned.Over -> Unit
 
 fn writer() -> Unit
     ? "The outboxes and the Blocks Peers asked for, as their sockets empty."
-    ! [Infra.Wire.drained, yield]
+    ! [Infra.Wire.drained]
     match Infra.Wire.drained()
         Infra.Wire.Turned.Again -> writer()
         Infra.Wire.Turned.Over -> Unit
@@ -109,7 +108,6 @@ fn walk() -> Unit
     ? "Every Catch-up, one after another, for as long as the node is open."
     ! [
         Infra.Catching.aligned, Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.due, Infra.Catching.ended, Infra.Catching.fetched, Infra.Catching.headers, Infra.Catching.settled,
-        yield,
     ]
     due = Infra.Catching.due()
     going = caughtUpIf(due)
@@ -121,7 +119,6 @@ fn caughtUpIf(due: Infra.Catching.Due) -> Bool
     ? "A Catch-up when one is due; false once the node has closed."
     ! [
         Infra.Catching.aligned, Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched, Infra.Catching.headers, Infra.Catching.settled,
-        yield,
     ]
     match due
         Infra.Catching.Due.From(key) -> caughtUp(key)
@@ -133,7 +130,6 @@ fn caughtUp(key: Int) -> Bool
       "asked, a refusal that is a fact about the chain ends the run (#183)."
     ! [
         Infra.Catching.aligned, Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched, Infra.Catching.headers, Infra.Catching.settled,
-        yield,
     ]
     ending = catchingUp(key)
     match Infra.Catching.settled(key, ending)
@@ -146,7 +142,6 @@ fn catchingUp(key: Int) -> Infra.Catching.Ending
       "taken back to the fork, then the bodies and the Set forward."
     ! [
         Infra.Catching.aligned, Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched, Infra.Catching.headers,
-        yield,
     ]
     match headersFrom(key)
         Infra.Catching.Batch.Done -> aligning(key)
@@ -156,7 +151,7 @@ fn catchingUp(key: Int) -> Infra.Catching.Ending
 
 fn headersFrom(key: Int) -> Infra.Catching.Batch
     ? "Batches of Headers until one stops moving the tip."
-    ! [Infra.Catching.headers, yield]
+    ! [Infra.Catching.headers]
     batch = Infra.Catching.headers(key)
     match batch
         Infra.Catching.Batch.More -> headersFrom(key)
@@ -166,7 +161,6 @@ fn aligning(key: Int) -> Infra.Catching.Ending
     ? "The Set back to the fork, then the bodies."
     ! [
         Infra.Catching.aligned, Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched,
-        yield,
     ]
     match Infra.Catching.aligned(key)
         Infra.Catching.Aligned.Ready -> fetching(key)
@@ -176,10 +170,7 @@ fn aligning(key: Int) -> Infra.Catching.Ending
 fn fetching(key: Int) -> Infra.Catching.Ending
     ? "A slice of the download, then a chunk of the Set over what landed,"
       "until the bodies are all here (#185); then the Set to the tip."
-    ! [
-        Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched,
-        yield,
-    ]
+    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, Infra.Catching.fetched]
     fetch = Infra.Catching.fetched(key)
     onward = chunkIfMore(fetch)
     match onward
@@ -191,7 +182,7 @@ fn chunkIfMore(fetch: Infra.Catching.Fetch) -> Bool
       "and the download goes on unless the node closed meanwhile. A chunk"
       "the chain refuses here is not the end: the Set to the tip meets the"
       "same Block again and says so."
-    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, yield]
+    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended]
     match fetch
         Infra.Catching.Fetch.More -> goesOn(chunkOf(false))
         _ -> false
@@ -210,7 +201,7 @@ verify goesOn
 
 fn afterFetch(fetch: Infra.Catching.Fetch) -> Infra.Catching.Ending
     ? "The bodies are here, or the reason they are not."
-    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, yield]
+    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended]
     match fetch
         Infra.Catching.Fetch.Done -> settingUp()
         Infra.Catching.Fetch.More -> Infra.Catching.Ending.Over
@@ -220,7 +211,7 @@ fn afterFetch(fetch: Infra.Catching.Fetch) -> Infra.Catching.Ending
 
 fn settingUp() -> Infra.Catching.Ending
     ? "The Set forward to the tip, a chunk at a time."
-    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, yield]
+    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended]
     chunk = chunkOf(true)
     match chunk
         Infra.Catching.Chunk.AtTip -> Infra.Catching.Ending.Moved
@@ -231,7 +222,7 @@ fn settingUp() -> Infra.Catching.Ending
 
 fn chunkOf(final: Bool) -> Infra.Catching.Chunk
     ? "One chunk of the Set, a Block at a time."
-    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended, yield]
+    ! [Infra.Catching.begun, Infra.Catching.connected, Infra.Catching.ended]
     match Infra.Catching.begun(final)
         Infra.Catching.Begun.At(height) -> blocksFrom(height)
         Infra.Catching.Begun.Refused(why) -> Infra.Catching.Chunk.Refused(why)
@@ -240,7 +231,7 @@ fn chunkOf(final: Bool) -> Infra.Catching.Chunk
 
 fn blocksFrom(height: Int) -> Infra.Catching.Chunk
     ? "This Block, then the next, until the chunk has none left."
-    ! [Infra.Catching.connected, Infra.Catching.ended, yield]
+    ! [Infra.Catching.connected, Infra.Catching.ended]
     match Infra.Catching.connected(height)
         Infra.Catching.Step.Next -> blocksFrom(height + 1)
         Infra.Catching.Step.Ended -> Infra.Catching.ended()
