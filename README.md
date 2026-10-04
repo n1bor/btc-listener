@@ -1771,7 +1771,8 @@ main.av             argv entrypoint, deliberately thin
 
 app/                cli.av argument handling, usage.av the help text,
                     show.av / lookup.av / maintain.av one per group of
-                    commands, node.av the commands that never stop
+                    commands, node.av the commands that never stop,
+                    owner.av the one module the processes dispatch to
 
 domain/  the wire
   address.av network.av message.av version.av inventory.av dns.av
@@ -1781,7 +1782,9 @@ domain/  the wire
   addressbook.av    Candidates: Peer Addresses heard about, not yet Peers
   compactblock.av   BIP152, rebuilt from the Mempool
   siphash.av        the short Ids' hash
-  compactsize.av hash.av text.av json.av
+  compactsize.av hash.av text.av json.av stamp.av
+  handshake.av      what a version must say before a Peer is seated
+  outbox.av         what is queued for a Peer, and what it is allowed to cost
 
 domain/  addresses
   script.av         recognising output scripts, naming who they pay
@@ -1791,13 +1794,17 @@ domain/  the chain
   block.av          Block Headers: reading, naming, asking for more
   headertree.av     every Header seen, and which Branch has the most work
   chainwork.av blockwork.av reorg.av rewind.av
-  headerbytes.av treestore.av index.av indexkeys.av segment.av
-  checks.av rules.av locktime.av spend.av txcheck.av
+  headerbytes.av treestore.av index.av indexkeys.av segment.av bytefield.av
+  target.av         what a Header must prove before it is placed
+  body.av           whether a body is the Block it was asked for, and which fault
+  catchup.av        what an announcement is worth before a phase is run
+  checks.av rules.av locktime.av spend.av txcheck.av finality.av blocklimits.av
 
 domain/  the UTXO Set
   connect.av        a Block into the Set: spends out, Outputs in, fees
   disconnect.av     a Block back out of it, from its Undo Data
   utxostore.av subsidy.av assumevalid.av
+  blockworkjob.av   a Block's decode and its pure connect, done off the loop
 
 domain/  the Mempool
   mempool.av        what is held, what conflicts, what leaves when
@@ -1820,6 +1827,9 @@ domain/  the Screen
   snapshot.av       one picture of the node, folded up each tick
   screen.av         every character and key of the Screen, no terminal
   screenlines.av
+  page.av           the http status page, the same picture as HTML
+  watchdog.av       the budgets, and the four lines an overrun writes
+  build.av          which commit this binary was built from
 
 corpus/  Core's own vectors, generated
   scriptcases1-5 witnesscases1-3 txcases1-4 sighashcases1-2 assetcases1-9
@@ -1835,6 +1845,10 @@ infra/  the network
   follow.av         the node that stays on the tip
   mempool.av        admission: the questions, in cost order
   resolver.av       the DNS seeds
+  wire.av catching.av  what the processes ask the owner for
+  blockjobs.av      the Work contract a Block's arithmetic goes through
+  board.av          the http Readers, and what each is allowed
+  readiness.av      what is worth waiting on next
 
 infra/  the disk
   store.av          keyed store over two backends, one opaque API
