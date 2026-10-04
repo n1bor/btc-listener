@@ -952,11 +952,12 @@ anyway.
 Two things it does not do, both recorded as issues rather than left to be
 assumed:
 
-- **Selection is first-untried, so it is a convenience and not a defence.**
-  Core buckets addresses by where they were heard from and picks randomly
-  within a bucket, precisely so a Peer answering `getaddr` with a thousand
-  addresses it controls cannot choose who you connect to next. That is
-  [#118](https://github.com/n1bor/btc-listener/issues/118).
+- ~~**Selection is first-untried, so it is a convenience and not a defence.**~~
+  **Fixed.** Selection is uniform by source and then uniform within it, which
+  is the eclipse defence Core's buckets are for: a Peer answering `getaddr`
+  with a thousand addresses it controls gets one source's worth of weight, not
+  a thousand addresses' worth
+  ([#118](https://github.com/n1bor/btc-listener/issues/118)).
 - ~~**A Candidate that does not answer stalls the loop for five seconds.**~~
   **Fixed.** A dial is now one more key in the same `Wait.poll` as the Peers
   ([jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125),
@@ -1174,7 +1175,7 @@ nobody left to dial asks the DNS seeds again rather than ending the run
 ### When something takes too long: the watchdog lines
 
 `debug.log` also says when the node has overrun itself (#268), because the
-one fault that hid for hours (#266) hid as a *missing* line. Three lines,
+one fault that hid for hours (#266) hid as a *missing* line. Four lines,
 each written once, under the kind `watchdog`:
 
 - `slow chunk: connecting a..b has run 61s against a budget of 50s, at
@@ -1185,6 +1186,11 @@ each written once, under the kind `watchdog`:
   Block over thirty seconds, said after it, because a Block is one call.
 - `slow stop: 480s from the stop being asked to the loop leaving` — a `q`
   or a SIGINT that took more than ten seconds to land, said when it does.
+- `slow turn: 45s between two polls, handling drained` — one turn of the
+  `follow` loop that worked more than thirty seconds between two polls. The
+  last word names which of the owner's fourteen answers the turn was, which
+  before #412 it borrowed from the last Message dispatched and so usually got
+  wrong.
 
 Reporting only: nothing is killed or dropped on an overrun. A healthy run
 writes none of them. The budgets are [Domain.Watchdog](domain/watchdog.av);
@@ -1229,8 +1235,11 @@ touches a terminal.
 A Screen run leaves nothing behind, so `log` writes what it would have said
 where it survives: `<dir>/metrics.log` (`log:PATH` puts it elsewhere) gets one
 line a minute and one at every phase boundary — timestamp, phase, Height,
-target, Blocks, bytes, milliseconds inside the Peers `Wait.poll` and outside it, Peers,
-Candidates — in a fixed order that `awk` reads without a parser. The same word
+target, Blocks, bytes, milliseconds inside `Wait.poll` and outside it, Peers,
+Candidates, and the Outputs the Set added and removed — twelve fields in a
+fixed order that `awk` reads without a parser. A line covers the **window**
+since the line before it, so the two millisecond figures sum to that interval
+and neither is the cost of one turn. The same word
 turns on `<dir>/debug.log`, one line per *decision* — a phase started, a Peer
 seated or dropped and why, a fault and what it was charged to — so a run that
 ends under the Screen can be read afterwards rather than re-run in plain mode
@@ -1318,7 +1327,8 @@ does not need a toolchain. It needs one executable and a peer.
 ### The binary
 
 Every push to `main` that gets past `format`, `check`, both `verify` jobs, the
-provider tests, the wasm-gc host and the build publishes what it just proved to
+provider tests, the wasm-gc host, the isolated Bitcoin Core acceptance suite
+and the build publishes what it just proved to
 the
 [`main-build`](https://github.com/n1bor/btc-listener/releases/tag/main-build)
 release, replacing what was there. The repository is public, so this needs no
@@ -1369,10 +1379,11 @@ a chain. The binary above is what a server wants.
 `main.wasm`, and most people want only one of them; without it, `sha256sum`
 fails on the file you deliberately did not fetch.
 
-**Check the hash rather than skipping it.** Nothing inside the binary says
-which commit produced it; `SHA256SUMS` and the release title are the only
-provenance there is, and three days into a download is exactly when someone
-asks which build wrote the directory.
+**Check the hash rather than skipping it.** The binary does say which commit
+produced it since #383 — the Screen, the `http` status page and the user agent
+all carry it, and a local build says `dev` — which answers the question three
+days into a download about which build wrote the directory. `SHA256SUMS` is
+still what proves the file you fetched is the one CI published.
 
 Picking up a later build is the same two `curl`s. There is no upgrade path for
 a chain directory and deliberately is not one — a format change means
@@ -1674,7 +1685,7 @@ aver format  . --check                  # formatting
 aver compile main.av --module-root . -o ../btc-listener-build --check   # and cargo check what it emitted
 ```
 
-0 check errors, 0 format issues, about **5,500 hand-written verify cases** on
+0 check errors, 0 format issues, **13,416 hand-written verify cases** on
 the program graph and **6,050** more in the Core corpus. Everything except the
 socket is pure and covered.
 
@@ -1713,7 +1724,7 @@ the same hand, agree with each other whether or not they agree with Bitcoin.
 
 ## Layout
 
-141 Aver modules — 79 in `domain/`, 26 in `infra/`, 6 in `app/`, 29 generated
+159 Aver modules — 91 in `domain/`, 31 in `infra/`, 7 in `app/`, 29 generated
 in `corpus/`, and `main.av`. Grouped by what they are for rather than listed;
 [docs/architecture.md](docs/architecture.md) walks the same ground with
 diagrams.
@@ -1880,11 +1891,14 @@ witness evaluator, an output index — has all arrived: the first four as a
 `domain/witness.av` and `domain/taproot.av`, the index as `outputs` and the
 Set. What is deliberately not here is listed where it is deferred: BIP125
 replacement, the orphan pool and package relay
-([#28](https://github.com/n1bor/btc-listener/issues/28)), Address Book
-bucketing against eclipse ([#118](https://github.com/n1bor/btc-listener/issues/118)),
-IPv6, and the signet challenge. The seam that keeps the list honest is
-`domain/ecdsa.av`, which has no `Valid` constructor for anything it cannot
-decide, so the compiler names every caller when a capability arrives.
+([#28](https://github.com/n1bor/btc-listener/issues/28)),
+IPv6, and the signet challenge. (Address Book selection against eclipse,
+[#118](https://github.com/n1bor/btc-listener/issues/118), was on this list and
+is done.) The seam that kept the list honest was
+`domain/ecdsa.av`, which had no `Valid` constructor for anything it could not
+decide, so the compiler named every caller when the curve arrived. The type is
+`Ruling` now and it has `Valid`; the seam that is still unspent is
+`Domain.AssumeValid.runsScriptsAt`, which has no caller.
 
 ## Licence
 
@@ -2026,7 +2040,10 @@ Aver is a moving target and this project is one of its driving projects, so
 fixes we ask for land often. The toolchain CI tests with is whatever commit
 [`.aver-version`](.aver-version) names, and a developer machine's `aver` is
 whatever `../aver` was at when it was last `cargo install`ed — `aver
---version` cannot tell you which. Moving forward is a routine, and the
+--version` narrows that but does not pin it. The pin is a tagged release
+(`b82939cb` is 0.30.0), so a local `aver 0.30.0` at least rules out a build of
+main, which reports `0.30.0-dev`; it cannot tell two commits of one release
+apart. Moving forward is a routine, and the
 [canary workflow](.github/workflows/canary.yml) runs the cheap gates against
 upstream's tip nightly so the routine is rarely a surprise:
 
