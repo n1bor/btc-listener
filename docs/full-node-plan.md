@@ -49,7 +49,8 @@ entire chain from this one on 25 August 2026, validated it, and left initial
 block download — which is the sentence D1 was written to earn.
 
 Stages 3 and 4 are independent of each other; both need Stage 2. Stage 5 is
-where the readiness poll becomes blocking. Stage 8 is the finish line and is
+where one socket's wait becomes a wait over every parked item, which is
+`Wait.poll` under Aver's generated loop. Stage 8 is the finish line and is
 last on purpose.
 
 ## The parallel track
@@ -76,11 +77,11 @@ continues that on purpose: each stage names what it needs before it needs it.
 | ask | upstream | gates |
 |---|---|---|
 | a concurrency direction | [jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007) — **answered**: independent products plus poll-shaped effects; see [ADR 0008](adr/0008-independence-and-a-single-writer-loop.md) | nothing any more |
-| ~~a configurable TCP read deadline~~ | **original delivery**: [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads lost their mid-frame deadline | **current branch**: `Wait.poll` plus incremental `Tcp.readNow` buffers and owner deadlines, across single- and multi-Peer commands |
-| a readiness poll over connections | **original delivery**: `Tcp.poll` over caller-keyed connections | **current branch**: `Wait.poll` watches read/write interests; the Work owner also waits on its typed job |
+| ~~a configurable TCP read deadline~~ | **original delivery**: [`Tcp.poll`](https://github.com/jasisz/aver/issues/782) and `Tcp.readSome`; session reads lost their mid-frame deadline | **shipped**: `Wait.poll` plus incremental `Tcp.readNow` buffers and owner deadlines, across single- and multi-Peer commands |
+| a readiness poll over connections | **original delivery**: `Tcp.poll` over caller-keyed connections | **shipped**: `Wait.poll` watches read/write interests; the Work owner also waits on its typed job |
 | byte-oriented `Disk`, with a positional read | [jasisz/aver#1009](https://github.com/jasisz/aver/issues/1009) | binary Segments |
 | ~~a bounded dial~~ | **delivered**: `connect_timeout_secs` is deployment policy (aver.toml), and [jasisz/aver#1122](https://github.com/jasisz/aver/pull/1122) made the deadline observable — [#1118](https://github.com/jasisz/aver/issues/1118) closed | **wired**: the 5 s deadline still ends a dead dial, but since [#1125](https://github.com/jasisz/aver/issues/1125) it ends only that dial |
-| ~~a connect that reports through the poll~~ | **delivered and closed** as [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125): `Tcp.beginConnect`, `Tcp.dialled`, `Tcp.closeDial`, and `Tcp.Socket.Dialing` as one more key in `Tcp.poll` | **current branch**: `Infra.Peers.dialling`/`advanced` retain the dial and then a pending greeting across turns; `joined` remains the startup facade |
+| ~~a connect that reports through the poll~~ | **delivered and closed** as [jasisz/aver#1125](https://github.com/jasisz/aver/issues/1125): `Tcp.beginConnect`, `Tcp.dialled`, `Tcp.closeDial`, and `Tcp.Socket.Dialing` as one more key in `Tcp.poll` | **shipped**: `Infra.Peers.dialling`/`advanced` retain the dial and then a pending greeting across turns; `joined` remains the startup facade |
 | ~~`Tcp.listen` / `Tcp.accept`~~ | **delivered and closed**: filed 24 August 2026 as [jasisz/aver#1131](https://github.com/jasisz/aver/issues/1131), answered the next day by [#1138](https://github.com/jasisz/aver/pull/1138) with exactly what was asked — a non-blocking `accept` the existing poll can see, an accepted socket that is an ordinary `Tcp.Connection`, and `Tcp.peerAddress` | **wired**: Stage 8 shipped on it |
 
 The [Work/Wait migration acceptance](work-wait-migration.md) records current
@@ -101,4 +102,4 @@ Nothing in this plan relaxes what the auditor half of the project established:
   that cheaper, not optional
 - `domain/` stays pure and `infra/` stays thin, which is what will let a
   Mempool's admission logic or a Header tree's work comparison carry verify
-  blocks the way the Script engine's 3,889 do
+  blocks the way the Script engine's 809 do
