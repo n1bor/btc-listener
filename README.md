@@ -1076,9 +1076,19 @@ eighty bytes proved only that a Peer answered under the right Block Id;
 [Domain.Body](domain/body.av) now proves the rest is that Block before a byte
 of it reaches a Segment — the Transactions decode, the first and only the first
 is a coinbase, each passes `TxCheck`, none repeats, and they build the Merkle
-Root the Header commits to without a duplicated pair (CVE-2012-2459). A body
-that fails is the fault of the Peer that sent it: that Peer is dropped and the
-Height goes back on the list for whoever is left. A compact Block rebuilt from
+Root the Header commits to without a duplicated pair (CVE-2012-2459), and
+since #399 that the witnesses hash to the coinbase's commitment.
+
+**Which kind of fault the gate found decides what happens next** (#408). A
+body that is *not* the Block — it does not decode, its Transactions do not
+build the Root, its witnesses do not match the commitment — costs the Peer its
+place, and the Height is asked of someone else, because the Block may be fine.
+A body that *is* the Block and still breaks the weight or signature-operation
+ceiling (#400) is a Block no Peer could serve differently: its Header is
+marked invalid, the tip goes back to its parent, and it is asked of nobody.
+Those ceilings are checked only after the Root and the commitment have bound
+those bytes to that Header, which is what makes the distinction sound. Getting
+it the wrong way round cost an honest Peer per bad Block. A compact Block rebuilt from
 the Mempool goes through the same check, and is kept only if it is the Block
 being rebuilt and its Header is in the tree. A body read back from disk is
 hashed against the Block Id the Index filed it under before its Transactions
@@ -1086,6 +1096,15 @@ are connected, so a torn Segment is a report naming the Height rather than the
 wrong Block under the right Id. Until this, any Peer handed a `getdata` could
 answer with the honest Header and a body of its choosing, and `b:` being
 append-only meant the honest body was never asked for again.
+
+A Block that proved its work and then **fails consensus when it is connected**
+is neither an honest Peer's mistake nor a body the walk should keep asking for
+([#376](https://github.com/n1bor/btc-listener/issues/376)). It is marked
+invalid in the tree, the tip goes back to its parent, no Header is ever placed
+on it again, and the Peer whose Catch-up fetched it is dropped — Core's
+`BLOCK_FAILED_VALID` and disconnect. The refusal travels as one sentence that
+the walk writes and reads back, so a stop that is the chain's own can be told
+from a stop that is a Peer's fault.
 
 A Header has to prove its work before it is placed
 ([#281](https://github.com/n1bor/btc-listener/issues/281)). Its Block Id must
