@@ -198,8 +198,9 @@ Unchanged: roughly 2,150× for writing the obvious helper. The Store's own write
 say the same thing, compiled, 40,000 entries: **52 ms** through one `putAll`
 against **24,404 ms** one `put` at a time, because each `put` hands back a Store
 holding a copy of the whole `Map`. Every batch in `infra/download.av`,
-`infra/txindex.av` and `infra/prune.av` earns its keep, and `absorbAll`,
-`forgetAll` and `replayApplied` still have to keep `Map.set` out of a helper.
+`infra/txindex.av` and `infra/prune.av` earns its keep, and `absorbAll` and
+`forgetAll` still have to keep `Map.set` out of a helper. (`replayApplied`
+stood here too until the log backend went with #44.)
 
 ### Re-measured 26 August 2026, and half of it has gone
 
@@ -238,7 +239,7 @@ other.** For two days it had both: `Infra.Store.put` hands back a `Store`, a
 `Store` is a record holding a `Map`, and so writing one key at a time paid the
 copy every time. That is gone.
 
-What is not gone is [ADR 0006](0006-a-leveldb-under-the-index.md)'s argument:
+What is not gone is [ADR 0009](0009-rocksdb-under-the-index.md)'s argument:
 one `Kv.putAll` is one RocksDB `WriteBatch`, and a batch is what makes a set
 of changes land together or not at all. A Block's Locations, its Index entries
 and its Undo record are one such set — a crash between them leaves an Index
@@ -273,7 +274,8 @@ Equal at every size, and on the real 1,454,101-entry Index equal on time and
 52 MB cheaper, the intermediate list being gone. `parseAll`, `parseNext`,
 `applyChanges` and `applyNext` are replaced by `replayed`, `replayNext` and
 `replayApplied`, which read the log in one walk. This is the first workaround in
-this project that a fix upstream has actually retired.
+this project that a fix upstream has actually retired. (All six names went
+with the log backend in #44; `Infra.Store.open` opens a RocksDB now.)
 
 ### The residue, filed as #963
 
@@ -315,12 +317,13 @@ now uses `Wait.poll` and incremental `readNow` buffers throughout the applicatio
 function being copied, closed too. **It retires no code here**, which is worth
 being plain about:
 
-- `absorbAll`, `forgetAll` and `replayApplied` are already written the natural
-  way — a tail-recursive walk with `Map.set` inline in the recursive call. The
+- `absorbAll` and `forgetAll` are already written the natural
+  way — a tail-recursive walk with `Map.set` inline in the recursive call.
+  (`replayApplied` was the third until #44 took the log.) The
   workaround #890 forced was a constraint on *how* to write them, not an extra
   layer to take out. There is nothing to delete.
 - `putAll` and `deleteAll` keep their batching, and [ADR
-  0006](0006-a-leveldb-under-the-index.md) already gives the reason that
+  0009](0009-rocksdb-under-the-index.md) already gives the reason that
   outlives #890: one `Kv.putAll` is one RocksDB `WriteBatch`, which is where
   the all-or-nothing guarantee comes from. A batched API that exists for
   atomicity does not stop being wanted because the copy it also avoided is

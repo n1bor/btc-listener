@@ -29,7 +29,9 @@ spent their time, against Segments that `reindex` walks in 73 s.
 ## Decided
 
 **The Index moves to RocksDB**, through the `rocksdb` crate that binds the C++
-engine. The `Infra.Kv` contract does not change — the same six operations, the
+engine. The `Infra.Kv` contract does not change — the same six operations it
+then had (eight now: `applyAll` came with the one-batch connect and disconnect
+of #247 and #289, `prefixed` with the Set and Index walks), the
 same Oracle dimensions — and `providers/kv/src/lib.rs` is the whole change.
 
 **Every batch is durable.** `putAll` and `deleteAll` write with `sync = true`

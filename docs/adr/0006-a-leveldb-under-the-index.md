@@ -85,15 +85,18 @@ on 20 August 2026 and the numbers were re-taken on 26 August: **8 ms against
 a helper returning a bare `Map` and not one returning a *record* holding a
 `Map`, which is exactly what `Infra.Store.put` does. The reason has not
 expired. See [ADR 0003](0003-compile-rather-than-interpret.md). On the database arm the
-same shape earns its keep differently — one `Kv.putAll` is one LevelDB
-`WriteBatch`, which is where the all-or-nothing guarantee comes from — so there
+same shape earns its keep differently — one `Kv.putAll` is one `WriteBatch`,
+LevelDB's then and RocksDB's now (ADR
+[0009](0009-rocksdb-under-the-index.md)), which is where the all-or-nothing
+guarantee comes from — so there
 is no version of this API that stops being batched.
 
 ## Consequences
 
 Every module on the read path now declares `Infra.Kv.get` or one of its
 siblings. That ripple was mechanical and the checker named every site, but it is
-permanent: a Store read is an effect now, and ten modules say so. `size` became
+permanent: a Store read is an effect now, and ten modules said so when this
+was written — twenty-two do today. `size` became
 a `Result` for the same reason.
 
 Two Aver defects came out of it and both were fixed within a day of being
