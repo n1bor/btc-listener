@@ -89,11 +89,9 @@ the abandoned Postgres design (`../test/ISSUE-postgres-design.md`: a
 | Java / Scala | Generics standard; Scala typeclasses would have deduplicated the encoders. |
 | Python | Duck typing makes it a non-issue. |
 
-### 4. Immutable records, no update syntax, state threaded through
+### 4. Immutable records, state threaded through
 
-**Here.** `Pool` (`infra/peers.av:36-51`) has 15 fields and is threaded
-through about 120 functions; `Standing` is rebuilt spelling all seven fields
-to change one (`domain/inbox.av:235,269,362,373`); 124 functions have six or
+**Here.** `Pool` has 15 fields and is threaded through about 120 functions; 124 functions have six or
 more parameters and one (`infra/metrics.av:83`) has 14. In return: no
 aliasing bugs, every state transition is a pure function with a verify
 block, and the single-writer loop (ADR 0008) was easy to keep honest.
@@ -103,7 +101,7 @@ block, and the single-writer loop (ADR 0008) was easy to keep honest.
 | Go | Mutable structs and pointers: trivial to update; the reorganisation and UTXO code would need care to avoid shared-state bugs. |
 | C++ | As Go plus lifetime hazards; this is the kind of code that gets a use-after-free. |
 | Java | Records (16+) with builder-style copies; mutability is the default culture. |
-| Scala | `case class` with `.copy(field = x)` is exactly what Aver lacks — immutability with none of the seven-field ceremony. The biggest single ergonomic gap against Scala. |
+| Scala | `case class` with `.copy(field = x)` was exactly what Aver lacked, and was called the biggest single ergonomic gap here. **Aver has it**: `Type.update(v, field = x)`, used about 150 times in this repository. What is left is state threading and wide parameter lists, which is a smaller complaint. |
 | Python | `dataclasses.replace`; mutation is trivial and unchecked. |
 
 ### 5. Exact effect lists on every function and every module
@@ -158,7 +156,7 @@ less likely to have been done.
 **Here.** Chain Work is written as `2^256 / (target + 1)` literally
 (`domain/chainwork.av`) and pinned against Core's `0x100010001` — cleaner
 than Core's own `~target / (target + 1) + 1`. Cost: no bitwise operators at
-all until aver 0.29 — `domain/bits.av` simulated xor via div/mod at 7.5 µs a
+all until aver 0.29 — the since-deleted `domain/bits.av` simulated xor via div/mod at 7.5 µs a
 call (about 4 ms per Bech32 address), and SHA-256 and RIPEMD-160 could not be
 written in Aver, becoming an upstream PR and a provider respectively.
 `Int.div` returns `Result`, so 48 call sites carry `withDefault` with a
@@ -235,16 +233,30 @@ counts its cases.
 | Java / Scala | JIT; no hidden second-stage failures; GC pauses are the only cliff. Scala's compile times are the pain. |
 | Python | No compile step; predictable slowness — the 1.45 M-entry Index open and the twelve-input sighash cases would be painful but not surprising. |
 
-### 11. Concurrency: independent products `(a, b)?!`, `Tcp.poll`, a single-writer loop
+### 11. Concurrency: processes on a generated loop, typed Work jobs, a single writer
 
-**Here.** No threads, async or channels. Several Peers on one loop over
-`Tcp.poll`; `awaitFrom` keeps one conversation straight-line while the other
-Peers are pumped. `?!` gives a thread per branch when compiled, runs
-sequentially under verify, and reverse-order rerun is a falsifier (ADR
-0008). The design is clean and verifiable, but it existed only because the
-author asked for `poll`, `readSome`, `beginConnect`/`dialled` and
-`listen`/`accept` in turn (#1013, #1125, #1131) — each a blocked stage until
-upstream shipped it, usually within a day.
+**Here, as of October 2026.** No user-written threads, async or channels, and
+no hand-written poll loop either. `follow` is six **processes** seated by
+Aver's generated loop — one per seated Peer plus the Catch-up walk, the clock,
+the listener, the outboxes and opening the node — each written in direct
+style, cut at every request into state, request and answer functions by the
+compiler, and all answered by one module (`app/owner.av`) over one state
+record. The waiting is one `Wait.poll` a turn over every parked socket and job.
+Block decode and the pure UTXO connect are typed **Work jobs** that run on
+`aver-rt` threads behind a declared capability, bounded by `[work] max-jobs`,
+and they carry data rather than a Store — which is how the owner stays the
+only writer (ADR 0008). A process is a process because of what it asks for,
+not because it is marked: the `yield` marker that 0.30 replaced is gone.
+
+**What this section used to say**, and it is worth keeping because the trade
+is the point: several Peers on one loop over `Tcp.poll`, with `awaitFrom`
+keeping one conversation straight-line, and `?!` independent products giving a
+thread per branch when compiled. That design was clean and verifiable and it
+existed only because the author asked for `poll`, `readSome`,
+`beginConnect`/`dialled` and `listen`/`accept` in turn (#1013, #1125,
+#1131) — each a blocked stage until upstream shipped it, usually within a day.
+The generated loop and the Work layer replaced it wholesale, which is a
+larger upstream dependency than any single operation was.
 
 | Language | Compared with Aver |
 |---|---|
@@ -279,7 +291,7 @@ builtin was silently resolved to the builtin (`Connection` → `Tcp.Connection`)
 `used:` clause, the coverage lints, `context` and `decision` blocks are
 genuinely useful to a reviewer. Against: `aver --version` does not change
 between commits (two bugs re-reported against a stale binary, one withdrawn —
-`29f87bf`), `compile` exits 0 on unbuildable output, the formatter rejected
+`29f87bf`), `compile` exited 0 on unbuildable output, until `--check`, the formatter rejected
 `Tuple<A, B>` while recommending it (#891), and the step budget hid corpus
 rows as "case aborted".
 
