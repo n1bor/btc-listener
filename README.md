@@ -136,8 +136,8 @@ out part way through a frame leaves the stream silently desynchronised — but
 the application now waits with `Wait.poll` and reads available bytes with
 `Tcp.readNow`, retaining incomplete frames in per-Peer buffers. Bitcoin Core pings
 an otherwise-quiet connection every two minutes, so a Peer that has said
-nothing for two and a half is gone, and the session ends with `Peer said
-nothing for 150 seconds` instead of blocking while looking like it is
+nothing for two and a half is gone, and the session ends with `no Peer said
+anything for 150 seconds` instead of blocking while looking like it is
 working. A read after readiness can still find nothing; it returns to the
 loop without losing the buffered prefix. The single-Peer listening command is
 a pool of one on the same machinery `follow` runs eight Peers on. A bound
@@ -535,7 +535,7 @@ under:
 
 | corpus | cases | agree | disagree | undecided |
 |---|---|---|---|---|
-| `script_tests.json` Script pairs | 1120 | 1050 | 0 | 70 |
+| `script_tests.json` Script pairs | 1120 | 1052 | 0 | 68 |
 | `script_tests.json` Witness rows | 108 | 108 | 0 | 0 |
 | `tx_valid` + `tx_invalid` | 214 | 214 | 0 | 0 |
 | `sighash.json` | 500 | 500 | 0 | 0 |
@@ -547,7 +547,7 @@ under:
 | SipHash-2-4 reference vectors | 64 | 64 | 0 | 0 |
 | one compact Block, captured from Core | 31 | 31 | 0 | 0 |
 
-**Nothing disagrees, in either direction.** The seventy undecided are Script
+**Nothing disagrees, in either direction.** The sixty-eight undecided are Script
 pairs whose answer needs a Transaction the row does not carry, which is the
 honest answer rather than a disagreement — and the direction that would matter,
 refusing what Core accepts, is nought and has always been nought.
@@ -557,9 +557,9 @@ Transaction — used to be answered by the compiled engine alone, because
 `aver verify`'s VM stops a case at a million steps and raising that budget
 needed a flag it did not have. It has one now:
 [jasisz/aver#1071](https://github.com/jasisz/aver/issues/1071) closed with
-`[[verify.costly]]`, `aver.toml` carries an entry for `corpus/scriptcases*.av`
-and one for `corpus/txcases*.av`, and both cases are checked on every run like
-everything else. The counts in the table above are what says so: 1120 for
+`[[verify.costly]]`, `aver.toml` carries three entries —
+`corpus/scriptcases*.av`, `corpus/txcases*.av` and `corpus/assetcases*.av` —
+and all of those cases are checked on every run like everything else. The counts in the table above are what says so: 1120 for
 `script_tests.json` and 214 for `tx_valid`/`tx_invalid`, each generated
 module's `intent` carrying the count it was generated with. A corpus that
 cannot say how many cases it holds is one that can lose some without saying
@@ -682,14 +682,20 @@ It takes a Height rather than a range, because a UTXO Set is the state after
 connecting every Block up to one Height; there is nothing a start Height could
 mean. It resumes from whatever it last recorded.
 
-Three rules are checked as each Block connects, and none of them is about
-signatures:
+Three rules about value are checked as each Block connects, and none of them
+is about signatures:
 
 - every Input finds an unspent Output it is allowed to spend — including the
   hundred-Block wait on anything a coinbase minted
 - no Transaction pays out more than it takes in
 - the coinbase claims no more than the subsidy plus the fees the rest of the
   Block left behind
+
+Five more are checked beside them, by Height: BIP30's refusal of a Block that
+re-creates an Output the Set already holds (#354), BIP34's coinbase Height
+(#399), the Block weight and signature-operation ceilings (#400), and
+`IsFinalTx` with BIP113 and BIP68 (#401). Provably unspendable Outputs are
+kept out of the Set rather than stored and never spent.
 
 A Block that breaks one of them stops the walk with the reason. So does a
 Height whose body is not held: stepping over it would connect the next Block
@@ -753,15 +759,23 @@ range, at whatever pace the engine and the disk allow.
 **It is not a switch on the connect path.** Nothing the node does when it
 connects a Block runs a Script, at any Height
 ([#303](https://github.com/n1bor/btc-listener/issues/303)) — `Domain.Connect`
-has no Script dependency. So setting this Height does not make the node skip
-work it would otherwise do; it records which range you are treating as already
-audited. What the Set phase *does* check on every Block, whatever this is set
-to, is input existence, no intra-Block double-spend, coinbase maturity, value
-out against value in, and the coinbase claim against subsidy plus fees — with
-the Merkle Root, coinbase first-and-only, no repeated txid and `TxCheck` at the
-body gate before that. Signatures are `audit`'s work, and CONTEXT.md lists
-under **Deferred consensus rules** the six by-Height rules that are deferred
-with them.
+has no path to the Script engine. So setting this Height does not make the
+node skip work it would otherwise do; it records which range you are treating
+as already audited.
+
+What the Set phase *does* check on every Block, whatever this is set to, is
+input existence, no intra-Block double-spend, coinbase maturity, value out
+against value in, the coinbase claim against subsidy plus fees, BIP30
+duplicate Outputs, BIP34's coinbase Height, the Block weight and
+signature-operation ceilings, and `IsFinalTx` with BIP113 and BIP68 — keeping
+provably unspendable Outputs out of the Set as it goes. Before any of that,
+the body gate requires the Merkle Root, coinbase first-and-only, no repeated
+txid, `TxCheck` and the witness commitment. **Six by-Height rules used to be
+deferred alongside the Scripts and all six are enforced now**: BIP34 and the
+witness commitment with #399, weight and signature-operation cost with #400,
+and the three lock-time rules with #401. Signatures remain `audit`'s work, and
+Scripts on the connect path are the one thing CONTEXT.md still lists as
+deferred.
 
 The claim is pinned to a **Block Id**, not a bare Height — the one the Index
 held there when the claim was made. If a reorganisation later moves that Height
@@ -920,7 +934,7 @@ the Address Book holds 486 Candidate(s), up 486
 peer 1 is 88.99.167.175:38333, from the Address Book
 ```
 
-The node keeps up to **eight** Peers, which is Bitcoin Core's outbound default
+The node keeps up to **eight outbound** Peers, which is Bitcoin Core's outbound default — counted as outbound since #333, so a full inbound table cannot spend the dial budget
 and chosen for the same reason: enough that losing one is routine and that no
 single Peer decides what chain we see, few enough not to be a burden on the
 Network. It dials at most one Candidate per turn of the loop, because a
@@ -1132,8 +1146,9 @@ Block that cannot be rebuilt is fetched whole, as before.
 ### Peers that dial us
 
 `serve` binds the Network's own port (`serve:PORT` another) and accepts
-inbound Peers, up to **eight** — a bound on the slots anybody at all can take,
-kept separate from the eight outbound ones we choose. They are handshaken and
+inbound Peers, up to **125** by default and `inbound:N` to change it — a
+budget for the slots anybody at all can take, kept separate from the eight
+outbound ones we choose (#329). They are handshaken and
 served: `getheaders`, `getdata` for Blocks out of the Segments and for
 Transactions out of the Mempool, `getaddr` from the Address Book. A Bitcoin
 Core node with this as its only Peer synced its whole regtest chain from it,
