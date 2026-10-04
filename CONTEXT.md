@@ -230,10 +230,13 @@ the reader presses refresh to ask again.
 _Avoid_: dashboard, API, endpoint, web server
 
 **Kept**:
-The company a walk keeps while the loop is not turning: the pool, the
-Address Book and the next Peer key, carried on the Eye and tended once a
-second from inside the Set walk (#275), so a Candidate that answers is a
-Peer within a second whether the node is walking or listening.
+The company a **standalone** walk keeps: the pool, the Address Book and the
+next Peer key, carried on the Flight and tended once a second from inside the
+walk (`Infra.Bodies.tended`, #199, #275), so a Candidate that answers is a
+Peer within a second. There is no `Kept` type — the word names the practice,
+not a record — and under `follow` the premise is gone: the loop is Aver's
+generated process loop and is always turning (#361), so only `bodies` and
+`utxo` still tend their own company this way.
 _Avoid_: context, session state
 
 **Reader**:
@@ -241,6 +244,46 @@ Whoever connects to the Board. Not a Peer: no Handshake, no Inbox, no place
 in the Address Book; a Reader is given a tenth of a second to have asked,
 is answered once, and is closed.
 _Avoid_: client, user, visitor, request
+
+### The loop and its clocks
+
+**Fault** (of a body):
+What `Domain.Body.fault` answers about a body that was asked for by Block Id:
+`Sound`, or one of two refusals that are **not** interchangeable (#408).
+`Fault.Body` means these bytes are not that Block — they do not decode, their
+Transactions do not build the Merkle Root, their witnesses do not hash to the
+coinbase's commitment — so the Height is asked of another Peer, because the
+Block itself may be fine. `Fault.Block` means no Peer could serve this Block
+differently: the weight or the signature-operation ceiling, checked only after
+the Root and the commitment have bound those bytes to that Header, so the
+Header is marked invalid and asked of nobody.
+_Avoid_: error, invalid block (say which fault); "bad body" for either
+
+**Clock** (of a connect):
+The four times `Domain.Finality` needs to judge a Transaction: the Height, the
+Block's own timestamp, the previous Block's median-time-past, and the median
+at each Output a BIP68 relative lock reaches back to (#401). Gathered from the
+tree by the walk, not read from a system clock.
+_Avoid_: time, timestamp (a Header has a timestamp; this is the set of them)
+
+**Job**, **Task**:
+Work the owner hands off rather than does: a `Task` goes to
+`Infra.BlockJobs.begin` and its `Reply` comes back from `take`, with the body
+supplied by `Domain.BlockWorkJob.run` and at most `[work] max-jobs` in flight.
+A Block's decode and its pure UTXO connection are the two. The owner stays the
+only writer (ADR 0008); a Job computes and returns data and touches no Store.
+_Avoid_: thread, worker, async
+
+**Turn**, and **Window**:
+A **turn** is one question the generated loop asks `App.Owner` and one answer
+it gives. There are fourteen kinds, and `Domain.Watchdog.slowTurn` names which
+one a slow turn was (#412) — before that it named the last Message dispatched,
+which was usually something else entirely. A **window** is the span a
+`metrics.log` row covers, between that row and the one before it: `polledMs`
+and `workedMs` accumulate over a window and sum to it, so a row is never one
+turn. Not to be confused with the Undo Window.
+_Avoid_: tick, iteration, cycle for a turn; "that turn took N seconds" read off
+a metrics row
 
 ### What we store
 
@@ -307,11 +350,13 @@ we never fetched from one we chose to discard — the two look identical in the
 Index and demand opposite responses.
 _Avoid_: cutoff, floor, horizon, threshold
 
-### Deferred consensus rules
+### Consensus rules: what is deferred, and what no longer is
 
 What this node does **not** check when it connects a Block, recorded here so
-that no one has to infer it from an absence (#303). Everything in this section
-is deliberate and none of it is a claim the node makes.
+that no one has to infer it from an absence (#303) — followed by the record of
+the rules that used to be in that list and are now enforced, which is kept
+here because the absence was documented here. Everything deferred is
+deliberate and none of it is a claim the node makes.
 
 **Scripts on the connect path**:
 `Domain.Connect` has no Script dependency and never has, so a Block's

@@ -22,7 +22,7 @@ The exit code is the verdict: 0 within every budget and no regression against
 the baseline, 1 over a budget or a regression, 2 when the harness itself
 failed (no `lake`, an unreadable baseline). The JSON summary is in the job log
 and attached as an artifact, followed by one text line from the gate
-(`--gate: 0 regression(s) vs baseline (101 baseline laws, 101 current)`), so a
+(`--gate: 0 regression(s) vs baseline (166 baseline laws, 166 current)`), so a
 red run says which claim moved.
 
 Locally, with Lean on the machine (`elan`; `lake` fetches the pinned
@@ -39,7 +39,8 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `6eddd964` pin: **153 universal, 13 bounded, 0 sorries, 13 declined**,
+at the `b82939cb` pin (the tagged Aver 0.30.0): **153 universal, 13 bounded,
+0 sorries, 13 declined**,
 166 laws in the manifest, `build_errors: 0`. Four recursions were reshaped
 along the way to make it possible — a countdown in `Bech32.checksumDigits` and
 `foldGenerators`, a countdown over eras in `Subsidy.minted`, a fuel of the
@@ -83,17 +84,22 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. At the
-  `c4b08179` pin there are 119.
-- **`bounded_laws`** — laws stated only over an enumerated domain. One
-  today, `when`-guarded (`ScriptState.rearranged.staysWithinDeclaredDepth`). A law that
-  cites a bounded law in `using` can never be universal.
+  proves counts here, because that trusts the compiler's evaluator. **153 at
+  the `b82939cb` pin.** The engine cone alone stood at 119 when it was its own
+  entry, at the `c4b08179` pin.
+- **`bounded_laws`** — laws stated only over an enumerated domain.
+  **Thirteen today**: the three `Domain.Target` laws, the two `TreeStore`
+  codec round trips, `UtxoStore.decodeReached`, `IndexKeys.scanOrder`,
+  `Segment.nameOf`, both `Stamp.isoOf` laws, both `Domain.Connect` laws and
+  `ScriptState.rearranged.staysWithinDeclaredDepth`. A law that cites a
+  bounded law in `using` can never be universal. (One, when the engine cone
+  was its own entry.)
 - **`sorries`** — obligations that no strategy closed. Budget 0: a law that
   lands on `sorry` is a red run, by design.
 - **`declined`** — claims the exporter refused to state at all, so no theorem,
   no `sorry` and no error stands in for them. They need their own budget
-  precisely because nothing else would notice them. **Three in the engine cone
-  and thirteen in the laws leaf**, and since the `6eddd964` pin they are all
+  precisely because nothing else would notice them. **Thirteen**, and since
+  the `6eddd964` pin they are all
   one cause:
 
   - Every remaining decline **reaches a mutual recursion the exporter cannot
@@ -138,17 +144,22 @@ Three numbers in the summary, and a manifest.
   what is lost is the cross-check that the Lean translation agrees with the VM
   about them. Pass `--examples` to restore it. It is worth one run by hand when
   the Aver pin moves, which is exactly when a translation could start
-  disagreeing, and it is not worth the 133 declines in every CI run.
+  disagreeing, and it is not worth carrying every example decline in every CI run — the engine
+cone alone brought 133 of them.
 
 ## What green does not mean
 
 Kernel-genuine is a narrow claim: the kernel checked the proof of *the theorem
 as translated*. It certifies the tactics, not the Aver-to-Lean translator,
 which is part of the trusted base. What pins the translation to the runtime is
-the dual run: every `verify` case runs on the VM under `aver verify` and as a
-Lean example under `aver proof`, so each is one point where the two must
-agree. The 6,050 Core corpus cases are the largest such set, which is one more
-reason the corpus is verified on every push.
+the dual run: every `verify` case running on the VM under `aver verify` and
+also as a Lean example under `aver proof`, so each was one point where the two
+had to agree. **That is opt-in now.** Since the law cone became `aver proof`'s
+default the cases are not exported unless `--examples` is passed, which
+CLAUDE.md's pin routine asks for by hand on a pin move — exactly when a
+translation could begin to disagree. And it never covered the corpus: nothing
+`depends` on `corpus/*.av`, so those 6,050 cases were never in this gate.
+`aver verify` is their gate, on every push.
 
 Nothing here says the engine agrees with Bitcoin Core. There is no formal
 statement of Script to prove against; Core's C++ is the specification, and the
@@ -196,15 +207,17 @@ citations, see `docs/script-laws.md`), each of which is also a millisecond
 test under `aver verify`. A proven helper law is a rewrite rule for every law
 below it.
 
-## The pinned proof-composition fix
+## The proof-composition fix, and what it cost at the time
 
 Aver’s certificate-wall change (#1368) exposed default-heartbeat timeouts in
 this project’s heavy `because` laws, tracked in
 [jasisz/aver#1386](https://github.com/jasisz/aver/issues/1386).
-The pin includes [jasisz/aver#1387](https://github.com/jasisz/aver/pull/1387),
-which composes checked equations and citations before expanding helpers.
-The existing gate passes with **117 universal, 3 bounded, 0 open and 134 declined**,
-without increasing the heartbeat or admission budgets.
+[jasisz/aver#1387](https://github.com/jasisz/aver/pull/1387) composes checked
+equations and citations before expanding helpers, and the pin has carried it
+for several moves. **Measured then, on the engine cone when it was its own
+entry: 117 universal, 3 bounded, 0 open and 134 declined, without raising the
+heartbeat or admission budgets.** The gate today is the figures at the top of
+this page.
 
 ## The elan default, a closed chapter
 

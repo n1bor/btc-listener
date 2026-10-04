@@ -108,16 +108,19 @@ Peer the node dials (modes: `checksum`, `network`, `lowbits`, `hugetx`,
 `bip30`, `invflood`, `invflood-late`, `invflood-pieces`, `echo`, `wrongwitness`, `badheight`, `overweight`, `sigops`, `nonfinal`, `sequencelock`); `tools/regtest/caller.py`
 is a caller that dials the node's served port (`early`, `chatty`, `silent`,
 `pinger`, `polite`, `lurker`, `locator`, `deaf`, `ancient`, `unwitnessed`, `boaster`). Each security fix in this repo (#281–#284, #291, #293,
-#300, #347, #354, #358, #399, #400, #401, #405) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
+#300, #347, #354, #358, #399, #400, #401, #405, #408) added a mode and a `docs/regtest-testing.md` section that runs it beside an honest Peer and
 shows the offender dropped while the node carries on — that pairing is the
 house pattern, and a security fix without it is unproven. Run the honest
 baseline first: a validity check that has never seen real data can be a
 permanent false accusation, and only the honest run shows it. Practicalities:
 another agent usually holds 18443/18444, so run a second Core on
 `port=18454 rpcport=18453` with its own datadir; a Core restarted without
-`loadwallet` mines nothing; `headers`/`bodies`/`listen` cannot take
-`host:port` (#140), so sync with `follow host:port dir` under `timeout` and
-read exit 124 as the pass.
+`loadwallet` mines nothing; and ~~`headers`/`bodies`/`listen` cannot take
+`host:port` (#140)~~ — **#140 closed and they can**:
+`headers 127.0.0.1:18454 dir` reaches a Peer on a non-default port, because
+`Domain.Address.fromPeerText` parses the port. `follow host:port dir` under
+`timeout`, reading exit 124 as the pass, is still the way to sync a directory
+without a terminal, but it is no longer the only way.
 
 **Landing a fix is its own routine, and Robin is specific about it.** One
 branch and PR per issue; put `Closes #NN` in the body so the issue closes when
@@ -185,7 +188,7 @@ build` took five minutes to say the same.
 ## Commands
 
 ```bash
-aver audit  .                                       # check + verify + format, the CI gate
+aver audit  .                                       # check + verify + format in one pass; CI runs the three as separate jobs, never audit
 aver check  . --module-root .                        # contracts, coverage, lints
 aver verify main.av --module-root .                  # every hand-written case, the program graph, seconds
 aver verify main.av --module-root . --hostile        # the same on type-boundary values and hostile effect profiles; CI runs it (#351)
@@ -218,7 +221,8 @@ cd ../btc-listener-build && cargo build --release
 (29 generated files, 6,050 cases, 200 M-step budgets) is the Core test data
 compiled to verify blocks; it changes only when `tools/refresh_corpora.sh`
 or the engine does, and nothing `depends` on those modules, so it lives in
-its own directory and CI runs it as its own job (#219). `aver verify main.av`
+its own directory and CI runs it as its own job, sharded four ways so its wall
+time is one shard's rather than the sum (#219). `aver verify main.av`
 is the program graph -- every hand-written case, in seconds -- and
 `aver verify corpus` is the corpus; `aver verify .` is both and is what
 `aver audit` runs. Locally, `aver verify <file>` on what you changed, then
@@ -242,7 +246,8 @@ and `builtAt()` as `dev`/`unstamped`, and the `compile` and `windows` jobs in
 the published `main-build` says its commit on the status page, in the Screen
 and in the user agent (`/aver-btc-listener:0.1-<sha>/`), and a local build says
 `dev`. Nothing else in the binary can say what it was built from: `aver
---version` does not move between releases.
+--version` names the compiler's release and not the commit inside it (the
+paragraph above says what that does and does not narrow).
 
 The fifteen CLI commands (`headers`, `bodies`, `txindex`, `outputs`, `utxo`,
 `assumevalid`, `follow`, `show`, `tx`, `spend`, `audit`, `prune`, `reindex`,
@@ -257,8 +262,8 @@ arrangement of `domain/` parts; `app/` adapts argv to those; `main.av` is
 deliberately thin. A failure against a live peer is therefore a socket
 problem, never an ambiguity in the pure code.
 
-**Capability providers.** Three contracts are declared in Aver with no bodies
-and supplied at run time by Rust crates named in `aver.toml`:
+**Capability providers.** Three contracts are declared in Aver with no
+bodies and bound in `aver.toml` — two to Rust crates, and one to Aver itself:
 
 - `domain/primitives.av` → `providers/primitives` — RIPEMD-160 and secp256k1
   (libsecp256k1, the same code Bitcoin Core runs). The curve is a provider on
@@ -267,6 +272,11 @@ and supplied at run time by Rust crates named in `aver.toml`:
   libclang-dev to build, ADR 0009). Effectful, so
   each operation declares an Oracle dimension. `Handle` is an opaque capability
   resource Aver code cannot construct or serialise.
+- `infra/blockjobs.av` → **`Domain.BlockWorkJob.run`**, a `work` binding in
+  `aver.toml` rather than a crate: the contract's provider is this program's
+  own Aver code. `begin` and `take` hand a Block's decode and its pure UTXO
+  connection to the Work layer, off the owner's thread, bounded by
+  `[work] max-jobs = 4`. ADR 0008 is why the owner stays the single writer.
 
 ~~`infra/durable.av` → `providers/durable`~~ — **retired.** It was an fsync in
 thirty lines of `std::fs`, a capability only because Aver had none (#301), and
@@ -288,13 +298,17 @@ crash (#92, the rusty-leveldb era; RocksDB syncs every batch). Every on-disk
 record has exactly one shape and its decoder refuses any other by its numbers
 (#355); `providers/kv/examples/cut_record.rs` is how the regtest document
 hands the node a short one, since nothing else can write the Index.
-Key prefixes: `b:` Block Id → Location, `h:` Height →
-Block Id, `t:` Transaction Id → site, `n:` Block Id → Height, `k:` Block Id →
-Header plus its Height and Chain Work, `o:<txid>:<index>` → Output (what lets a
-spend resolve in one lookup), `u:<txid>:<index>` → unspent Output, `d:` Block Id
-→ Undo Data. `h:` is rewritten by a Reorganisation and `u:` shrinks on every
-spend; `b:`, `t:`, `n:`, `k:` and `o:` are append-only, because a Block Id
-always names the same bytes.
+**A key is one ASCII tag byte then fixed-width binary fields**, not text
+with colons — `domain/indexkeys.av` opens by saying so, and #42 is why (an
+Output key was seventy-two characters where thirty-seven bytes do). The tags:
+`b` Block Id → Location, `h` Height → Block Id, `t` Transaction Id → site,
+`n` Block Id → Height, `k` Block Id → Header plus its Height and Chain Work,
+`o` txid and index → Output (what lets a spend resolve in one lookup), `u`
+txid and index → unspent Output, `d` Block Id → Undo Data, `x` Block Id →
+invalid (#376), and `m` for the singletons. Writing one as `o:<txid>:<index>`
+is the old spelling and will not find anything. `h` is rewritten by a
+Reorganisation and `u` shrinks on every spend; `b`, `t`, `n`, `k` and `o` are
+append-only, because a Block Id always names the same bytes.
 
 **Pruning is bounded by what the Set still needs** (#302): `prune <dir> <h>` is
 refused when `h` is above where `meta:setTo` stands (a body the walk has not
@@ -333,9 +347,11 @@ write, and the caller drops the Peer.
 sockets and per-Peer buffers. `Tcp.readNow` takes available bytes;
 `domain/inbox.av` extracts whole Messages. `Tcp.writeNow` consumes a bounded
 prefix of the FIFO outbox, preserving the remainder for a later turn.
-Under `follow` the waiting is Aver's generated loop (`main.av`): one process
-per seated Peer, one walking the Catch-up, one for the clock, one draining the
-outboxes, all answered by `app/owner.av` over one `Infra.Follow.Following`.
+Under `follow` the waiting is Aver's generated loop (`main.av`), which seats
+six kinds of process: one per seated Peer, one walking the Catch-up, one for
+the clock, one taking callers off the listener, one draining the outboxes and
+one opening the node — all answered by `app/owner.av` over one
+`Infra.Follow.Following`.
 The standalone commands keep `Wait.poll` and `awaitFrom`, the straight-line
 conversation facade: `headers`, `bodies` and `listen` are pools of one. The pool idle deadline is 150s; an answer has
 60s. A pending Handshake has one non-renewing 10s deadline and handles at most
@@ -423,9 +439,12 @@ itself — and a Peer whose last Catch-up moved nothing has its next claim
 **held** for twenty seconds rather than dropped, so the rate is capped without
 a single-Peer node sitting a Block behind. The Set therefore has to know which
 Block it stands on and not merely which Height, so
-`meta:setTo` holds `{height}:{blockId}`; a record holding a bare Height was
-written before #26 and is **refused**, because a Height alone cannot say
-whether `h:` was re-pointed underneath it. `Domain.Rewind` plans the walk back
+the Set standing under `m` holds a 4-byte Height then the 32-byte Block Id,
+thirty-six bytes exactly, and anything shorter is refused on its length
+(#355) — a Height alone cannot say whether `h` was re-pointed underneath it.
+There is no older text spelling left to tell apart: the directory is rebuilt
+rather than migrated (#42), so what would have read as one is simply not
+there. `Domain.Rewind` plans the walk back
 to the fork and `Infra.Rewind` carries it out, reading the Set's own Branch out
 of `k:` because `h:` no longer leads there. A fork below the 288-Block Undo
 window stops the node with a report (D8) rather than being guessed past.
@@ -462,9 +481,12 @@ used to list are all enforced now — BIP34 and the witness commitment since
 and BIP68 since #401 — and that Scripts on the connect path are the one thing
 still deferred (ADR 0007).
 
-**The seam for what's missing**: `domain/ecdsa.av` has no `Valid` constructor
-for outcomes it cannot yet produce, so adding Schnorr/witness evaluation will
-make the compiler name every caller that must change.
+**The seam for what's missing** worked and is spent: `domain/ecdsa.av` kept
+no `Valid` constructor for outcomes it could not produce, so when the curve
+arrived as a provider the compiler named every caller that had to change. The
+type is `Ruling` now (`Domain.Spend` had taken `Verdict`) and it has `Valid`.
+The live seam is `Domain.AssumeValid.runsScriptsAt`, which still has no caller
+(#303, ADR 0007).
 
 **Test corpus**: Bitcoin Core's published test data — `script_tests.json`,
 `sighash.json`, `tx_valid`/`tx_invalid`, `key_io`, `base58`, the BIP341

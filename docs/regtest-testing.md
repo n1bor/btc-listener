@@ -1862,7 +1862,7 @@ $BIN regtest follow $PEERS $D log:/tmp/m.log # somewhere else
 ```
 
 ```
-# atMs phase height target blocks bytes polledMs workedMs peers candidates
+# atMs phase height target blocks bytes polledMs workedMs peers candidates added removed
 ... headers 2001    0    0      0     40    518  3 0
 ... bodies     1 2000    0      0      0      0  3 0
 ... bodies  2000 2000 2000 499857      0    702  3 0
@@ -1967,14 +1967,14 @@ Read the shape of a regtest run and you can see what it is telling you:
 
 ```bash
 grep -vc '^#' $D/metrics.log                 # records written
-awk '/^#/{next} NF != 10 {bad++} END {print bad+0}' $D/metrics.log
+awk '/^#/{next} NF != 12 {bad++} END {print bad+0}' $D/metrics.log
 ```
 
 - **A Screen run writes records and leaks nothing onto the frame.** Grep the
   pty capture for a record line — it must find none.
 - **A plain run keeps its stdout lines as well**, so `log` adds a file rather
   than replacing what was already printed.
-- **Ctrl-C leaves the log whole.** Every line is ten fields and the file ends
+- **Ctrl-C leaves the log whole.** Every line is twelve fields and the file ends
   with a newline, because records are appended one line at a time and a run
   that stops mid-phase simply has no record for it.
 
