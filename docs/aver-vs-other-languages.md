@@ -216,8 +216,9 @@ verifiable seam. Ergonomically Python wins; architecturally Aver wins.
 three forms (all three now fixed upstream, the parameter form last, as
 jasisz/aver#1162 — but "four renames in a day" while they were not), `R#await` keyword trampolines (#899), Result
 pass-through E0308 (#901), packed-bytes equality (#1065), an opaque resource
-in a record (#994), E0505 borrow moves (#1130). `aver compile` exits 0 on
-Rust that does not build. Performance cliffs: a `Map` returned from a helper
+in a record (#994), E0505 borrow moves (#1130). `aver compile` exited 0 on
+Rust that did not build, until `--check` ran `cargo check` on the emission
+(jasisz/aver#1172, closed). Performance cliffs: a `Map` returned from a helper
 was cloned (3,400× slower; opening a Store "took hours instead of two
 seconds", #890, fixed); a record holding a Map was too (2,200×, #1160,
 fixed by #1163); the VM was quadratic on `[h, ..t]` with an accumulator (29 s / 16 GB
@@ -274,8 +275,9 @@ falsifier or the single-writer invariant for free.
 **Here.** `exposes opaque [Store]` let the backend sum gain a Database arm
 and lose a Log arm without any caller changing. But every `depends` module is
 glob-imported into the emitted Rust, so adding a dependency can break the
-build through a name two dependencies share — `Domain.Addr.offering` is "a
-worse name chosen so the emitted Rust compiles". A type named after a
+build through a name two dependencies share — `Domain.Addr.offering` was "a
+worse name chosen so the emitted Rust compiles", and the field is `payload`
+again, the parameter form having closed as jasisz/aver#1162. A type named after a
 builtin was silently resolved to the builtin (`Connection` → `Tcp.Connection`).
 
 | Language | Compared with Aver |
@@ -289,8 +291,9 @@ builtin was silently resolved to the builtin (`Connection` → `Tcp.Connection`)
 
 **Here.** `aver audit` as a single CI gate is good. `unused-effect` with its
 `used:` clause, the coverage lints, `context` and `decision` blocks are
-genuinely useful to a reviewer. Against: `aver --version` does not change
-between commits (two bugs re-reported against a stale binary, one withdrawn —
+genuinely useful to a reviewer. Against: `aver --version` names the release
+but not the commit inside it, so it cannot tell two commits of one release
+apart (two bugs re-reported against a stale binary, one withdrawn —
 `29f87bf`), `compile` exited 0 on unbuildable output, until `--check`, the formatter rejected
 `Tuple<A, B>` while recommending it (#891), and the step budget hid corpus
 rows as "case aborted".

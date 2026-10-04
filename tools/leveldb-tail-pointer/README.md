@@ -5,6 +5,21 @@ release. Everything in this directory is generic: it uses the crate's own
 public API and its own test helpers, and nothing from the project it was found
 in.
 
+**Why it is in a Bitcoin listener: this is the defect the Index moved off
+`rusty-leveldb` for.** ADR
+[0009](../../docs/adr/0009-rocksdb-under-the-index.md) names it as the first of
+the two faults that forced the move, and n1bor/btc-listener#33 is the issue.
+The project depends on RocksDB now (`providers/kv`), nothing here is built or
+run by CI, and this README is kept because it is the only full write-up of the
+bug. Read it as evidence for a decision already taken, not as live tooling.
+
+A related finding has since been reported upstream by someone else: open PR
+[dermesser/leveldb-rs#69](https://github.com/dermesser/leveldb-rs/pull/69)
+(September 2026) describes the same `LRUList` unsoundness this README flags
+below as worth reporting, with the same Miri rejection and the same downstream
+heap corruption. Whether it subsumes `fix.patch` has not been checked. The
+tail-pointer bug itself was never sent upstream from here.
+
 [rusty-leveldb]: https://github.com/dermesser/leveldb-rs
 
 ## The bug
