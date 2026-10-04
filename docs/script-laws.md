@@ -1,40 +1,129 @@
 # Script laws and executable explanations
 
-The Aver pin in `.aver-version` includes `because`, `using` and checked list
-induction. The Script laws can be checked together, including their imported
-helpers, from the interpreter entry:
+This file is the register of this project's **laws**: the claims it states once
+and has a machine check for every value, rather than for the examples somebody
+thought of. Most of them are about the Script engine, which is where the file
+started, but laws have since spread to the chain, the stores, the codecs and
+the clock, and they are all gated together.
 
 ```sh
-aver proof domain/interp.av --module-root . --check-json -o /tmp/script-laws
+aver proof main.av --module-root . -o ../btc-listener-proof \
+  --check-json --declined-budget "$(cat proof/main.declined)" \
+  --sorry-budget 0 --gate proof/main.manifest.json
 ```
 
-At pin `c5e6faddec2ce61cfca9f7521677a72335bf49af`, Lean reports **99 universal
-laws, 2 bounded laws and no open laws**. The strict command still exits 1
-because 130 non-law claims in the wider graph are deliberately declined. The generated `proof_manifest.json`
-records the tier and kernel dependencies of each law.
+At pin `b82939cb` (Aver 0.30.0), that is **166 laws over 25 modules: 153
+universal, 13 bounded, 0 sorries, 13 declined**, and it exits 0. It is the
+`proof` job in CI, one entry for the whole program since
+n1bor/btc-listener#350; before that it took two, and `docs/proofs.md` tells
+that story. `proof/main.manifest.json` records every law's tier, theorem and
+axiom set, and `--gate` fails on any law removed, demoted or grown an axiom.
 
-Of the original twenty laws in PR #338, eighteen now close universally, up
-from fourteen. The extra eighty-one laws are counted separately: eight
-roundtrip and induction additions, seventeen canonical-encoding laws, twelve
-helpers that establish the exact arithmetic-width boundary, and fifteen
-helpers that establish the CompactSize roundtrip, eight laws for stable
-Script filtering and deletion algebra, and nineteen laws establishing exact
-Script parse/serialize roundtrip, plus two laws connecting concatenated deletion
-batches to the public hex wrapper. The existing function bodies and public API are unchanged apart
-from the original PR's `littleEndian` guard repair.
+**Every law named below links to the `verify ... law ...` line that states
+it**, on `main`. The line anchor is a convenience and can drift as the file
+around it changes; the law's name is the exact identifier, so
+`grep -rn "law <name>" domain/ infra/` always finds it.
+
+**Counts in the sections below are historical.** Each says the pin it was
+measured at and the issue that added it, and several describe the retired
+second entry `domain/laws.av` in the present tense because it existed when
+they were written. The current numbers are the ones above.
+
+## What a law is, and what proving one buys
+
+A **verify case** is one input and one expected answer:
+
+```aver
+verify isoOf
+    String.len(isoOf(1789427176648)) => 24
+```
+
+`aver verify` runs it. It proves something about 1789427176648 and nothing
+about any other instant.
+
+A **law** names the inputs it ranges over and states an equation that must
+hold across them:
+
+```aver
+verify isoOf law alwaysTwentyFourCharacters
+    given ms: Int = [0, 1, 999, 1000, 86399999, 86400000, 951782400000, 1789427176648, 253402300799999]
+    when Bool.and(ms >= 0, ms < 253402300800000)
+    String.len(isoOf(ms)) => 24
+```
+
+The `given` list is **samples, not the claim**. `aver verify` runs the law on
+them, which is a cheap test. `aver proof` does something else: it translates
+the law into a Lean 4 theorem quantified over the *type* — every `Int`
+satisfying the `when` guard, not the nine listed — and asks the Lean kernel to
+check it. A law can cite other laws with `because` and `using`, so a long
+argument is assembled from named steps rather than one opaque proof.
+
+**The tiers are the whole point, and the manifest records them per law.**
+
+- **universal** — the kernel checked the theorem over every value of the
+  law's `given`s, with `#print axioms` inside Lean's core three (`propext`,
+  `Classical.choice`, `Quot.sound`). 153 laws today. This is the only tier
+  that means "for all inputs".
+- **bounded** — stated only over the enumerated samples. 13 laws today, and
+  each has a reason: a `when` guard the exporter cannot lift, or a helper it
+  cannot bound. A law that cites a bounded law through `using` can never be
+  universal.
+- **declined** — the exporter refused to state the claim at all, so there is
+  no theorem, no `sorry` and no error standing in for it. 13 entries today for
+  8 distinct laws, all one cause: the `Domain.Transaction` and
+  `Domain.Connect`/`Domain.Disconnect` mutual recursions it cannot find a
+  decreasing measure for. **A declined law is not proved.** It still runs under
+  `aver verify` on its samples, which is why `proof/main.declined` is a budget
+  that only goes down.
+- **sorry** — an obligation no strategy closed. The budget is zero, so one is
+  a red run by design.
+
+**What a universal law buys, concretely.** The round-trip laws are the clearest
+case: [`Domain.TreeStore.decodeHeld.readsWhatEncodeHeldWrote`](https://github.com/n1bor/btc-listener/blob/main/domain/treestore.av#L76) says that for
+*every* Header record the writer can produce, the reader gives back exactly
+what went in. That is not a statement about the fixtures; it is a statement
+about the pair of functions, and it closes off the entire class of bug where
+a record encodes fine and reads back subtly wrong. Likewise
+`Domain.ScriptParse`'s parse/serialise laws mean no Script can round-trip to
+different bytes, and `Domain.StackItem`'s arithmetic-width laws mean the
+boundary where Script numbers stop being exact is where the code says it is,
+for every number, not for the handful anybody tried.
+
+**What they do not buy, which matters more.**
+
+- Laws cover the pure code reachable from `main.av`. The network, the disk and
+  the Screen are not in the cone; nothing here says a socket is read
+  correctly. That is what `docs/regtest-testing.md` is for.
+- The curve and the hashes are **providers**, opaque by construction, because
+  their edge cases are consensus rules. No law reaches inside `verifySignature`
+  or `ripemd160`. Interestingly, no law *needs* to: every decline that touched
+  a provider turned out to be a verify example rather than a law (see
+  `docs/proofs.md`).
+- A law is only as good as its statement. `aver proof` checks that the
+  statement follows from the code, not that the statement is the right one to
+  make. The project's defence against a wrong statement is that law
+  expectations are pinned to sources outside this implementation — published
+  vectors, Core's own test data, spec-computed values — never captured from
+  the code under test.
+- Agreement with Bitcoin Core is **not** established by laws. It is
+  established by the corpus: 6,050 cases of Core's published test data in
+  `corpus/*.av`, verified as its own CI job. The laws say the engine is
+  self-consistent; the corpus says it matches Core.
+- A green proof run says nothing about Scripts on the connect path, which
+  `Domain.Connect` deliberately does not run (ADR 0007).
 
 ## Number guarantees
 
 These laws quantify over all Aver integers, including values larger than the
 four-byte arithmetic operand range:
 
-- `asNumber.readsWhatFromNumberWrote`: reading an encoded number gives the
+- [`asNumber.readsWhatFromNumberWrote`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L42): reading an encoded number gives the
   original number, for either sign and across sign-byte boundaries.
-- `isMinimalNumber.acceptsWhatFromNumberWrites`: the encoding has no
+- [`isMinimalNumber.acceptsWhatFromNumberWrites`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L571): the encoding has no
   redundant top byte.
-- `fromNumber.encodingIdentifiesTheNumber`: two encodings are equal exactly
+- [`fromNumber.encodingIdentifiesTheNumber`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L158): two encodings are equal exactly
   when their numbers are equal. Different numbers cannot collide.
-- `asNumber.rewritingPreservesTheNumber`: reading an item, writing its number
+- [`asNumber.rewritingPreservesTheNumber`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L48): reading an item, writing its number
   minimally and reading it again preserves the value. This includes redundant
   zero bytes and negative zero; it does not claim the original bytes survive.
 
@@ -46,7 +135,7 @@ function is needed for either consequence.
 ## Canonical Script numbers
 
 For every list whose elements are octets (`0 <= byte < 256`),
-`fromNumber.canonicalExactlyWhenMinimal` proves:
+[`fromNumber.canonicalExactlyWhenMinimal`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L179) proves:
 
 ```text
 fromNumber(asNumber(bytes)) == bytes  iff  isMinimalNumber(bytes)
@@ -58,9 +147,9 @@ normalizes to `[1]`; the necessary sign byte in `[128, 0]` survives.
 The octet premise matters: the out-of-domain list `[256]` passes the minimality
 predicate but normalizes to `[128, 128]`, so the theorem deliberately excludes it.
 
-The hard direction is `fromNumber.minimalItemsAreFixedPoints`. Its two
+The hard direction is [`fromNumber.minimalItemsAreFixedPoints`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L171). Its two
 explanations first recover the magnitude digits, then restore the top byte or
-separate sign byte. `bigEndian.writingReadDigitsPreservesThem` supplies checked
+separate sign byte. [`bigEndian.writingReadDigitsPreservesThem`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L116) supplies checked
 list induction: the recursive explanation consumes one byte and updates the
 positive prefix. Each explanation and the final implication are independently
 universal and kernel-audited. The Aver pin includes generic compiler fixes found
@@ -68,12 +157,12 @@ while checking these proofs; no Bitcoin-specific compiler logic or handwritten
 Lean is used.
 
 The reverse direction cites the already-proved minimality of every encoder
-output. `asNumber.minimalEncodingIdentifiesBytes` then proves that two minimal byte
+output. [`asNumber.minimalEncodingIdentifiesBytes`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L53) then proves that two minimal byte
 encodings are equal exactly when they decode to the same number.
 
 ## An induction written in Aver
 
-`bigEndian.largerPrefixStaysLarger` says that reading the same list preserves
+[`bigEndian.largerPrefixStaysLarger`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L107) says that reading the same list preserves
 the strict order of two accumulators. It holds for every integer list, so it
 also holds for byte lists of any length:
 
@@ -102,7 +191,7 @@ it has no `sorryAx` or dependency on sample evaluation.
 
 ## Exact arithmetic-width boundary
 
-`fitsArithmetic.acceptsCoreOperandRange` is now universal:
+[`fitsArithmetic.acceptsCoreOperandRange`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L547) is now universal:
 
 ```text
 fitsArithmetic(fromNumber(value))  iff  -2147483648 < value < 2147483648
@@ -113,7 +202,7 @@ needs another byte for its sign, so even -2147483648 is outside the four-byte
 operand range. The proof composes the exact one-, two-, three-, and four-byte
 thresholds: 128, 32768, 8388608 and 2147483648.
 
-The common step is `signedBytes.lengthStep`: above a single unsigned byte,
+The common step is [`signedBytes.lengthStep`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L235): above a single unsigned byte,
 the low byte adds one to the length of the quotient's signed encoding.
 `sizeRecurrenceReason` is the same executable explanation at each threshold.
 The sign-placement law preserves a prepended byte whenever the tail is nonempty;
@@ -126,7 +215,7 @@ No width-specific compiler rule or handwritten Lean is involved.
 
 ## CompactSize preserves the following field
 
-`CompactSize.encode.readsBack` is universal for every unsigned 64-bit value
+[`CompactSize.encode.readsBack`](https://github.com/n1bor/btc-listener/blob/main/domain/compactsize.av#L131) is universal for every unsigned 64-bit value
 and every trailing list:
 
 ```text
@@ -167,7 +256,7 @@ applied in either order. These quantify over lists of any length, including
 repeated payloads. They preserve the exact surviving operations and their order.
 
 The reference function `retained` compares each complete encoded operation with
-the target bytes. `without.stableFilter` proves that the production accumulator
+the target bytes. [`without.stableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L351) proves that the production accumulator
 implementation is exactly `reverse(acc) ++ retained(ops, target)`. The remaining
 lemmas establish single-deletion idempotence and commutation, move one deletion
 past a batch, and then induct over entire batches. The Bool explanations are
@@ -178,7 +267,7 @@ removes `Op.Push(1, [171])`, while `Op.Push(76, [171])` survives. Equal payloads
 not imply equal serialized operations. These internal laws concern `withoutEach`
 on arbitrary operation lists.
 
-The public API now has `withoutPushes.repeatedItemsHaveNoFurtherEffect`:
+The public API now has [`withoutPushes.repeatedItemsHaveNoFurtherEffect`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L294):
 
 ```text
 withoutPushes(scriptHex, items ++ items) == withoutPushes(scriptHex, items)
@@ -191,7 +280,7 @@ successful outputs have identical lowercase hex, preserving every surviving
 operation's encoding. For example, deleting `[171]` twice from
 `"5101AB4C01AB52"` yields `Ok("514c01ab52")`: the nonminimal push survives.
 
-The helper law `withoutEach.concatenatedBatches` proves that processing
+The helper law [`withoutEach.concatenatedBatches`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L310) proves that processing
 `left ++ right` equals processing `left` and then `right`. Its executable
 `batchConcatReason` follows the left batch. The wrapper law selects that
 lemma and the existing idempotence law with `using`; the existing Aver pin
@@ -210,7 +299,7 @@ Float and structures containing Float retain their nonreflexive NaN semantics.
 
 ## Parsing preserves exact Script bytes
 
-For every finite list of octets, `ScriptParse.parse.preservesExactBytes`
+For every finite list of octets, [`ScriptParse.parse.preservesExactBytes`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L37)
 proves:
 
 ```text
@@ -234,7 +323,7 @@ Eighteen helper laws establish serializer composition, preservation of valid
 slices, length-field read/write identity, complete and truncated parser steps,
 and the final induction. `parseReason(bytes, acc)` is executable Aver that
 follows the actual remaining input, including named and nested slices.
-`preservesBytes` proves the explanation for every valid octet list and
+[`preservesBytes`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L716) proves the explanation for every valid octet list and
 accumulator. Its induction hypothesis applies to shorter lists; recursive
 calls must still establish the octet premise. There is no separate step-list
 parameter or guide-length premise.
@@ -260,11 +349,11 @@ zero build errors. Its three provider-related non-law refusals remain explicit.
 Three additional laws live in `domain/chainwork.av`, outside the interpreter
 entry's law count:
 
-- `over.preservesDifference`: processing the same contributions preserves the
+- [`over.preservesDifference`](https://github.com/n1bor/btc-listener/blob/main/domain/chainwork.av#L195): processing the same contributions preserves the
   exact difference between two initial totals.
-- `over.chunksCompose`: processing `prefix ++ suffix` equals processing the
+- [`over.chunksCompose`](https://github.com/n1bor/btc-listener/blob/main/domain/chainwork.av#L203): processing `prefix ++ suffix` equals processing the
   prefix and then continuing with the suffix from its resulting total.
-- `heavier.sameWorkPreservesChoice`: adding the same contributions to candidate
+- [`heavier.sameWorkPreservesChoice`](https://github.com/n1bor/btc-listener/blob/main/domain/chainwork.av#L226): adding the same contributions to candidate
   and incumbent preserves the strict heavier decision, including ties.
 
 Two private recursive Bool explanations supply list induction with changing
@@ -280,10 +369,10 @@ were credited with the whole space. `usable` now refuses on the target, after
 the cheap refusals (a negative field, a negative mantissa, an overflowing
 exponent), so every Int is answered without unpacking it:
 
-- `ofBits.zeroTargetProvesNothing`: `when zeroTarget(bits)`, the work is 0.
+- [`ofBits.zeroTargetProvesNothing`](https://github.com/n1bor/btc-listener/blob/main/domain/chainwork.av#L73): `when zeroTarget(bits)`, the work is 0.
 - `ofBits.neverNegative`: the work is never below zero, on any Int, which is
   what makes `added` and `over` monotone along a branch.
-- `overflowing.isAnExponentAboveThirtyFour`: the exponent refusal against the
+- [`overflowing.isAnExponentAboveThirtyFour`](https://github.com/n1bor/btc-listener/blob/main/domain/chainwork.av#L166): the exponent refusal against the
   form Core's `SetCompact` uses. The mantissa-bit refusal and "the work is
   never negative" are cases: relating `Bits.and` to `Int.mod` and the
   division to its sign are beyond the auto-prover, and stated as laws they
@@ -306,23 +395,23 @@ Six laws in `domain/segment.av` (n1bor/btc-listener#357), the pure half of
 `nextHeader` / `payloadAt` / `complete` are what `reindex` reads a Segment
 back with after a crash; nothing stated that the two agree until these.
 
-- `place.recordEndsAtUsed`: the record placed ends exactly at the new
+- [`place.recordEndsAtUsed`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L100): the record placed ends exactly at the new
   `used`, in the Segment the state names, as long as the Block, past a header.
-- `place.consecutiveRecordsTile`: two consecutive placements either open the
+- [`place.consecutiveRecordsTile`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L106): two consecutive placements either open the
   next Segment at its first record or start one header past where the first
   ended -- no gap, no overlap.
-- `place.staysUnderCap`: a record that fits under the cap never takes `used`
+- [`place.staysUnderCap`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L113): a record that fits under the cap never takes `used`
   past it.
-- `place.agreesWithTheReader`: when the Segment does not roll, the offset is
+- [`place.agreesWithTheReader`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L119): when the Segment does not roll, the offset is
   `payloadAt(used)`, the state after is `nextHeader(used, n)`, and `complete`
   holds for the record against a Segment that size.
-- `headerFor.readsBack`: `lengthOf(headerFor(n)) == Ok(n)` for every
-  `0 <= n < 2^32`, citing `Domain.Message.littleEndian.fourBytesReadBack`.
-- `nameOf.sortsWithSegment`: the file names sort as the Segment numbers do,
+- [`headerFor.readsBack`](https://github.com/n1bor/btc-listener/blob/main/domain/compactsize.av#L131): `lengthOf(headerFor(n)) == Ok(n)` for every
+  `0 <= n < 2^32`, citing [`Domain.Message.littleEndian.fourBytesReadBack`](https://github.com/n1bor/btc-listener/blob/main/domain/message.av#L49).
+- [`nameOf.sortsWithSegment`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L68): the file names sort as the Segment numbers do,
   below a million.
 
-A seventh pair pins the effectful fix: `agreesWithDisk.theDiskItCountedAgrees`
-(the size the count says is accepted) and `agreesWithDisk.anyOtherSizeRefuses`
+A seventh pair pins the effectful fix: [`agreesWithDisk.theDiskItCountedAgrees`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L231)
+(the size the count says is accepted) and [`agreesWithDisk.anyOtherSizeRefuses`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L235)
 (any other size is refused by name, with both numbers and the Segment).
 
 **Segment is outside the interpreter's proof cone**, so these are not in the
@@ -330,7 +419,7 @@ CI proof job's count and have no Lean tier yet. They are checked by
 `aver verify domain/segment.av --module-root .` and by the same command with
 `--hostile`, which is where the `when` guards come from: a negative `used`
 or a negative Block length is not a world the writer is ever in, and a
-`rolls` case is exactly the one `agreesWithTheReader` is not about.
+`rolls` case is exactly the one [`agreesWithTheReader`](https://github.com/n1bor/btc-listener/blob/main/domain/segment.av#L119) is not about.
 
 ## Validation of the latest additions
 
@@ -350,8 +439,8 @@ There are no open laws in this export. The command still reports 130 declined
 non-law claims in the wider interpreter dependency cone; they are neither exported
 nor proved and are separate from the law counts.
 
-Two laws retain bounded credit: `ScriptState.rearranged.staysWithinDeclaredDepth`
-and `StackItem.isMinimalPush.directPushIsMinimalUnlessSmallNumber`. All previously
+Two laws retain bounded credit: [`ScriptState.rearranged.staysWithinDeclaredDepth`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstate.av#L487)
+and [`StackItem.isMinimalPush.directPushIsMinimalUnlessSmallNumber`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L625). All previously
 universal laws retain their credit.
 
 ## Laws added after #338 (n1bor/btc-listener#337)
@@ -362,15 +451,15 @@ the proof job (#341) gating them. Tiers as the gate measured them at pin
 
 | law | pins | tier |
 |---|---|---|
-| `ScriptMath.unaryValue.unaryValueSpec` | the unary table against a spec whose `?` block quotes Core's `EvalScript` line per opcode | universal |
-| `ScriptMath.binaryValue.binaryValueSpec` | the binary table the same way, `a` the deeper operand | universal |
-| `ScriptMath.binaryValue.commutative` | ADD, BOOLAND, BOOLOR, NUMEQUAL, NUMNOTEQUAL, MIN, MAX commute | universal |
-| `ScriptState.executing.executingSpec` | executing is "every open branch is taken" | universal |
-| `ScriptState.settled.settledSpec` | an open OP_IF fails the Script; otherwise the top decides | universal |
-| `ScriptState.spent.onlyOpcodesCount` | only opcodes above OP_16 count against the limit | universal |
-| `ScriptState.rearranged.lengthSpec` | how many items each of the thirteen shuffles leaves | universal |
-| `ScriptStep.landed.neverOverLimit` | a Step continues exactly when both stacks together fit in 1000 | universal |
-| `ScriptParse.parse.directPushRunsPastTheEnd` | the error string for a direct push with no data, for `1 <= n <= 75` | bounded (`when`) |
+| [`ScriptMath.unaryValue.unaryValueSpec`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptmath.av#L69) | the unary table against a spec whose `?` block quotes Core's `EvalScript` line per opcode | universal |
+| [`ScriptMath.binaryValue.binaryValueSpec`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptmath.av#L142) | the binary table the same way, `a` the deeper operand | universal |
+| [`ScriptMath.binaryValue.commutative`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptmath.av#L148) | ADD, BOOLAND, BOOLOR, NUMEQUAL, NUMNOTEQUAL, MIN, MAX commute | universal |
+| [`ScriptState.executing.executingSpec`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstate.av#L234) | executing is "every open branch is taken" | universal |
+| [`ScriptState.settled.settledSpec`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstate.av#L271) | an open OP_IF fails the Script; otherwise the top decides | universal |
+| [`ScriptState.spent.onlyOpcodesCount`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstate.av#L207) | only opcodes above OP_16 count against the limit | universal |
+| [`ScriptState.rearranged.lengthSpec`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstate.av#L508) | how many items each of the thirteen shuffles leaves | universal |
+| [`ScriptStep.landed.neverOverLimit`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptstep.av#L28) | a Step continues exactly when both stacks together fit in 1000 | universal |
+| [`ScriptParse.parse.directPushRunsPastTheEnd`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L44) | the error string for a direct push with no data, for `1 <= n <= 75` | bounded (`when`) |
 
 ## Laws added with the Regtest P2SH Height (n1bor/btc-listener#346)
 
@@ -382,10 +471,10 @@ the rules Core states rather than against a value someone copied:
 
 | law | pins | tier |
 |---|---|---|
-| `Rules.at.witnessImpliesPayToScriptHash` | `segWit ⇒ payToScriptHash` on all four Networks at every activation Height and its neighbour; fails on the old table at (Regtest, 0) | universal |
-| `Rules.at.rulesOnlyTurnOn` | every rule in force at `h` is in force at `h + 1` (`eachRuleOn`, seven fields); Core's `DeploymentActiveAt` is monotone and nothing turns a soft fork off | universal |
-| `Rules.at.auditorGetsNoPolicy` | `at(n, h).policy == Policy.none()` on every Network: the #52 guarantee the module intent relies on, stated executably | universal |
-| `Rules.onOrStays.isImplication` | the one-field helper is material implication | universal |
+| [`Rules.at.witnessImpliesPayToScriptHash`](https://github.com/n1bor/btc-listener/blob/main/domain/rules.av#L120) | `segWit ⇒ payToScriptHash` on all four Networks at every activation Height and its neighbour; fails on the old table at (Regtest, 0) | universal |
+| [`Rules.at.rulesOnlyTurnOn`](https://github.com/n1bor/btc-listener/blob/main/domain/rules.av#L126) | every rule in force at `h` is in force at `h + 1` (`eachRuleOn`, seven fields); Core's `DeploymentActiveAt` is monotone and nothing turns a soft fork off | universal |
+| [`Rules.at.auditorGetsNoPolicy`](https://github.com/n1bor/btc-listener/blob/main/domain/rules.av#L131) | `at(n, h).policy == Policy.none()` on every Network: the #52 guarantee the module intent relies on, stated executably | universal |
+| [`Rules.onOrStays.isImplication`](https://github.com/n1bor/btc-listener/blob/main/domain/rules.av#L164) | the one-field helper is material implication | universal |
 
 `Domain.Rules` is inside the `domain/interp.av` cone, so these are checked by
 the existing proof job and ratcheted by `proof/interp.manifest.json`. Measured
@@ -402,10 +491,10 @@ universal, 1 bounded, 0 open, 134 declined** for the cone, 0 regressions):
 
 | law | pins | tier |
 |---|---|---|
-| `LockTime.lockTimeChecked.agreesWithCoreCheckLockTime` | `Continue` exactly when `cltvSpec`: same side of 500,000,000, `value <= lockTime`, sequence not final (Core's `CheckLockTime`) | universal |
-| `LockTime.sequenceChecked.agreesWithCoreCheckSequence` | `Continue` exactly when `csvSpec`: disable bit on the value passes; else version >= 2 as uint32, Input's disable bit clear, same type bit, masked value <= masked sequence (Core's `CheckSequence`, BIP68/112) | universal |
-| `LockTime.checked.isANopBelowTheFork` | under rules where `stillNop`, the opcode is `Continue(state)` even on an empty stack | universal |
-| `LockTime.checked.neverPops` | a `Continue` carries the State untouched (BIP65: the top item is not popped) | universal |
+| [`LockTime.lockTimeChecked.agreesWithCoreCheckLockTime`](https://github.com/n1bor/btc-listener/blob/main/domain/locktime.av#L140) | `Continue` exactly when `cltvSpec`: same side of 500,000,000, `value <= lockTime`, sequence not final (Core's `CheckLockTime`) | universal |
+| [`LockTime.sequenceChecked.agreesWithCoreCheckSequence`](https://github.com/n1bor/btc-listener/blob/main/domain/locktime.av#L233) | `Continue` exactly when `csvSpec`: disable bit on the value passes; else version >= 2 as uint32, Input's disable bit clear, same type bit, masked value <= masked sequence (Core's `CheckSequence`, BIP68/112) | universal |
+| [`LockTime.checked.isANopBelowTheFork`](https://github.com/n1bor/btc-listener/blob/main/domain/locktime.av#L27) | under rules where `stillNop`, the opcode is `Continue(state)` even on an empty stack | universal |
+| [`LockTime.checked.neverPops`](https://github.com/n1bor/btc-listener/blob/main/domain/locktime.av#L34) | a `Continue` carries the State untouched (BIP65: the top item is not popped) | universal |
 
 The five-byte operand width is pinned by cases either side of five: stated as
 a law over the whole Step for any item, the export landed on `sorry`.
@@ -420,12 +509,12 @@ no regression).
 
 | law | pins | tier |
 |---|---|---|
-| `StackItem.isTruthy.zeroIsFalse` | `isTruthy(fromNumber(n)) == (n != 0)`; `because truthinessReason` names the most significant digit and follows it through sign placement, citing `mostSignificantDigitIsNotZero`, `outsideByteRangeIsNeverAdded`, `zeroDigitWindow` and `placed.positiveTopIsTruthy` | universal |
-| `StackItem.isTruthy.negativeZeroIsFalse` | `isTruthy(item ++ [128]) == anyNonZero(item)`: a sign byte on nothing is false (BIP62 rule 3); `because negativeZeroReason` reads the reversal, citing `anyNonZero.reversal` | universal |
-| `StackItem.placed.positiveTopIsTruthy` | a positive top digit survives placement as a set byte | universal |
-| `StackItem.anyNonZero.setHeadIsEnough` | a set head decides | universal |
-| `StackItem.anyNonZero.concatenation` | set-in-the-join is set-on-either-side, by induction on the left | universal |
-| `StackItem.anyNonZero.reversal` | reversal does not change whether anything is set | universal |
+| [`StackItem.isTruthy.zeroIsFalse`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L478) | `isTruthy(fromNumber(n)) == (n != 0)`; `because truthinessReason` names the most significant digit and follows it through sign placement, citing [`mostSignificantDigitIsNotZero`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L322), [`outsideByteRangeIsNeverAdded`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L310), [`zeroDigitWindow`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L317) and [`placed.positiveTopIsTruthy`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L429) | universal |
+| [`StackItem.isTruthy.negativeZeroIsFalse`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L484) | `isTruthy(item ++ [128]) == anyNonZero(item)`: a sign byte on nothing is false (BIP62 rule 3); `because negativeZeroReason` reads the reversal, citing [`anyNonZero.reversal`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L518) | universal |
+| [`StackItem.placed.positiveTopIsTruthy`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L429) | a positive top digit survives placement as a set byte | universal |
+| [`StackItem.anyNonZero.setHeadIsEnough`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L505) | a set head decides | universal |
+| [`StackItem.anyNonZero.concatenation`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L511) | set-in-the-join is set-on-either-side, by induction on the left | universal |
+| [`StackItem.anyNonZero.reversal`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L518) | reversal does not change whether anything is set | universal |
 
 The `simp` heartbeat timeout #344 recorded for the second law did not
 recur once the reversal was stated as its own law and cited with `using`
@@ -433,7 +522,7 @@ rather than left to the structural induction.
 
 The remaining #337 proposal, that `minimalPush` is `isMinimalPush`-minimal, is false as stated:
 `CScript() << vch` writes `[1]` as a one-byte push, which MINIMALDATA refuses
-in favour of OP_1, and `isMinimalPush.directPushIsMinimalUnlessSmallNumber`
+in favour of OP_1, and [`isMinimalPush.directPushIsMinimalUnlessSmallNumber`](https://github.com/n1bor/btc-listener/blob/main/domain/stackitem.av#L625)
 already pins exactly that.
 
 ## Connect, Undo and BIP30 (n1bor/btc-listener#354)
@@ -455,15 +544,15 @@ open, 95 declined**; `--gate` reports four new laws and no regression, and
 
 | law | pins | tier |
 |---|---|---|
-| `Connect.connected.valueIsConserved` | an applied Block adds at most the subsidy plus what it removed (`conservedIn`); `when` bounds the Height to the subsidy's last halving | declined |
-| `Connect.connected.noOutputSpentTwice` | `removed` has distinct keys and is disjoint from `added`, across the store and in-Block paths | declined |
-| `Connect.connected.feesAgreeWithConfirmed` | `fees` is the sum of the confirmed fees, and `confirmed` leads with the coinbase at fee 0 and holds no other coinbase | declined |
-| `Connect.duplicateOutputs.nothingHeldIsNeverRefused` | a Block whose created keys the Set does not hold is never refused for BIP30 | universal |
-| `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo` | any held key is refused, unless the Block is mainnet 91842 or 91880 | bounded (`when held != []`) |
-| `Disconnect.reversal.undoesConnected` | applying a Block's Change and then its Reversal is the identity on the Set (`roundTrip`) | declined |
-| `Disconnect.reversal.deletesEverythingConnectAdds` | every key `connected` adds is in the Reversal's `deleted` (one direction: an Output created and spent in-Block is deleted and never added) | declined |
-| `Disconnect.undoable.windowIsExactly288Deep` | a fork is reversible against `windowFrom(tip)` exactly when it disconnects at most `windowSize()` Blocks | universal |
-| `Disconnect.prunable.neverTakesUndoData` | pruning below `h` is permitted exactly when `h <= windowFrom(standing)` | universal |
+| [`Connect.connected.valueIsConserved`](https://github.com/n1bor/btc-listener/blob/main/domain/connect.av#L149) | an applied Block adds at most the subsidy plus what it removed (`conservedIn`); `when` bounds the Height to the subsidy's last halving | declined |
+| [`Connect.connected.noOutputSpentTwice`](https://github.com/n1bor/btc-listener/blob/main/domain/connect.av#L156) | `removed` has distinct keys and is disjoint from `added`, across the store and in-Block paths | declined |
+| [`Connect.connected.feesAgreeWithConfirmed`](https://github.com/n1bor/btc-listener/blob/main/domain/connect.av#L161) | `fees` is the sum of the confirmed fees, and `confirmed` leads with the coinbase at fee 0 and holds no other coinbase | declined |
+| [`Connect.duplicateOutputs.nothingHeldIsNeverRefused`](https://github.com/n1bor/btc-listener/blob/main/domain/connect.av#L567) | a Block whose created keys the Set does not hold is never refused for BIP30 | universal |
+| [`Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo`](https://github.com/n1bor/btc-listener/blob/main/domain/connect.av#L572) | any held key is refused, unless the Block is mainnet 91842 or 91880 | bounded (`when held != []`) |
+| [`Disconnect.reversal.undoesConnected`](https://github.com/n1bor/btc-listener/blob/main/domain/disconnect.av#L113) | applying a Block's Change and then its Reversal is the identity on the Set (`roundTrip`) | declined |
+| [`Disconnect.reversal.deletesEverythingConnectAdds`](https://github.com/n1bor/btc-listener/blob/main/domain/disconnect.av#L120) | every key `connected` adds is in the Reversal's `deleted` (one direction: an Output created and spent in-Block is deleted and never added) | declined |
+| [`Disconnect.undoable.windowIsExactly288Deep`](https://github.com/n1bor/btc-listener/blob/main/domain/disconnect.av#L88) | a fork is reversible against `windowFrom(tip)` exactly when it disconnects at most `windowSize()` Blocks | universal |
+| [`Disconnect.prunable.neverTakesUndoData`](https://github.com/n1bor/btc-listener/blob/main/domain/disconnect.av#L318) | pruning below `h` is permitted exactly when `h <= windowFrom(standing)` | universal |
 
 **Why the budget rose.** Five of the nine are declined, not open: the Lean
 call cone of `connected` reaches the Block walk (`conserving`, `found`,
@@ -542,7 +631,7 @@ regressions in both.
 
 ## A Transaction's size is what its decoder consumed (n1bor/btc-listener#280 item 17)
 
-One law over `Domain.Transaction.decodeNext`: `sizeIsWhatItConsumed` — a
+One law over `Domain.Transaction.decodeNext`: [`sizeIsWhatItConsumed`](https://github.com/n1bor/btc-listener/blob/main/domain/transaction.av#L348) — a
 decoded Transaction's `size` equals the bytes `decodeNext` took off the
 front, and bytes that do not decode consume nothing and claim nothing. It is
 what lets `Domain.Block.oneCarried` and `Domain.CompactBlock.carried` cut a
@@ -576,19 +665,19 @@ Six laws over `Domain.Sighash` and `Domain.Bip341`, the two modules that
 turn a hash type byte into what a signature commits to. Both are inside the
 `domain/interp.av` cone, so the proof job gates them. Measured at pin
 `c4b08179`: **129 universal, 1 bounded, 0 open, 134 declined** for the cone
-(the bounded one is still `ScriptParse.parse.directPushRunsPastTheEnd`);
+(the bounded one is still [`ScriptParse.parse.directPushRunsPastTheEnd`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L44));
 `--gate` reports ten new laws against the committed baseline — these six
 and #352's four, which had not been written into it — and no regression, so
 the baseline is regenerated with exactly those ten added.
 
 | law | pins | tier |
 |---|---|---|
-| `Sighash.baseOf.lowFiveBitsDecide` | `baseOf(t) == baseOf(t & 31)`: only the low five bits choose ALL, NONE or SINGLE (Core's `nHashType & 0x1f`) | universal |
-| `Sighash.baseOf.anyoneCanPayDoesNotChangeTheBase` | `baseOf(t + 128) == baseOf(t)`: setting ANYONECANPAY leaves the base alone | universal |
-| `Sighash.isAnyoneCanPay.isBitSeven` | `isAnyoneCanPay(t) == (t & 128 == 128)` | universal |
-| `Sighash.withoutSeparators.isStableFilter` | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, `because separatorReason` | universal |
-| `Bip341.validHashType.isBip341Set` | valid exactly on `0..3` and `129..131`, the set BIP341 names, with negatives refused | universal |
-| `Bip341.spendType.isTwiceTheExtensionPlusTheAnnex` | `spendType(annex, ext) == 2 * ext + annex`, the byte BIP341 writes into the signature message | universal |
+| [`Sighash.baseOf.lowFiveBitsDecide`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L63) | `baseOf(t) == baseOf(t & 31)`: only the low five bits choose ALL, NONE or SINGLE (Core's `nHashType & 0x1f`) | universal |
+| [`Sighash.baseOf.anyoneCanPayDoesNotChangeTheBase`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L67) | `baseOf(t + 128) == baseOf(t)`: setting ANYONECANPAY leaves the base alone | universal |
+| [`Sighash.isAnyoneCanPay.isBitSeven`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L84) | `isAnyoneCanPay(t) == (t & 128 == 128)` | universal |
+| [`Sighash.withoutSeparators.isStableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L256) | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, `because separatorReason` | universal |
+| [`Bip341.validHashType.isBip341Set`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L149) | valid exactly on `0..3` and `129..131`, the set BIP341 names, with negatives refused | universal |
+| [`Bip341.spendType.isTwiceTheExtensionPlusTheAnnex`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L176) | `spendType(annex, ext) == 2 * ext + annex`, the byte BIP341 writes into the signature message | universal |
 
 The seventh, that a SINGLE hash type signing an Input past the last Output
 yields the value one (the SIGHASH_SINGLE bug Core's `SignatureHash`
@@ -613,9 +702,9 @@ is regenerated with exactly those three.
 
 | law | pins | tier |
 |---|---|---|
-| `UtxoStore.decodeReached.readsWhatEncodeReachedWrote` | `decode(encode(Reached(h, id))) == Ok(Reached(h, id))` for Heights `0`, `4000`, `2^32 - 1` and three real Ids; `when` a 32-bit Height and a 64-hex Id | bounded (`when`) |
-| `TreeStore.decodeHeld.readsWhatEncodeHeldWrote` | `decode(encode(held)) == Ok(held)` over Heights and Chain Work up to 2^256, with a real parent and Header | bounded (`when`) |
-| `TreeStore.heldIn.refusesAnythingCutShort` | the 123-byte sample record cut to `n` bytes decodes exactly when `n == 123` | bounded (`when`) |
+| [`UtxoStore.decodeReached.readsWhatEncodeReachedWrote`](https://github.com/n1bor/btc-listener/blob/main/domain/utxostore.av#L261) | `decode(encode(Reached(h, id))) == Ok(Reached(h, id))` for Heights `0`, `4000`, `2^32 - 1` and three real Ids; `when` a 32-bit Height and a 64-hex Id | bounded (`when`) |
+| [`TreeStore.decodeHeld.readsWhatEncodeHeldWrote`](https://github.com/n1bor/btc-listener/blob/main/domain/treestore.av#L76) | `decode(encode(held)) == Ok(held)` over Heights and Chain Work up to 2^256, with a real parent and Header | bounded (`when`) |
+| [`TreeStore.heldIn.refusesAnythingCutShort`](https://github.com/n1bor/btc-listener/blob/main/domain/treestore.av#L119) | the 123-byte sample record cut to `n` bytes decodes exactly when `n == 123` | bounded (`when`) |
 
 The fourth, that a Set standing of `n` zero bytes decodes exactly when
 `n == 36`, landed on `sorry` as a law over the count — the prover does not
@@ -647,16 +736,16 @@ export now lists under both spellings), and the baseline is regenerated.
 
 | law | pins | tier |
 |---|---|---|
-| `Block.meetsTarget.signBitProvesNothing` | with bit 23 set no Block Id meets the target (Core: `fNegative`, or a zero target) | universal |
-| `Block.meetsTarget.overflowProvesNothing` | with the mantissa shifted past 256 bits no Block Id meets the target (Core: `fOverflow`) | universal |
+| [`Block.meetsTarget.signBitProvesNothing`](https://github.com/n1bor/btc-listener/blob/main/domain/block.av#L394) | with bit 23 set no Block Id meets the target (Core: `fNegative`, or a zero target) | universal |
+| [`Block.meetsTarget.overflowProvesNothing`](https://github.com/n1bor/btc-listener/blob/main/domain/block.av#L400) | with the mantissa shifted past 256 bits no Block Id meets the target (Core: `fOverflow`) | universal |
 | `Target.compactOf.roundTripsTheLimitOfEveryNetwork` | `compactOf(targetOf(limitBits(n))) == limitBits(n)` on all four Networks (Core: `GetCompact(SetCompact(x)) == x`) | cases |
-| `Target.compactOf.truncatesAndIsIdempotent` | `targetOf(compactOf(t)) <= t` and `compactOf` is idempotent through `targetOf`, for `0 < t < 2^256` | bounded (`when`) |
-| `Target.ruleFor.windowsRepeatAndRegtestNeverRetargets` | the rule at `h` is the rule at `h + 2016`, and regtest is never `Retarget` (`fPowNoRetargeting`) | universal |
-| `Target.retargeted.clampsAndNeverExceedsTheLimit` | for canonical parent bits and spans either side of the clamp: the new target is at most four times the old, never above the Network's limit, and the old bits at exactly one window when the old target is under the limit (`retargetSpec`) | bounded (`when`) |
-| `Target.minOrLast.twentyMinutesIsStrict` | `parentTime + 1200` keeps the last bits; `+ 1201` gives the limit | universal |
+| [`Target.compactOf.truncatesAndIsIdempotent`](https://github.com/n1bor/btc-listener/blob/main/domain/target.av#L128) | `targetOf(compactOf(t)) <= t` and `compactOf` is idempotent through `targetOf`, for `0 < t < 2^256` | bounded (`when`) |
+| [`Target.ruleFor.windowsRepeatAndRegtestNeverRetargets`](https://github.com/n1bor/btc-listener/blob/main/domain/target.av#L75) | the rule at `h` is the rule at `h + 2016`, and regtest is never `Retarget` (`fPowNoRetargeting`) | universal |
+| [`Target.retargeted.clampsAndNeverExceedsTheLimit`](https://github.com/n1bor/btc-listener/blob/main/domain/target.av#L212) | for canonical parent bits and spans either side of the clamp: the new target is at most four times the old, never above the Network's limit, and the old bits at exactly one window when the old target is under the limit (`retargetSpec`) | bounded (`when`) |
+| [`Target.minOrLast.twentyMinutesIsStrict`](https://github.com/n1bor/btc-listener/blob/main/domain/target.av#L283) | `parentTime + 1200` keeps the last bits; `+ 1201` gives the limit | universal |
 | `Target.refusal.acceptsExactlyWhatTheRuleGives` | `refusal == None` exactly when `placeable`: the rule's bits, at most two hours ahead, strictly after the median | cases |
 | `Target.medianOf.isOrderFree` | invariant under reversal and sorting | cases |
-| `Target.medianOf.isOneOfItsInputs` | an element of a non-empty input | bounded (`when`) |
+| [`Target.medianOf.isOneOfItsInputs`](https://github.com/n1bor/btc-listener/blob/main/domain/target.av#L459) | an element of a non-empty input | bounded (`when`) |
 | `Target.medianOf.takesTheUpperMiddleOfAnEvenList` | `medianOf([a, b]) == max(a, b)`, Core's `pbegin[(pend - pbegin) / 2]`; a lower middle would shift MTP by one Header | cases |
 
 The `canonical` guard on the retarget law is a `match`, not a `Bool.and`:
@@ -709,12 +798,12 @@ laws), baseline regenerated, `--gate` 0 regressions.
 | `Snapshot.ringWith.holdsEachIdOnce` | after `ringWith(views, view)` exactly one row names `view.txId` | cases |
 | `SpendContext.inputAt.someExactlyWhenTheInputExists` | `Some` exactly for `0 <= index < inputs`; the negative side fails before the fix and was the hostile lane's alone until jasisz/aver#1451 closed on the `8fb5d98e` pin, when a `0 - 1` row joined the cases | cases |
 | `Address.routableOctets.agreesWithCoreIsRoutable` | equals `coreIsRoutable`, Core's `IsRoutable` written flat, over a 12×10×5×3 grid of octets | cases |
-| `Inventory.countPrefix.isCompactSize` | the inv count prefix is `CompactSize.encode` below 65536 | universal |
-| `Block.countPrefix.isCompactSize` | the Locator count prefix is `CompactSize.encode` below 65536 | universal |
-| `IndexKeys.scanOrder.isByteFieldNumber` | the big-endian key field is `ByteField.number` | bounded (`when`) |
+| [`Inventory.countPrefix.isCompactSize`](https://github.com/n1bor/btc-listener/blob/main/domain/block.av#L630) | the inv count prefix is `CompactSize.encode` below 65536 | universal |
+| [`Block.countPrefix.isCompactSize`](https://github.com/n1bor/btc-listener/blob/main/domain/block.av#L630) | the Locator count prefix is `CompactSize.encode` below 65536 | universal |
+| [`IndexKeys.scanOrder.isByteFieldNumber`](https://github.com/n1bor/btc-listener/blob/main/domain/indexkeys.av#L104) | the big-endian key field is `ByteField.number` | bounded (`when`) |
 | `ScriptWork.intoLightest.keepsEveryPiece` | one more Piece among the branches, whatever the branches | cases (verify only) |
 | `Infra.Utxo.txidIn.agreesWithUtxoStore` | the Set-key Id slice agrees with `UtxoStore.txidInKey` (verify only: `infra/` is outside both proof entries) | verify |
-| `Infra.Utxo.fromScanOrder.isByteFieldNumberIn` | the big-endian reader is `ByteField.numberIn` (verify only) | verify |
+| [`Infra.Utxo.fromScanOrder.isByteFieldNumberIn`](https://github.com/n1bor/btc-listener/blob/main/infra/utxo.av#L647) | the big-endian reader is `ByteField.numberIn` (verify only) | verify |
 
 Four of the statements are cases rather than laws: `agreesWithCoreIsRoutable`
 (two flat Bool trees over four octets), `holdsEachIdOnce`,
@@ -728,3 +817,86 @@ Item 12's remaining duplicates — the witness-version byte reader in Script,
 Witness and ReadAddress, and the second Script tokenizer — are left as they
 are: each is a few lines, and a law pinning them equal would be longer than
 the duplication it pins.
+
+## The Handshake refuses exactly three things (n1bor/btc-listener#280 item 16)
+
+`Domain.Handshake.versionFault` reads a Peer's `version` for what it says, and
+one law pins the whole of its behaviour rather than its three messages:
+
+```aver
+verify versionFault law refusesExactlyTheThree
+    given version: Int = [0, 209, 70015, 70016, 70017]
+    given services: Int = [0, 1, 8, 9, 1033]
+    given ourNonce: Bool = [true, false]
+    given inbound: Bool = [true, false]
+    isNone(versionFault(version, services, ourNonce, inbound)) => ...
+```
+
+Universal. The right-hand side is the acceptance condition spelled out
+independently — not our own nonce, at or above the minimum protocol, and
+either inbound or offering `NODE_WITNESS` — so the law says the function
+refuses **exactly** that set and nothing else. A fourth refusal added without
+updating the condition is a red law, which is the property worth having: the
+failure mode for a handshake check is refusing an honest Peer, and that is
+indistinguishable from a deadline expiring unless something states the
+boundary. Twenty combinations of the four arguments, and the samples include
+`70015` and `70016` either side of the floor, and services `8` and `9` either
+side of the witness bit.
+
+## A refusal survives the round trip (n1bor/btc-listener#376)
+
+When a Block proves its work and then fails consensus, the reason travels as
+one sentence that `Domain.Connect.cannotConnect` writes and `refusalOf` reads
+back. The law says the reader inverts the writer:
+
+```aver
+verify refusalOf law readsWhatCannotConnectWrote
+    given blockId: String = [...]
+    given why: String = [...]
+    when Bool.and(Bool.not(String.contains(blockId, " ")), Bool.not(String.contains(why, " cannot connect: ")))
+    refusalOf(cannotConnect(blockId, why)) => Option.Some((blockId, why))
+```
+
+Bounded, by the `when` guard on the separator. What it protects is a string
+the walk has to parse back to decide whether a stop is the chain's own or a
+Peer's fault: a message that is not that sentence is treated as the chain
+stopping, so a writer and reader that disagreed would turn a Peer's bad Block
+into a node that stops. The guard is the honest part of the statement — a
+Block Id with a space in it, or a reason containing the separator, is outside
+what the writer can produce.
+
+## The debug log's instant (n1bor/btc-listener#360)
+
+Two laws over `Domain.Stamp.isoOf`, which turns milliseconds into the date and
+clock every `debug.log` line opens with. Both bounded, by `when` guards on the
+range:
+
+- [`alwaysTwentyFourCharacters`](https://github.com/n1bor/btc-listener/blob/main/domain/stamp.av#L48) — the result is always 24 characters, for every
+  instant from the epoch to the year 9999. A format that silently narrows,
+  dropping a leading zero or the milliseconds, makes every log line after it
+  misalign; this is the law that says it cannot.
+- [`dayAndClockAreIndependent`](https://github.com/n1bor/btc-listener/blob/main/domain/stamp.av#L53) — `isoOf(day * 86400000 + inDay)` is
+  `"{civilOf(day)}T{clockOf(inDay)}Z"` for every day and every instant within
+  it. That is the real content: the date half and the clock half do not
+  interfere, so there is no hour that rolls the date or millisecond that
+  rolls the hour.
+
+## The pool's silence rule (n1bor/btc-listener#268)
+
+Two laws over `Domain.Watchdog.unheard`, which decides when the pool's silence
+ends the run. Both universal:
+
+- [`emptyDiallingPoolIsNeverUnheard`](https://github.com/n1bor/btc-listener/blob/main/domain/watchdog.av#L88) — a pool with no Peers that is still
+  dialling is never unheard, at any silence and any deadline. Without it the
+  node could end its own run during startup, before anybody has had a chance
+  to answer.
+- [`aPoolWithSomebodyKeepsTheRule`](https://github.com/n1bor/btc-listener/blob/main/domain/watchdog.av#L93) — with at least one Peer, silence is
+  tolerated **if and only if** it is under the deadline. Stated as an
+  equivalence rather than an implication, so neither a node that gives up
+  early nor one that waits for ever satisfies it.
+
+The pair is worth reading together: the first is the exception, the second is
+the rule, and between them they cover the pool states that matter. The
+companion question — one quiet Peer rather than a quiet pool — is a different
+rule and has no law, because it is a sweep over per-Peer clocks rather than an
+arithmetic claim (#330).
