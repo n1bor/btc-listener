@@ -10,7 +10,8 @@ The one-paragraph version: a Bitcoin node written as a **pure core and a
 thin, effectful shell**. `domain/` decides everything and touches nothing;
 `infra/` is the only code that reads a socket or a disk and it is an
 arrangement of `domain/` parts; `app/` turns argv into calls; `main.av` is
-thirty lines. Persistent state is one keyed byte Store (RocksDB) plus
+240 lines: the program's whole effect set, and the six processes `follow`
+runs as. Persistent state is one keyed byte Store (RocksDB) plus
 append-only Segment files of Block bodies. Several Peers share one polling
 loop. The UTXO Set is built by connecting Blocks in Height order against a
 write-back window, with the next Block's fetch running beside the current
@@ -47,7 +48,7 @@ flowchart TB
         state["ChainState · Utxo · Rewind · Headers · Audit · Outputs · TxIndex · Spends · Mempool"]
         store["Store · Kv · Blocks · Lock · Prune · Reindex · Screen · Metrics · Debug"]
     end
-    subgraph domain ["domain/ — pure, 1,745 verify blocks"]
+    subgraph domain ["domain/ — pure, 2,412 verify blocks"]
         d1["Block · Transaction · Message · Inbox · Version · Addr · AddressBook"]
         d2["HeaderTree · Chainwork · Reorg · Rewind · Connect · Disconnect · UtxoStore · Index · IndexKeys · Segment"]
         d3["Script* · Interp · Witness · Taproot · Sighash · Bip143 · Bip341 · Ecdsa · Rules · Checks"]
@@ -65,9 +66,9 @@ flowchart TB
 | Layer | Files | What may happen there | Tested by |
 |---|---|---|---|
 | [`main.av`](../main.av) | 1 | Declares the program's full effect set and calls the adapter | reachability |
-| [`app/`](../app) | 6 | Parse argv, print usage, choose a command | verify blocks on the parsing |
-| [`infra/`](../infra) | 28 | Sockets, disk, the database, the terminal, time, randomness | regtest end-to-end ([docs/regtest-testing.md](regtest-testing.md)) |
-| [`domain/`](../domain) | 81 | Nothing. Every function is pure | colocated verify blocks (about 1,800) + the Core corpus (6,050 cases) |
+| [`app/`](../app) | 7 | Parse argv, print usage, choose a command | verify blocks on the parsing |
+| [`infra/`](../infra) | 31 | Sockets, disk, the database, the terminal, time, randomness | regtest end-to-end ([docs/regtest-testing.md](regtest-testing.md)) |
+| [`domain/`](../domain) | 91 | Nothing. Every function is pure | colocated verify blocks (2,412) + the Core corpus (6,050 cases) |
 | [`providers/`](../providers) | 2 crates | RocksDB; the curve | their own Rust tests |
 
 **Why this split.** The claim the project wants to make is: *a failure against
@@ -316,10 +317,18 @@ they are [`Infra.Download`](../infra/download.av) and
 The Header phase comes first because a `getdata` names Block Ids and never
 Heights: the chain has to be known before any body can be asked for. Every
 Header is fetched (all of them fit comfortably) and placed. The body phase
-then asks for Locations in batches and, for each body that arrives, checks
-that it hashes to the Id it was requested under
-([`Domain.Block.idOfWholeBlock`](../domain/block.av)) before it is appended
-to a Segment — an honest Peer is never accused, and a lying one is dropped.
+then asks for Locations in batches and, for each body that arrives, puts it
+through [`Domain.Body.fault`](../domain/body.av) before it is appended to a
+Segment: it must hash to the Id it was requested under
+([`Domain.Block.idOfWholeBlock`](../domain/block.av)), decode, open with one
+coinbase and only one, repeat no txid, build the Merkle Root with no
+duplicated pair, and since #399 commit to its witnesses. **Which kind of
+fault decides what happens next** (#408): `Fault.Body` means these bytes are
+not that Block, so the Height is asked of another Peer; `Fault.Block` means
+the weight or the signature-operation ceiling, checked only once the Root and
+the commitment have bound those bytes to that Header, so the Header is marked
+invalid and asked of nobody. Getting that the wrong way round cost an honest
+Peer per bad Block.
 
 Both phases claim the directory through [`Infra.Lock`](../infra/lock.av)
 first ([`app/cli.av:193`](../app/cli.av#L193), [`:331`](../app/cli.av#L331)):
@@ -339,10 +348,10 @@ what a Block does to the Set is pure
 
 ```mermaid
 flowchart TB
-    subgraph step ["one step of the walk — Infra.ChainState.overlapped"]
+    subgraph step ["one step of the walk — Infra.ChainState.stepOnce"]
         part["partitioned(this.transactions, window)<br/>Inputs the window answers → hits<br/>the rest → misses"]
         part --> prod
-        subgraph prod ["?! independent product — two threads"]
+        subgraph prod ["Infra.BlockJobs — Tasks run off the owner thread"]
             fetch["fetched(store, blocks, height+1)<br/>h: → b: → Segment → decode"]
             prep["prepared(store, split)<br/>getAll(misses) → Domain.Connect.connected"]
         end
@@ -353,12 +362,17 @@ flowchart TB
     end
 ```
 
-**Three rules, none about signatures.** [`Domain.Connect.connected`](../domain/connect.av#L113)
-checks that every Input names an Output the Set holds, that value is
-conserved per Transaction and per Block (fees against
-[`Domain.Subsidy`](../domain/subsidy.av)), and that a coinbase Output is a
-hundred Blocks old before it is spent — which is why every `u:` entry carries
-the Height that made it and whether it came from a coinbase. Signatures are
+**Three rules about value, five more by Height, and none about signatures.**
+[`Domain.Connect.connected`](../domain/connect.av#L113) checks that every
+Input names an Output the Set holds, that value is conserved per Transaction
+and per Block (fees against [`Domain.Subsidy`](../domain/subsidy.av)), and
+that a coinbase Output is a hundred Blocks old before it is spent — which is
+why every `u` entry carries the Height that made it and whether it came from
+a coinbase. Since #354 and #399–#401 `connectedUnless` adds BIP30 duplicate
+Outputs, BIP34's coinbase Height, the Block weight and signature-operation
+ceilings through [`Domain.BlockLimits`](../domain/blocklimits.av), and
+`IsFinalTx`, BIP113 and BIP68 through
+[`Domain.Finality`](../domain/finality.av). Signatures are
 the Script engine's business ([§9](#9-the-script-engine)) and are checked
 by `audit`, not by the walk (ADR [0007](adr/0007-two-claims-two-tools.md)).
 
@@ -384,14 +398,20 @@ window. Every `Map.set` on it sits in argument position
 of a tail call on a parameter (#227) — the one shape under which Aver's
 `Rc<HashMap>` copy-on-write does not copy.
 
-**The product (#233, ADR [0008](adr/0008-independence-and-a-single-writer-loop.md)).**
-`(fetched(...), prepared(...))?!` runs the next Block's read and this Block's
-resolve as two threads. The rule the shape obeys: **everything in the
-product reads; every write happens after it, on the one thread that owns
-the Store.** That is both a correctness discipline and a language
-constraint — a product's carrier has to be comparable, and a Store holding a
-database resource cannot be, so `Applied` (the written Store) could never
-have crossed it. Attempts to move more work into the product are measured,
+**The job (#233, then the Work layer; ADR [0008](adr/0008-independence-and-a-single-writer-loop.md)).**
+This began as `(fetched(...), prepared(...))?!`, an independent product
+running the next Block's read and this Block's resolve as two threads. It is
+a typed Work job now: `Infra.ChainState.stepOnce` walks
+`aheadOr → readingOr → decodeTaken → connectingFrom → connectBegun →
+connectTaken → absorbedFrom → advanced`, handing a Block's decode and its
+pure UTXO connection to `Infra.BlockJobs.begin` and applying the `Reply` that
+`take` returns, with at most `[work] max-jobs = 4` in flight. The rule is
+unchanged and is the point: **everything off the owner's thread reads; every
+write happens on the one thread that owns the Store.** The old shape enforced
+it through the language — a product's carrier has to be comparable, and a
+Store holding a database resource cannot be, so `Applied` could never have
+crossed it — and the Job enforces it by carrying data and no Store at all.
+Attempts to move more work off the owner are measured,
 and two of them were losses: prefetching the next Block's Store answers on
 the fetch thread (#251, 6 % slower — the resolve was already off the
 critical path) and RocksDB option changes (#252, within noise).
@@ -405,7 +425,10 @@ them. The download runs Set chunks of its own while Blocks are still landing
 the unbounded version of that walk was #266, an eight-minute wedge that hid
 as a *missing* line. Hence the watchdog (#268): the Eye that every walk
 carries knows which chunk it is walking and when the last Block ended, and
-writes `slow chunk` (from inside the walk), `slow block` and `slow stop`
+writes `slow chunk` (from inside the walk), `slow chunk done`, `slow block`,
+`slow stop` and `slow turn` — the last naming which of `App.Owner`'s fourteen
+answers the turn was spent in, which before #412 it borrowed from the last
+Message dispatched and so usually got wrong
 lines to `debug.log` when a budget is passed ([`Domain.Watchdog`](../domain/watchdog.av)
 is the budgets and the words). Reporting only.
 
@@ -427,9 +450,10 @@ is still on the chain.
 `follow` is the three download phases — Headers, bodies, Set — run again
 every time a Peer announces something, plus the things a node does that a
 downloader does not. [`Infra.Follow`](../infra/follow.av) is the largest
-module (2,777 lines) and [`Following`](../infra/follow.av) is its state
-record, carried through a tail-recursive loop
-([`turning`](../infra/follow.av#L1467)).
+module (3,543 lines) and [`Following`](../infra/follow.av) is its state
+record — carried now by [`App.Owner`](../app/owner.av) and advanced one
+answer at a time by the processes in `main.av`, where it used to go round a
+tail-recursive loop of Follow's own.
 
 ```mermaid
 stateDiagram-v2
@@ -522,7 +546,8 @@ Core runs): its edge cases are consensus rules and are not something to
 re-derive.
 
 **Rules by Height.** A Block is checked under the rules it was mined under
-([`Domain.Rules.at`](../domain/rules.av#L81)): P2SH, BIP66 encoding, CLTV
+([`Domain.Rules.at`](../domain/rules.av#L81)): P2SH, BIP66 strict DER,
+SegWit, NULLDUMMY, Taproot, CLTV
 and CSV activation Heights per network. `Infra.Audit` resolves the rules
 once per Height and the Context carries them down to the opcode.
 
@@ -578,10 +603,10 @@ the pattern, repeated everywhere.
 
 **No loops, no `if`: state machines as tail-recursive functions.** Every
 loop in the program is a function that matches on its state and calls
-itself or its successor. `turning → tended → caughtUp / catchingUp` in
-Follow, `stepping → unlessStopped → overlapped → absorbing → continued` in
-ChainState, and the per-key `partitionedFrom → partitionedOne` folds in
-Utxo. This is why the walk's state is a flat set of parameters rather than
+itself or its successor. `stepOnce → readingOr → connectingFrom →
+connectTaken → absorbedFrom → advanced` in ChainState, the process functions
+`walk → caughtUpIf → catchingUp → fetching → afterFetch` in `main.av`, and
+the per-key `partitionedFrom → partitionedOne` folds in Utxo. This is why the walk's state is a flat set of parameters rather than
 one record: a `Map` that lives in a record field is copied on every `set`,
 and one that is a parameter and is set in argument position of a tail call
 is not (#227). The window's shape — six parameters threaded through five
@@ -594,7 +619,7 @@ verify block is a check error, and a verify block can only call pure code.
 That made "can I write a case for this?" the test of whether a function
 belongs in `domain/`, and it is why `App.Show` reads no disk (every function
 is covered by cases) and why `Domain.Screen` computes draw operations instead
-of drawing. The 1,745 verify blocks are pinned against published vectors,
+of drawing. The 2,412 verify blocks are pinned against published vectors,
 Core's test data and spec-computed values, never against the code under
 test — a project rule that the language made cheap to keep.
 
@@ -619,7 +644,11 @@ and no elliptic curve. Rather than write either in Aver, the project
 declared each as a contract with no bodies and supplied Rust — the same
 libsecp256k1 Core runs, the same RocksDB Core's cousins run. The domain
 seam ([`Domain.Ecdsa.Ruling`](../domain/ecdsa.av#L78)) was designed so that
-what the provider *cannot* answer is a constructor, not a silent pass.
+what the provider *cannot* answer is a constructor, not a silent pass. A
+third contract has no Rust behind it at all:
+[`Infra.BlockJobs`](../infra/blockjobs.av) is bound in `aver.toml` to
+`Domain.BlockWorkJob.run`, so the provider is this program's own Aver code
+and the Work layer is what runs it.
 
 **A glossary that the compiler half-enforces.** Aver's rule that every name
 means one thing in its scope — a parameter may not shadow a function, a
@@ -639,6 +668,14 @@ pin" routine is the discipline of retiring them as the issues close — the
 `Ahead.network` field, the E0659 renames and the `?!` enum capture (#1191)
 have all gone that way.
 
+**The laws are checked by a machine, not by review.** Every `verify ... law`
+reachable from `main.av` is exported to Lean 4 and checked by its kernel as
+CI's `proof` job: 166 laws, 153 of them universal, with a zero sorry budget
+and a committed per-law manifest (`proof/main.manifest.json`) that fails the
+job if a law is removed, demoted or grows an axiom.
+[docs/script-laws.md](script-laws.md) is the register and
+[docs/proofs.md](proofs.md) is what a green run does and does not mean.
+
 ## 12. Where the rest is written down
 
 | Document | What it holds |
@@ -651,3 +688,6 @@ have all gone that way.
 | [docs/regtest-testing.md](regtest-testing.md) | The end-to-end test against a real Core node, including a reorganisation |
 | [docs/core-corpora.md](core-corpora.md) | Which Core test data is compiled in, and how |
 | [docs/aver-vs-other-languages.md](aver-vs-other-languages.md) | The language comparison this document's §11 summarises |
+| [docs/proofs.md](proofs.md) | What the `proof` job proves about the whole program, and what a green run does not mean |
+| [docs/script-laws.md](script-laws.md) | The register of the 166 laws: what a law is, what proving one buys, and every one linked to its source |
+| [docs/work-wait-migration.md](work-wait-migration.md) | What moving `follow` onto Aver's generated loop required, and how it was measured |
