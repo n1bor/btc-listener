@@ -10,25 +10,31 @@ blocks each one.
 
 | Core file | ours | cases | tool |
 |---|---|---|---|
-| `script_tests.json` | `corpus/scriptcases1..5.av` | 1118 | `tools/script_tests_to_aver.py` |
+| `script_tests.json` | `corpus/scriptcases1..5.av` | 1120 | `tools/script_tests_to_aver.py` |
 | `sighash.json` | `corpus/sighashcases1..2.av` | 500 | `tools/sighash_tests_to_aver.py` |
-| `tx_valid.json`, `tx_invalid.json` | `corpus/txcases1..4.av` | 213 | `tools/tx_tests_to_aver.py` |
+| `tx_valid.json`, `tx_invalid.json` | `corpus/txcases1..4.av` | 214 | `tools/tx_tests_to_aver.py` |
 | `script_tests.json`, the Witness rows | `corpus/witnesscases1..3.av` | 108 | `tools/witness_tests_to_aver.py` |
 | BIP341 `wallet-test-vectors.json` | `corpus/bip341cases.av` | 39 | `tools/bip341_vectors_to_aver.py` |
 | `key_io_valid.json` | `corpus/keyiocases.av` | 108 | `tools/key_io_to_aver.py` |
 | `key_io_invalid.json` | `corpus/keyioinvalidcases.av` | 70 | `tools/key_io_invalid_to_aver.py` |
 | `base58_encode_decode.json` | `corpus/base58cases.av` | 42 | `tools/base58_to_aver.py` |
 | `script_assets_test.json` | `corpus/assetcases1..9.av` | 3737 | `tools/script_assets_to_aver.py` |
+| veorq/SipHash `vectors.h` | `corpus/siphashcases.av` | 64 | `tools/siphash_vectors_to_aver.py` |
+| a regtest `cmpctblock` capture | `corpus/compactblockcases.av` | 31 | `tools/cmpct_oracle_to_aver.py` |
 
-Between them **5,938 verify cases**, and every entry these files hold is either
+The last two are not Core's files: SipHash's vectors come from veorq's
+reference implementation, and the compact-Block oracle is a capture taken from
+a live regtest Core and committed rather than rebuilt in CI.
+
+Between them **6,050 verify cases across 29 generated files**, and every entry these files hold is either
 read or excluded for a reason with an issue against it:
 
 | file | entries | read | left out |
 |---|---|---|---|
-| `script_tests.json`, Script pairs | 1120 | 1119 | 1 over the verify VM's step budget, answered by the compiled engine and recorded in the module, #75 |
+| `script_tests.json`, Script pairs | 1120 | 1120 | — |
 | `script_tests.json`, Witness rows | 113 | 108 | 5 carrying `TAPROOT`, which are BIP342 leaf cases Core's own note sends to the taproot asset tests, #74 |
 | `sighash.json` | 500 | 500 | — |
-| `tx_valid.json`, `tx_invalid.json` | 214 | 213 | 1 over the step budget, answered by the compiled engine and recorded in the module, #75 |
+| `tx_valid.json`, `tx_invalid.json` | 214 | 214 | — |
 | BIP341 `wallet-test-vectors.json` | 3 sections | all 3 | — |
 | `key_io_valid.json` | 70 | 54 | 16 WIF private keys, which this project has no notion of, #71 |
 | `key_io_invalid.json` | 70 | 70 | — |
@@ -200,7 +206,7 @@ Getting the construction wrong would look exactly like getting the engine
 wrong, which is the risk this tool carries. It is self-checking in one
 important way: BIP143 and BIP341 both commit to the Transaction Id and to the
 amount, so a harness that built either wrongly would fail **every** signed case
-rather than some of them. Fifty-six of the 108 pass, which is evidence about
+rather than some of them. Forty-two of the 108 pass, which is evidence about
 the harness and not only about the engine.
 
 Five rows are left out: the ones carrying the `TAPROOT` flag, which are
@@ -239,7 +245,7 @@ The probe needs a project of its own and the reason is worth stating, because
 the obvious command does not work:
 
 ```
-$ aver run /tmp/p/main.av --module-root . --providers
+$ aver run /tmp/p/main.av --module-root .
 aver.toml: [[providers.bindings]] index 1 capability 'Infra.Kv' has no
 capability contract in this project
 ```
@@ -346,8 +352,16 @@ Core's row order is `[raw, script, index, hashType, hash]` and `check` takes
 
 `--check` regenerates in memory and diffs against what is on disk. That is how
 the tool was tested: the corpus already existed and passed, so a generator that
-reproduces it byte for byte is a generator that would have produced it. Both
-files match.
+reproduces it byte for byte is a generator that would have produced it.
+
+**Both files now differ, in their header and not their cases.** `--check`
+reports `sighashcases1.av DIFFERS` / `sighashcases2.av DIFFERS` on one line:
+the committed file says `depends [Bytes, Domain.Sighash]` and the tool would
+write `depends [Domain.Sighash]`. `tools/bip341_vectors_to_aver.py --check`
+differs the same way, on `Bytes.octets` against `Bytes.toList`. Both are the
+generators trailing a changed `Bytes` API rather than corpus drift — the case
+data is identical — but it means these two tools can no longer reproduce the
+corpora they own, which is the one property this section claims for them.
 
 ## Not read yet
 
@@ -451,13 +465,14 @@ had been sitting in Core's repository for years.
 
 ## Cases left out
 
-Both tools drop cases the verify VM cannot finish. `aver verify` runs on the VM
-with a million-step budget; the compiled engine has no such limit and answers
-them.
+**The step-budget exclusions are gone.** Both tools used to drop the cases the
+verify VM could not finish within a million steps — anything over 1000 bytes
+on either side for Scripts, and one 1911-byte Transaction with twelve
+Inputs — and record them as answered by the compiled engine instead (#75).
+`aver.toml`'s `[[verify.costly]]` entries raised the budget for exactly those
+three corpora, so every case is read now and both generators say so in their
+own docstrings. One exclusion remains, and it is not about cost:
 
-* Scripts: anything over 1000 bytes on either side.
-* Transactions: one case, a 1911 byte Transaction with twelve Inputs. The
-  median case is 135 bytes and the next largest is under 500.
 * Witness rows: the five carrying the `TAPROOT` flag, which are tapscript leaf
   cases rather than BIP141 ones.
 
@@ -469,9 +484,11 @@ the corpus is regenerated.
 A regenerated corpus with a different answer in it is either a fix or a
 regression, and the diff will not tell you which. What tells you is the
 agreement report moving in the right direction, and every disagreement having
-a reason. The open ones are #22 (BIP66), #51 (CLTV and CSV), #52 (verification
-flags), #53 (CheckTransaction), #54 (unknown witness versions), #20 (SegWit)
-and #12 (Taproot).
+a reason. **There are none today**: every probe corpus records 0 disagree, and
+the issues that once held them — #22 (BIP66), #51 (CLTV and CSV), #52
+(verification flags), #53 (CheckTransaction), #54 (unknown witness versions),
+#20 (SegWit) and #12 (Taproot) — are all closed. What follows is what to do
+when one appears.
 
 
 ## The cases verify cannot run, and how they stopped being invisible
