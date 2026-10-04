@@ -359,7 +359,7 @@ here because the absence was documented here. Everything deferred is
 deliberate and none of it is a claim the node makes.
 
 **Scripts on the connect path**:
-`Domain.Connect` has no Script dependency and never has, so a Block's
+`Domain.Connect` has no path to the Script engine and never has, so a Block's
 signatures are not checked when it is connected to the UTXO Set. The Set phase
 enforces input existence, no intra-Block double-spend, coinbase maturity, value
 out ≤ value in, coinbase claim ≤ subsidy plus fees, unspendable Outputs

@@ -91,7 +91,11 @@ is the shape `infra/download.av` and `infra/txindex.av` already have.
   not.
 - Per-Input Script checking inside Block validation becomes the first natural
   product in the codebase — pure, embarrassingly parallel, and measurable
-  against the sequential walk `audit` uses today.
+  against the sequential walk `audit` uses today. *(It did not: #303 kept
+  Scripts off the connect path entirely, so there was nothing there to fan
+  out. The first concurrent work was the Block-decode and pure UTXO-connect
+  Work job instead, `Domain.BlockWorkJob.run` behind `Infra.BlockJobs` — see
+  the update below.)*
 - Anything that must outlive a call — a background sync alongside a serving
   loop, say — has no home in this model yet. The maintainer named that as the
   conversation not yet had; if a stage needs it, the ask goes upstream before
@@ -116,7 +120,11 @@ the result; rule 3 still holds. Cancelling a native job discards its result,
 without preempting the worker thread. Independent products remain useful for
 work that joins inside one call.
 
-This is an explicit CLI owner, not a generated coordinator. Startup facades
-still wait for their answers, and storage operations remain synchronous.
+**That flipped.** It is Aver's generated process loop now: `main.av` seats
+one process per seated Peer and five more — the Catch-up walk, the clock, the
+listener, the outboxes and opening the node — and `App.Owner` answers what
+they ask over one `Infra.Follow.Following`. Rule 3 is untouched, which is the
+point: the owner is still the only writer. Startup facades still wait for
+their answers, and storage operations remain synchronous.
 See [migration acceptance](../work-wait-migration.md) for the compiler
 requirement, measured native behavior and remaining validation.

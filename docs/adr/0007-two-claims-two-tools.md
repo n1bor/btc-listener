@@ -60,8 +60,10 @@ the auditor is the point of this project.
 
 n1bor/btc-listener#303. The decision above describes a node that runs Scripts
 above the Assume-valid Height and skips them below it. **Neither half was ever
-built.** `Domain.Connect` has no Script dependency, so the Set phase runs no
-Scripts at *any* Height, and `Domain.AssumeValid.runsScriptsAt` — the function
+built.** `Domain.Connect` has no path to the Script *engine* — it depends on
+`Domain.Script` for `bytesOf` and on `Domain.StackItem` for BIP34's height
+push, and neither reaches `Domain.Interp` — so the Set phase runs no Scripts
+at *any* Height, and `Domain.AssumeValid.runsScriptsAt` — the function
 that would decide where they start — has no caller outside its own module.
 `audit` runs every Script it is given, and does not consult the claim either.
 
@@ -84,18 +86,32 @@ narrower than this document originally wrote down: *this is the chain, value
 was conserved on it, and no signature on it has been checked here*.
 
 `runsScriptsAt` is kept, uncalled, as the seam — the same way
-`domain/ecdsa.av` keeps no `Valid` constructor for outcomes it cannot yet
-produce. When the Script coverage and the speed arrive, where verification
-starts is a wiring job and not a design one.
+`domain/ecdsa.av` kept no `Valid` constructor until the curve arrived as a
+provider and the compiler then named every caller that had to change. (That
+one is spent: the type is `Ruling` now and it has `Valid`.) When the speed
+arrives, where verification starts is a wiring job and not a design one.
 
-Six by-Height consensus rules are deferred alongside the Scripts and are listed
-in CONTEXT.md under **Deferred consensus rules**, with the reason: every one of
-them needs a Peer willing to spend real proof of work before it could matter,
-which #281 now requires before a Header is placed at all.
+Six by-Height consensus rules were deferred alongside the Scripts, for the
+reason that every one of them needs a Peer willing to spend real proof of
+work before it could matter — which #281 requires before a Header is placed
+at all. **All six are enforced now**: BIP34 and the witness commitment with
+#399, the Block weight and signature-operation ceilings with #400, and
+`IsFinalTx`, BIP113 and BIP68 with #401, each with a liar in
+`docs/regtest-testing.md`. CONTEXT.md records the closure. Scripts on the
+connect path are the one deferral left.
 
 ## What would retire this
 
 An engine and a machine fast enough that full verification from genesis is an
-overnight job rather than a season. Real concurrency in Aver
-([jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007)) plus both
-Script issues closing would reopen the question; until then the trade stands.
+overnight job rather than a season.
+
+**The trigger this record named has fired, and the trade still stands.** Real
+concurrency in Aver
+([jasisz/aver#1007](https://github.com/jasisz/aver/issues/1007)) closed, and
+so did both Script issues — #20 for segwit v0 and #12 for Taproot. Aver has
+processes and typed Work jobs, and the engine passes Core's corpus. So the
+question was reopened and re-decided on the remaining half of the argument
+alone: speed. Verifying every signature from genesis is still a season's work
+on one machine, and `audit` is still the tool that does it when asked. What
+would retire the decision now is only that: fast enough to do it on the
+connect path without making the node useless.

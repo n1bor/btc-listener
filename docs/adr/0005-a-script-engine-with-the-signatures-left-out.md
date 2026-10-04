@@ -730,3 +730,54 @@ need a Block Id to reach `Rules`, and would buy nothing that can ever be
 observed on mainnet.
 
 What did need fixing was the doc comment, which claimed the Height was Core's.
+
+## Update — the curve arrived, and most of this record is now history
+
+Dated 18 August 2026, written here 4 October 2026, because the event that
+most changes this record's subject never reached it. **The primitives this
+record was written around are all supplied now**, behind a declared contract
+with no bodies in Aver: `domain/primitives.av` → `providers/primitives`,
+which is libsecp256k1 and RIPEMD-160 and SHA-1, the same code Core runs. The
+curve is a provider on purpose — its edge cases are consensus rules, so
+re-deriving it in Aver would be re-deriving consensus.
+
+What that makes false above, point by point:
+
+- **"Its body returns `Verdict.Undecidable` and nothing else"** and **"there
+  is no `Verdict.Valid`"**. The type is `Ruling` now — `Domain.Spend` had
+  taken `Verdict` — and it is `Valid | Invalid(String) | Undecidable(String)`.
+  `decide` hands well-formed signatures to `Domain.Primitives.verifySignature`.
+  The seam worked exactly as designed: when the curve landed, the missing
+  constructor made the compiler name every caller that had to change.
+- **"Four more need a hash Aver has not got"** — `OP_HASH160`,
+  `OP_RIPEMD160`, `OP_HASH256`, `OP_SHA1`. All answerable; `domain/hash.av`
+  wraps them with pinned vectors.
+- **"`Undecided` is the answer for every real spend until there is a curve"**.
+  It is the rare answer now. `audit` over mainnet reports
+  `scripts 2133120 passed / 0 failed / 0 undecided`. Undecided means a
+  witness or Taproot program refused before running, or a primitive genuinely
+  missing — not every spend.
+- **"Taproot is out of scope for a first version"**. In scope and in:
+  `domain/bip341.av`, `domain/taproot.av`, `domain/tapsig.av`,
+  `domain/schnorr.av`, and Core's 3,737 `script_assets_test.json` tapscript
+  cases in `corpus/assetcases1-9.av`. #12 and #20 are both closed.
+- **"`Domain.Transaction` keeps `witnessItems` as a count and discards the
+  items"** and **"`Domain.Script` reports P2PK as `nonstandard`"**. Both
+  resolved: `record Input` carries `witness: List<String>`, with the count
+  surviving only as the accessor `witnessItemsOf`; `classify` reports `P2PK`
+  for 33- and 65-byte pushes.
+- **"`domain/scriptcases1.av` through `scriptcases5.av`"** — they live in
+  `corpus/` now, which got its own directory and its own CI job (#219).
+- **"Aver cannot read JSON at verify time"** — true for every corpus but one.
+  `domain/json.av` is a verify-time JSON reader, written precisely so that
+  `script_assets_test.json` could be carried as text rather than decoded by
+  Python (#101).
+- The `audit` summary line no longer ends `FAULTS 0` in capitals; it ends
+  `CLEAN (faults 0, script failures 0)`, or `UNSETTLED (…)`.
+
+**What has not changed is the decision.** The engine still refuses what it
+cannot read rather than passing it, which is the whole argument of this
+record, and the invariant it exists to protect still holds in both
+directions: **0 cases where we refuse what Core accepts.** The three-valued
+answer that made the gap visible is what made closing it safe, and
+`domain/ecdsa.av`'s own intent block is the fuller record of the change.
