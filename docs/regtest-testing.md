@@ -613,7 +613,7 @@ $BIN regtest follow 127.0.0.1:18444 $D serve:18455 &
 ```
 
 ```
-listening on port 18455 for up to 125 inbound Peer(s)
+listening on port 18455 as NODE_NETWORK|NODE_WITNESS at Height 0, for up to 125 inbound Peer(s)
 ```
 
 Then have the *second* node dial it. It must be a node with no other route to
@@ -702,11 +702,12 @@ failure. Check `getblockcount` on both before concluding anything.
 
 #### What this does not yet do
 
-Serving the chain. A Peer that dials us can talk to us, but `getheaders` and
-`getdata` for Blocks are not answered yet, so nobody can sync from this node —
-which is the rest of #30, along with the DoS work the issue asks for. What is
-here is the accept loop, the handshake from the answering side, an inbound
-cap, and a caller that misbehaves costing itself its slot and nothing else.
+**Serving the chain was the gap here and it is closed** — §12 syncs Core from
+this node, §12b does it across an abandoned fork, and the suite asserts both
+plus a `getdata` larger than a Peer's outbox. What is left of #30 is the
+BIP324 v2 transport, which this node does not speak. What this section covers
+is the accept loop, the handshake from the answering side, an inbound cap,
+and a caller that misbehaves costing itself its slot and nothing else.
 
 ### 12. A node that syncs from us
 
@@ -999,7 +1000,8 @@ does the rest.
 **The grammar is arity plus two words, not a flag.** `follow <dir>`,
 `follow <dir> screen` and `follow <dir> serve:18455` all read the first
 argument as the directory, because nothing following it is anything but
-`screen`, `serve` or `serve:PORT`. A directory actually named `screen` would
+`screen`, `log`/`log:PATH`, `serve`/`serve:PORT`, `http`/`http:PORT` or
+`inbound:N` — the whole list `App.Node.isKeyword` accepts. A directory actually named `screen` would
 be read as the word — the price of a grammar with no flags in it.
 
 **The Book is not persisted.** `domain/addressbook.av` keeps it in memory by
@@ -1765,7 +1767,7 @@ rm -rf $F2; mkdir -p $F2
 sleep 4; time curl -s -m 5 localhost:18331/ | grep -A3 '<h2>Overview'   # answers in about a second, mid-walk
 ```
 
-### 16k. The Set runs inside the download
+### 16m. The Set runs inside the download
 
 Until #185 a catch-up did the whole download and then the whole Set, one
 after the other, over the same range. The download is mostly waiting on
@@ -2488,7 +2490,8 @@ does not spell easily, so that path is the verify cases and the law in
 
 Bitcoin Core is cooperative by construction: you cannot ask it for a bad
 checksum or another Network's magic, so the paths that exist for Peers that lie
-need a Peer built to lie. `tools/regtest/liar.py` is about forty lines — it
+need a Peer built to lie. `tools/regtest/liar.py` is six hundred lines and
+twenty-one modes — it
 binds a port, answers the version handshake, then sends one bad frame:
 
 ```bash
@@ -2510,7 +2513,7 @@ false accusation, and only the honest run shows it.
 
 ### A Header that proves no work
 
-The third mode, `lowbits`, is the attack of
+The `lowbits` mode is the attack of
 [#281](https://github.com/n1bor/btc-listener/issues/281): after the
 handshake the liar announces one Header off regtest genesis carrying bits
 `0x01010000` — a target of one, worth 2^255 of work — and answers every
@@ -2663,7 +2666,7 @@ peer 1 dialled us from 127.0.0.1:49810
 refused an inbound Peer from 127.0.0.1:52690: already holding one from that host
 ```
 
-In the Work/Wait branch, a pending greeting already reserves the host's slot.
+A pending greeting already reserves the host's slot.
 The first caller can therefore be silent while the second is refused; it no
 longer needs to finish its Handshake before the host cap can be tested.
 
@@ -2738,7 +2741,7 @@ The original deadline-fix run measured — `early` 0.0 s, `chatty` 1.0 s,
 `silent` 11.0 s, `pinger` 15.0 s (the deadline is ten; the loop accepts on a
 quiet turn, and the pinger only learns it was dropped on its next send) —
 where before it was up to 150 s and for ever.
-That run still used an inline greeting. The Work/Wait branch now retains
+That run still used an inline greeting. The process loop on `main` now retains
 pending greeting state between bounded turns: ten seconds occupies the
 caller's slot while other Peers and the dashboard remain serviceable. The
 [current network probes](work-wait-migration.md#remaining-network-waits-removed)
@@ -2750,7 +2753,7 @@ writes; those measurements are separate from the historical numbers above.
 The original failure below cost the node, and was tracked as
 [#304](https://github.com/n1bor/btc-listener/issues/304). The recorded logs
 retain the old `Tcp.poll` name. The scenario remains a useful resource-ownership
-regression for the Work/Wait branch. It needs two things
+regression. It needs two things
 at once and neither on its own does anything: a caller whose Handshake does not
 complete, and another Peer disconnecting while that Handshake waits. The
 Handshake reads every Peer while it waits, so the second Peer is closed and
@@ -2853,7 +2856,7 @@ exits when it is dropped, which is the right ending.
 
 ### A Transaction that claims more Inputs than there are bytes
 
-The fourth mode, `hugetx`, is
+The `hugetx` mode is
 [#282](https://github.com/n1bor/btc-listener/issues/282): a thirteen-byte
 `tx` — version 1, then an Input count of 2^64−1 and nothing behind it. A
 decoder that trusts the count loops that many times building phantom Inputs,
