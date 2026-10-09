@@ -1814,6 +1814,7 @@ domain/  the Mempool
 domain/  Script
   opcode.av scriptparse.av stackitem.av scriptstate.av scriptmath.av
   scriptnumops.av scriptstep.av scriptops.av scriptwork.av
+  stackrules.av     a proof rule for the shuffle laws, outside the program
   interp.av         the walk: one recursion over a Script, and only one
   spendscript.av    the Input's Script then the Output's, in that order
   spendcontext.av   what a signature commits to, carried to the opcode
