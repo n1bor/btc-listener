@@ -283,8 +283,8 @@ operation's encoding. For example, deleting `[171]` twice from
 `"5101AB4C01AB52"` yields `Ok("514c01ab52")`: the nonminimal push survives.
 
 The helper law [`withoutEach.concatenatedBatches`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L310) proves that processing
-`left ++ right` equals processing `left` and then `right`. Its executable
-`batchConcatReason` follows the left batch. The wrapper law selects that
+`left ++ right` equals processing `left` and then `right`. It closes by
+induction on the left batch, with no reason function. The wrapper law selects that
 lemma and the existing idempotence law with `using`; the existing Aver pin
 closes the composition without compiler changes or handwritten Lean.
 

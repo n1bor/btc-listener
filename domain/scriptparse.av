@@ -311,8 +311,8 @@ verify withoutEach law concatenatedBatches
     given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
     given left: List<List<Int>> = [[], [[]], [[171], [187]]]
     given right: List<List<Int>> = [[], [[171]]]
-    because batchConcatReason(ops, left, right)
     using []
+    induction left
     withoutEach(ops, List.concat(left, right)) => withoutEach(withoutEach(ops, left), right)
 
 verify withoutEach law oneDeletionCommutes
@@ -352,7 +352,6 @@ verify without law stableFilter
     given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171]), Op.Code(81)]]
     given target: List<Int> = [[], [0], [1, 171]]
     given acc: List<Op> = [[], [Op.Code(82)]]
-    because retainReason(ops, target, acc)
     using []
     without(ops, target, acc) => List.concat(List.reverse(acc), retained(ops, target))
 
@@ -379,18 +378,6 @@ verify keptUnlessMatched
     keptUnlessMatched(Op.Push(1, [171]), [], [1, 171], []) => []
     keptUnlessMatched(Op.Push(76, [171]), [], [1, 171], []) => [Op.Push(76, [171])]
 
-fn retainReason(ops: List<Op>, target: List<Int>, acc: List<Op>) -> Bool
-    ? "Follow the accumulator filter one operation at a time, preserving its reversed prefix."
-    match ops
-        [] -> without(ops, target, acc) == List.concat(List.reverse(acc), retained(ops, target))
-        [head, ..tail] -> match bytesOf([head]) == target
-            true -> Bool.and(retainReason(tail, target, acc), without(ops, target, acc) == List.concat(List.reverse(acc), retained(ops, target)))
-            false -> Bool.and(retainReason(tail, target, List.prepend(head, acc)), without(ops, target, acc) == List.concat(List.reverse(acc), retained(ops, target)))
-
-verify retainReason
-    retainReason([], [1, 171], [Op.Code(82)]) => true
-    retainReason([Op.Push(1, [171]), Op.Push(76, [171])], [1, 171], [Op.Code(82)]) => true
-
 fn retainedRepeatReason(ops: List<Op>, target: List<Int>) -> Bool
     ? "Deleting one exact encoding twice leaves the same survivors."
     match ops
@@ -401,16 +388,6 @@ verify retainedRepeatReason
     retainedRepeatReason([], [1, 171]) => true
     retainedRepeatReason([Op.Push(1, [171]), Op.Push(76, [171])], [1, 171]) => true
 
-fn retainedSwapReason(ops: List<Op>, left: List<Int>, right: List<Int>) -> Bool
-    ? "Two exact-encoding filters commute at each operation."
-    match ops
-        [] -> retained(retained(ops, left), right) == retained(retained(ops, right), left)
-        [head, ..tail] -> Bool.and(retainedSwapReason(tail, left, right), retained(retained(ops, left), right) == retained(retained(ops, right), left))
-
-verify retainedSwapReason
-    retainedSwapReason([], [1, 171], [1, 187]) => true
-    retainedSwapReason([Op.Push(1, [171]), Op.Push(1, [187]), Op.Code(81)], [1, 171], [1, 187]) => true
-
 fn onePastManyReason(ops: List<Op>, items: List<List<Int>>, target: List<Int>) -> Bool
     ? "Move one deletion past a list of deletions, using the checked single-step commutation."
     match items
@@ -420,16 +397,6 @@ fn onePastManyReason(ops: List<Op>, items: List<List<Int>>, target: List<Int>) -
 verify onePastManyReason
     onePastManyReason([], [], [1, 171]) => true
     onePastManyReason([Op.Push(1, [171]), Op.Push(1, [187])], [[187], [171]], [1, 171]) => true
-
-fn batchConcatReason(ops: List<Op>, left: List<List<Int>>, right: List<List<Int>>) -> Bool
-    ? "Processing concatenated batches continues with the right batch after the left is exhausted."
-    match left
-        [] -> withoutEach(ops, List.concat(left, right)) == withoutEach(withoutEach(ops, left), right)
-        [head, ..tail] -> Bool.and(batchConcatReason(without(ops, minimalPush(head), []), tail, right), withoutEach(ops, List.concat(left, right)) == withoutEach(withoutEach(ops, left), right))
-
-verify batchConcatReason
-    batchConcatReason([], [], []) => true
-    batchConcatReason([Op.Push(1, [171]), Op.Push(76, [171]), Op.Code(81)], [[171]], [[187], [171]]) => true
 
 fn manyRepeatReason(ops: List<Op>, items: List<List<Int>>) -> Bool
     ? "Remove the first repeated deletion, then apply the argument to the remaining items."
@@ -474,7 +441,6 @@ verify retained law commutes
     given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
     given left: List<Int> = [[], [1, 171]]
     given right: List<Int> = [[], [1, 187]]
-    because retainedSwapReason(ops, left, right)
     using []
     retained(retained(ops, left), right) => retained(retained(ops, right), left)
 
