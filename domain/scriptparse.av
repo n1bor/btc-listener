@@ -147,8 +147,7 @@ verify bytesOf law prepend
 verify bytesOf law concatenates
     given left: List<Op> = [[], [Op.Code(81)], [Op.Push(76, [171]), Op.Code(82)]]
     given right: List<Op> = [[], [Op.Code(83)]]
-    because serializeConcatReason(left, right)
-    using [bytesOf.prepend]
+    using [intoBytes.concatenatesOntoAcc]
     bytesOf(List.concat(left, right)) => List.concat(bytesOf(left), bytesOf(right))
 
 fn intoBytes(ops: List<Op>, acc: List<Int>) -> List<Int>
@@ -167,6 +166,13 @@ verify intoBytes law accumulates
     given acc: List<Int> = [[], [9, 8]]
     using [prependReversed.reverseOnto, List.reverse.ofConcat, List.concat.rightIdentity, List.concat.assoc]
     intoBytes(ops, acc) => List.concat(List.reverse(acc), bytesOf(ops))
+
+verify intoBytes law concatenatesOntoAcc
+    given left: List<Op> = [[], [Op.Code(81)], [Op.Push(76, [171]), Op.Code(82)]]
+    given right: List<Op> = [[], [Op.Code(83)]]
+    given acc: List<Int> = [[], [9, 8]]
+    using [intoBytes.accumulates]
+    intoBytes(List.concat(left, right), acc) => List.concat(intoBytes(left, acc), bytesOf(right))
 
 verify intoBytes law consStep
     given head: Op = [Op.Code(81), Op.Push(76, [171])]
@@ -355,6 +361,12 @@ verify without law stableFilter
     using []
     without(ops, target, acc) => List.concat(List.reverse(acc), retained(ops, target))
 
+verify without law emptyAccIsRetained
+    given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
+    given target: List<Int> = [[], [1, 171]]
+    using [without.stableFilter]
+    without(ops, target, []) => retained(ops, target)
+
 verify without law repeatedDeletion
     given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
     given target: List<Int> = [[], [1, 171]]
@@ -365,7 +377,8 @@ verify without law deletionCommutes
     given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
     given left: List<Int> = [[], [1, 171]]
     given right: List<Int> = [[], [1, 187]]
-    using [without.stableFilter, retained.commutes]
+    because retained(retained(ops, left), right) == retained(retained(ops, right), left)
+    using [without.emptyAccIsRetained, retained.commutesAsEquality]
     without(without(ops, left, []), right, []) => without(without(ops, right, []), left, [])
 
 fn keptUnlessMatched(op: Op, rest: List<Op>, target: List<Int>, acc: List<Op>) -> List<Op>
@@ -444,15 +457,12 @@ verify retained law commutes
     using []
     retained(retained(ops, left), right) => retained(retained(ops, right), left)
 
-fn serializeConcatReason(left: List<Op>, right: List<Op>) -> Bool
-    ? "Serializing a concatenation preserves both byte sequences and their order."
-    match left
-        [] -> bytesOf(List.concat(left, right)) == List.concat(bytesOf(left), bytesOf(right))
-        [head, ..tail] -> Bool.and(serializeConcatReason(tail, right), bytesOf(List.concat(left, right)) == List.concat(bytesOf(left), bytesOf(right)))
-
-verify serializeConcatReason
-    serializeConcatReason([], [Op.Code(81)]) => true
-    serializeConcatReason([Op.Push(77, [170])], [Op.Code(82)]) => true
+verify retained law commutesAsEquality
+    given ops: List<Op> = [[], [Op.Code(81)], [Op.Push(1, [171]), Op.Push(76, [171])]]
+    given left: List<Int> = [[], [1, 171]]
+    given right: List<Int> = [[], [1, 187]]
+    using [retained.commutes]
+    retained(retained(ops, left), right) == retained(retained(ops, right), left) => true
 
 fn validOctets(bytes: List<Int>) -> Bool
     ? "Every integer in the input represents one byte."
