@@ -677,7 +677,7 @@ the baseline is regenerated with exactly those ten added.
 | [`Sighash.baseOf.lowFiveBitsDecide`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L63) | `baseOf(t) == baseOf(t & 31)`: only the low five bits choose ALL, NONE or SINGLE (Core's `nHashType & 0x1f`) | universal |
 | [`Sighash.baseOf.anyoneCanPayDoesNotChangeTheBase`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L67) | `baseOf(t + 128) == baseOf(t)`: setting ANYONECANPAY leaves the base alone | universal |
 | [`Sighash.isAnyoneCanPay.isBitSeven`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L84) | `isAnyoneCanPay(t) == (t & 128 == 128)` | universal |
-| [`Sighash.withoutSeparators.isStableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L256) | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, `because separatorReason` | universal |
+| [`Sighash.withoutSeparators.isStableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L256) | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, one operation at a time through `accAfter` | universal |
 | [`Bip341.validHashType.isBip341Set`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L149) | valid exactly on `0..3` and `129..131`, the set BIP341 names, with negatives refused | universal |
 | [`Bip341.spendType.isTwiceTheExtensionPlusTheAnnex`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L176) | `spendType(annex, ext) == 2 * ext + annex`, the byte BIP341 writes into the signature message | universal |
 
