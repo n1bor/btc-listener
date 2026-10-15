@@ -39,10 +39,11 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `a025f3f2` pin: **173 universal, 0 sorries, 25 declined**, 173 laws in
-the manifest, `build_errors: 0`; 19 of them are lemmas added at that pin for
-the Aver proof steps. At the `ba1e574a` pin it was 154 universal, 0 sorries and
-25 declined. At the `b82939cb` pin (the tagged Aver
+at the `dde1fdd7` pin: **178 universal, 0 sorries, 25 declined**, 178 laws in
+the manifest, `build_errors: 0`; 24 of them are lemmas for the Aver proof
+steps, 19 added at the `a025f3f2` pin and 5 at this one. At the `a025f3f2` pin
+it was 173 universal, 0 sorries and 25 declined. At the `ba1e574a` pin it was
+154 universal, 0 sorries and 25 declined. At the `b82939cb` pin (the tagged Aver
 0.30.0) it was 153 universal, 13 bounded, 0 sorries and 13 declined, 166 laws
 in the manifest; the bounded tier has gone since, and the next section says
 where its thirteen laws went. Four recursions were reshaped
@@ -88,8 +89,8 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **173 at
-  the `a025f3f2` pin**, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  proves counts here, because that trusts the compiler's evaluator. **178 at
+  the `dde1fdd7` pin**, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
