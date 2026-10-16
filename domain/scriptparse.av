@@ -560,12 +560,45 @@ fn parsedBytesMatch(bytes: List<Int>, acc: List<Op>) -> Bool
         Result.Err(_) -> true
         Result.Ok(ops) -> bytesOf(ops) == List.concat(bytesOf(List.reverse(acc)), bytes)
 
+verify parsedBytesMatch law codeAppended
+    given code: Int = [0, 118, 255]
+    given acc: List<Op> = [[], [Op.Code(82)], [Op.Push(1, [171]), Op.Code(82)]]
+    given rest: List<Int> = [[], [1, 170]]
+    when Bool.not(Domain.Opcode.isPushData(code))
+    using [bytesOf.concatenates, List.concat.assoc, intoBytes.accumulates, intoBytes.concatenatesOntoAcc]
+    List.concat(bytesOf(List.reverse(List.prepend(Op.Code(code), acc))), rest) => List.concat(bytesOf(List.reverse(acc)), List.prepend(code, rest))
+
+verify parsedBytesMatch law pushAppended
+    given code: Int = [1, 2, 75, 76, 77, 78]
+    given data: List<Int> = [[], [170], [170, 171]]
+    given acc: List<Op> = [[], [Op.Code(82)], [Op.Push(1, [171]), Op.Code(82)]]
+    given rest: List<Int> = [[], [1, 170]]
+    when Domain.Opcode.isPushData(code)
+    using [bytesOf.concatenates, bytesOf.prepend, List.concat.rightIdentity, List.concat.assoc, intoBytes.concatenatesOntoAcc]
+    List.concat(bytesOf(List.reverse(List.prepend(Op.Push(code, data), acc))), rest) => List.concat(bytesOf(List.reverse(acc)), List.concat(pushHead(code, List.len(data)), List.concat(data, rest)))
+
+verify parsedBytesMatch law codeShifts
+    given code: Int = [0, 118, 255]
+    given rest: List<Int> = [[], [1, 170], [2, 170], [118]]
+    given acc: List<Op> = [[], [Op.Code(82)]]
+    when Bool.not(Domain.Opcode.isPushData(code))
+    using [parsedBytesMatch.codeAppended, bytesOf.concatenates, List.concat.assoc, intoBytes.accumulates, intoBytes.concatenatesOntoAcc]
+    parsedBytesMatch(List.prepend(code, rest), acc) => parsedBytesMatch(rest, List.prepend(Op.Code(code), acc))
+
+verify parsedBytesMatch law directShifts
+    given code: Int = [1, 2, 75]
+    given rest: List<Int> = [[], [1, 170], [170, 118], [170, 2, 170]]
+    given acc: List<Op> = [[], [Op.Code(82)]]
+    when Bool.and(Domain.Opcode.isPushData(code), Bool.and(Domain.Opcode.pushWidth(code) == 0, List.len(List.take(rest, code)) == code))
+    using [parsedBytesMatch.pushAppended, bytesOf.concatenates, List.concat.assoc, intoBytes.accumulates, intoBytes.concatenatesOntoAcc, List.concat.takeDrop, prependReversed.reverseOnto, List.reverse.ofConcat, List.reverse.involutive]
+    parsedBytesMatch(List.prepend(code, rest), acc) => parsedBytesMatch(List.drop(rest, code), List.prepend(Op.Push(code, List.take(rest, code)), acc))
+
 verify parsedBytesMatch law codeStep
     given code: Int = [0, 118, 255]
     given rest: List<Int> = [[], [1, 170]]
     given acc: List<Op> = [[], [Op.Code(82)]]
     when Bool.and(Bool.not(Domain.Opcode.isPushData(code)), parsedBytesMatch(rest, List.prepend(Op.Code(code), acc)))
-    using [bytesOf.prepend, bytesOf.concatenates, rejoined.exact]
+    using [parsedBytesMatch.codeShifts]
     parsedBytesMatch(List.prepend(code, rest), acc) holds
 
 verify parsedBytesMatch law directPushStep
@@ -573,7 +606,7 @@ verify parsedBytesMatch law directPushStep
     given rest: List<Int> = [[], [1, 170], [170, 118]]
     given acc: List<Op> = [[], [Op.Code(82)]]
     when directStepReady(code, rest, acc)
-    using [bytesOf.prepend, bytesOf.concatenates, rejoined.exact]
+    using [parsedBytesMatch.directShifts]
     parsedBytesMatch(List.prepend(code, rest), acc) holds
 
 verify parsedBytesMatch law widePushStep
