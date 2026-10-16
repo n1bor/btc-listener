@@ -39,9 +39,10 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `607d9c0c` pin: **179 universal, 0 sorries, 25 declined**, 179 laws in
-the manifest, `build_errors: 0`; 25 of them are lemmas for the Aver proof
-steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7` and 1 at this one. At
+at the `607d9c0c` pin: **182 universal, 0 sorries, 24 declined**, 182 laws in
+the manifest, `build_errors: 0`; 27 of them are lemmas for the Aver proof
+steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7` and 3 at this one. With
+the first lemma at this pin it was 179 universal, 0 sorries and 25 declined. At
 the `dde1fdd7` pin it was 178 universal, 0 sorries and 25 declined. At the
 `a025f3f2` pin it was 173 universal, 0 sorries and 25 declined. At the `ba1e574a` pin it was
 154 universal, 0 sorries and 25 declined. At the `b82939cb` pin (the tagged Aver
