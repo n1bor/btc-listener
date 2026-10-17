@@ -70,9 +70,15 @@ verify ofBits
     ofBits(2147483647) >= 0 => true
     ofBits(4294967295) >= 0 => true
 
+verify ofBits law zeroTargetIsUnusable
+    given bits: Int = [0, 16777217, 33554433, 33554687, 65535, 33619967, 486604799]
+    when zeroTarget(bits)
+    usable(bits) => false
+
 verify ofBits law zeroTargetProvesNothing
     given bits: Int = [0, 16777217, 33554433, 33554687, 65535, 33619967, 486604799]
     when zeroTarget(bits)
+    using [ofBits.zeroTargetIsUnusable]
     ofBits(bits) => 0
 
 fn perTarget(target: Int) -> Int
@@ -196,7 +202,6 @@ verify over law preservesDifference
     given bits: List<Int> = [[], [486604799], [545259519, 486604799]]
     given left: Int = [-1, 0, 17]
     given right: Int = [-1, 0, 23]
-    because gapReason(bits, left, right)
     using []
     over(bits, left) - over(bits, right) => left - right
 
@@ -204,8 +209,8 @@ verify over law chunksCompose
     given prefix: List<Int> = [[], [486604799], [545259519, 486604799]]
     given suffix: List<Int> = [[], [486604799], [545259519]]
     given acc: Int = [-1, 0, 17]
-    because chunkReason(prefix, suffix, acc)
     using []
+    induction prefix
     over(List.concat(prefix, suffix), acc) => over(suffix, over(prefix, acc))
 
 fn heavier(candidate: Int, incumbent: Int) -> Bool
@@ -227,31 +232,6 @@ verify heavier law sameWorkPreservesChoice
     given bits: List<Int> = [[], [486604799], [545259519, 486604799]]
     given candidate: Int = [-1, 0, 17]
     given incumbent: Int = [-1, 0, 23]
+    because over(bits, candidate) - over(bits, incumbent) == candidate - incumbent
     using [over.preservesDifference]
     heavier(over(bits, candidate), over(bits, incumbent)) => heavier(candidate, incumbent)
-
-fn gapReason(bits: List<Int>, left: Int, right: Int) -> Bool
-    ? "The same contribution leaves the gap unchanged at each shorter suffix."
-    match bits
-        [] -> over(bits, left) - over(bits, right) == left - right
-        [head, ..tail] -> Bool.and(
-            gapReason(tail, added(left, head), added(right, head)),
-            over(bits, left) - over(bits, right) == left - right
-        )
-
-verify gapReason
-    gapReason([], 17, 23) => true
-    gapReason([545259519, 486604799], 17, 23) => true
-
-fn chunkReason(prefix: List<Int>, suffix: List<Int>, acc: Int) -> Bool
-    ? "Move one prefix item into the accumulator, then join the remaining chunks."
-    match prefix
-        [] -> over(List.concat(prefix, suffix), acc) == over(suffix, over(prefix, acc))
-        [head, ..tail] -> Bool.and(
-            chunkReason(tail, suffix, added(acc, head)),
-            over(List.concat(prefix, suffix), acc) == over(suffix, over(prefix, acc))
-        )
-
-verify chunkReason
-    chunkReason([], [486604799], 17) => true
-    chunkReason([545259519], [486604799], 17) => true

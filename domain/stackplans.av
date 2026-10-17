@@ -1,0 +1,28 @@
+module StackPlans
+    intent =
+        "Proof plans for laws about the top of a stack held as a list."
+        "openByLength: for a law under `when List.len(v) >= k` with a literal k, open v a cell at a time,"
+        "k times; each empty case contradicts the `when`. The last case is closed with the rest still a"
+        "variable, or, when that does not close it, after one more split of the rest."
+        "The plan only writes the script; Kernel.Std runs it and the automatic steps close each Auto."
+    depends [Kernel.Term, Kernel.Proof, Kernel.Lib, Kernel.Std]
+    plans [openByLength]
+
+fn openByLength(goal: Goal) -> Result<Tactic, String>
+    ? "The script that opens the list the `when` bounds, or why the plan does not apply."
+    match Kernel.Lib.whenOf(goal)
+        Option.Some(Term.TOp(">=", Term.TBi("List.len", [Term.TVar(v)]), Term.TInt(k))) -> Result.Ok(cells(v, k))
+        _ -> Result.Err("the `when` is not `List.len(v) >= k` with a literal k")
+
+verify openByLength
+    openByLength(Kernel.Lib.goalFor(Law(key = "k", givens = [], premise = [], lhs = Term.TInt(1), rhs = Term.TInt(1)))) => Result.Err("the `when` is not `List.len(v) >= k` with a literal k")
+
+fn cells(v: String, n: Int) -> Tactic
+    ? "Open n cells of v, each tail named after how many cells are left; then close the case, or split the rest once more and close both."
+    match n <= 0
+        true -> Tactic.First([Tactic.Auto, Tactic.Split(v, "x", "rest", Tactic.Auto, Tactic.Auto)])
+        false -> Tactic.Split(v, "x{n}", "r{n}", Tactic.Auto, cells("r{n}", n - 1))
+
+verify cells
+    cells("items", 0) => Tactic.First([Tactic.Auto, Tactic.Split("items", "x", "rest", Tactic.Auto, Tactic.Auto)])
+    cells("items", 1) => Tactic.Split("items", "x1", "r1", Tactic.Auto, Tactic.First([Tactic.Auto, Tactic.Split("r1", "x", "rest", Tactic.Auto, Tactic.Auto)]))

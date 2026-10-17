@@ -39,9 +39,17 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `b82939cb` pin (the tagged Aver 0.30.0): **153 universal, 13 bounded,
-0 sorries, 13 declined**,
-166 laws in the manifest, `build_errors: 0`. Four recursions were reshaped
+at the `607d9c0c` pin: **186 universal, 0 sorries, 24 declined**, 186 laws in
+the manifest, `build_errors: 0`; 31 of them are lemmas for the Aver proof
+steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7` and 7 at this one. With
+the first lemma at this pin it was 179 universal, 0 sorries and 25 declined,
+and with the first three 182 universal, 0 sorries and 24 declined. At
+the `dde1fdd7` pin it was 178 universal, 0 sorries and 25 declined. At the
+`a025f3f2` pin it was 173 universal, 0 sorries and 25 declined. At the `ba1e574a` pin it was
+154 universal, 0 sorries and 25 declined. At the `b82939cb` pin (the tagged Aver
+0.30.0) it was 153 universal, 13 bounded, 0 sorries and 13 declined, 166 laws
+in the manifest; the bounded tier has gone since, and the next section says
+where its thirteen laws went. Four recursions were reshaped
 along the way to make it possible — a countdown in `Bech32.checksumDigits` and
 `foldGenerators`, a countdown over eras in `Subsidy.minted`, a fuel of the
 tree's size in `HeaderTree.ancestryOf`, one function on a fuel in
@@ -84,26 +92,31 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **153 at
-  the `b82939cb` pin.** The engine cone alone stood at 119 when it was its own
+  proves counts here, because that trusts the compiler's evaluator. **179 at
+  the `607d9c0c` pin**, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
-- **`bounded_laws`** — laws stated only over an enumerated domain.
-  **Thirteen today**: the three `Domain.Target` laws, the two `TreeStore`
-  codec round trips, `UtxoStore.decodeReached`, `IndexKeys.scanOrder`,
-  `Segment.nameOf`, both `Stamp.isoOf` laws, both `Domain.Connect` laws and
-  `ScriptState.rearranged.staysWithinDeclaredDepth`. A law that cites a
-  bounded law in `using` can never be universal. (One, when the engine cone
-  was its own entry.)
+- **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
+  not close was stated over its samples only and counted as bounded; thirteen
+  were, at the `b82939cb` pin. Aver no longer states a law that way: a law is
+  stated for every input or not at all. Of the thirteen,
+  `Connect.duplicateOutputs.heldIsRefusedExceptCoreTwo` is universal now, and
+  the other twelve are declined with the reason that their universal proof did
+  not close: the three `Domain.Target` laws, the two `TreeStore` codec round
+  trips, `UtxoStore.decodeReached`, `IndexKeys.scanOrder`, `Segment.nameOf`,
+  both `Stamp.isoOf` laws, `Connect.refusalOf.readsWhatCannotConnectWrote` and
+  `ScriptState.rearranged.staysWithinDeclaredDepth`. They were never proved
+  for every input; `aver verify` still checks their samples.
 - **`sorries`** — obligations that no strategy closed. Budget 0: a law that
   lands on `sorry` is a red run, by design.
 - **`declined`** — claims the exporter refused to state at all, so no theorem,
   no `sorry` and no error stands in for them. They need their own budget
-  precisely because nothing else would notice them. **Thirteen**, and since
-  the `6eddd964` pin they are all
-  one cause:
+  precisely because nothing else would notice them. **Twenty-five**, for two
+  causes:
 
-  - Every remaining decline **reaches a mutual recursion the exporter cannot
-    bound**. In the engine cone that is `Domain.Transaction.decode`'s two laws
+  - **Twelve are the former bounded laws** listed above, declined because
+    their universal proof does not close.
+  - **Thirteen reach a mutual recursion the exporter cannot bound**, and since
+    the `6eddd964` pin these were the only ones. In the engine cone that is `Domain.Transaction.decode`'s two laws
     and `decodeNext.sizeIsWhatItConsumed`; in the leaf it is those three again
     plus `Domain.Connect.connected`'s three (`valueIsConserved`,
     `noOutputSpentTwice`, `feesAgreeWithConfirmed`) and
@@ -170,8 +183,9 @@ corpus is the only bridge to it.
 - **`proof/main.declined`** — the declined budget, a number. It only goes
   down. A PR that lifts a decline (a recursion given a measure, a cone that no
   longer reaches a provider) lowers it in the same PR. A PR that raises it has
-  to say why in its own diff; CI will not raise it for you. **13 today, and
-  they are eight laws, all one cause**: the `Domain.Transaction` and
+  to say why in its own diff; CI will not raise it for you. **25 today**:
+  twelve are the former bounded laws, whose universal proof does not close,
+  and thirteen are eight laws reaching the `Domain.Transaction` and
   `Domain.Connect`/`Domain.Disconnect` mutual recursions the exporter cannot
   bound, the Connect and Disconnect five listed under both their qualified and
   their bare names. Every claim on `decode` is declined by construction (the

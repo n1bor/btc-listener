@@ -12,8 +12,9 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
   --sorry-budget 0 --gate proof/main.manifest.json
 ```
 
-At pin `b82939cb` (Aver 0.30.0), that is **166 laws over 25 modules: 153
-universal, 13 bounded, 0 sorries, 13 declined**, and it exits 0. It is the
+At pin `ba1e574a`, that is **154 universal, 0 sorries, 25 declined**, and it
+exits 0. At pin `b82939cb` (Aver 0.30.0) it was 166 laws over 25 modules: 153
+universal, 13 bounded, 0 sorries, 13 declined. It is the
 `proof` job in CI, one entry for the whole program since
 n1bor/btc-listener#350; before that it took two, and `docs/proofs.md` tells
 that story. `proof/main.manifest.json` records every law's tier, theorem and
@@ -62,15 +63,16 @@ argument is assembled from named steps rather than one opaque proof.
 
 - **universal** — the kernel checked the theorem over every value of the
   law's `given`s, with `#print axioms` inside Lean's core three (`propext`,
-  `Classical.choice`, `Quot.sound`). 153 laws today. This is the only tier
+  `Classical.choice`, `Quot.sound`). 154 laws today. This is the only tier
   that means "for all inputs".
-- **bounded** — stated only over the enumerated samples. 13 laws today, and
-  each has a reason: a `when` guard the exporter cannot lift, or a helper it
-  cannot bound. A law that cites a bounded law through `using` can never be
-  universal.
-- **declined** — the exporter refused to state the claim at all, so there is
-  no theorem, no `sorry` and no error standing in for it. 13 entries today for
-  8 distinct laws, all one cause: the `Domain.Transaction` and
+- **bounded** — gone. Up to Aver 0.30 a law whose universal proof did not
+  close was stated over its samples only; 13 were. Now a law is stated for
+  every input or declined: one of the 13 is universal and the other twelve are
+  declined.
+- **declined** — the exporter did not state the claim, so there is no
+  theorem, no `sorry` and no error standing in for it. 25 entries today:
+  twelve former bounded laws whose universal proof does not close, and 13
+  entries for 8 distinct laws that reach the `Domain.Transaction` and
   `Domain.Connect`/`Domain.Disconnect` mutual recursions it cannot find a
   decreasing measure for. **A declined law is not proved.** It still runs under
   `aver verify` on its samples, which is why `proof/main.declined` is a budget
@@ -281,8 +283,8 @@ operation's encoding. For example, deleting `[171]` twice from
 `"5101AB4C01AB52"` yields `Ok("514c01ab52")`: the nonminimal push survives.
 
 The helper law [`withoutEach.concatenatedBatches`](https://github.com/n1bor/btc-listener/blob/main/domain/scriptparse.av#L310) proves that processing
-`left ++ right` equals processing `left` and then `right`. Its executable
-`batchConcatReason` follows the left batch. The wrapper law selects that
+`left ++ right` equals processing `left` and then `right`. It closes by
+induction on the left batch, with no reason function. The wrapper law selects that
 lemma and the existing idempotence law with `using`; the existing Aver pin
 closes the composition without compiler changes or handwritten Lean.
 
@@ -675,7 +677,7 @@ the baseline is regenerated with exactly those ten added.
 | [`Sighash.baseOf.lowFiveBitsDecide`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L63) | `baseOf(t) == baseOf(t & 31)`: only the low five bits choose ALL, NONE or SINGLE (Core's `nHashType & 0x1f`) | universal |
 | [`Sighash.baseOf.anyoneCanPayDoesNotChangeTheBase`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L67) | `baseOf(t + 128) == baseOf(t)`: setting ANYONECANPAY leaves the base alone | universal |
 | [`Sighash.isAnyoneCanPay.isBitSeven`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L84) | `isAnyoneCanPay(t) == (t & 128 == 128)` | universal |
-| [`Sighash.withoutSeparators.isStableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L256) | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, `because separatorReason` | universal |
+| [`Sighash.withoutSeparators.isStableFilter`](https://github.com/n1bor/btc-listener/blob/main/domain/sighash.av#L256) | the OP_CODESEPARATOR strip is the accumulator reversed followed by every retained non-separator, one operation at a time through `accAfter` | universal |
 | [`Bip341.validHashType.isBip341Set`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L149) | valid exactly on `0..3` and `129..131`, the set BIP341 names, with negatives refused | universal |
 | [`Bip341.spendType.isTwiceTheExtensionPlusTheAnnex`](https://github.com/n1bor/btc-listener/blob/main/domain/bip341.av#L176) | `spendType(annex, ext) == 2 * ext + annex`, the byte BIP341 writes into the signature message | universal |
 

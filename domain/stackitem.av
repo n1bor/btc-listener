@@ -165,7 +165,6 @@ verify fromNumber law signedMagnitudeEncoding
     given magnitude: Int = [1, 127, 128, 256]
     given negative: Bool = [false, true]
     when magnitude > 0
-    using []
     fromNumber(signedBy(magnitude, negative)) => withSign(littleEndian(magnitude, []), negative)
 
 verify fromNumber law minimalItemsAreFixedPoints
@@ -256,29 +255,97 @@ verify signedBytes law oneByteRange
     using [signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.positiveHasBytes]
     List.len(signedBytes(magnitude, negative)) <= 1 => magnitude < 128
 
+verify signedBytes law smallMagnitudeSizeUnfolded
+    given magnitude: Int = [0, 1, 127, 128, 255]
+    given negative: Bool = [false, true]
+    when Bool.and(magnitude >= 0, magnitude < 256)
+    using [signedBytes.smallMagnitudeSize]
+    List.len(withSign(littleEndian(magnitude, []), negative)) => smallSize(magnitude)
+
+verify signedBytes law highBytesNeedTwo
+    given magnitude: Int = [32768, 65535, 65536]
+    when magnitude >= 32768
+    Int.div(magnitude, 256) >= 128 holds
+
+verify signedBytes law twoByteRangeUnfoldedAbove
+    given magnitude: Int = [32768, 65535, 65536, 2147483648]
+    given negative: Bool = [false, true]
+    when magnitude >= 32768
+    because Bool.not(List.len(signedBytes(Int.div(magnitude, 256), negative)) <= 1)
+    using [signedBytes.oneByteRange, signedBytes.highBytesNeedTwo]
+    1 + List.len(withSign(littleEndian(Int.div(magnitude, 256), []), negative)) <= 2 => false
+
 verify signedBytes law twoByteRange
     given magnitude: Int = [0, 1, 32767, 32768, 65536]
     given negative: Bool = [false, true]
     when magnitude >= 0
     because sizeRecurrenceReason(magnitude, negative)
-    using [signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.oneByteRange]
+    using [signedBytes.smallMagnitudeSizeUnfolded, signedBytes.twoByteRangeUnfoldedAbove, signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.oneByteRange]
     List.len(signedBytes(magnitude, negative)) <= 2 => magnitude < 32768
+
+verify signedBytes law threeByteRangeUnfoldedAbove
+    given magnitude: Int = [8388608, 16777216, 2147483648]
+    given negative: Bool = [false, true]
+    when magnitude >= 8388608
+    because Bool.not(List.len(signedBytes(Int.div(magnitude, 256), negative)) <= 2)
+    using [signedBytes.twoByteRange]
+    1 + List.len(withSign(littleEndian(Int.div(magnitude, 256), []), negative)) <= 3 => false
+
+verify signedBytes law threeByteRangeUnfoldedBelow
+    given magnitude: Int = [256, 65536, 8388607]
+    given negative: Bool = [false, true]
+    when Bool.and(magnitude >= 256, magnitude < 8388608)
+    because List.len(signedBytes(Int.div(magnitude, 256), negative)) <= 2
+    using [signedBytes.twoByteRange]
+    1 + List.len(withSign(littleEndian(Int.div(magnitude, 256), []), negative)) <= 3 => true
 
 verify signedBytes law threeByteRange
     given magnitude: Int = [0, 1, 8388607, 8388608, 16777216]
     given negative: Bool = [false, true]
     when magnitude >= 0
     because sizeRecurrenceReason(magnitude, negative)
-    using [signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.twoByteRange]
+    using [signedBytes.smallMagnitudeSizeUnfolded, signedBytes.threeByteRangeUnfoldedAbove, signedBytes.threeByteRangeUnfoldedBelow, signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.twoByteRange]
     List.len(signedBytes(magnitude, negative)) <= 3 => magnitude < 8388608
+
+verify signedBytes law fourByteRangeUnfoldedAbove
+    given magnitude: Int = [2147483648, 4294967296]
+    given negative: Bool = [false, true]
+    when magnitude >= 2147483648
+    because Bool.not(List.len(signedBytes(Int.div(magnitude, 256), negative)) <= 3)
+    using [signedBytes.threeByteRange]
+    1 + List.len(withSign(littleEndian(Int.div(magnitude, 256), []), negative)) <= 4 => false
+
+verify signedBytes law fourByteRangeUnfoldedBelow
+    given magnitude: Int = [256, 65536, 2147483647]
+    given negative: Bool = [false, true]
+    when Bool.and(magnitude >= 256, magnitude < 2147483648)
+    because List.len(signedBytes(Int.div(magnitude, 256), negative)) <= 3
+    using [signedBytes.threeByteRange]
+    1 + List.len(withSign(littleEndian(Int.div(magnitude, 256), []), negative)) <= 4 => true
 
 verify signedBytes law fourByteRange
     given magnitude: Int = [0, 1, 2147483647, 2147483648, 4294967296]
     given negative: Bool = [false, true]
     when magnitude >= 0
     because sizeRecurrenceReason(magnitude, negative)
-    using [signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.threeByteRange]
+    using [signedBytes.smallMagnitudeSizeUnfolded, signedBytes.fourByteRangeUnfoldedAbove, signedBytes.fourByteRangeUnfoldedBelow, signedBytes.smallMagnitudeSize, signedBytes.lengthStep, signedBytes.threeByteRange]
     List.len(signedBytes(magnitude, negative)) <= 4 => magnitude < 2147483648
+
+verify signedBytes law fitsFourBytesUnfolded
+    given magnitude: Int = [0, 1, 2147483647]
+    given negative: Bool = [false, true]
+    when Bool.and(magnitude >= 0, magnitude < 2147483648)
+    because List.len(signedBytes(magnitude, negative)) <= 4
+    using [signedBytes.fourByteRange]
+    List.len(withSign(littleEndian(magnitude, []), negative)) <= 4 => true
+
+verify signedBytes law exceedsFourBytesUnfolded
+    given magnitude: Int = [2147483648, 4294967296]
+    given negative: Bool = [false, true]
+    when magnitude >= 2147483648
+    because Bool.not(List.len(signedBytes(magnitude, negative)) <= 4)
+    using [signedBytes.fourByteRange]
+    List.len(withSign(littleEndian(magnitude, []), negative)) <= 4 => false
 
 fn littleEndian(value: Int, acc: List<Int>) -> List<Int>
     ? "Least significant byte first, with no leading zero."
@@ -305,6 +372,7 @@ verify littleEndian law accumulatorComesFirst
 verify littleEndian law readsBackBigEndian
     given m: Int = [0, 1, 127, 128, 255, 256, 65535, 65536, 2147483647, 2147483648]
     when m >= 0
+    using [littleEndian.accumulatorComesFirst, bigEndian.readsTheLastByteLast]
     bigEndian(List.reverse(littleEndian(m, [])), 0) => m
 
 verify littleEndian law outsideByteRangeIsNeverAdded
@@ -317,15 +385,25 @@ verify littleEndian law outsideByteRangeIsNeverAdded
 verify littleEndian law zeroDigitWindow
     given m: Int = [-1, 0, 1, 127, 128, 255, 256, 32767, 32768, 8388607, 8388608, 2147483647, 2147483648]
     given acc: List<Int> = [[], [0], [1, 2], [-1, 300]]
+    using [littleEndian.accumulatorComesFirst, List.len.ofConcat, List.len.ofReverse]
     List.len(littleEndian(m, acc)) <= List.len(acc) => m < 1
+
+verify littleEndian law topDigitOntoAccIsNotZero
+    given m: Int = [-1, 0, 1, 127, 128, 255, 256, 65536]
+    given acc: List<Int> = [[], [0], [1], [1, 0], [0, 1]]
+    when Bool.or(m > 0, List.contains(List.take(acc, 1), 0) == false)
+    using [List.reverse.involutive]
+    List.contains(List.take(List.reverse(littleEndian(m, acc)), 1), 0) => false
 
 verify littleEndian law mostSignificantDigitIsNotZero
     given m: Int = [-1, 0, 1, 127, 128, 255, 256, 32767, 32768, 8388607, 8388608, 2147483647, 2147483648]
+    using [littleEndian.topDigitOntoAccIsNotZero]
     List.contains(List.take(List.reverse(littleEndian(m, [])), 1), 0) => false
 
 verify littleEndian law firstDigitIsPreserved
     given value: Int = [0, 1, 128, 256]
     given digit: Int = [0, 1, 255]
+    using [littleEndian.accumulatorComesFirst]
     littleEndian(value, [digit]) => List.prepend(digit, littleEndian(value, []))
 
 verify littleEndian law positiveStep
@@ -349,6 +427,7 @@ verify littleEndian law oneDigitEncoding
 verify littleEndian law positiveHasDigits
     given value: Int = [1, 127, 128, 256, 2147483648]
     when value > 0
+    using [littleEndian.firstDigitIsPreserved]
     List.len(littleEndian(value, [])) > 0 holds
 
 verify littleEndian law lowDigitStep
@@ -380,7 +459,7 @@ verify withSign law restoresMagnitudeTop
     given top: Int = [1, 127, 129, 255]
     given rest: List<Int> = [[], [0], [1, 255]]
     when Bool.and(Bool.and(top >= 0, top < 256), unsigned(top) > 0)
-    using []
+    using [List.reverse.ofConcat, List.reverse.involutive]
     withSign(List.reverse(List.prepend(unsigned(top), rest)), top >= 128) => List.reverse(List.prepend(top, rest))
 
 verify withSign law restoresSeparateSign
@@ -388,7 +467,7 @@ verify withSign law restoresSeparateSign
     given head: Int = [128, 255]
     given tail: List<Int> = [[], [0], [1, 255]]
     when Bool.and(Bool.or(top == 0, top == 128), head >= 128)
-    using []
+    using [List.reverse.ofConcat, List.reverse.involutive]
     withSign(List.reverse(List.prepend(head, tail)), top >= 128) => List.reverse(List.prepend(top, List.prepend(head, tail)))
 
 verify withSign law preservesLowByte
@@ -417,6 +496,7 @@ verify placed law placementReadsBack
     given rest: List<Int> = [[], [0], [255], [-1, 300], [255, 255, 255]]
     given negative: Bool = [false, true]
     when top >= 0
+    using [List.reverse.ofConcat, List.reverse.involutive]
     asNumber(placed(top, rest, negative)) => signedBy(bigEndian(List.prepend(top, rest), 0), negative)
 
 verify placed law positiveTopMakesPlacementMinimal
@@ -424,6 +504,7 @@ verify placed law positiveTopMakesPlacementMinimal
     given rest: List<Int> = [[], [0], [255], [-1, 300], [255, 255, 255]]
     given negative: Bool = [false, true]
     when top > 0
+    using [List.reverse.ofConcat]
     isMinimalNumber(placed(top, rest, negative)) holds
 
 verify placed law positiveTopIsTruthy
@@ -431,7 +512,7 @@ verify placed law positiveTopIsTruthy
     given rest: List<Int> = [[], [0], [255], [-1, 300], [0, 0, 0]]
     given negative: Bool = [false, true]
     when top > 0
-    using [anyNonZero.setHeadIsEnough]
+    using [anyNonZero.setHeadIsEnough, List.reverse.ofConcat]
     isTruthy(placed(top, rest, negative)) holds
 
 fn signByte(negative: Bool) -> Int
@@ -546,7 +627,7 @@ verify fitsArithmetic
 
 verify fitsArithmetic law acceptsCoreOperandRange
     given value: Int = [-4294967296, -2147483649, -2147483648, -2147483647, -2147483646, -8388608, -8388607, -128, -127, -1, 0, 1, 127, 128, 8388607, 8388608, 2147483646, 2147483647, 2147483648, 4294967295, 4294967296]
-    using [signedBytes.fourByteRange]
+    using [signedBytes.fourByteRange, signedBytes.fitsFourBytesUnfolded, signedBytes.exceedsFourBytesUnfolded]
     fitsArithmetic(fromNumber(value)) => Bool.and(value >= 0 - 2147483647, value <= 2147483647)
 
 fn isMinimalNumber(item: List<Int>) -> Bool
@@ -941,10 +1022,12 @@ verify validBytes law headAndTail
 verify validBytes law concatenation
     given left: List<Int> = [[], [1, 2], [-1]]
     given right: List<Int> = [[], [255], [256]]
+    induction left
     validBytes(List.concat(left, right)) => Bool.and(validBytes(left), validBytes(right))
 
 verify validBytes law reversal
     given bytes: List<Int> = [[], [1, 2], [-1, 256], [255, 0, 128]]
+    using [validBytes.concatenation]
     validBytes(List.reverse(bytes)) => validBytes(bytes)
 
 fn afterFirstDigit(value: Int) -> List<Int>
