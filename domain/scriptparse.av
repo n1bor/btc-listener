@@ -111,6 +111,14 @@ verify wide
     wide(76, 1, [], []) => Result.Err("push length runs past the end of the script")
     wide(77, 2, [1, 0, 170], []) => Result.Ok([Op.Push(77, [170])])
 
+verify wide law completeField
+    given code: Int = [76, 77]
+    given width: Int = [1, 2]
+    given rest: List<Int> = [[], [1, 170], [1, 0, 170], [2, 170]]
+    given acc: List<Op> = [[], [Op.Code(82)]]
+    when Bool.and(List.len(List.take(rest, width)) == width, List.len(List.take(List.drop(rest, width), Domain.Message.readLittleEndian(List.take(rest, width)))) == Domain.Message.readLittleEndian(List.take(rest, width)))
+    wide(code, width, rest, acc) => from(List.drop(List.drop(rest, width), Domain.Message.readLittleEndian(List.take(rest, width))), List.prepend(Op.Push(code, List.take(List.drop(rest, width), Domain.Message.readLittleEndian(List.take(rest, width)))), acc))
+
 fn taken(code: Int, count: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
     ? "Take the pushed bytes, or say the Script ended in the middle of them."
       "This is the only way parsing fails, and it is worth being exact about"
@@ -209,6 +217,14 @@ verify pushHead
     pushHead(76, 1) => [76, 1]
     pushHead(77, 1) => [77, 1, 0]
     pushHead(78, 1) => [78, 1, 0, 0, 0]
+
+verify pushHead law wideBytes
+    given code: Int = [76, 77, 78]
+    given count: Int = [0, 1]
+    given rest: List<Int> = [[], [1, 170], [1, 0, 170]]
+    when Bool.and(Domain.Opcode.pushWidth(code) > 0, Bool.and(Domain.Message.littleEndian(count, Domain.Opcode.pushWidth(code)) == List.take(rest, Domain.Opcode.pushWidth(code)), List.len(List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), count)) == count))
+    using [List.concat.takeDrop, List.concat.assoc]
+    List.concat(pushHead(code, List.len(List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), count))), List.concat(List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), count), List.drop(List.drop(rest, Domain.Opcode.pushWidth(code)), count))) => List.prepend(code, rest)
 
 fn prependReversed(bytes: List<Int>, acc: List<Int>) -> List<Int>
     ? "Push a run of bytes onto an accumulator that is being built backwards."
