@@ -74,6 +74,14 @@ verify from
     from([118], []) => Result.Ok([Op.Code(118)])
     from([2, 170], []) => Result.Err("push of 2 bytes runs past the end of the script")
 
+verify from law wideStep
+    given code: Int = [76, 77, 78]
+    given rest: List<Int> = [[], [1, 170], [1, 0, 170], [1, 0, 0, 0, 170], [2, 170]]
+    given acc: List<Op> = [[], [Op.Code(82)]]
+    when Bool.and(Domain.Opcode.isPushData(code), Bool.and(Domain.Opcode.pushWidth(code) > 0, Bool.and(List.len(List.take(rest, Domain.Opcode.pushWidth(code))) == Domain.Opcode.pushWidth(code), List.len(List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))) == Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))))
+    using [wide.completeField]
+    from(List.prepend(code, rest), acc) => from(List.drop(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code)))), List.prepend(Op.Push(code, List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))), acc))
+
 fn nextOp(code: Int, rest: List<Int>, acc: List<Op>) -> Result<List<Op>, String>
     ? "A byte is a direct push, a wide push, or an opcode."
       "OP_0 pushes nothing and is an opcode rather than a push of zero bytes,"
@@ -608,14 +616,6 @@ verify parsedBytesMatch law directShifts
     when Bool.and(Domain.Opcode.isPushData(code), Bool.and(Domain.Opcode.pushWidth(code) == 0, List.len(List.take(rest, code)) == code))
     using [parsedBytesMatch.pushAppended, bytesOf.concatenates, List.concat.assoc, intoBytes.accumulates, intoBytes.concatenatesOntoAcc, List.concat.takeDrop, prependReversed.reverseOnto, List.reverse.ofConcat, List.reverse.involutive]
     parsedBytesMatch(List.prepend(code, rest), acc) => parsedBytesMatch(List.drop(rest, code), List.prepend(Op.Push(code, List.take(rest, code)), acc))
-
-verify from law wideStep
-    given code: Int = [76, 77, 78]
-    given rest: List<Int> = [[], [1, 170], [1, 0, 170], [1, 0, 0, 0, 170], [2, 170]]
-    given acc: List<Op> = [[], [Op.Code(82)]]
-    when Bool.and(Domain.Opcode.isPushData(code), Bool.and(Domain.Opcode.pushWidth(code) > 0, Bool.and(List.len(List.take(rest, Domain.Opcode.pushWidth(code))) == Domain.Opcode.pushWidth(code), List.len(List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))) == Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))))
-    using [wide.completeField]
-    from(List.prepend(code, rest), acc) => from(List.drop(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code)))), List.prepend(Op.Push(code, List.take(List.drop(rest, Domain.Opcode.pushWidth(code)), Domain.Message.readLittleEndian(List.take(rest, Domain.Opcode.pushWidth(code))))), acc))
 
 verify parsedBytesMatch law wideShifts
     given code: Int = [76, 77, 78]
