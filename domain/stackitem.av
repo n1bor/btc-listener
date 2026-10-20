@@ -171,9 +171,10 @@ verify fromNumber law minimalItemsAreFixedPoints
     given item: List<Int> = [[], [1], [129], [128], [0], [1, 0], [128, 0], [128, 128], [255, 255, 255, 127], [0, 0, 0, 128, 0]]
     when Bool.and(validBytes(item), isMinimalNumber(item))
     because validBytes(List.reverse(item))
+    because minimalFromTop(List.reverse(item))
     because canonicalDigitsReason(item)
     because canonicalReason(item)
-    using [canonicalDigitsReason.minimalItemDigitsReadBack, bigEndian.positivePrefixStaysPositive, withSign.restoresMagnitudeTop, withSign.restoresSeparateSign, validBytes.headAndTail, validBytes.reversal, bigEndian.headStartsPrefix, fromNumber.signedMagnitudeEncoding]
+    using [canonicalDigitsReason.minimalItemDigitsReadBack, canonicalReason.readsFromTheTop, restoredFromTop.minimalReversedIsRestored, restoredFromTop.minimalValueIsRestored, List.reverse.involutive, withSign.restoresMagnitudeTop, withSign.restoresSeparateSign, validBytes.headAndTail, validBytes.reversal, bigEndian.headStartsPrefix, fromNumber.signedMagnitudeEncoding]
     fromNumber(asNumber(item)) => item
 
 verify fromNumber law canonicalExactlyWhenMinimal
@@ -1096,6 +1097,14 @@ verify minimalFromTop
     minimalFromTop([0, 128]) => true
     minimalFromTop([128]) => false
 
+verify minimalFromTop law topHasMagnitude
+    given top: Int = [0, 1, 127, 128, 129, 255]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [1, 2, 3]]
+    when Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest)))
+    because validBytes(rest)
+    using [validBytes.headAndTail, bigEndian.headStartsPrefix, bigEndian.positivePrefixStaysPositive]
+    bigEndian(List.prepend(unsigned(top), rest), 0) > 0 holds
+
 fn digitsFromTop(reversed: List<Int>) -> Bool
     ? "The digit readback of a minimal item, read from the top byte down on an item already reversed."
     match reversed
@@ -1170,6 +1179,73 @@ verify canonicalDigitsReason law minimalItemDigitsReadBack
     using [validBytes.headAndTail, validBytes.reversal, bigEndian.positivePrefixStaysPositive, bigEndian.writingReadDigitsPreservesThem, littleEndian.oneDigitEncoding, canonicalDigitsReason.readsFromTheTop, digitsFromTop.minimalReversedReadsBack]
     canonicalDigitsReason(item) holds
 
+fn restoredFromTop(reversed: List<Int>) -> Bool
+    ? "The top byte restored after reading magnitude and sign, on an item already reversed."
+    match reversed
+        [] -> true
+        [top, ..rest] -> match unsigned(top) > 0
+            true -> fromNumber(valued(top, rest)) == List.reverse(List.prepend(top, rest))
+            false -> match rest
+                [] -> false
+                [head, ..tail] -> fromNumber(valued(top, rest)) == List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop
+    restoredFromTop([]) => true
+    restoredFromTop([0, 128]) => true
+    restoredFromTop([128]) => false
+
+verify restoredFromTop law magnitudeTopIsRestored
+    given top: Int = [1, 127, 129, 255]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [1, 2, 3]]
+    when Bool.and(Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest))), unsigned(top) > 0)
+    because digitsFromTop(List.prepend(top, rest))
+    using [digitsFromTop.minimalTopReadsBack, minimalFromTop.topHasMagnitude, withSign.restoresMagnitudeTop, validBytes.headAndTail, bigEndian.headStartsPrefix, fromNumber.signedMagnitudeEncoding]
+    fromNumber(valued(top, rest)) => List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop law positiveSignByteValueIsRestored
+    given top: Int = [0]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [128, 2, 3]]
+    when Bool.and(top == 0, Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest))))
+    using [bigEndian.positivePrefixStaysPositive, littleEndian.writesReadBytesThenDigit, withSign.restoresSeparateSign, fromNumber.signedMagnitudeEncoding]
+    induction rest
+    fromNumber(valued(top, rest)) => List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop law negativeSignByteValueIsRestored
+    given top: Int = [128]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [128, 2, 3]]
+    when Bool.and(top == 128, Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest))))
+    using [bigEndian.positivePrefixStaysPositive, littleEndian.writesReadBytesThenDigit, withSign.restoresSeparateSign, fromNumber.signedMagnitudeEncoding]
+    induction rest
+    fromNumber(valued(top, rest)) => List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop law minimalTopIsRestored
+    given top: Int = [0, 1, 127, 128, 129, 255]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [1, 2, 3]]
+    when Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest)))
+    using [restoredFromTop.magnitudeTopIsRestored, restoredFromTop.positiveSignByteValueIsRestored, restoredFromTop.negativeSignByteValueIsRestored]
+    induction rest
+    restoredFromTop(List.prepend(top, rest)) holds
+
+verify restoredFromTop law signByteValueIsRestored
+    given top: Int = [0, 128]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [128, 2, 3]]
+    when Bool.and(Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest))), Bool.not(unsigned(top) > 0))
+    using [restoredFromTop.negativeSignByteValueIsRestored, restoredFromTop.positiveSignByteValueIsRestored]
+    fromNumber(valued(top, rest)) => List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop law minimalValueIsRestored
+    given top: Int = [0, 1, 127, 128, 129, 255]
+    given rest: List<Int> = [[], [0], [128], [255, 0], [1, 2, 3]]
+    when Bool.and(validBytes(List.prepend(top, rest)), minimalFromTop(List.prepend(top, rest)))
+    using [restoredFromTop.magnitudeTopIsRestored, restoredFromTop.signByteValueIsRestored]
+    fromNumber(valued(top, rest)) => List.reverse(List.prepend(top, rest))
+
+verify restoredFromTop law minimalReversedIsRestored
+    given reversed: List<Int> = [[], [0], [1], [128], [0, 128], [128, 0], [127, 255, 255, 255]]
+    when Bool.and(validBytes(reversed), minimalFromTop(reversed))
+    using [restoredFromTop.minimalTopIsRestored]
+    restoredFromTop(reversed) holds
+
 fn canonicalReason(item: List<Int>) -> Bool
     ? "Restore the original top byte after reading the magnitude and sign."
     match List.reverse(item)
@@ -1187,6 +1263,12 @@ verify canonicalReason
     canonicalReason([128, 128]) => true
     canonicalReason([128]) => false
     canonicalReason([0, 1]) => true
+
+verify canonicalReason law readsFromTheTop
+    given low: Int = [0, 1, 128, 255]
+    given higher: List<Int> = [[], [0], [128], [1, 0], [255, 255, 127]]
+    using [List.len.ofReverse, List.len.ofConcat]
+    canonicalReason(List.prepend(low, higher)) => restoredFromTop(List.reverse(List.prepend(low, higher)))
 
 fn smallSize(magnitude: Int) -> Int
     ? "Byte count for a nonnegative magnitude below 256: zero, a byte with sign room, or a byte plus sign."
