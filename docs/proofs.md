@@ -39,13 +39,15 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `bc3d6280` pin: **203 universal, 0 sorries, 24 declined**, 203 laws in
+at the `847eef78` pin: **203 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`; 48 of them are lemmas for the Aver proof
 steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7`, 7 at `607d9c0c` and 17
-since. This pin brings Lean 4.35.0, whose `==` and `!=` on `Int` carry
-`Classical.choice` (deciding `=` on `Int` does not), so 43 laws whose proofs
-pass through one of them now list it among their axioms; it is one of Lean's core three, no tier changed, and the
-baseline was recorded again for it. At the `607d9c0c` pin it was 186 universal, 0 sorries and 24 declined;
+at `bc3d6280`. At `bc3d6280`, with Lean 4.35.0, `==` and `!=` on `Int` carried
+`Classical.choice`, and 43 laws listed it among their axioms. At `847eef78`
+Aver decides `Int` equality and states the order on `Int` without it, so 164
+of the 379 entries in the baseline depend on `Classical.choice`, down from 294;
+no tier changed, and the baseline was recorded again for it. At the `bc3d6280`
+pin it was 203 universal, 0 sorries and 24 declined. At the `607d9c0c` pin it was 186 universal, 0 sorries and 24 declined;
 with its first lemma 179 universal, 0 sorries and 25 declined, and with the
 first three 182 universal, 0 sorries and 24 declined. At
 the `dde1fdd7` pin it was 178 universal, 0 sorries and 25 declined. At the
@@ -97,7 +99,7 @@ Three numbers in the summary, and a manifest.
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
   proves counts here, because that trusts the compiler's evaluator. **203 at
-  the `bc3d6280` pin**, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  the `847eef78` pin**, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
