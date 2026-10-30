@@ -671,13 +671,14 @@ jobs:
         run: |
           cd build/target/release && sha256sum main main.wasm $([ -f main.exe ] && echo main.exe) > SHA256SUMS && cd -
           floor=$(objdump -T build/target/release/main | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1)
-          # Deleted and recreated rather than edited, so the tag names the
-          # commit that actually produced the asset hanging off it.
-          gh release delete main-build --yes --cleanup-tag 2>/dev/null || true
-          gh release create main-build \
-            --target "$GITHUB_SHA" \
-            --title "Build of main — $(git rev-parse --short "$GITHUB_SHA")" \
-            --notes "$(printf '%s\n' \
+          # Updated in place, never deleted first. The assets go up before the
+          # tag moves, and the tag is force-moved to the commit that produced
+          # them, so the rolling release is never absent: a step that fails
+          # leaves the previous build standing, where delete-then-create once
+          # left no release and no tag at all (30 Oct 2026, a run whose token
+          # could delete but not create). Created only when missing.
+          title="Build of main — $(git rev-parse --short "$GITHUB_SHA")"
+          notes="$(printf '%s\n' \
               "The compiled node, from \`$GITHUB_SHA\` on main, behind every gate in CI." \
               "" \
               "\`\`\`bash" \
@@ -715,6 +716,12 @@ jobs:
               "Treat it as something to try rather than something to run, and see #325." \
               "" \
               "This release is replaced on every push to main. \`SHA256SUMS\` covers every" \
-              "file in it. Setting a server up with it: #138.")" \
-            build/target/release/main build/target/release/main.wasm build/target/release/SHA256SUMS \
-            $([ -f build/target/release/main.exe ] && echo build/target/release/main.exe)
+              "file in it. Setting a server up with it: #138.")"
+          assets="build/target/release/main build/target/release/main.wasm build/target/release/SHA256SUMS $([ -f build/target/release/main.exe ] && echo build/target/release/main.exe)"
+          if gh release view main-build >/dev/null 2>&1; then
+            gh release upload main-build $assets --clobber
+            git push -f origin "$GITHUB_SHA:refs/tags/main-build"
+            gh release edit main-build --target "$GITHUB_SHA" --title "$title" --notes "$notes"
+          else
+            gh release create main-build --target "$GITHUB_SHA" --title "$title" --notes "$notes" $assets
+          fi
