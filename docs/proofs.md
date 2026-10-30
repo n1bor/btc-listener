@@ -39,14 +39,14 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `1a6f0e7a` pin: **203 universal, 0 sorries, 24 declined**, 203 laws in
+at the `68fb9320` pin (Aver 0.31.0): **203 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`; 48 of them are lemmas for the Aver proof
 steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7`, 7 at `607d9c0c` and 17
 at `bc3d6280`. At `bc3d6280`, with Lean 4.35.0, `==` and `!=` on `Int` carried
 `Classical.choice`, and 43 laws listed it among their axioms. At `847eef78`
 Aver decides `Int` equality and states the order on `Int` without it, so 164
 of the 379 entries in the baseline depend on `Classical.choice`, down from 294;
-no tier changed, and the baseline was recorded again for it. At `1a6f0e7a` the counts and the axioms are the same as at `847eef78`; the baseline was recorded again because the statements of nine theorems are now written differently. At the `bc3d6280`
+no tier changed, and the baseline was recorded again for it. At `68fb9320` (Aver 0.31.0) the counts and the axioms are the same as at `847eef78`; the baseline was recorded again because the statements of nine theorems are now written differently. At the `bc3d6280`
 pin it was 203 universal, 0 sorries and 24 declined. At the `607d9c0c` pin it was 186 universal, 0 sorries and 24 declined;
 with its first lemma 179 universal, 0 sorries and 25 declined, and with the
 first three 182 universal, 0 sorries and 24 declined. At
