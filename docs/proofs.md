@@ -168,6 +168,19 @@ Three numbers in the summary, and a manifest.
   disagreeing, and it is not worth carrying every example decline in every CI run — the engine
 cone alone brought 133 of them.
 
+  **What that hand run said at the 0.31.0 pin** (`68fb9320`, 30 Oct 2026): the
+  laws came out exactly as CI's law cone has them — 203 universal, none
+  moved — so the translation and the VM agree about every law. Nineteen
+  verify cases were isolated (fenced with `sorry` so the rest builds), all of
+  them effectful cases in `Infra.Headers`, which is jasisz/aver#1462's shape
+  shrunk from 22; and 407 example claims were declined, every one in the two
+  known categories, provider-owned curve operations and fuel-lowered
+  recursions. So `passed: false`, as expected of a run whose budgets are set
+  for laws. What it cost: about an hour on a cold `.lake`, 2m18s when
+  relaunched (lake rebuilds only what changed, so give up on a cap and
+  relaunch rather than start over), and 2.4 GB peak — wall time, not memory,
+  is the limit on this machine.
+
 ## What green does not mean
 
 Kernel-genuine is a narrow claim: the kernel checked the proof of *the theorem
