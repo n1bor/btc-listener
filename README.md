@@ -2075,8 +2075,8 @@ fixes we ask for land often. The toolchain CI tests with is whatever commit
 [`.aver-version`](.aver-version) names, and a developer machine's `aver` is
 whatever `../aver` was at when it was last `cargo install`ed — `aver
 --version` narrows that but does not pin it. The pin is a tagged release
-(`b82939cb` is 0.30.0), so a local `aver 0.30.0` at least rules out a build of
-main, which reports `0.30.0-dev`; it cannot tell two commits of one release
+(`68fb9320` is 0.31.0), so a local `aver 0.31.0` at least rules out a build of
+main, which reports a `-dev` version; it cannot tell two commits of one release
 apart. Moving forward is a routine, and the
 [canary workflow](.github/workflows/canary.yml) runs the cheap gates against
 upstream's tip nightly so the routine is rarely a surprise:

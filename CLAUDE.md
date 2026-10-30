@@ -59,8 +59,9 @@ The deep dives are `../aver/docs/` (`language.md`, `types.md`, `effects.md`,
 `cli.md`). The `aver` on PATH is `cargo install`ed from `../aver`, so it is
 whatever that checkout was at when it was last installed — and **`aver
 --version` narrows it but does not pin it**. Between releases the string does
-not move, so a build of main says `0.30.0-dev` whichever commit it is; the pin
-is a tagged release now (`b82939cb` is `0.30.0`), so a local `aver 0.30.0` at
+not move, so a build of main says `-dev` whichever commit it is; the pin is a
+tagged release (`68fb9320` is `0.31.0`, since n1bor/btc-listener#425; it was
+`b82939cb`, `0.30.0`, from 3 to 30 Oct 2026), so a local `aver 0.31.0` at
 least says the compiler is not a build of main. It still cannot tell two
 commits of the same release apart, and for a pin on main it says nothing at
 all. CI builds the commit named in `.aver-version`. When
