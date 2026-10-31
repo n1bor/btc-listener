@@ -191,7 +191,7 @@ verify script
 
 fn decoded(rawHex: String) -> Result<Transaction, String>
     ? "The Transaction the vector gives, as bytes then as fields."
-    Domain.Transaction.decode(Bytes.toList(Bytes.fromHex(rawHex)?))
+    Domain.Transaction.decode(Bytes.octets(Bytes.fromHex(rawHex)?))
 
 verify decoded
     Domain.Transaction.versionOf(decoded("%(sample)s")?) => 2
