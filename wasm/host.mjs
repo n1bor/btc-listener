@@ -1,3 +1,4 @@
+import { requireAllImports } from "./imports.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -1056,6 +1057,13 @@ async function main() {
   try {
     process.on("SIGINT", requestStop);
     process.on("SIGTERM", requestStop);
+    if (process.argv[2] === "--check-imports") {
+      const module = await WebAssembly.compile(readFileSync(process.argv[3]));
+      const imports = { aver: standardImports(), ...providerImports() };
+      const declared = requireAllImports(module, imports);
+      console.log(`every one of the ${declared} function import(s) the module declares has a host function`);
+      return;
+    }
     const requestedArgs = process.argv.slice(3).filter((argument) => argument !== "--");
     const workProbe = requestedArgs[0] === "--work-probe";
     const cancel = workProbe && requestedArgs[3] === "cancel";
@@ -1077,6 +1085,7 @@ async function main() {
     const wasm = readFileSync(process.argv[2]);
     const imports = { aver: standardImports(), ...providerImports() };
     const module = await WebAssembly.compile(wasm);
+    requireAllImports(module, imports);
     workHost = await createWorkHost(module, { maxJobs: 2, imports, pollSockets });
     guest = workHost.instance.exports;
     const run = WebAssembly.promising(guest.main);
