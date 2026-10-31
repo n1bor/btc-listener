@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { missingImports } from "./imports.mjs";
+import { missingImports, provides, adapterProvides } from "./imports.mjs";
 
 // A minimal wasm module whose only content is one function import,
 // `aver.no_such_thing`, built byte by byte so the test needs no toolchain.
@@ -26,4 +26,19 @@ test("an import the host provides is not reported", () => {
 test("a host value that is not a function does not count as providing it", () => {
   const module = moduleImporting("aver", "x");
   assert.deepEqual(missingImports(module, { aver: { x: 1 } }), ["aver.x"]);
+});
+
+test("a JSPI Suspending import counts as provided", { skip: typeof WebAssembly.Suspending !== "function" && "no JSPI" }, () => {
+  const module = moduleImporting("aver", "wait_poll");
+  const suspending = new WebAssembly.Suspending(async () => 0);
+  assert.equal(provides(suspending), true);
+  assert.deepEqual(missingImports(module, { aver: { wait_poll: suspending } }), []);
+});
+
+test("an import the Work adapter provides on its own counts as provided", async () => {
+  const adapter = await adapterProvides();
+  const module = moduleImporting("aver", "work_cancel");
+  assert.deepEqual(missingImports(module, {}, adapter), []);
+  assert.deepEqual(missingImports(module, {}), ["aver.work_cancel"]);
+  assert.ok(Object.keys(adapter["aver:work/v1"] ?? {}).length >= 4, "the adapter's own aver:work/v1 table");
 });
