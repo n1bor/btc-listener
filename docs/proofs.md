@@ -39,8 +39,12 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `68fb9320` pin (Aver 0.31.0): **203 universal, 0 sorries, 24 declined**, 203 laws in
-the manifest, `build_errors: 0`; 48 of them are lemmas for the Aver proof
+at the `adf4f4f3` pin (Aver 0.33.1): **203 universal, 0 sorries, 24 declined**, 203 laws in
+the manifest, `build_errors: 0`, every law closed by proof steps, 0 regressions
+against the baseline recorded at `68fb9320` (Aver 0.31.0), which had the same
+counts and the same axioms, so the baseline was not recorded again. What did
+move is the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
+needed ten to twelve minutes; 48 of them are lemmas for the Aver proof
 steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7`, 7 at `607d9c0c` and 17
 at `bc3d6280`. At `bc3d6280`, with Lean 4.35.0, `==` and `!=` on `Int` carried
 `Classical.choice`, and 43 laws listed it among their axioms. At `847eef78`
@@ -99,7 +103,7 @@ Three numbers in the summary, and a manifest.
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
   proves counts here, because that trusts the compiler's evaluator. **203 at
-  the `847eef78` pin**, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  the `adf4f4f3` pin** (Aver 0.33.1), 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
