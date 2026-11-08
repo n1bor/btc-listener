@@ -172,7 +172,16 @@ Three numbers in the summary, and a manifest.
   disagreeing, and it is not worth carrying every example decline in every CI run — the engine
 cone alone brought 133 of them.
 
-  **What that hand run said at the 0.31.0 pin** (`68fb9320`, 30 Oct 2026): the
+  **What that hand run said at the 0.33.1 pin** (`adf4f4f3`, 8 Nov 2026): the
+  same as at 0.31.0 in every count — 203 universal laws, 19 isolated cases
+  all in `Infra.Headers` (`absorbedInto` 9, `treeFor` 4, `markedInvalid` 3,
+  `vetted` 2, `lineageFor` 1), 407 example claims declined,
+  `build_succeeded: true`, `--gate: 0 regression(s)` — in 39 minutes on a
+  `.lake` whose prelude was already built by the law-cone gate. So
+  jasisz/aver#1462 is unchanged by two releases, and nothing the example
+  export can state disagrees between the VM and Lean.
+
+  **What it said at the 0.31.0 pin** (`68fb9320`, 30 Oct 2026): the
   laws came out exactly as CI's law cone has them — 203 universal, none
   moved — so the translation and the VM agree about every law. Nineteen
   verify cases were isolated (fenced with `sorry` so the rest builds), all of
