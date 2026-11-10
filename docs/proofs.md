@@ -39,11 +39,13 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `adf4f4f3` pin (Aver 0.33.1): **203 universal, 0 sorries, 24 declined**, 203 laws in
+at the `adf4f4f3` pin (Aver 0.33.1): **227 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`, every law closed by proof steps, 0 regressions
-against the baseline recorded at `68fb9320` (Aver 0.31.0), which had the same
-counts and the same axioms, so the baseline was not recorded again. What did
-move is the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
+against the baseline recorded at `68fb9320` (Aver 0.31.0). The 24 above the
+manifest's 203 are n1bor/btc-listener#441's finality laws, new laws being
+allowed without a new baseline; at the pin move itself it was 203 universal
+with the same counts and the same axioms as the baseline, so the baseline was
+not recorded again. What did move at the pin was the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
 needed ten to twelve minutes; 48 of them are lemmas for the Aver proof
 steps, 19 added at the `a025f3f2` pin, 5 at `dde1fdd7`, 7 at `607d9c0c` and 17
 at `bc3d6280`. At `bc3d6280`, with Lean 4.35.0, `==` and `!=` on `Int` carried
@@ -102,8 +104,9 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **203 at
-  the `adf4f4f3` pin** (Aver 0.33.1), 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  proves counts here, because that trusts the compiler's evaluator. **227 at
+  the `adf4f4f3` pin** (Aver 0.33.1) with n1bor/btc-listener#441's twenty-four
+  finality laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
@@ -254,6 +257,16 @@ split the law into helper laws (`because` explanations and `using`
 citations, see `docs/script-laws.md`), each of which is also a millisecond
 test under `aver verify`. A proven helper law is a rewrite rule for every law
 below it.
+
+**A mask that is not one bit or one low run does not close** (learned on
+n1bor/btc-listener#441). The kernel reads `Bits.and(x, 2^n)` as that bit of
+the quotient and `Bits.and(x, 2^n - 1)` as a remainder, and nothing else;
+`relativeLockOf(s) => relativeLockOf(Bits.and(s, 2151743487))`, the
+`0x8040FFFF` of BIP68's three fields in one literal, landed on a `sorry` both
+as written and as the sum of its three parts. State one bit or one run per
+law instead: the six laws that say which bit decides `Off`, which decides
+`Seconds`, and that the count is the low sixteen bits, together say the same
+thing and every one closed.
 
 ## The proof-composition fix, and what it cost at the time
 

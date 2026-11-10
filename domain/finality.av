@@ -66,6 +66,10 @@ verify cutoffOf
     cutoffOf(clockAt(10, 1000, 900, true, {})) => 900
     cutoffOf(clockAt(10, 1000, 900, false, {})) => 1000
 
+verify cutoffOf law bip113PicksTheMedianAndNothingElse
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(10, 1000, 900, false, {}), clockAt(0, 0, 0, true, {}), clockAt(419328, 1468000000, 1467990000, true, {}), clockAt(419327, 1468000000, 1467990000, false, {})]
+    cutoffOf(clock) => cutoffSpec(clock)
+
 fn isFinal(transaction: Transaction, height: Int, cutoff: Int) -> Bool
     ? "IsFinalTx: no lock time, or one the chain has passed, or every"
       "sequence at the maximum."
@@ -84,6 +88,32 @@ verify isFinal
     isFinal(locked(500000001, 0), 10, 500000001) => false
     isFinal(locked(500000001, 4294967295), 10, 500000001) => true
 
+verify isFinal law agreesWithCoreIsFinalTx
+    given transaction: Transaction = [locked(0, 0), locked(9, 0), locked(10, 0), locked(10, 4294967295), locked(500000000, 0), locked(500000001, 0), locked(500000001, 4294967295), locked(1, 4294967294), twoInputs(10, 4294967295, 0)]
+    given height: Int = [0, 9, 10, 11, 500000000]
+    given cutoff: Int = [0, 500000000, 500000001, 500000002]
+    isFinal(transaction, height, cutoff) => coreIsFinalTx(transaction, height, cutoff)
+
+verify isFinal law noLockTimeIsAlwaysFinal
+    given sequence: Int = [0, 1, 4294967294, 4294967295]
+    given height: Int = [0, 10, 500000000]
+    given cutoff: Int = [0, 500000001]
+    isFinal(locked(0, sequence), height, cutoff) => true
+
+verify isFinal law everyInputAtMaxSequenceIsAlwaysFinal
+    given transaction: Transaction = [locked(0, 4294967295), locked(10, 4294967295), locked(500000001, 4294967295), twoInputs(10, 4294967295, 4294967295)]
+    given height: Int = [0, 10, 11]
+    given cutoff: Int = [0, 500000001]
+    when allMaxSequence(transaction.inputs)
+    isFinal(transaction, height, cutoff) => true
+
+verify isFinal law oneInputBelowMaxSequenceNeedsTheLockPassed
+    given transaction: Transaction = [locked(10, 0), locked(10, 4294967294), locked(500000001, 0), twoInputs(10, 4294967295, 0), twoInputs(10, 0, 4294967295)]
+    given height: Int = [0, 10, 11]
+    given cutoff: Int = [0, 500000001, 500000002]
+    when Bool.and(transaction.lockTime != 0, Bool.not(allMaxSequence(transaction.inputs)))
+    isFinal(transaction, height, cutoff) => passed(transaction.lockTime, height, cutoff)
+
 fn passed(lockTime: Int, height: Int, cutoff: Int) -> Bool
     ? "A Height lock against the Height, a time lock against the cutoff,"
       "strictly: a Transaction locked to Height 10 is final at 11."
@@ -97,6 +127,40 @@ verify passed
     passed(500000000, 0, 500000001) => true
     passed(500000000, 0, 500000000) => false
 
+verify passed law aHeightLockIsStrictlyBelowTheHeight
+    given lockTime: Int = [0, 1, 9, 10, 11, 499999999]
+    given height: Int = [0, 9, 10, 11, 13440000]
+    given cutoff: Int = [0, 500000000, 1700000000]
+    when lockTime < lockTimeThreshold()
+    passed(lockTime, height, cutoff) => lockTime < height
+
+verify passed law aTimeLockIsStrictlyBelowTheCutoff
+    given lockTime: Int = [500000000, 500000001, 1231006505, 1700000000]
+    given height: Int = [0, 10, 13440000]
+    given cutoff: Int = [0, 500000000, 500000001, 1231006505, 1700000000]
+    when lockTime >= lockTimeThreshold()
+    passed(lockTime, height, cutoff) => lockTime < cutoff
+
+verify passed law aHeightLockNeverReadsTheClock
+    given lockTime: Int = [0, 10, 499999999]
+    given height: Int = [0, 10, 11]
+    given cutoff: Int = [0, 500000001]
+    given other: Int = [0, 1700000000]
+    when lockTime < lockTimeThreshold()
+    passed(lockTime, height, cutoff) => passed(lockTime, height, other)
+
+verify passed law aTimeLockNeverReadsTheHeight
+    given lockTime: Int = [500000000, 1700000000]
+    given height: Int = [0, 10]
+    given other: Int = [11, 13440000]
+    given cutoff: Int = [0, 500000001, 1700000001]
+    when lockTime >= lockTimeThreshold()
+    passed(lockTime, height, cutoff) => passed(lockTime, other, cutoff)
+
+verify passed law lockedToThisVeryHeightOrTimeIsNotYetFinal
+    given lockTime: Int = [0, 1, 10, 499999999, 500000000, 1700000000]
+    passed(lockTime, lockTime, lockTime) => false
+
 fn allMaxSequence(inputs: List<Input>) -> Bool
     ? "Every Input's sequence is the maximum; none is."
     match inputs
@@ -109,6 +173,11 @@ verify allMaxSequence
     allMaxSequence([]) => true
     allMaxSequence(locked(1, 4294967295).inputs) => true
     allMaxSequence(locked(1, 5).inputs) => false
+
+verify allMaxSequence law splitsOverConcatenation
+    given left: List<Input> = [[], locked(1, 4294967295).inputs, locked(1, 5).inputs, twoInputs(1, 4294967295, 4294967295).inputs]
+    given right: List<Input> = [[], locked(1, 4294967295).inputs, locked(1, 0).inputs]
+    allMaxSequence(List.concat(left, right)) => Bool.and(allMaxSequence(left), allMaxSequence(right))
 
 fn nonFinalIn(transactions: List<Transaction>, clock: Clock) -> Option<String>
     ? "The first Transaction that is not final at this Block, if any: Core's"
@@ -125,6 +194,11 @@ verify nonFinalIn
     nonFinalIn([locked(10, 0)], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction lk is not final at Height 10: lock time 10 against 900")
     nonFinalIn([locked(500000950, 0)], clockAt(10, 500001000, 500000900, false, {})) => Option.None
     nonFinalIn([locked(500000950, 0)], clockAt(10, 500001000, 500000900, true, {})) => Option.Some("Transaction lk is not final at Height 10: lock time 500000950 against 500000900")
+
+verify nonFinalIn law noneExactlyWhenEveryTransactionIsFinal
+    given transactions: List<Transaction> = [[], [locked(9, 0)], [locked(10, 0)], [locked(0, 0), locked(500000950, 0)], [locked(9, 0), locked(10, 4294967295), locked(500000001, 0)]]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(10, 500001000, 500000900, false, {}), clockAt(10, 500001000, 500000900, true, {})]
+    isNone(nonFinalIn(transactions, clock)) => allFinal(transactions, clock.height, cutoffOf(clock))
 
 type Lock
     Off
@@ -150,6 +224,32 @@ verify relativeLockOf
     relativeLockOf(65535) => Lock.Blocks(65535)
     relativeLockOf(65536 + 7) => Lock.Blocks(7)
 
+verify relativeLockOf law offExactlyWhenBit31IsSet
+    given sequence: Int = [0, 1, 65535, 65536, 4194304, 4194309, 2147483647, 2147483648, 2147483653, 4294967293, 4294967295]
+    isOff(relativeLockOf(sequence)) => Bits.and(sequence, 2147483648) != 0
+
+verify relativeLockOf law secondsExactlyWhenBit22IsSetAndBit31Clear
+    given sequence: Int = [0, 1, 65535, 65536, 4194304, 4194309, 4259839, 2147483647, 2147483648, 6341632, 4294967295]
+    isSeconds(relativeLockOf(sequence)) => Bool.and(Bits.and(sequence, 2147483648) == 0, Bits.and(sequence, 4194304) != 0)
+
+verify relativeLockOf law blocksExactlyWhenBit22AndBit31Clear
+    given sequence: Int = [0, 1, 65535, 65536, 4194304, 4194309, 2147483647, 2147483648, 6341632, 4294967295]
+    isBlocks(relativeLockOf(sequence)) => Bool.and(Bits.and(sequence, 2147483648) == 0, Bits.and(sequence, 4194304) == 0)
+
+verify relativeLockOf law theCountIsTheLowSixteenBitsWhenEnabled
+    given sequence: Int = [0, 1, 65535, 65536, 131071, 4194304, 4194309, 4259839, 2147483647, 2147483648, 4294967295]
+    when Bits.and(sequence, 2147483648) == 0
+    countOf(relativeLockOf(sequence)) => Bits.and(sequence, 65535)
+
+verify relativeLockOf law secondsAreTheCountTimes512
+    given sequence: Int = [4194304, 4194305, 4194309, 4259839, 6341632]
+    when Bool.and(Bits.and(sequence, 2147483648) == 0, Bits.and(sequence, 4194304) != 0)
+    relativeLockOf(sequence) => Lock.Seconds(Bits.and(sequence, 65535) * 512)
+
+verify relativeLockOf law theCountNeverExceedsSixteenBits
+    given sequence: Int = [0, 1, 65535, 65536, 131071, 4194304, 4259839, 2147483647, 2147483648, 4294967295]
+    withinSixteenBits(countOf(relativeLockOf(sequence))) => true
+
 fn sequenceFault(transaction: Transaction, coinHeights: List<Int>, clock: Clock) -> Option<String>
     ? "SequenceLocks for one Transaction: nothing before BIP68 or below"
       "version 2; otherwise each Input's relative lock against the Height"
@@ -170,6 +270,21 @@ verify sequenceFault
     sequenceFault(sequenced(2, 4194304 + 1), [5], clockAt(10, 1000, 900, true, {5 => 389})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since the median 389 before Height 5 and the median before this Block is 900 (BIP68)")
     sequenceFault(sequenced(2, 4194304 + 1), [5], clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since Height 5, whose median-time-past the caller did not supply (BIP68)")
     sequenceFault(sequenced(2, 4294967293), [5], clockAt(10, 1000, 900, true, {})) => Option.None
+
+verify sequenceFault law nothingBeforeBip68OrBelowVersionTwo
+    given transaction: Transaction = [sequenced(1, 100), sequenced(2, 100), sequenced(0, 6), sequenced(3, 4194305)]
+    given coinHeights: List<Int> = [[], [5], [5, 7]]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(10, 1000, 900, false, {})]
+    when Bool.not(Bool.and(clock.csv, transaction.version >= 2))
+    sequenceFault(transaction, coinHeights, clock) => Option.None
+
+verify sequenceFault law aDisabledSequenceIsNeverAFault
+    given version: Int = [2, 3]
+    given sequence: Int = [2147483648, 2147483653, 4294967293, 4294967295]
+    given coinHeights: List<Int> = [[], [5], [100]]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(0, 0, 0, true, {})]
+    when Bits.and(sequence, 2147483648) != 0
+    sequenceFault(sequenced(version, sequence), coinHeights, clock) => Option.None
 
 fn eachInput(transaction: Transaction, inputs: List<Input>, coinHeights: List<Int>, index: Int, clock: Clock) -> Option<String>
     ? "Input by Input, beside the Height of what it spends."
@@ -207,6 +322,17 @@ verify oneInput
     oneInput(sequenced(2, 0), 0, Lock.Off, 5, clockAt(10, 1000, 900, true, {})) => Option.None
     oneInput(sequenced(2, 0), 0, Lock.Blocks(0), 10, clockAt(10, 1000, 900, true, {})) => Option.None
 
+verify oneInput law offIsNeverAFault
+    given coinHeight: Int = [0, 5, 10, 100]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(0, 0, 0, true, {})]
+    oneInput(sequenced(2, 0), 0, Lock.Off, coinHeight, clock) => Option.None
+
+verify oneInput law aBlockLockPassesExactlyWhenTheHeightIsReached
+    given count: Int = [0, 1, 5, 6, 65535]
+    given coinHeight: Int = [0, 4, 5, 10]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(0, 0, 0, true, {}), clockAt(65540, 0, 0, true, {})]
+    isNone(oneInput(sequenced(2, 0), 0, Lock.Blocks(count), coinHeight, clock)) => coinHeight + count <= clock.height
+
 fn timeLock(transaction: Transaction, index: Int, seconds: Int, coinHeight: Int, coinMedian: Option<Int>, clock: Clock) -> Option<String>
     ? "The coin's median plus the lock against this Block's cutoff; a median"
       "the caller did not gather is a fault too, since a lock that cannot be"
@@ -220,6 +346,18 @@ fn timeLock(transaction: Transaction, index: Int, seconds: Int, coinHeight: Int,
 verify timeLock
     timeLock(sequenced(2, 0), 0, 512, 5, Option.Some(388), clockAt(10, 1000, 900, true, {})) => Option.None
     timeLock(sequenced(2, 0), 0, 512, 5, Option.Some(389), clockAt(10, 1000, 900, true, {})) => Option.Some("Transaction sq Input 0 asks 512 second(s) since the median 389 before Height 5 and the median before this Block is 900 (BIP68)")
+
+verify timeLock law aMedianTheCallerDidNotGatherIsAlwaysAFault
+    given seconds: Int = [0, 512, 33553920]
+    given coinHeight: Int = [0, 5]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(0, 0, 0, true, {})]
+    isNone(timeLock(sequenced(2, 0), 0, seconds, coinHeight, Option.None, clock)) => false
+
+verify timeLock law aTimeLockPassesExactlyWhenTheMedianIsReached
+    given seconds: Int = [0, 512, 1024, 33553920]
+    given median: Int = [0, 388, 389, 900]
+    given clock: Clock = [clockAt(10, 1000, 900, true, {}), clockAt(0, 0, 0, true, {}), clockAt(10, 1000, 33554820, true, {})]
+    isNone(timeLock(sequenced(2, 0), 0, seconds, 5, Option.Some(median), clock)) => median + seconds <= clock.previousMedian
 
 fn coinHeightsOf(inputs: List<Input>, fromStore: Map<Bytes, Unspent>, height: Int, acc: List<Int>) -> Result<List<Int>, String>
     ? "The Height of the Output each Input spends, in Input order: the"
@@ -293,6 +431,131 @@ verify wantedIf
     wantedIf(Lock.Seconds(512), 5, []) => [5]
     wantedIf(Lock.Blocks(1), 5, []) => []
     wantedIf(Lock.Off, 5, []) => []
+
+fn cutoffSpec(clock: Clock) -> Int
+    ? "BIP113 in one line, written apart from the code: the median before"
+      "this Block once CSV is in force, the Block's own time before that."
+    match clock.csv
+        true -> clock.previousMedian
+        false -> clock.ownTime
+
+verify cutoffSpec
+    cutoffSpec(clockAt(10, 1000, 900, true, {})) => 900
+    cutoffSpec(clockAt(10, 1000, 900, false, {})) => 1000
+
+fn coreIsFinalTx(transaction: Transaction, height: Int, cutoff: Int) -> Bool
+    ? "Core's IsFinalTx, in one line and apart from the code so the law"
+      "reads the rule: a zero lock time is final; a lock time below the"
+      "one it is measured against (the Height when it is below the"
+      "threshold, the time otherwise) is final; else every Input must be"
+      "at the maximum sequence."
+    Bool.or(Bool.or(transaction.lockTime == 0, transaction.lockTime < measureFor(transaction.lockTime, height, cutoff)), allMaxSequence(transaction.inputs))
+
+verify coreIsFinalTx
+    coreIsFinalTx(locked(0, 0), 0, 0) => true
+    coreIsFinalTx(locked(10, 0), 10, 0) => false
+    coreIsFinalTx(locked(10, 0), 11, 0) => true
+    coreIsFinalTx(locked(500000001, 0), 10, 500000001) => false
+    coreIsFinalTx(locked(500000001, 4294967295), 10, 500000001) => true
+
+fn measureFor(lockTime: Int, height: Int, cutoff: Int) -> Int
+    ? "What a lock time is measured against: Core's ternary on the threshold."
+    match lockTime < lockTimeThreshold()
+        true -> height
+        false -> cutoff
+
+verify measureFor
+    measureFor(10, 7, 900) => 7
+    measureFor(500000000, 7, 900) => 900
+
+fn allFinal(transactions: List<Transaction>, height: Int, cutoff: Int) -> Bool
+    ? "Every Transaction is final at this Block, for the law on nonFinalIn."
+    match transactions
+        [] -> true
+        [head, ..tail] -> match isFinal(head, height, cutoff)
+            true -> allFinal(tail, height, cutoff)
+            false -> false
+
+verify allFinal
+    allFinal([], 10, 900) => true
+    allFinal([locked(9, 0)], 10, 900) => true
+    allFinal([locked(9, 0), locked(10, 0)], 10, 900) => false
+
+fn isNone(answer: Option<String>) -> Bool
+    ? "Whether there was no fault, for the laws here."
+    match answer
+        Option.None -> true
+        Option.Some(_) -> false
+
+verify isNone
+    isNone(Option.None) => true
+    isNone(Option.Some("x")) => false
+
+fn isOff(lock: Lock) -> Bool
+    ? "Whether the lock is switched off, for the laws here."
+    match lock
+        Lock.Off -> true
+        Lock.Blocks(_) -> false
+        Lock.Seconds(_) -> false
+
+verify isOff
+    isOff(Lock.Off) => true
+    isOff(Lock.Blocks(1)) => false
+    isOff(Lock.Seconds(512)) => false
+
+fn isSeconds(lock: Lock) -> Bool
+    ? "Whether the lock counts seconds, for the laws here."
+    match lock
+        Lock.Seconds(_) -> true
+        Lock.Blocks(_) -> false
+        Lock.Off -> false
+
+verify isSeconds
+    isSeconds(Lock.Seconds(512)) => true
+    isSeconds(Lock.Blocks(1)) => false
+    isSeconds(Lock.Off) => false
+
+fn isBlocks(lock: Lock) -> Bool
+    ? "Whether the lock counts Blocks, for the laws here."
+    match lock
+        Lock.Blocks(_) -> true
+        Lock.Seconds(_) -> false
+        Lock.Off -> false
+
+verify isBlocks
+    isBlocks(Lock.Blocks(1)) => true
+    isBlocks(Lock.Seconds(512)) => false
+    isBlocks(Lock.Off) => false
+
+fn countOf(lock: Lock) -> Int
+    ? "The sixteen-bit count a lock carries: the Blocks, or the seconds"
+      "divided back by 512; nought for a lock that is off."
+    match lock
+        Lock.Off -> 0
+        Lock.Blocks(count) -> count
+        Lock.Seconds(seconds) -> Int.div(seconds, 512)
+
+verify countOf
+    countOf(Lock.Off) => 0
+    countOf(Lock.Blocks(7)) => 7
+    countOf(Lock.Seconds(1536)) => 3
+
+fn withinSixteenBits(count: Int) -> Bool
+    ? "Nought to 65,535 inclusive."
+    Bool.and(count >= 0, count <= 65535)
+
+verify withinSixteenBits
+    withinSixteenBits(0) => true
+    withinSixteenBits(65535) => true
+    withinSixteenBits(65536) => false
+    withinSixteenBits(0 - 1) => false
+
+fn twoInputs(lockTime: Int, first: Int, second: Int) -> Transaction
+    ? "A two-Input Transaction with this lock time and these sequences, for the laws here."
+    Transaction(version = 1, inputs = [Input(previousTxid = "aa", previousIndex = 0, script = "", sequence = first, witness = []), Input(previousTxid = "bb", previousIndex = 1, script = "", sequence = second, witness = [])], outputs = [], lockTime = lockTime, txid = "tw", size = 0, isSegWit = false)
+
+verify twoInputs
+    List.len(twoInputs(7, 1, 2).inputs) => 2
 
 fn locked(lockTime: Int, sequence: Int) -> Transaction
     ? "A one-Input Transaction with this lock time and sequence, for the cases here."
