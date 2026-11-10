@@ -37,6 +37,15 @@ verify wrongWith
     wrongWith(sample([spending("aa", 0, "")], [])) => Option.Some("no outputs")
     wrongWith(sample([spending("aa", 0, "")], [Output(value = 1, script = "51")])) => Option.None
 
+verify wrongWith law noInputsIsRefusedFirst
+    given outputs: List<Output> = [[], [Output(value = 1, script = "51")], [Output(value = 2100000000000001, script = "")]]
+    wrongWith(sample([], outputs)) => Option.Some("no inputs")
+
+verify wrongWith law noOutputsIsRefusedNext
+    given inputs: List<Input> = [[spending("aa", 0, "")], [spending("aa", 0, ""), spending("aa", 0, "")], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")]]
+    when inputs != []
+    wrongWith(sample(inputs, [])) => Option.Some("no outputs")
+
 fn withOutputs(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
     ? "A Transaction that pays nowhere is invalid however well it spends."
     match Domain.Transaction.outputsOf(transaction)
@@ -139,6 +148,11 @@ verify amountsWrong
     amountsWrong([Output(value = 1, script = "")], 0) => Option.None
     amountsWrong([Output(value = 2100000000000001, script = "")], 0) => Option.Some("output of 2100000000000001 is more than there is")
 
+verify amountsWrong law acceptedOutputsAreEachWithinMaxMoney
+    given outputs: List<Output> = [[], [Output(value = 1, script = "")], [Output(value = 2100000000000001, script = "")], [Output(value = 1, script = ""), Output(value = 2100000000000001, script = "")], [Output(value = 2100000000000000, script = ""), Output(value = 1, script = "")]]
+    given sofar: Int = [0, 1, 2100000000000000]
+    Bool.or(Bool.not(isNone(amountsWrong(outputs, sofar))), eachAtMostMaxMoney(outputs)) => true
+
 fn oneAmount(output: Output, rest: List<Output>, sofar: Int) -> Option<String>
     ? "An amount above the cap, or a total that climbs past it."
       "A negative amount cannot arise here: the decoder reads eight bytes"
@@ -153,6 +167,20 @@ verify oneAmount
     oneAmount(Output(value = 2100000000000001, script = ""), [], 0) => Option.Some("output of 2100000000000001 is more than there is")
     oneAmount(Output(value = 1, script = ""), [], 0) => Option.None
 
+verify oneAmount law anOutputWithinMaxMoneyPassesToTheRunningTotal
+    given value: Int = [0, 1, 2100000000000000]
+    given rest: List<Output> = [[], [Output(value = 1, script = "")]]
+    given sofar: Int = [0, 1, 2100000000000000]
+    when value <= maxMoney()
+    oneAmount(Output(value = value, script = ""), rest, sofar) => runningTotal(value + sofar, rest)
+
+verify oneAmount law anOutputAboveMaxMoneyIsRefused
+    given value: Int = [2100000000000001, 2100000000000002, 9223372036854775807]
+    given rest: List<Output> = [[], [Output(value = 1, script = "")]]
+    given sofar: Int = [0, 2100000000000000]
+    when value > maxMoney()
+    isNone(oneAmount(Output(value = value, script = ""), rest, sofar)) => false
+
 fn runningTotal(total: Int, rest: List<Output>) -> Option<String>
     ? "The sum is capped as well as each part, which is not the same rule."
     match total > maxMoney()
@@ -162,6 +190,18 @@ fn runningTotal(total: Int, rest: List<Output>) -> Option<String>
 verify runningTotal
     runningTotal(2100000000000001, []) => Option.Some("outputs total 2100000000000001, which is more than there is")
     runningTotal(5, []) => Option.None
+
+verify runningTotal law aTotalWithinMaxMoneyPassesToTheNextOutput
+    given total: Int = [0, 1, 2100000000000000]
+    given rest: List<Output> = [[], [Output(value = 1, script = "")], [Output(value = 2100000000000001, script = "")]]
+    when total <= maxMoney()
+    runningTotal(total, rest) => amountsWrong(rest, total)
+
+verify runningTotal law aTotalAboveMaxMoneyIsRefused
+    given total: Int = [2100000000000001, 9223372036854775807]
+    given rest: List<Output> = [[], [Output(value = 1, script = "")]]
+    when total > maxMoney()
+    isNone(runningTotal(total, rest)) => false
 
 fn withInputs(transaction: Transaction, first: Input, rest: List<Input>) -> Option<String>
     ? "The same Output cannot be spent twice by one Transaction, and a null"
@@ -182,6 +222,19 @@ fn duplicated(inputs: List<Input>, seen: List<String>) -> Option<String>
 verify duplicated
     duplicated([], []) => Option.None
     duplicated([spending("aa", 0, "")], ["aa:0"]) => Option.Some("spends aa:0 twice")
+
+verify duplicated law anOutpointAlreadySeenIsRefused
+    given first: Input = [spending("aa", 0, ""), spending("bb", 7, "")]
+    given rest: List<Input> = [[], [spending("cc", 1, "")], [spending("aa", 0, "")]]
+    given seen: List<String> = [["aa:0"], ["bb:7"], ["aa:0", "bb:7"]]
+    when List.contains(seen, named(first))
+    isNone(duplicated(List.prepend(first, rest), seen)) => false
+
+verify duplicated law anOutpointSpentTwiceInARowIsRefused
+    given first: Input = [spending("aa", 0, ""), spending("bb", 7, "")]
+    given rest: List<Input> = [[], [spending("cc", 1, "")]]
+    given seen: List<String> = [[], ["cc:1"], ["aa:0"]]
+    isNone(duplicated(List.prepend(first, List.prepend(first, rest)), seen)) => false
 
 fn firstOrSeen(input: Input, rest: List<Input>, seen: List<String>) -> Option<String>
     ? "One outpoint, against the ones before it."
@@ -209,6 +262,24 @@ fn byCoinbase(first: Input, rest: List<Input>) -> Option<String>
 verify byCoinbase
     byCoinbase(spending("aa", 0, ""), []) => Option.None
 
+verify byCoinbase law inputsSpendingNothingNullAreAccepted
+    given first: Input = [spending("aa", 0, ""), spending("bb", 7, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 0, ""), spending("aa", 4294967295, "")]
+    given rest: List<Input> = [[], [spending("cc", 1, "")], [spending("aa", 0, ""), spending("bb", 7, "")]]
+    when Bool.not(anyNull(List.prepend(first, rest)))
+    using [noNullPrevout.noneWhenNoInputIsNull]
+    byCoinbase(first, rest) => Option.None
+
+verify byCoinbase law aNullPrevoutBesideAnotherInputIsRefused
+    given first: Input = [spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151")]
+    given rest: List<Input> = [[spending("cc", 1, "")], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")], [spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")]]
+    when Bool.and(rest != [], anyNull(List.prepend(first, rest)))
+    using [noNullPrevout.refusedWhenAnInputIsNull]
+    byCoinbase(first, rest) => Option.Some("spends a null prevout without being a coinbase")
+
+verify byCoinbase law aLoneNullInputIsJudgedByItsScriptLength
+    given script: String = ["", "51", "5151", "03a0860100"]
+    byCoinbase(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, script), []) => coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, script))
+
 fn isCoinbase(transaction: Transaction) -> Bool
     ? "One Input spending nothing: the shape only a coinbase has."
     match Domain.Transaction.inputsOf(transaction)
@@ -220,6 +291,11 @@ verify isCoinbase
     isCoinbase(sample([spending("aa", 0, "")], [Output(value = 1, script = "51")])) => false
     isCoinbase(sample([], [Output(value = 1, script = "51")])) => false
     isCoinbase(sample([spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151"), spending("aa", 0, "")], [Output(value = 1, script = "51")])) => false
+
+verify isCoinbase law isExactlyOneNullInput
+    given inputs: List<Input> = [[], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151")], [spending("aa", 0, "")], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151"), spending("aa", 0, "")], [spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")]]
+    given outputs: List<Output> = [[], [Output(value = 1, script = "51")]]
+    isCoinbase(sample(inputs, outputs)) => Bool.and(List.len(inputs) == 1, anyNull(inputs))
 
 fn aloneAndNull(only: Input, rest: List<Input>) -> Bool
     ? "The one Input, with none after it, spending nothing."
@@ -238,6 +314,12 @@ fn isNull(input: Input) -> Bool
 verify isNull
     isNull(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")) => true
     isNull(spending("aa", 4294967295, "")) => false
+
+verify isNull law isTheAllZeroTxidAtTheLastIndex
+    given txid: String = ["0000000000000000000000000000000000000000000000000000000000000000", "aa", "", "0000000000000000000000000000000000000000000000000000000000000001"]
+    given index: Int = [0, 1, 4294967294, 4294967295]
+    given script: String = ["", "5151"]
+    isNull(spending(txid, index, script)) => Bool.and(index == 4294967295, txid == "0000000000000000000000000000000000000000000000000000000000000000")
 
 fn allZero(txid: String) -> Bool
     ? "Sixty-four characters of nought, which is how a coinbase says nothing."
@@ -261,6 +343,10 @@ verify coinbaseLength
     coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "51")) => Option.Some("coinbase script is 1 bytes, outside two to a hundred")
     coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "5151")) => Option.None
 
+verify coinbaseLength law acceptedExactlyBetweenTwoAndAHundredBytes
+    given script: String = ["", "51", "5151", "515151", "03a0860100", "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+    isNone(coinbaseLength(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, script))) => Bool.and(String.len(script) >= 4, String.len(script) <= 200)
+
 fn noNullPrevout(inputs: List<Input>) -> Option<String>
     ? "Outside a coinbase, an Input that spends nothing spends nothing."
     match inputs
@@ -271,6 +357,15 @@ verify noNullPrevout
     noNullPrevout([]) => Option.None
     noNullPrevout([spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")]) => Option.Some("spends a null prevout without being a coinbase")
 
+verify noNullPrevout law noneWhenNoInputIsNull
+    given inputs: List<Input> = [[], [spending("aa", 0, "")], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")], [spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")], [spending("aa", 0, ""), spending("bb", 1, "")]]
+    when Bool.not(anyNull(inputs))
+    noNullPrevout(inputs) => Option.None
+
+verify noNullPrevout law refusedWhenAnInputIsNull
+    given inputs: List<Input> = [[], [spending("aa", 0, "")], [spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")], [spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")], [spending("aa", 0, ""), spending("bb", 1, "")]]
+    Bool.or(Bool.not(anyNull(inputs)), noNullPrevout(inputs) == Option.Some("spends a null prevout without being a coinbase")) => true
+
 fn nullOrNext(input: Input, rest: List<Input>) -> Option<String>
     ? "One Input, then the rest."
     match isNull(input)
@@ -280,6 +375,70 @@ fn nullOrNext(input: Input, rest: List<Input>) -> Option<String>
 verify nullOrNext
     nullOrNext(spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, ""), []) => Option.Some("spends a null prevout without being a coinbase")
     nullOrNext(spending("aa", 0, ""), []) => Option.None
+
+fn isNone(answer: Option<String>) -> Bool
+    ? "Whether nothing was wrong, for the laws here."
+    match answer
+        Option.None -> true
+        Option.Some(_) -> false
+
+verify isNone
+    isNone(Option.None) => true
+    isNone(Option.Some("x")) => false
+
+fn anyNull(inputs: List<Input>) -> Bool
+    ? "Whether any Input spends nothing, for the laws here."
+    match inputs
+        [] -> false
+        [head, ..tail] -> match isNull(head)
+            true -> true
+            false -> anyNull(tail)
+
+verify anyNull
+    anyNull([]) => false
+    anyNull([spending("aa", 0, "")]) => false
+    anyNull([spending("aa", 0, ""), spending("0000000000000000000000000000000000000000000000000000000000000000", 4294967295, "")]) => true
+
+fn allNonNegative(outputs: List<Output>) -> Bool
+    ? "No Output pays a negative amount, which the decoder cannot produce"
+      "and the laws here assume."
+    match outputs
+        [] -> true
+        [head, ..tail] -> match Domain.Transaction.valueOf(head) >= 0
+            true -> allNonNegative(tail)
+            false -> false
+
+verify allNonNegative
+    allNonNegative([]) => true
+    allNonNegative([Output(value = 0, script = "")]) => true
+    allNonNegative([Output(value = 0 - 1, script = "")]) => false
+
+fn eachAtMostMaxMoney(outputs: List<Output>) -> Bool
+    ? "No single Output pays more than there is, for the laws here."
+    match outputs
+        [] -> true
+        [head, ..tail] -> match Domain.Transaction.valueOf(head) <= maxMoney()
+            true -> eachAtMostMaxMoney(tail)
+            false -> false
+
+verify eachAtMostMaxMoney
+    eachAtMostMaxMoney([]) => true
+    eachAtMostMaxMoney([Output(value = 2100000000000000, script = "")]) => true
+    eachAtMostMaxMoney([Output(value = 2100000000000001, script = "")]) => false
+
+fn valueTotal(outputs: List<Output>) -> Int
+    ? "What the Outputs pay, added up, for the laws here."
+    match outputs
+        [] -> 0
+        [head, ..tail] -> Domain.Transaction.valueOf(head) + valueTotal(tail)
+
+verify valueTotal
+    valueTotal([]) => 0
+    valueTotal([Output(value = 1, script = ""), Output(value = 2, script = "")]) => 3
+
+verify valueTotal law neverNegativeWhenEachIsNot
+    given outputs: List<Output> = [[], [Output(value = 0, script = "")], [Output(value = 1, script = ""), Output(value = 2, script = "")], [Output(value = 0 - 1, script = "")]]
+    Bool.or(Bool.not(allNonNegative(outputs)), valueTotal(outputs) >= 0) => true
 
 fn spending(txid: String, index: Int, script: String) -> Input
     ? "An Input, for the cases above."

@@ -39,11 +39,12 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `adf4f4f3` pin (Aver 0.33.1): **227 universal, 0 sorries, 24 declined**, 203 laws in
+at the `adf4f4f3` pin (Aver 0.33.1): **245 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`, every law closed by proof steps, 0 regressions
-against the baseline recorded at `68fb9320` (Aver 0.31.0). The 24 above the
-manifest's 203 are n1bor/btc-listener#441's finality laws, new laws being
-allowed without a new baseline; at the pin move itself it was 203 universal
+against the baseline recorded at `68fb9320` (Aver 0.31.0). The 42 above the
+manifest's 203 are n1bor/btc-listener#441's twenty-four finality laws and
+#442's eighteen CheckTransaction laws, new laws being allowed without a new
+baseline; at the pin move itself it was 203 universal
 with the same counts and the same axioms as the baseline, so the baseline was
 not recorded again. What did move at the pin was the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
 needed ten to twelve minutes; 48 of them are lemmas for the Aver proof
@@ -104,9 +105,9 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **227 at
+  proves counts here, because that trusts the compiler's evaluator. **245 at
   the `adf4f4f3` pin** (Aver 0.33.1) with n1bor/btc-listener#441's twenty-four
-  finality laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  finality laws and #442's eighteen CheckTransaction laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
@@ -267,6 +268,21 @@ as written and as the sum of its three parts. State one bit or one run per
 law instead: the six laws that say which bit decides `Off`, which decides
 `Seconds`, and that the count is the low sixteen bits, together say the same
 thing and every one closed.
+
+**A premise that is a recursive predicate belongs in the claim, not in
+`when`** (learned on n1bor/btc-listener#442). A `when`-law is proved by a
+non-inductive route (`grind` over the unfolded cone), so `when
+allNonNegative(outputs)` over a law that needs induction on `outputs` is
+declined every time, where the same law written `Bool.or(Bool.not(
+allNonNegative(outputs)), claim) => true` closes by induction. Int-only
+premises can stay in `when`. **And an accumulator that changes through a
+mutual recursion is not generalised**: a law that `amountsWrong` accepts
+every list within the money bound needs the hypothesis at `sofar + value`
+inside `runningTotal`, and the exporter proves the step at `sofar` only;
+four shapes landed on a `sorry`. What closed instead is one law per step
+(`oneAmount` passes a value within the bound to `runningTotal`,
+`runningTotal` passes a total within the bound to the next Output), which
+say the same thing with the induction left to the reader.
 
 ## The proof-composition fix, and what it cost at the time
 
