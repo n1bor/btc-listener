@@ -54,6 +54,39 @@ verify atHeight
     atHeight(Network.Regtest, 150) => 2500000000
     atHeight(Network.Regtest, 300) => 1250000000
 
+verify atHeight law isFiftyCoinsHalvedOncePerEra
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 149, 150, 209999, 210000, 6930000, 6930001]
+    atHeight(network, height) => halvedBy(5000000000, Int.min(eras(network, height), 64))
+
+verify atHeight law constantWithinAnEra
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given earlier: Int = [0, 1, 149, 150, 209999, 210000, 419999, 6930000]
+    given later: Int = [0, 149, 150, 209999, 210000, 419999, 420000, 6930000, 6930001]
+    when eras(network, earlier) == eras(network, later)
+    atHeight(network, earlier) => atHeight(network, later)
+
+verify atHeight law neverExceedsFiftyCoins
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 150, 209999, 210000, 6930000, 6930001]
+    when height >= 0
+    using [halved.isAtMostTheAmount]
+    atHeight(network, height) <= 5000000000 holds
+
+verify atHeight law neverNegative
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 150, 209999, 210000, 6930000, 6930001]
+    when height >= 0
+    using [halved.neverNegative]
+    atHeight(network, height) >= 0 holds
+
+verify atHeight law zeroPastThirtyThreeEras
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [4950, 6930000, 6930001, 7000000]
+    when eras(network, height) >= 33
+    using [halvedBy.vanishesAfterThirtyThreeFromFiftyCoins]
+    atHeight(network, height) => 0
+
 fn eras(network: Network, height: Int) -> Int
     ? "How many halvings have happened by this Height."
       "Total: the interval is a positive constant per Network, so the division"
@@ -67,27 +100,144 @@ verify eras
     eras(Network.Mainnet, 630000) => 3
     eras(Network.Regtest, 300) => 2
 
+verify eras law neverDecreasesWithHeight
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given earlier: Int = [0, 1, 149, 150, 209999, 210000, 6930000]
+    given later: Int = [0, 150, 209999, 210000, 420000, 6930000, 6930001]
+    when earlier <= later
+    eras(network, earlier) <= eras(network, later) holds
+
+verify eras law zeroBeforeTheFirstHalving
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 149, 150, 209999]
+    when Bool.and(height >= 0, height < halvingInterval(network))
+    eras(network, height) => 0
+
+verify eras law mainnetEra1
+    given height: Int = [210000, 300000, 419999]
+    when Bool.and(height >= 210000, height < 420000)
+    eras(Network.Mainnet, height) => 1
+
+verify eras law mainnetEra2
+    given height: Int = [420000, 500000, 629999]
+    when Bool.and(height >= 420000, height < 630000)
+    eras(Network.Mainnet, height) => 2
+
+verify eras law mainnetEra3
+    given height: Int = [630000, 700000, 839999]
+    when Bool.and(height >= 630000, height < 840000)
+    eras(Network.Mainnet, height) => 3
+
+verify eras law mainnetEra4
+    given height: Int = [840000, 975281, 1049999]
+    when Bool.and(height >= 840000, height < 1050000)
+    eras(Network.Mainnet, height) => 4
+
+verify eras law stepsUpByOneEachInterval
+    given network: Network = [Network.Mainnet, Network.Testnet, Network.Signet, Network.Regtest]
+    given height: Int = [0, 1, 149, 150, 209999, 210000, 6930000]
+    when height >= 0
+    eras(network, height + halvingInterval(network)) => eras(network, height) + 1
+
 fn halved(amount: Int, times: Int) -> Int
     ? "An amount halved that many times, rounding down."
       "Rounding down is the whole reason the total supply is not a round"
       "number. Bitcoin Core stops at sixty-four halvings to avoid shifting a"
       "64-bit value past its width; here the amount simply reaches zero on the"
       "thirty-third and stays there, which is the same schedule without the"
-      "special case."
-      "The divisor is a literal, so this division answers an Int rather than a"
-      "Result -- unlike the one in eras, whose divisor is a Network parameter"
-      "the checker cannot see the sign of."
-    match times <= 0
-        true -> amount
-        false -> halved(Int.div(amount, 2), times - 1)
+      "special case. The count is clamped at sixty-four all the same"
+      "(n1bor/btc-listener#443): sixty-four halvings take any 64-bit amount to"
+      "the value it then keeps (nought, or minus one for a negative), so the"
+      "clamp changes no answer and no count can cost more than sixty-four"
+      "steps, where a Height of 2^63 used to ask for 4e13 halvings of nothing."
+    halvedBy(amount, Int.min(times, 64))
 
 verify halved
     halved(5000000000, 0) => 5000000000
     halved(5000000000, 1) => 2500000000
     halved(5000000000, 33) => 0
     halved(5000000000, 64) => 0
+    halved(5000000000, 9223372036854775807) => 0
+    halved(0, 9223372036854775807) => 0
     halved(1, 1) => 0
     halved(3, 1) => 1
+
+verify halved law isTheCountdownClampedAtSixtyFour
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 33, 64, 65, 1000]
+    halved(amount, times) => halvedBy(amount, Int.min(times, 64))
+
+verify halved law sixtyFourHalvingsIsTheMost
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [64, 65, 1000]
+    when times >= 64
+    halved(amount, times) => halved(amount, 64)
+
+verify halved law isAtMostTheAmount
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 32, 33, 64, 1000]
+    when Bool.and(amount >= 0, times >= 0)
+    using [halvedBy.isAtMostTheAmount]
+    halved(amount, times) <= amount holds
+
+verify halved law neverNegative
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 32, 33, 64, 1000]
+    when amount >= 0
+    using [halvedBy.neverNegative]
+    halved(amount, times) >= 0 holds
+
+fn halvedBy(amount: Int, times: Int) -> Int
+    ? "The amount halved that many times, counted down one at a time."
+      "The divisor is a literal, so this division answers an Int rather than a"
+      "Result -- unlike the one in eras, whose divisor is a Network parameter"
+      "the checker cannot see the sign of."
+    match times <= 0
+        true -> amount
+        false -> halvedBy(Int.div(amount, 2), times - 1)
+
+verify halvedBy
+    halvedBy(5000000000, 0) => 5000000000
+    halvedBy(5000000000, 1) => 2500000000
+    halvedBy(5000000000, 33) => 0
+    halvedBy(3, 1) => 1
+    halvedBy(0 - 3, 1) => 0 - 2
+
+verify halvedBy law vanishesAfterThirtyThreeFromFiftyCoins
+    given times: Int = [33, 34, 64]
+    when times <= 64
+    using [halvedBy.halvingCommutes]
+    Bool.or(times < 33, halvedBy(5000000000, times) == 0) => true
+
+verify halvedBy law stepIsHalfRoundedDown
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 32, 33]
+    when Bool.and(times >= 0, times <= 63)
+    halvedBy(amount, times + 1) => halvedBy(Int.div(amount, 2), times)
+
+verify halvedBy law halvingCommutes
+    given amount: Int = [0, 1, 3, 7, 5000000000]
+    given times: Int = [0, 1, 2, 32, 33]
+    when times <= 64
+    halvedBy(Int.div(amount, 2), times) => Int.div(halvedBy(amount, times), 2)
+
+verify halvedBy law theNextHalvingNeverMintsMore
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 2, 32, 33]
+    when times <= 63
+    Bool.or(amount < 0, halvedBy(amount, times + 1) <= halvedBy(amount, times)) => true
+
+verify halvedBy law isAtMostTheAmount
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 32, 33, 64]
+    when Bool.and(Bool.and(amount >= 0, times >= 0), times <= 64)
+    halvedBy(amount, times) <= amount holds
+
+verify halvedBy law neverNegative
+    given amount: Int = [0, 1, 3, 5000000000]
+    given times: Int = [0, 1, 32, 33, 64]
+    when Bool.and(amount >= 0, times <= 64)
+    halvedBy(amount, times) >= 0 holds
 
 fn claimAllowed(subsidy: Int, fees: Int) -> Int
     ? "The most a coinbase may pay out: what it mints plus what the Block's"
@@ -98,6 +248,11 @@ verify claimAllowed
     claimAllowed(5000000000, 0) => 5000000000
     claimAllowed(5000000000, 1234) => 5000001234
     claimAllowed(0, 1234) => 1234
+
+verify claimAllowed law isTheSumExactly
+    given subsidy: Int = [0, 1234, 5000000000]
+    given fees: Int = [0, 1, 1234]
+    claimAllowed(subsidy, fees) => subsidy + fees
 
 fn withinClaim(paid: Int, subsidy: Int, fees: Int) -> Bool
     ? "Whether the coinbase claimed no more than it was allowed."
@@ -114,6 +269,37 @@ verify withinClaim
     withinClaim(5000001234, 5000000000, 1234) => true
     withinClaim(5000001235, 5000000000, 1234) => false
     withinClaim(0, 5000000000, 0) => true
+
+verify withinClaim law theExactClaimIsAllowed
+    given subsidy: Int = [0, 1234, 5000000000]
+    given fees: Int = [0, 1, 1234]
+    withinClaim(subsidy + fees, subsidy, fees) => true
+
+verify withinClaim law oneSatoshiOverIsRefused
+    given subsidy: Int = [0, 1234, 5000000000]
+    given fees: Int = [0, 1, 1234]
+    withinClaim(subsidy + fees + 1, subsidy, fees) => false
+
+verify withinClaim law moreSubsidyKeepsTheClaimAllowed
+    given paid: Int = [0, 1, 5000000000, 5000001235]
+    given subsidy: Int = [0, 5000000000]
+    given fees: Int = [0, 1234]
+    when withinClaim(paid, subsidy, fees)
+    withinClaim(paid, subsidy + 1, fees) => true
+
+verify withinClaim law moreFeesKeepTheClaimAllowed
+    given paid: Int = [0, 1, 5000000000, 5000001235]
+    given subsidy: Int = [0, 5000000000]
+    given fees: Int = [0, 1234]
+    when withinClaim(paid, subsidy, fees)
+    withinClaim(paid, subsidy, fees + 1) => true
+
+verify withinClaim law payingLessIsAlwaysAllowed
+    given paid: Int = [0, 1, 4999999999, 5000000000]
+    given subsidy: Int = [0, 5000000000]
+    given fees: Int = [0, 1234]
+    when Bool.and(paid <= subsidy, fees >= 0)
+    withinClaim(paid, subsidy, fees) => true
 
 fn possibleSupply() -> Int
     ? "Every satoshi the mainnet schedule will ever allow, added up."

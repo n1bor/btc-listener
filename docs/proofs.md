@@ -39,12 +39,12 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `adf4f4f3` pin (Aver 0.33.1): **245 universal, 0 sorries, 24 declined**, 203 laws in
+at the `adf4f4f3` pin (Aver 0.33.1): **273 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`, every law closed by proof steps, 0 regressions
-against the baseline recorded at `68fb9320` (Aver 0.31.0). The 42 above the
-manifest's 203 are n1bor/btc-listener#441's twenty-four finality laws and
-#442's eighteen CheckTransaction laws, new laws being allowed without a new
-baseline; at the pin move itself it was 203 universal
+against the baseline recorded at `68fb9320` (Aver 0.31.0). The 70 above the
+manifest's 203 are n1bor/btc-listener#441's twenty-four finality laws,
+#442's eighteen CheckTransaction laws and #443's twenty-eight subsidy laws,
+new laws being allowed without a new baseline; at the pin move itself it was 203 universal
 with the same counts and the same axioms as the baseline, so the baseline was
 not recorded again. What did move at the pin was the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
 needed ten to twelve minutes; 48 of them are lemmas for the Aver proof
@@ -105,9 +105,10 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **245 at
+  proves counts here, because that trusts the compiler's evaluator. **273 at
   the `adf4f4f3` pin** (Aver 0.33.1) with n1bor/btc-listener#441's twenty-four
-  finality laws and #442's eighteen CheckTransaction laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  finality laws, #442's eighteen CheckTransaction laws and #443's twenty-eight
+  subsidy laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
@@ -283,6 +284,26 @@ four shapes landed on a `sorry`. What closed instead is one law per step
 (`oneAmount` passes a value within the bound to `runningTotal`,
 `runningTotal` passes a total within the bound to the next Output), which
 say the same thing with the induction left to the reader.
+
+**`--hostile` hands an Int given 2^63, and a recursion that counts it down
+is "not answered"** (learned on n1bor/btc-listener#443). `halved(amount,
+times)` recursed `times` times whatever the amount, so every law with a
+count or a Height given hit the step budget under the boundary values and
+the whole file was reported unchecked. Two things fixed it, in this order:
+the function was made total in time by construction (the count is clamped
+at sixty-four, which takes any 64-bit amount to its fixed point, so no
+answer changed), and the laws on the unclamped countdown worker carry
+`when times <= 64`. A guard on the amount instead (`Bool.or(times <= 0,
+amount == 0)`) took the function out of the Int-countdown shape the
+exporter proves and every law on it failed; the clamp is a wrapper, so the
+worker keeps its shape. **And a law that cites a `when`-lemma has to imply
+that lemma's premise**: `atHeight` at the next era citing a worker lemma
+scoped to sixty-three halvings is unprovable as stated, because nothing
+bounds the era, and five era-pin laws citing the per-era `eras` lemmas
+landed on the same `implication` obligation for a reason `--explain` did
+not record; `atHeight(network, height) =>
+halvedBy(5000000000, Int.min(eras(network, height), 64))` closes and, with
+the `eras` lemmas, says what the six did.
 
 ## The proof-composition fix, and what it cost at the time
 
