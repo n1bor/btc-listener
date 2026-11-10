@@ -39,12 +39,13 @@ aver proof main.av --module-root . -o ../btc-listener-proof \
 
 **Now.** `aver proof main.av` is the entry and `proof/main.declined` and
 `proof/main.manifest.json` are the two files it is measured against. Measured
-at the `adf4f4f3` pin (Aver 0.33.1): **273 universal, 0 sorries, 24 declined**, 203 laws in
+at the `adf4f4f3` pin (Aver 0.33.1): **297 universal, 0 sorries, 24 declined**, 203 laws in
 the manifest, `build_errors: 0`, every law closed by proof steps, 0 regressions
-against the baseline recorded at `68fb9320` (Aver 0.31.0). The 70 above the
+against the baseline recorded at `68fb9320` (Aver 0.31.0). The 94 above the
 manifest's 203 are n1bor/btc-listener#441's twenty-four finality laws,
-#442's eighteen CheckTransaction laws and #443's twenty-eight subsidy laws,
-new laws being allowed without a new baseline; at the pin move itself it was 203 universal
+#442's eighteen CheckTransaction laws, #443's twenty-eight subsidy laws and
+#444's twenty-four Block-limit laws, new laws being allowed without a new
+baseline; at the pin move itself it was 203 universal
 with the same counts and the same axioms as the baseline, so the baseline was
 not recorded again. What did move at the pin was the cost: the warm `lake build` took 3m48s at 0.33.1 where 0.31.0
 needed ten to twelve minutes; 48 of them are lemmas for the Aver proof
@@ -105,10 +106,10 @@ Three numbers in the summary, and a manifest.
 - **`universal_laws`** — laws whose theorem the Lean kernel checked in full,
   over every value of their `given`s, with `#print axioms` inside Lean's core
   three (`propext`, `Classical.choice`, `Quot.sound`). Nothing `native_decide`
-  proves counts here, because that trusts the compiler's evaluator. **273 at
+  proves counts here, because that trusts the compiler's evaluator. **297 at
   the `adf4f4f3` pin** (Aver 0.33.1) with n1bor/btc-listener#441's twenty-four
-  finality laws, #442's eighteen CheckTransaction laws and #443's twenty-eight
-  subsidy laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
+  finality laws, #442's eighteen CheckTransaction laws, #443's twenty-eight
+  subsidy laws and #444's twenty-four Block-limit laws, 203 at the pin move, 203 at `68fb9320` and `847eef78`, 203 at `bc3d6280`, 186 at `607d9c0c`, 178 at `dde1fdd7`, 173 at `a025f3f2`, 154 at `ba1e574a`, 153 at `b82939cb`. The engine cone alone stood at 119 when it was its own
   entry, at the `c4b08179` pin.
 - **`bounded_laws` is gone.** Up to Aver 0.30 a law whose universal proof did
   not close was stated over its samples only and counted as bounded; thirteen
@@ -304,6 +305,26 @@ landed on the same `implication` obligation for a reason `--explain` did
 not record; `atHeight(network, height) =>
 halvedBy(5000000000, Int.min(eras(network, height), 64))` closes and, with
 the `eras` lemmas, says what the six did.
+
+**A cone that reaches `Domain.TxCheck.strippedSize` does not build** (learned
+on n1bor/btc-listener#444). Three laws on `BlockLimits.strippedOf`, the twin
+of `totalOf` whose accumulator law closed, came back `failed` with an empty
+axiom list, which is a theorem Lean could not elaborate rather than one it
+could not prove; the only difference is that `strippedOf` sums
+`strippedSize`, whose cone has `Domain.Transaction` inside it. The weight
+laws were restated over the two sizes as atoms instead: with
+`strippedBlockSize(carried) <= totalBlockSize(carried)` as the premise, a
+fact the decoder guarantees and the law states rather than proves, the
+BIP141 bounds `4 * stripped <= weight <= 4 * total`, the unwitnessed Block
+weighing four times its size and a legacy-sized Block being within the
+limit all close by arithmetic. **And an inequality by induction through a
+mutual recursion over `List.drop` does not close**: `sigopsIn(script, true)
+<= sigopsIn(script, false)`, the accurate count never above the legacy
+count, needs induction through `counting`, `counted`, `skipped` and `past`,
+and the accumulator law on `counting` the same; both landed on a `sorry`
+and were dropped. What closed instead is one law per opcode class on
+`counted`, the push laws on `skipped` and `past`, and `sigopsIn` with a
+CHECKSIG or CHECKMULTISIG in front.
 
 ## The proof-composition fix, and what it cost at the time
 

@@ -73,6 +73,30 @@ verify weightOf
     weightOf([]) => 324
     weightOf([Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())]) => 1140
 
+verify weightOf law fourTimesStrippedNeverExceedsWeight
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    when strippedBlockSize(carried) <= totalBlockSize(carried)
+    4 * strippedBlockSize(carried) <= weightOf(carried) holds
+
+verify weightOf law neverExceedsFourTimesTotal
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    when strippedBlockSize(carried) <= totalBlockSize(carried)
+    weightOf(carried) <= 4 * totalBlockSize(carried) holds
+
+verify weightOf law unwitnessedBlockWeighsFourTimesItsSize
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    when strippedBlockSize(carried) == totalBlockSize(carried)
+    weightOf(carried) => 4 * totalBlockSize(carried)
+
+verify weightOf law aLegacySizedBlockIsWithinTheLimit
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    when Bool.and(strippedBlockSize(carried) == totalBlockSize(carried), totalBlockSize(carried) <= 1000000)
+    weightOf(carried) <= maxWeight() holds
+
+verify weightOf law isThreeStrippedPlusTotal
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    weightOf(carried) => 3 * strippedBlockSize(carried) + totalBlockSize(carried)
+
 fn widthOver(count: Int) -> Int
     ? "The CompactSize count prefix's width, less the one byte 81 already counted."
     List.len(Domain.CompactSize.encode(count)) - 1
@@ -99,6 +123,11 @@ fn totalOf(carried: List<Carried>, acc: Int) -> Int
 verify totalOf
     totalOf([], 0) => 0
     totalOf([Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])], 0) => 3
+
+verify totalOf law accumulatorIsAdded
+    given carried: List<Carried> = [[], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes()), Carried(transaction = genesisCoinbase(), bytes = genesisCoinbaseBytes())], [Carried(transaction = emptyTransaction(), bytes = [1, 2, 3])], [Carried(transaction = genesisCoinbase(), bytes = [1, 2, 3])]]
+    given acc: Int = [0, 7, 1000000]
+    totalOf(carried, acc) => totalOf(carried, 0) + acc
 
 fn sigopsIn(script: List<Int>, accurate: Bool) -> Int
     ? "CScript::GetSigOpCount over raw bytes: walked opcode by opcode, a"
@@ -127,6 +156,26 @@ verify sigopsIn
     sigopsIn(coreMultisigThenIf(), false) => 21
     sigopsIn(coreMultisigThenIf(), true) => 3
 
+verify sigopsIn law neverNegative
+    given script: List<Int> = [[], [172], [173], [174], [175], [82, 174], [96, 175], [0, 174], [1, 172, 172], [2, 172], [76, 1, 172, 172], [76], [77, 1, 0, 172, 172], [78, 1, 0, 0, 0, 172], [81, 172, 174], [172, 76, 5, 170], [172, 172, 174, 175], [250, 172]]
+    given accurate: Bool = [false, true]
+    using [counting.neverBelowTheAccumulator]
+    sigopsIn(script, accurate) >= 0 holds
+
+verify sigopsIn law aCheckSigInFrontCountsOne
+    given script: List<Int> = [[], [172], [173], [174], [175], [82, 174], [96, 175], [0, 174], [1, 172, 172], [2, 172], [76, 1, 172, 172], [76], [77, 1, 0, 172, 172], [78, 1, 0, 0, 0, 172], [81, 172, 174], [172, 76, 5, 170], [172, 172, 174, 175], [250, 172]]
+    given accurate: Bool = [false, true]
+    given op: Int = [172, 173]
+    when Bool.or(op == 172, op == 173)
+    sigopsIn(List.prepend(op, script), accurate) => counting(script, accurate, op, 1)
+
+verify sigopsIn law aMultisigInFrontCountsTwenty
+    given script: List<Int> = [[], [172], [173], [174], [175], [82, 174], [96, 175], [0, 174], [1, 172, 172], [2, 172], [76, 1, 172, 172], [76], [77, 1, 0, 172, 172], [78, 1, 0, 0, 0, 172], [81, 172, 174], [172, 76, 5, 170], [172, 172, 174, 175], [250, 172]]
+    given accurate: Bool = [false, true]
+    given op: Int = [174, 175]
+    when Bool.or(op == 174, op == 175)
+    sigopsIn(List.prepend(op, script), accurate) => counting(script, accurate, op, 20)
+
 fn counting(script: List<Int>, accurate: Bool, last: Int, acc: Int) -> Int
     ? "One opcode at a time, remembering the one before for the accurate"
       "multisig count."
@@ -137,6 +186,13 @@ fn counting(script: List<Int>, accurate: Bool, last: Int, acc: Int) -> Int
 verify counting
     counting([], true, 0, 5) => 5
     counting([172, 172], false, 0, 0) => 2
+
+verify counting law neverBelowTheAccumulator
+    given script: List<Int> = [[], [172], [173], [174], [175], [82, 174], [96, 175], [0, 174], [1, 172, 172], [2, 172], [76, 1, 172, 172], [76], [77, 1, 0, 172, 172], [78, 1, 0, 0, 0, 172], [81, 172, 174], [172, 76, 5, 170], [172, 172, 174, 175], [250, 172]]
+    given accurate: Bool = [false, true]
+    given last: Int = [0, 82, 172]
+    given acc: Int = [0, 1, 7]
+    counting(script, accurate, last, acc) >= acc holds
 
 fn counted(op: Int, rest: List<Int>, accurate: Bool, last: Int, acc: Int) -> Int
     ? "This opcode: a push to skip, a signature operation to count, or"
@@ -153,6 +209,33 @@ verify counted
     counted(0, [], true, 0, 0) => 0
     counted(172, [], true, 0, 0) => 1
 
+verify counted law aCheckSigCountsOne
+    given op: Int = [172, 173]
+    given rest: List<Int> = [[], [172], [82, 174]]
+    given accurate: Bool = [false, true]
+    given last: Int = [0, 82]
+    given acc: Int = [0, 7]
+    when Bool.or(op == 172, op == 173)
+    counted(op, rest, accurate, last, acc) => counting(rest, accurate, op, acc + 1)
+
+verify counted law aMultisigCountsTheMultisigCount
+    given op: Int = [174, 175]
+    given rest: List<Int> = [[], [172], [82, 174]]
+    given accurate: Bool = [false, true]
+    given last: Int = [0, 82, 96, 97]
+    given acc: Int = [0, 7]
+    when Bool.or(op == 174, op == 175)
+    counted(op, rest, accurate, last, acc) => counting(rest, accurate, op, acc + multisigCount(accurate, last))
+
+verify counted law anyOtherOpcodeCountsNothing
+    given op: Int = [0, 79, 80, 81, 96, 169, 171, 176, 255]
+    given rest: List<Int> = [[], [172], [82, 174]]
+    given accurate: Bool = [false, true]
+    given last: Int = [0, 82]
+    given acc: Int = [0, 7]
+    when Bool.and(Bool.or(op < 1, op > 78), Bool.or(op < 172, op > 175))
+    counted(op, rest, accurate, last, acc) => counting(rest, accurate, op, acc)
+
 fn multisigCount(accurate: Bool, last: Int) -> Int
     ? "MAX_PUBKEYS_PER_MULTISIG, or the OP_N before it when counting accurately."
     match Bool.and(accurate, Bool.and(last >= 81, last <= 96))
@@ -163,6 +246,20 @@ verify multisigCount
     multisigCount(false, 82) => 20
     multisigCount(true, 82) => 2
     multisigCount(true, 0) => 20
+
+verify multisigCount law isBetweenOneAndTwenty
+    given accurate: Bool = [false, true]
+    given last: Int = [0, 80, 81, 82, 96, 97, 172]
+    Bool.and(multisigCount(accurate, last) >= 1, multisigCount(accurate, last) <= 20) => true
+
+verify multisigCount law legacyIsAlwaysTwenty
+    given last: Int = [0, 80, 81, 82, 96, 97, 172]
+    multisigCount(false, last) => 20
+
+verify multisigCount law accurateReadsTheOpN
+    given n: Int = [1, 2, 3, 15, 16]
+    when Bool.and(n >= 1, n <= 16)
+    multisigCount(true, 80 + n) => n
 
 fn skipped(op: Int, rest: List<Int>, accurate: Bool, acc: Int) -> Int
     ? "A push: its length is the opcode for 1..75, or the one, two or four"
@@ -179,6 +276,22 @@ fn skipped(op: Int, rest: List<Int>, accurate: Bool, acc: Int) -> Int
 verify skipped
     skipped(1, [172, 172], true, 0) => 1
     skipped(2, [172], true, 0) => 0
+
+verify skipped law aShortPushSkipsItsOwnLength
+    given op: Int = [1, 2, 5, 75]
+    given rest: List<Int> = [[172], [172, 172], [1, 2, 3, 4, 5, 172], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 174]]
+    given accurate: Bool = [false, true]
+    given acc: Int = [0, 7]
+    when Bool.and(op >= 1, op <= 75)
+    Bool.or(List.len(rest) < op, skipped(op, rest, accurate, acc) == counting(List.drop(rest, op), accurate, op, acc)) => true
+
+verify skipped law aPushPastTheEndStopsTheCount
+    given op: Int = [1, 2, 5, 75]
+    given rest: List<Int> = [[], [172], [172, 172], [1, 2, 3, 172]]
+    given accurate: Bool = [false, true]
+    given acc: Int = [0, 7]
+    when Bool.and(op >= 1, op <= 75)
+    Bool.or(List.len(rest) >= op, skipped(op, rest, accurate, acc) == acc) => true
 
 fn pushdata(rest: List<Int>, width: Int, accurate: Bool, acc: Int) -> Int
     ? "The length read little-endian off the next width bytes, then skipped."
@@ -200,6 +313,15 @@ verify past
     past([172], 1, true, 0, 1) => 0
     past([172, 172], 1, true, 0, 1) => 1
 
+verify past law stopsWhereTheBytesRunOut
+    given rest: List<Int> = [[], [172], [172, 172]]
+    given length: Int = [1, 2, 3, 75]
+    given accurate: Bool = [false, true]
+    given acc: Int = [0, 7]
+    given op: Int = [1, 76]
+    when List.len(rest) < length
+    past(rest, length, accurate, acc, op) => acc
+
 fn legacySigopsOf(transactions: List<Transaction>, acc: Int) -> Int
     ? "GetLegacySigOpCount over a Block: every Input's script and every"
       "Output's, the coinbase's included, counted inaccurately."
@@ -210,6 +332,11 @@ fn legacySigopsOf(transactions: List<Transaction>, acc: Int) -> Int
 verify legacySigopsOf
     legacySigopsOf([], 0) => 0
     legacySigopsOf([genesisCoinbase()], 0) => 1
+
+verify legacySigopsOf law accumulatorIsAdded
+    given transactions: List<Transaction> = [[], [genesisCoinbase()], [genesisCoinbase(), emptyTransaction()]]
+    given acc: Int = [0, 7]
+    legacySigopsOf(transactions, acc) => legacySigopsOf(transactions, 0) + acc
 
 fn inputSigops(inputs: List<Input>, acc: Int) -> Int
     ? "The scriptSigs' operations."
@@ -235,6 +362,10 @@ fn legacySigopCostOf(transactions: List<Transaction>) -> Int
 
 verify legacySigopCostOf
     legacySigopCostOf([genesisCoinbase()]) => 4
+
+verify legacySigopCostOf law isWitnessScaleTimesTheLegacyCount
+    given transactions: List<Transaction> = [[], [genesisCoinbase()], [genesisCoinbase(), emptyTransaction()]]
+    legacySigopCostOf(transactions) => 4 * legacySigopsOf(transactions, 0)
 
 fn spendSigopCostOf(inputs: List<Input>, prevouts: Map<Bytes, List<Int>>, enforced: Enforced, acc: Int) -> Result<Int, String>
     ? "The P2SH and witness operations one Transaction's Inputs cost, given"
@@ -393,6 +524,20 @@ verify versionZeroCost
     versionZeroCost(32, []) => 0
     versionZeroCost(21, []) => 0
 
+verify versionZeroCost law payToWitnessKeyHashCostsOne
+    given witness: List<String> = [[], ["aa"], ["52ae"]]
+    versionZeroCost(20, witness) => 1
+
+verify versionZeroCost law payToWitnessScriptHashCostsTheScriptAccurately
+    given witness: List<String> = [[], ["aa"], ["52ae"], ["00", "ae"]]
+    versionZeroCost(32, witness) => sigopsIn(Domain.Script.bytesOf(lastOf(witness, "")), true)
+
+verify versionZeroCost law anyOtherLengthCostsNothing
+    given programLength: Int = [0, 19, 21, 31, 33, 40]
+    given witness: List<String> = [[], ["52ae"]]
+    when Bool.and(programLength != 20, programLength != 32)
+    versionZeroCost(programLength, witness) => 0
+
 fn lastOf(items: List<String>, last: String) -> String
     ? "The last of a list of hex items, or the default for none."
     match items
@@ -402,6 +547,22 @@ fn lastOf(items: List<String>, last: String) -> String
 verify lastOf
     lastOf([], "x") => "x"
     lastOf(["a", "b"], "x") => "b"
+
+fn strippedBlockSize(carried: List<Carried>) -> Int
+    ? "The Block without its witnesses: Header, count prefix and each"
+      "Transaction stripped, for the laws on weightOf."
+    81 + widthOver(List.len(carried)) + strippedOf(carried, 0)
+
+verify strippedBlockSize
+    strippedBlockSize([]) => 81
+
+fn totalBlockSize(carried: List<Carried>) -> Int
+    ? "The Block as it arrived: Header, count prefix and each Transaction's"
+      "bytes, for the laws on weightOf."
+    81 + widthOver(List.len(carried)) + totalOf(carried, 0)
+
+verify totalBlockSize
+    totalBlockSize([]) => 81
 
 fn zeros32Hex() -> String
     ? "Thirty-two zero bytes, for a program of that length in the cases here."
