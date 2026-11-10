@@ -113,6 +113,24 @@ verify createdInto
     createdInto(Bytes.fromList([170]), [Output(value = 5, script = "")], 3, true, 2, []) => Result.Ok([Unspent(txid = Bytes.fromList([170]), index = 2, value = 5, script = Bytes.empty(), height = 3, coinbase = true)])
     createdInto(Bytes.fromList([170]), [Output(value = 5, script = "zz")], 3, true, 2, []) => Result.Err("Bytes.fromHex: invalid hexadecimal character 'z'")
 
+verify createdInto law noOutputsAddNothing
+    given height: Int = [0, 7]
+    given coinbase: Bool = [false, true]
+    given index: Int = [0, 2]
+    given acc: List<Unspent> = [[], [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 7, coinbase = false)]]
+    createdInto(Bytes.fromList([170]), [], height, coinbase, index, acc) => Result.Ok(List.reverse(acc))
+
+verify createdInto law anUnspendableOutputStillTakesItsIndex
+    given head: Output = [Output(value = 0, script = "6a24aa21a9ed"), Output(value = 5, script = "51"), Output(value = 7, script = ""), Output(value = 5000000000, script = "76a914a31c06bd463e3923bc1aadbde48b16976c08071788ac"), Output(value = 1, script = "6a")]
+    given rest: List<Output> = [[], [Output(value = 5, script = "51")], [Output(value = 0, script = "6a24aa21a9ed"), Output(value = 5, script = "51")], [Output(value = 1, script = "6a")]]
+    given height: Int = [0, 7]
+    given coinbase: Bool = [false, true]
+    given index: Int = [0, 2]
+    given acc: List<Unspent> = [[], [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 7, coinbase = false)]]
+    when Domain.UtxoStore.neverSpendable(head.script)
+    using [keptIfSpendable.neverKeepsAnUnspendableOutput]
+    createdInto(Bytes.fromList([170]), List.prepend(head, rest), height, coinbase, index, acc) => createdInto(Bytes.fromList([170]), rest, height, coinbase, index + 1, acc)
+
 fn keptIfSpendable(txid: Bytes, index: Int, output: Output, height: Int, coinbase: Bool, acc: List<Unspent>) -> Result<List<Unspent>, String>
     ? "An Output nothing can ever spend never enters the Set."
     match Domain.UtxoStore.neverSpendable(output.script)
@@ -122,6 +140,15 @@ fn keptIfSpendable(txid: Bytes, index: Int, output: Output, height: Int, coinbas
 verify keptIfSpendable
     keptIfSpendable(Bytes.fromList([170]), 0, Output(value = 0, script = "6a24aa21a9ed"), 7, true, []) => Result.Ok([])
     keptIfSpendable(Bytes.fromList([170]), 1, Output(value = 5, script = "51"), 7, false, []) => Result.Ok([Unspent(txid = Bytes.fromList([170]), index = 1, value = 5, script = Bytes.fromList([81]), height = 7, coinbase = false)])
+
+verify keptIfSpendable law neverKeepsAnUnspendableOutput
+    given output: Output = [Output(value = 0, script = "6a24aa21a9ed"), Output(value = 5, script = "51"), Output(value = 7, script = ""), Output(value = 5000000000, script = "76a914a31c06bd463e3923bc1aadbde48b16976c08071788ac"), Output(value = 1, script = "6a")]
+    given index: Int = [0, 1, 7]
+    given height: Int = [0, 7]
+    given coinbase: Bool = [false, true]
+    given acc: List<Unspent> = [[], [Unspent(txid = Bytes.fromList([170]), index = 0, value = 5, script = Bytes.empty(), height = 7, coinbase = false)]]
+    when Domain.UtxoStore.neverSpendable(output.script)
+    keptIfSpendable(Bytes.fromList([170]), index, output, height, coinbase, acc) => Result.Ok(acc)
 
 fn connected(network: Network, height: Int, transactions: List<Transaction>, fromStore: Map<Bytes, Unspent>) -> Connecting
     ? "What this Block does to the Set, or why it may not."

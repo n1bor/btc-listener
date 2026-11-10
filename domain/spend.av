@@ -75,6 +75,26 @@ verify absorb
     absorb(started(), Spend.Invalid("no such output")).invalid => Option.Some("no such output")
     absorb(absorb(started(), Spend.Unknown("first")), Spend.Unknown("second")).unknown => Option.Some("first")
 
+verify absorb law aResolvedInputAddsItsValueAndNothingElse
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given value: Int = [0, 1, 5000000000]
+    absorb(tally, Spend.Resolved(value, "51")) => Tally(spent = tally.spent + value, unknown = tally.unknown, invalid = tally.invalid, coinbase = tally.coinbase)
+
+verify absorb law theFirstUnknownReasonIsKept
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given why: String = ["", "no record"]
+    absorb(tally, Spend.Unknown(why)) => Tally(spent = tally.spent, unknown = Option.Some(firstReason(tally.unknown, why)), invalid = tally.invalid, coinbase = tally.coinbase)
+
+verify absorb law theFirstInvalidReasonIsKept
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given why: String = ["", "no such output"]
+    absorb(tally, Spend.Invalid(why)) => Tally(spent = tally.spent, unknown = tally.unknown, invalid = Option.Some(firstReason(tally.invalid, why)), coinbase = tally.coinbase)
+
+verify absorb law neverTouchesTheCoinbaseFlag
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given spend: Spend = [Spend.Resolved(5, "51"), Spend.Unknown("u"), Spend.Invalid("i")]
+    absorb(tally, spend).coinbase => tally.coinbase
+
 fn firstReason(held: Option<String>, found: String) -> String
     ? "The reason already recorded, or this one if there was none."
     match held
@@ -84,6 +104,11 @@ fn firstReason(held: Option<String>, found: String) -> String
 verify firstReason
     firstReason(Option.None, "a") => "a"
     firstReason(Option.Some("a"), "b") => "a"
+
+verify firstReason law keepsWhatIsHeld
+    given held: Option<String> = [Option.None, Option.Some("a"), Option.Some("")]
+    given found: String = ["b", ""]
+    firstReason(held, found) => Option.withDefault(held, found)
 
 fn markCoinbase(tally: Tally) -> Tally
     ? "This Transaction mints rather than spends."
@@ -107,6 +132,36 @@ verify verdictOf
     verdictOf(Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), 700) => Verdict.Created(200)
     verdictOf(Tally(spent = 0, unknown = Option.Some("why"), invalid = Option.None, coinbase = false), 1) => Verdict.Incomplete("why")
     verdictOf(Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), 1) => Verdict.Broken("i")
+
+verify verdictOf law aCoinbaseIsAnsweredFirst
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 5000000000]
+    when tally.coinbase
+    verdictOf(tally, paid) => Verdict.Coinbase
+
+verify verdictOf law brokenOutranksEverythingElse
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 700]
+    when Bool.and(Bool.not(tally.coinbase), isSomeReason(tally.invalid))
+    isBroken(verdictOf(tally, paid)) => true
+
+verify verdictOf law incompleteOutranksTheArithmetic
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 700]
+    when Bool.and(Bool.and(Bool.not(tally.coinbase), Bool.not(isSomeReason(tally.invalid))), isSomeReason(tally.unknown))
+    isIncomplete(verdictOf(tally, paid)) => true
+
+verify verdictOf law conservedExactlyWhenSpentCoversPaid
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 700, 701]
+    when Bool.and(Bool.and(Bool.not(tally.coinbase), Bool.not(isSomeReason(tally.invalid))), Bool.not(isSomeReason(tally.unknown)))
+    isConserved(verdictOf(tally, paid)) => tally.spent >= paid
+
+verify verdictOf law createdIsTheShortfall
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 700, 701]
+    when Bool.and(Bool.and(Bool.and(Bool.not(tally.coinbase), Bool.not(isSomeReason(tally.invalid))), Bool.not(isSomeReason(tally.unknown))), tally.spent < paid)
+    verdictOf(tally, paid) => Verdict.Created(paid - tally.spent)
 
 fn settledVerdict(tally: Tally, paid: Int) -> Verdict
     ? "A Transaction that is not a coinbase."
@@ -139,6 +194,55 @@ verify sumVerdict
     sumVerdict(500, 500) => Verdict.Conserved
     sumVerdict(500, 700) => Verdict.Created(200)
 
+fn isSomeReason(reason: Option<String>) -> Bool
+    ? "Whether a reason was recorded, for the laws here."
+    match reason
+        Option.Some(_) -> true
+        Option.None -> false
+
+verify isSomeReason
+    isSomeReason(Option.Some("x")) => true
+    isSomeReason(Option.None) => false
+
+fn isBroken(verdict: Verdict) -> Bool
+    ? "Whether the verdict is Broken, for the laws here."
+    match verdict
+        Verdict.Broken(_) -> true
+        Verdict.Conserved -> false
+        Verdict.Created(_) -> false
+        Verdict.Incomplete(_) -> false
+        Verdict.Coinbase -> false
+
+verify isBroken
+    isBroken(Verdict.Broken("i")) => true
+    isBroken(Verdict.Conserved) => false
+
+fn isIncomplete(verdict: Verdict) -> Bool
+    ? "Whether the verdict is Incomplete, for the laws here."
+    match verdict
+        Verdict.Incomplete(_) -> true
+        Verdict.Conserved -> false
+        Verdict.Created(_) -> false
+        Verdict.Broken(_) -> false
+        Verdict.Coinbase -> false
+
+verify isIncomplete
+    isIncomplete(Verdict.Incomplete("u")) => true
+    isIncomplete(Verdict.Conserved) => false
+
+fn isConserved(verdict: Verdict) -> Bool
+    ? "Whether the verdict is Conserved, for the laws here."
+    match verdict
+        Verdict.Conserved -> true
+        Verdict.Created(_) -> false
+        Verdict.Incomplete(_) -> false
+        Verdict.Broken(_) -> false
+        Verdict.Coinbase -> false
+
+verify isConserved
+    isConserved(Verdict.Conserved) => true
+    isConserved(Verdict.Created(1)) => false
+
 fn feeOf(tally: Tally, paid: Int) -> Int
     ? "What was spent and not paid out, which the miner takes."
       "Only meaningful once the verdict is Conserved; anything else has an"
@@ -148,3 +252,9 @@ fn feeOf(tally: Tally, paid: Int) -> Int
 verify feeOf
     feeOf(Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => 200
     feeOf(Tally(spent = 500, unknown = Option.None, invalid = Option.None, coinbase = false), 500) => 0
+
+verify feeOf law isNeverNegativeWhenConserved
+    given tally: Tally = [Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 700, unknown = Option.None, invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.Some("u"), invalid = Option.None, coinbase = false), Tally(spent = 500, unknown = Option.None, invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = false), Tally(spent = 0, unknown = Option.None, invalid = Option.None, coinbase = true), Tally(spent = 9, unknown = Option.Some("u"), invalid = Option.Some("i"), coinbase = true)]
+    given paid: Int = [0, 500, 700, 701]
+    when isConserved(verdictOf(tally, paid))
+    feeOf(tally, paid) >= 0 holds
